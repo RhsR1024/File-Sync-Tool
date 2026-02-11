@@ -87,6 +87,7 @@ export const messages = {
       editServer: 'Edit Server',
       nameAlias: 'Name (Alias)',
       deployAll: 'Deploy to All Enabled Servers',
+      remotePath: 'Remote Path',
     },
     history: {
       title: 'Operation History',
@@ -191,6 +192,7 @@ export const messages = {
       editServer: '编辑服务器',
       nameAlias: '名称 (别名)',
       deployAll: '部署到所有已启用服务器',
+      remotePath: '远程路径',
     },
     history: {
       title: '历史记录',

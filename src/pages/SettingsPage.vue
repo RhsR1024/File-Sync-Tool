@@ -146,12 +146,15 @@ async function handleManualDeploy() {
         let successCount = 0;
         let failCount = 0;
         
+        let lastError = '';
+        
         for (const server of targets) {
              try {
                  await manualDeploy(server, config.value.post_commands, manualLocalPath.value, manualRemotePath.value);
                  successCount++;
              } catch (e) {
                  failCount++;
+                 lastError = String(e);
                  console.error(`Deploy to ${server.name} failed:`, e);
              }
         }
@@ -160,7 +163,7 @@ async function handleManualDeploy() {
             deployMsg.value = `Deployment successful to ${successCount} servers!`;
             addSystemEvent('MANUAL_DEPLOY', `Deployed to ${successCount} servers successfully.`);
         } else {
-            deployMsg.value = `Deployment finished. Success: ${successCount}, Failed: ${failCount}. Check console for details.`;
+            deployMsg.value = `Deployment finished. Success: ${successCount}, Failed: ${failCount}. Error: ${lastError}`;
         }
         
     } catch (e) {
