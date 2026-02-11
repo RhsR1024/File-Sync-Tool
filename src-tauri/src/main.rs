@@ -72,12 +72,27 @@ async fn test_ssh_connection(server: DeployServer) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn manual_deploy(app_handle: tauri::AppHandle, server: DeployServer, postCommands: Vec<String>, localPath: String, remotePath: String) -> Result<(), String> {
+async fn manual_deploy(app_handle: tauri::AppHandle, state: State<'_, AppState>, server: DeployServer, postCommands: Vec<String>, localPath: String, remotePath: String) -> Result<(), String> {
+    if state.is_scanning.load(Ordering::SeqCst) {
+        return Err("Operation already in progress".to_string());
+    }
+    
+    state.is_scanning.store(true, Ordering::SeqCst);
+    state.should_cancel.store(false, Ordering::SeqCst);
+    state.is_paused.store(false, Ordering::SeqCst);
+
+    let should_cancel = state.should_cancel.clone();
+    let is_paused = state.is_paused.clone();
+    let is_scanning = state.is_scanning.clone();
+
     // This runs in async context, but deploy_manual uses blocking SSH.
     // We should spawn blocking.
-    tauri::async_runtime::spawn_blocking(move || {
-        deploy::deploy_manual(&app_handle, &server, &postCommands, &localPath, &remotePath)
-    }).await.map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        deploy::deploy_manual(&app_handle, &server, &postCommands, &localPath, &remotePath, should_cancel, is_paused)
+    }).await.map_err(|e| e.to_string())?;
+    
+    is_scanning.store(false, Ordering::SeqCst);
+    result
 }
 
 fn main() {

@@ -206,8 +206,9 @@ onUnmounted(() => {
       </div>
       
       <!-- Controls -->
-      <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-center gap-3 relative overflow-hidden">
-        <div class="flex gap-3 relative z-10">
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col relative overflow-hidden">
+        <!-- Header / Main Controls -->
+        <div class="p-4 flex gap-3 relative z-10 border-b border-slate-100">
           <button 
             @click="isRunning ? stopScheduler() : startScheduler()"
             class="flex-1 px-4 py-3 rounded-lg font-bold transition-all flex items-center justify-center gap-2 shadow-sm active:scale-95"
@@ -229,28 +230,86 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- Progress Bar Overlay -->
-        <div v-if="appStore.progress" class="absolute bottom-0 left-0 w-full h-1.5 bg-slate-100">
-           <div class="h-full bg-blue-500 transition-all duration-300" :style="{ width: `${appStore.progress.percentage}%` }"></div>
-        </div>
-        <div v-if="appStore.progress" class="absolute inset-0 bg-white/95 z-20 flex flex-col items-center justify-center backdrop-blur-sm p-4 text-center">
-           <div class="text-xs font-bold text-blue-600 mb-1 uppercase tracking-wider">{{ isPaused ? t('console.pausedStatus') : t('console.copying') }}</div>
-           <div class="text-sm font-mono text-slate-700 mb-2 truncate max-w-full" :title="appStore.progress.folder">{{ appStore.progress.folder }}</div>
-           <div class="w-full h-2 bg-slate-200 rounded-full overflow-hidden mb-1">
-              <div class="h-full bg-blue-500 transition-all duration-300" :style="{ width: `${appStore.progress.percentage}%` }"></div>
+        <!-- Detailed Progress Table Style View -->
+        <div v-if="appStore.progress" class="bg-slate-50 border-t border-slate-100 text-xs font-mono">
+           <!-- Table Header -->
+           <div class="grid grid-cols-[2fr_1fr_2fr_1.5fr_2fr_0.5fr_2fr_1.5fr_1.5fr_1fr] gap-2 p-2 bg-slate-100 text-slate-600 font-bold border-b border-slate-200 items-center">
+               <div>{{ t('console.name') }}</div>
+               <div>{{ t('console.status') }}</div>
+               <div>{{ t('console.progress') }}</div>
+               <div>{{ t('console.size') }}</div>
+               <div>{{ t('console.localPath') }}</div>
+               <div class="text-center">&lt;-&gt;</div>
+               <div>{{ t('console.remotePath') }}</div>
+               <div>{{ t('console.speed') }}</div>
+               <div>{{ t('console.eta') }}</div>
+               <div>{{ t('console.elapsed') }}</div>
+           </div>
+
+           <!-- Table Row -->
+           <div class="grid grid-cols-[2fr_1fr_2fr_1.5fr_2fr_0.5fr_2fr_1.5fr_1.5fr_1fr] gap-2 p-3 bg-white items-center border-b border-slate-200 relative group hover:bg-slate-50 transition-colors">
+               <!-- Name -->
+               <div class="flex items-center gap-2 truncate" :title="appStore.progress.folder">
+                   <div class="w-4 h-4 bg-slate-200 rounded shrink-0"></div>
+                   <span class="truncate">{{ appStore.progress.folder }}</span>
+               </div>
+               
+               <!-- Status -->
+               <div :class="isPaused ? 'text-amber-600' : 'text-emerald-600'">
+                   {{ isPaused ? t('console.paused') : t('console.running') }}
+               </div>
+
+               <!-- Progress Bar -->
+               <div class="relative h-4 bg-slate-200 rounded overflow-hidden">
+                   <div class="absolute inset-0 bg-blue-500 transition-all duration-300" :style="{ width: `${appStore.progress.percentage}%` }"></div>
+                   <div class="absolute inset-0 flex items-center justify-center text-[10px] text-white font-bold drop-shadow-md">
+                       {{ appStore.progress.percentage.toFixed(0) }}%
+                   </div>
+                   <!-- Left Blue Indicator -->
+                   <div class="absolute left-0 top-0 bottom-0 w-1 bg-blue-600"></div>
+               </div>
+
+               <!-- Size -->
+               <div class="truncate" :title="`${(appStore.progress.copied / 1024 / 1024).toFixed(2)}MB / ${(appStore.progress.total / 1024 / 1024).toFixed(2)}MB`">
+                   {{ (appStore.progress.copied / 1024 / 1024).toFixed(2) }}MB / {{ (appStore.progress.total / 1024 / 1024).toFixed(2) }}MB
+               </div>
+
+               <!-- Local Path -->
+               <div class="truncate text-slate-500" :title="appStore.progress.localPath || '-'">
+                   {{ appStore.progress.localPath || '-' }}
+               </div>
+
+               <!-- Arrow -->
+               <div class="text-center flex justify-center">
+                   <div class="w-4 h-4 text-red-500 font-bold">↑</div>
+               </div>
+
+               <!-- Remote Path -->
+               <div class="truncate text-slate-500" :title="appStore.progress.remotePath || '-'">
+                   {{ appStore.progress.remotePath || '-' }}
+               </div>
+
+               <!-- Speed -->
+               <div class="truncate">
+                   {{ formatSpeed(appStore.progress.speed) }}
+               </div>
+
+               <!-- ETA -->
+               <div class="truncate">
+                   {{ formatDuration(appStore.progress.eta) }}
+               </div>
+
+               <!-- Elapsed -->
+               <div class="truncate">
+                   {{ formatDuration(appStore.progress.elapsed) }}
+               </div>
            </div>
            
-           <!-- Stats -->
-           <div class="flex justify-between w-full text-xs text-slate-500 font-mono mb-3 px-1">
-               <span>{{ appStore.progress.percentage.toFixed(1) }}%</span>
-               <span v-if="!isPaused">{{ formatSpeed(appStore.progress.speed) }} - ETA: {{ formatDuration(appStore.progress.eta) }}</span>
-               <span v-else class="text-amber-500">{{ t('console.paused') }}</span>
-           </div>
-           
-           <div class="flex gap-3">
+           <!-- Actions Row -->
+           <div class="p-2 flex justify-end gap-2 bg-white border-t border-slate-100">
                <button 
                  @click="togglePause"
-                 class="text-xs px-3 py-1.5 rounded-full font-medium border flex items-center gap-1 transition-colors"
+                 class="text-xs px-3 py-1.5 rounded border flex items-center gap-1 transition-colors"
                  :class="isPaused ? 'text-emerald-600 border-emerald-200 hover:bg-emerald-50' : 'text-amber-600 border-amber-200 hover:bg-amber-50'"
                >
                  <component :is="isPaused ? PlayCircle : Pause" class="w-3 h-3" />
@@ -259,7 +318,7 @@ onUnmounted(() => {
 
                <button 
                  @click="handleCancel"
-                 class="text-xs text-red-500 hover:text-red-700 hover:bg-red-50 px-3 py-1.5 rounded-full font-medium border border-red-200 flex items-center gap-1 transition-colors"
+                 class="text-xs text-red-500 hover:text-red-700 hover:bg-red-50 px-3 py-1.5 rounded border border-red-200 flex items-center gap-1 transition-colors"
                  :disabled="isCancelling"
                >
                  <XCircle class="w-3 h-3" />

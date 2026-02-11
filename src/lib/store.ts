@@ -13,6 +13,9 @@ export interface ProgressState {
     total: number;
     speed: number;
     eta: number;
+    elapsed: number;
+    localPath?: string;
+    remotePath?: string;
 }
 
 export const appStore = reactive({

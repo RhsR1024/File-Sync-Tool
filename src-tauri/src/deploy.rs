@@ -13,6 +13,8 @@ struct LogEvent {
     level: String,
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 #[derive(Debug, serde::Serialize, Clone)]
 struct ProgressEvent {
     folder: String,
@@ -21,6 +23,9 @@ struct ProgressEvent {
     percentage: f64,
     speed: u64, // bytes per second
     eta_seconds: u64,
+    elapsed_seconds: u64,
+    local_path: String,
+    remote_path: String,
 }
 
 fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
@@ -36,7 +41,10 @@ fn emit_progress<R: tauri::Runtime>(
     copied: u64, 
     total: u64,
     speed: u64,
-    eta_seconds: u64
+    eta_seconds: u64,
+    elapsed_seconds: u64,
+    local_path: &str,
+    remote_path: &str
 ) {
     let percentage = if total > 0 {
         (copied as f64 / total as f64) * 100.0
@@ -51,6 +59,9 @@ fn emit_progress<R: tauri::Runtime>(
         percentage,
         speed,
         eta_seconds,
+        elapsed_seconds,
+        local_path: local_path.to_string(),
+        remote_path: remote_path.to_string(),
     });
 }
 
@@ -205,7 +216,9 @@ pub fn deploy_manual<R: tauri::Runtime>(
     server: &DeployServer,
     post_commands: &[String],
     local_path: &str,
-    remote_path: &str
+    remote_path: &str,
+    should_cancel: Arc<AtomicBool>,
+    is_paused: Arc<AtomicBool>
 ) -> Result<(), String> {
     emit_log(app_handle, format!("Starting manual deployment: {} -> [{}] {}:{}", local_path, server.name, server.host, remote_path), "info");
 
@@ -261,6 +274,10 @@ pub fn deploy_manual<R: tauri::Runtime>(
     let start_time = Instant::now();
     let mut last_emit_time = Instant::now();
     
+    // Initial emit
+    let server_display = format!("{}:{}/{}", server.host, server.remote_path.trim_end_matches('/'), target_path_str.split('/').last().unwrap_or_default());
+    emit_progress(app_handle, &local_p.file_name().unwrap_or_default().to_string_lossy(), 0, total_size, 0, 0, 0, local_path, &server_display);
+
     upload_with_progress(
         app_handle, 
         &sftp, 
@@ -269,17 +286,24 @@ pub fn deploy_manual<R: tauri::Runtime>(
         total_size, 
         &mut copied_bytes, 
         start_time, 
-        &mut last_emit_time
+        &mut last_emit_time,
+        local_path,
+        &server_display,
+        &should_cancel,
+        &is_paused
     )?;
     
     emit_log(app_handle, "Upload complete".to_string(), "success");
     // Emit 100%
-    emit_progress(app_handle, &target_path_str, total_size, total_size, 0, 0);
+    emit_progress(app_handle, &local_p.file_name().unwrap_or_default().to_string_lossy(), total_size, total_size, 0, 0, start_time.elapsed().as_secs(), local_path, &server_display);
 
     // Exec commands
     if !post_commands.is_empty() {
         emit_log(app_handle, "Executing post-deployment commands...".to_string(), "info");
         for cmd in post_commands {
+            if should_cancel.load(Ordering::SeqCst) {
+                return Err("Deployment cancelled".to_string());
+            }
             emit_log(app_handle, format!("$ {}", cmd), "info");
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
             channel.exec(cmd).map_err(|e| e.to_string())?;
@@ -335,8 +359,16 @@ fn upload_with_progress<R: tauri::Runtime>(
     total_size: u64,
     copied_bytes: &mut u64,
     start_time: Instant,
-    last_emit_time: &mut Instant
+    last_emit_time: &mut Instant,
+    local_path_str: &str,
+    remote_path_display: &str,
+    should_cancel: &Arc<AtomicBool>,
+    is_paused: &Arc<AtomicBool>
 ) -> Result<(), String> {
+    if should_cancel.load(Ordering::SeqCst) {
+        return Err("Deployment cancelled".to_string());
+    }
+
     if local_path.is_dir() {
         let _ = sftp.mkdir(remote_path, 0o755);
         for entry in fs::read_dir(local_path).map_err(|e| e.to_string())? {
@@ -348,7 +380,7 @@ fn upload_with_progress<R: tauri::Runtime>(
             let remote_child_str = format!("{}/{}", remote_parent_str.trim_end_matches('/'), child_name_str);
             let remote_child_path = Path::new(&remote_child_str);
             
-            upload_with_progress(app_handle, sftp, &path, remote_child_path, total_size, copied_bytes, start_time, last_emit_time)?;
+            upload_with_progress(app_handle, sftp, &path, remote_child_path, total_size, copied_bytes, start_time, last_emit_time, local_path_str, remote_path_display, should_cancel, is_paused)?;
         }
     } else {
         let mut local_file = fs::File::open(local_path).map_err(|e| e.to_string())?;
@@ -356,6 +388,19 @@ fn upload_with_progress<R: tauri::Runtime>(
         
         let mut buffer = [0u8; 64 * 1024]; // 64KB buffer
         loop {
+            // Check cancel
+            if should_cancel.load(Ordering::SeqCst) {
+                return Err("Deployment cancelled".to_string());
+            }
+            
+            // Check pause
+            while is_paused.load(Ordering::SeqCst) {
+                if should_cancel.load(Ordering::SeqCst) {
+                    return Err("Deployment cancelled".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
             let n = local_file.read(&mut buffer).map_err(|e| e.to_string())?;
             if n == 0 { break; }
             remote_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
@@ -378,11 +423,14 @@ fn upload_with_progress<R: tauri::Runtime>(
                 
                 emit_progress(
                     app_handle, 
-                    &remote_path.to_string_lossy(), // Use remote path as "folder" name or task name
+                    &local_path.file_name().unwrap_or_default().to_string_lossy(),
                     *copied_bytes, 
                     total_size, 
                     speed, 
-                    eta
+                    eta,
+                    elapsed as u64,
+                    local_path_str,
+                    remote_path_display
                 );
                 *last_emit_time = now;
             }
