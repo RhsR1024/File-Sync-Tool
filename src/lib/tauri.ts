@@ -98,5 +98,5 @@ export async function testSshConnection(server: DeployServer): Promise<string> {
 }
 
 export async function manualDeploy(server: DeployServer, postCommands: string[], localPath: string, remotePath: string): Promise<void> {
-    await invoke('manual_deploy', { server, post_commands: postCommands, local_path: localPath, remote_path: remotePath });
+  await invoke('manual_deploy', { server, post_commands: postCommands, local_path: localPath, remote_path: remotePath });
 }
