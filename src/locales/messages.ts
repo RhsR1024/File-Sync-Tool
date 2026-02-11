@@ -86,6 +86,7 @@ export const messages = {
       executedOnAll: '(Executed on all servers)',
       editServer: 'Edit Server',
       nameAlias: 'Name (Alias)',
+      deployAll: 'Deploy to All Enabled Servers',
     },
     history: {
       title: 'Operation History',
@@ -189,6 +190,7 @@ export const messages = {
       executedOnAll: '(将在所有服务器上执行)',
       editServer: '编辑服务器',
       nameAlias: '名称 (别名)',
+      deployAll: '部署到所有已启用服务器',
     },
     history: {
       title: '历史记录',

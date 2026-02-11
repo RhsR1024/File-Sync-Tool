@@ -125,17 +125,46 @@ const deployMsg = ref('');
 async function handleManualDeploy() {
     if (!manualLocalPath.value || !manualRemotePath.value || !selectedServerId.value) return;
     
-    const server = config.value.servers.find(s => s.id === selectedServerId.value);
-    if (!server) return;
+    // Support "all" servers
+    let targets = [];
+    if (selectedServerId.value === 'all') {
+        targets = config.value.servers.filter(s => s.enabled);
+    } else {
+        const server = config.value.servers.find(s => s.id === selectedServerId.value);
+        if (server) targets.push(server);
+    }
+    
+    if (targets.length === 0) return;
 
     isDeploying.value = true;
     deployMsg.value = '';
+    
     try {
-        await manualDeploy(server, config.value.post_commands, manualLocalPath.value, manualRemotePath.value);
-        deployMsg.value = 'Deployment successful!';
-        addSystemEvent('MANUAL_DEPLOY', `Deployed to ${server.name}`);
+        // Run sequentially or parallel? Parallel is better.
+        // But manualDeploy is one-shot.
+        // We can loop here.
+        let successCount = 0;
+        let failCount = 0;
+        
+        for (const server of targets) {
+             try {
+                 await manualDeploy(server, config.value.post_commands, manualLocalPath.value, manualRemotePath.value);
+                 successCount++;
+             } catch (e) {
+                 failCount++;
+                 console.error(`Deploy to ${server.name} failed:`, e);
+             }
+        }
+        
+        if (failCount === 0) {
+            deployMsg.value = `Deployment successful to ${successCount} servers!`;
+            addSystemEvent('MANUAL_DEPLOY', `Deployed to ${successCount} servers successfully.`);
+        } else {
+            deployMsg.value = `Deployment finished. Success: ${successCount}, Failed: ${failCount}. Check console for details.`;
+        }
+        
     } catch (e) {
-        deployMsg.value = `Deployment failed: ${e}`;
+        deployMsg.value = `Deployment error: ${e}`;
     } finally {
         isDeploying.value = false;
     }
@@ -594,12 +623,18 @@ onMounted(load);
               
               <div>
                   <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.targetServer') }}</label>
-                  <select v-model="selectedServerId" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
-                      <option value="" disabled>{{ t('settings.selectServer') }}</option>
-                      <option v-for="s in config.servers" :key="s.id" :value="s.id">
-                          {{ s.name || s.host }} ({{ s.host }})
-                      </option>
-                  </select>
+                  <div class="relative">
+                      <select v-model="selectedServerId" class="w-full p-2 pr-8 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white appearance-none">
+                          <option value="" disabled>{{ t('settings.selectServer') }}</option>
+                          <option value="all">{{ t('settings.deployAll') }}</option>
+                          <option v-for="s in config.servers" :key="s.id" :value="s.id">
+                              {{ s.name || s.host }} ({{ s.host }})
+                          </option>
+                      </select>
+                      <div class="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none text-slate-500">
+                          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                      </div>
+                  </div>
               </div>
 
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
