@@ -117,7 +117,7 @@ async function testAllServers() {
 
 // Manual Deploy
 const manualLocalPath = ref('');
-const manualRemotePath = ref('');
+const manualRemotePath = ref('/tmp/upload');
 const selectedServerId = ref('');
 const isDeploying = ref(false);
 const deployMsg = ref('');
