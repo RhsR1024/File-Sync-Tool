@@ -72,11 +72,11 @@ async fn test_ssh_connection(server: DeployServer) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn manual_deploy(app_handle: tauri::AppHandle, server: DeployServer, post_commands: Vec<String>, local_path: String, remote_path: String) -> Result<(), String> {
+async fn manual_deploy(app_handle: tauri::AppHandle, server: DeployServer, postCommands: Vec<String>, localPath: String, remotePath: String) -> Result<(), String> {
     // This runs in async context, but deploy_manual uses blocking SSH.
     // We should spawn blocking.
     tauri::async_runtime::spawn_blocking(move || {
-        deploy::deploy_manual(&app_handle, &server, &post_commands, &local_path, &remote_path)
+        deploy::deploy_manual(&app_handle, &server, &postCommands, &localPath, &remotePath)
     }).await.map_err(|e| e.to_string())?
 }
 
