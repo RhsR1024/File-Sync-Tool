@@ -473,19 +473,19 @@ onMounted(load);
           <!-- Server List -->
           <div>
               <div class="flex justify-between items-center mb-3">
-                  <h4 class="font-medium text-slate-700">{{ t('settings.servers') || 'Servers' }}</h4>
+                  <h4 class="font-medium text-slate-700">{{ t('settings.servers') }}</h4>
                   <div class="flex gap-2">
                       <button @click="testAllServers" class="text-xs text-slate-600 hover:text-slate-800 flex items-center gap-1 font-medium bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg transition-colors" v-if="config.servers.length > 0">
-                           <Server class="w-3 h-3" /> Test All
+                           <Server class="w-3 h-3" /> {{ t('settings.testAll') }}
                       </button>
                       <button @click="addServer" class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors">
-                          <Plus class="w-3 h-3" /> {{ t('settings.addServer') || 'Add Server' }}
+                          <Plus class="w-3 h-3" /> {{ t('settings.addServer') }}
                       </button>
                   </div>
               </div>
               
               <div v-if="config.servers.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
-                  {{ t('settings.noServers') || 'No servers configured. Add one to start.' }}
+                  {{ t('settings.noServers') }}
               </div>
               
               <div v-else class="space-y-3">
@@ -504,8 +504,8 @@ onMounted(load);
                           <button @click="testServerConnection(idx)" class="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" :title="t('settings.testConnection')">
                               <Server class="w-4 h-4" />
                           </button>
-                          <button @click="editServer(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" title="Edit">
-                              <span class="text-xs font-bold">EDIT</span>
+                          <button @click="editServer(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
+                              <span class="text-xs font-bold">{{ t('settings.edit') }}</span>
                           </button>
                           <button @click="removeServer(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete">
                               <Trash2 class="w-4 h-4" />
@@ -518,40 +518,40 @@ onMounted(load);
           <!-- Server Edit Modal -->
           <div v-if="isEditingServer" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
               <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all">
-                  <h3 class="text-lg font-bold mb-6 text-slate-800">{{ editingServerIndex > -1 ? 'Edit Server' : 'Add Server' }}</h3>
+                  <h3 class="text-lg font-bold mb-6 text-slate-800">{{ editingServerIndex > -1 ? t('settings.editServer') : t('settings.addServer') }}</h3>
                   <div class="space-y-4">
                       <div>
-                          <label class="block text-sm font-medium mb-1 text-slate-700">Name (Alias)</label>
+                          <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.nameAlias') }}</label>
                           <input v-model="serverForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Production Server 1" />
                       </div>
                       <div class="grid grid-cols-3 gap-4">
                           <div class="col-span-2">
-                              <label class="block text-sm font-medium mb-1 text-slate-700">Host IP</label>
+                              <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.host') }}</label>
                               <input v-model="serverForm.host" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="192.168.1.100" />
                           </div>
                           <div>
-                              <label class="block text-sm font-medium mb-1 text-slate-700">Port</label>
+                              <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.port') }}</label>
                               <input v-model.number="serverForm.port" type="number" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                           </div>
                       </div>
                       <div class="grid grid-cols-2 gap-4">
                           <div>
-                              <label class="block text-sm font-medium mb-1 text-slate-700">Username</label>
+                              <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.username') }}</label>
                               <input v-model="serverForm.user" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                           </div>
                           <div>
-                              <label class="block text-sm font-medium mb-1 text-slate-700">Password</label>
+                              <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.password') }}</label>
                               <input v-model="serverForm.password" type="password" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                           </div>
                       </div>
                       <div>
-                          <label class="block text-sm font-medium mb-1 text-slate-700">Remote Path</label>
+                          <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.remoteTargetDir') }}</label>
                           <input v-model="serverForm.remote_path" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="/opt/deploy" />
                       </div>
                   </div>
                   <div class="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-100">
-                      <button @click="isEditingServer = false" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
-                      <button @click="saveServer" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm">Save Server</button>
+                      <button @click="isEditingServer = false" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">{{ t('console.cancel') }}</button>
+                      <button @click="saveServer" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm">{{ t('settings.save') }}</button>
                   </div>
               </div>
           </div>
@@ -560,7 +560,7 @@ onMounted(load);
           <div>
               <label class="block text-sm font-medium text-slate-600 mb-1 flex items-center gap-2">
                  <Terminal class="w-4 h-4" />
-                 {{ t('settings.postCommands') }} <span class="text-xs font-normal text-slate-400">(Executed on all servers)</span>
+                 {{ t('settings.postCommands') }} <span class="text-xs font-normal text-slate-400">{{ t('settings.executedOnAll') }}</span>
               </label>
               <div class="flex gap-2 mb-2">
                 <input 
@@ -588,14 +588,14 @@ onMounted(load);
           <div class="pt-6 border-t border-slate-100 space-y-4">
               <h4 class="text-md font-medium text-slate-700 flex items-center gap-2">
                   <UploadCloud class="w-4 h-4" />
-                  {{ t('settings.manualDeploy') || 'Manual Deployment Tool' }}
+                  {{ t('settings.manualDeploy') }}
               </h4>
-              <p class="text-xs text-slate-400">Upload a local file or folder to a specific remote path and execute post commands.</p>
+              <p class="text-xs text-slate-400">{{ t('settings.manualDeployDesc') }}</p>
               
               <div>
-                  <label class="block text-sm font-medium text-slate-600 mb-1">Target Server</label>
+                  <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.targetServer') }}</label>
                   <select v-model="selectedServerId" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
-                      <option value="" disabled>Select a server...</option>
+                      <option value="" disabled>{{ t('settings.selectServer') }}</option>
                       <option v-for="s in config.servers" :key="s.id" :value="s.id">
                           {{ s.name || s.host }} ({{ s.host }})
                       </option>
@@ -604,11 +604,11 @@ onMounted(load);
 
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                      <label class="block text-sm font-medium text-slate-600 mb-1">Local Path</label>
+                      <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.localPath') }}</label>
                       <input v-model="manualLocalPath" type="text" placeholder="C:\Path\To\Package.zip" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                   </div>
                   <div>
-                      <label class="block text-sm font-medium text-slate-600 mb-1">Remote Path</label>
+                      <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.remotePath') }}</label>
                       <input v-model="manualRemotePath" type="text" placeholder="/opt/app/deploy" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                   </div>
               </div>
@@ -620,7 +620,7 @@ onMounted(load);
                     :disabled="isDeploying || !selectedServerId || !manualLocalPath || !manualRemotePath"
                   >
                     <UploadCloud class="w-4 h-4" />
-                    {{ isDeploying ? 'Deploying...' : 'Deploy Now' }}
+                    {{ isDeploying ? t('settings.deploying') : t('settings.deployNow') }}
                   </button>
                   <span v-if="deployMsg" :class="deployMsg.includes('successful') ? 'text-green-600' : 'text-red-500'" class="text-sm font-medium">
                       {{ deployMsg }}
