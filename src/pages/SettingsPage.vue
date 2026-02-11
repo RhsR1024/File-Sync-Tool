@@ -2,6 +2,7 @@
 import { ref, onMounted, computed } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud } from 'lucide-vue-next';
 import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, type AppConfig } from '@/lib/tauri';
+import { appStore } from '@/lib/store';
 import { useI18n } from 'vue-i18n';
 
 const { t, locale } = useI18n();
@@ -119,8 +120,9 @@ async function testAllServers() {
 const manualLocalPath = ref('');
 const manualRemotePath = ref('/tmp/upload');
 const selectedServerId = ref('');
-const isDeploying = ref(false);
-const deployMsg = ref('');
+// State moved to appStore
+// const isDeploying = ref(false);
+// const deployMsg = ref('');
 
 async function handleManualDeploy() {
     if (!manualLocalPath.value || !manualRemotePath.value || !selectedServerId.value) return;
@@ -136,8 +138,8 @@ async function handleManualDeploy() {
     
     if (targets.length === 0) return;
 
-    isDeploying.value = true;
-    deployMsg.value = '';
+    appStore.isManualDeploying = true;
+    appStore.manualDeployMsg = '';
     
     try {
         // Run sequentially or parallel? Parallel is better.
@@ -160,16 +162,16 @@ async function handleManualDeploy() {
         }
         
         if (failCount === 0) {
-            deployMsg.value = `Deployment successful to ${successCount} servers!`;
+            appStore.manualDeployMsg = `Deployment successful to ${successCount} servers!`;
             addSystemEvent('MANUAL_DEPLOY', `Deployed to ${successCount} servers successfully.`);
         } else {
-            deployMsg.value = `Deployment finished. Success: ${successCount}, Failed: ${failCount}. Error: ${lastError}`;
+            appStore.manualDeployMsg = `Deployment finished. Success: ${successCount}, Failed: ${failCount}. Error: ${lastError}`;
         }
         
     } catch (e) {
-        deployMsg.value = `Deployment error: ${e}`;
+        appStore.manualDeployMsg = `Deployment error: ${e}`;
     } finally {
-        isDeploying.value = false;
+        appStore.isManualDeploying = false;
     }
 }
 
@@ -655,13 +657,16 @@ onMounted(load);
                   <button 
                     @click="handleManualDeploy"
                     class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                    :disabled="isDeploying || !selectedServerId || !manualLocalPath || !manualRemotePath"
+                    :disabled="appStore.isManualDeploying || !selectedServerId || !manualLocalPath || !manualRemotePath"
                   >
                     <UploadCloud class="w-4 h-4" />
-                    {{ isDeploying ? t('settings.deploying') : t('settings.deployNow') }}
+                    {{ appStore.isManualDeploying ? t('settings.deploying') : t('settings.deployNow') }}
                   </button>
-                  <span v-if="deployMsg" :class="deployMsg.includes('successful') ? 'text-green-600' : 'text-red-500'" class="text-sm font-medium">
-                      {{ deployMsg }}
+                  <span v-if="appStore.manualDeployMsg" :class="appStore.manualDeployMsg.includes('successful') ? 'text-green-600' : 'text-red-500'" class="text-sm font-medium">
+                      {{ appStore.manualDeployMsg }}
+                      <span v-if="appStore.isManualDeploying && appStore.progress" class="ml-2 text-blue-600">
+                          ({{ appStore.progress.percentage.toFixed(0) }}%)
+                      </span>
                   </span>
               </div>
           </div>

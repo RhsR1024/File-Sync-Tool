@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted, onActivated } from 'vue';
 import { Play, Square, RefreshCw, Trash2, Clock, Activity, AlertCircle, CheckCircle2, XCircle, Pause, PlayCircle } from 'lucide-vue-next';
 import { getConfig, scanNow, cancelScan, pauseScan, resumeScan, addSystemEvent, type ScanResult, type AppConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
-import { listen } from '@tauri-apps/api/event';
+import { appStore, addLog } from '@/lib/store';
 
 // Add name for KeepAlive
 defineOptions({
@@ -12,29 +12,19 @@ defineOptions({
 
 const { t } = useI18n();
 const isRunning = ref(false);
-const logs = ref<{ time: string; msg: string; type: 'info' | 'error' | 'success' }[]>([]);
 const nextRunTime = ref<string>('-');
 const config = ref<AppConfig | null>(null);
-const progress = ref<{ folder: string; percentage: number; copied: number; total: number; speed: number; eta: number } | null>(null);
 const isCancelling = ref(false);
 const isPaused = ref(false);
 let timer: ReturnType<typeof setInterval> | null = null;
-let unlistenLog: (() => void) | null = null;
-let unlistenProgress: (() => void) | null = null;
 
 async function handleCancel() {
   if (isCancelling.value) return;
   isCancelling.value = true;
   
-  const targetName = progress.value?.folder || '';
+  const targetName = appStore.progress?.folder || '';
   const msg = `${t('console.cancelling')} ${targetName ? '(' + targetName + ')' : ''}`;
   addLog(msg, 'info');
-  // Log to history
-  // Note: Backend cancelScan will trigger logic, but backend scanner might be busy.
-  // Actually, scanner.rs already handles COPY_CANCELLED.
-  // We don't need to add generic Cancel event if copy is running.
-  // But if we want to log "User clicked cancel", we can.
-  // Let's rely on scanner.rs for COPY_CANCELLED which is more accurate.
   
   try {
     await cancelScan();
@@ -45,9 +35,9 @@ async function handleCancel() {
 }
 
 async function togglePause() {
-  if (!progress.value) return;
+  if (!appStore.progress) return;
   
-  const targetName = progress.value.folder || '';
+  const targetName = appStore.progress.folder || '';
   
   if (isPaused.value) {
     await resumeScan();
@@ -81,74 +71,16 @@ function formatDuration(seconds: number) {
   return `${m}m ${s}s`;
 }
 
-function addLog(msg: string, type: 'info' | 'error' | 'success' = 'info') {
-  const time = new Date().toLocaleTimeString();
-  // Handle multiline messages (like tree view) by preserving whitespace
-  logs.value.unshift({ time, msg, type });
-  if (logs.value.length > 1000) logs.value.pop();
-}
-
-// Setup real-time listeners
-async function setupListeners() {
-    if (unlistenLog) unlistenLog();
-    if (unlistenProgress) unlistenProgress();
-
-    unlistenLog = await listen('log-message', (event: any) => {
-        const payload = event.payload as { msg: string, level: string };
-        let type: 'info' | 'error' | 'success' = 'info';
-        if (payload.level === 'error') type = 'error';
-        if (payload.level === 'success') type = 'success';
-        addLog(payload.msg, type);
-    });
-
-    unlistenProgress = await listen('copy-progress', (event: any) => {
-        const p = event.payload as { folder: string, total_bytes: number, copied_bytes: number, percentage: number, speed: number, eta_seconds: number };
-        progress.value = {
-            folder: p.folder,
-            percentage: p.percentage,
-            copied: p.copied_bytes,
-            total: p.total_bytes,
-            speed: p.speed,
-            eta: p.eta_seconds,
-        };
-        // Reset progress when done (100%)
-        if (p.percentage >= 100) {
-            setTimeout(() => {
-                if (progress.value?.folder === p.folder) {
-                    progress.value = null;
-                    isPaused.value = false; // Reset pause state
-                }
-            }, 2000);
-        }
-    });
-}
-
 async function loadConfig(silentIfSame = false) {
   try {
     const newConfig = await getConfig();
-    const isFirstLoad = config.value === null;
     const isChanged = JSON.stringify(config.value) !== JSON.stringify(newConfig);
 
     if (isChanged) {
         config.value = newConfig;
-        // Only log if it's NOT a silent reload (or if it's first load)
-        // Actually, user wants "Configuration loaded" ONLY if changed (or first load).
-        // If silentIfSame is true, and it IS changed, we SHOULD log "Updated".
-        // If silentIfSame is true, and NOT changed, we do nothing.
-        
-        // Let's refine:
-        // If first load -> Log "Loaded"
-        // If changed -> Log "Updated" (or Loaded)
-        // If not changed -> Do nothing (if silentIfSame=true)
-        
         addLog(t('console.configLoaded'), 'info');
     } else {
-        // Not changed
         if (!silentIfSame) {
-            // If not silent mode (manual call?), log it?
-            // User complained about "switching back to console" triggering log.
-            // onActivated calls loadConfig().
-            // So we should pass silentIfSame=true from onActivated.
              addLog(t('console.configLoaded'), 'info');
         }
     }
@@ -175,7 +107,7 @@ async function handleScan() {
   } catch (e) {
     addLog(t('console.scanFailed', { error: e }), 'error');
   } finally {
-    progress.value = null; // Ensure progress is cleared when scan finishes
+    appStore.progress = null; // Ensure progress is cleared when scan finishes
     isCancelling.value = false; // Reset cancel state
     isPaused.value = false;
   }
@@ -190,12 +122,10 @@ function startScheduler(isRestart = false) {
       addSystemEvent('SCHEDULER_START', msg);
   }
   
-  // Initial run only if not a restart (to avoid double scan on tab switch)
   if (!isRestart) {
       handleScan();
   }
   
-  // Schedule
   const intervalMs = config.value.interval_minutes * 60 * 1000;
   updateNextRunTime(intervalMs);
   
@@ -223,20 +153,14 @@ function updateNextRunTime(delayMs: number) {
 }
 
 function clearLogs() {
-  logs.value = [];
+  appStore.logs.splice(0, appStore.logs.length);
 }
 
 // Reload config when page is activated (switched back to)
 onActivated(() => {
-  loadConfig(true); // Pass true to silent if same
-  // If timer is running, we might want to restart it to pick up new interval?
-  // But user said: "real-time hot update config... next scheduled run use new config"
-  // Our startScheduler sets up a timer with FIXED interval. 
-  // To support dynamic interval change without stopping, we need more complex logic.
-  // For now, let's at least reload the config object so the next scan uses new paths/versions.
+  loadConfig(true); 
   
   if (isRunning.value && config.value) {
-       // Silent restart to apply potential interval changes
        if (timer) clearInterval(timer);
        startScheduler(true); 
    }
@@ -244,13 +168,10 @@ onActivated(() => {
 
 onMounted(() => {
   loadConfig();
-  setupListeners();
 });
 
 onUnmounted(() => {
   if (timer) clearInterval(timer);
-  if (unlistenLog) unlistenLog();
-  if (unlistenProgress) unlistenProgress();
 });
 </script>
 
@@ -309,20 +230,20 @@ onUnmounted(() => {
         </div>
 
         <!-- Progress Bar Overlay -->
-        <div v-if="progress" class="absolute bottom-0 left-0 w-full h-1.5 bg-slate-100">
-           <div class="h-full bg-blue-500 transition-all duration-300" :style="{ width: `${progress.percentage}%` }"></div>
+        <div v-if="appStore.progress" class="absolute bottom-0 left-0 w-full h-1.5 bg-slate-100">
+           <div class="h-full bg-blue-500 transition-all duration-300" :style="{ width: `${appStore.progress.percentage}%` }"></div>
         </div>
-        <div v-if="progress" class="absolute inset-0 bg-white/95 z-20 flex flex-col items-center justify-center backdrop-blur-sm p-4 text-center">
+        <div v-if="appStore.progress" class="absolute inset-0 bg-white/95 z-20 flex flex-col items-center justify-center backdrop-blur-sm p-4 text-center">
            <div class="text-xs font-bold text-blue-600 mb-1 uppercase tracking-wider">{{ isPaused ? t('console.pausedStatus') : t('console.copying') }}</div>
-           <div class="text-sm font-mono text-slate-700 mb-2 truncate max-w-full" :title="progress.folder">{{ progress.folder }}</div>
+           <div class="text-sm font-mono text-slate-700 mb-2 truncate max-w-full" :title="appStore.progress.folder">{{ appStore.progress.folder }}</div>
            <div class="w-full h-2 bg-slate-200 rounded-full overflow-hidden mb-1">
-              <div class="h-full bg-blue-500 transition-all duration-300" :style="{ width: `${progress.percentage}%` }"></div>
+              <div class="h-full bg-blue-500 transition-all duration-300" :style="{ width: `${appStore.progress.percentage}%` }"></div>
            </div>
            
            <!-- Stats -->
            <div class="flex justify-between w-full text-xs text-slate-500 font-mono mb-3 px-1">
-               <span>{{ progress.percentage.toFixed(1) }}%</span>
-               <span v-if="!isPaused">{{ formatSpeed(progress.speed) }} - ETA: {{ formatDuration(progress.eta) }}</span>
+               <span>{{ appStore.progress.percentage.toFixed(1) }}%</span>
+               <span v-if="!isPaused">{{ formatSpeed(appStore.progress.speed) }} - ETA: {{ formatDuration(appStore.progress.eta) }}</span>
                <span v-else class="text-amber-500">{{ t('console.paused') }}</span>
            </div>
            
@@ -365,11 +286,11 @@ onUnmounted(() => {
         </button>
       </div>
       <div class="flex-1 overflow-auto p-4 font-mono text-xs md:text-sm space-y-1.5 custom-scrollbar">
-        <div v-if="logs.length === 0" class="h-full flex flex-col items-center justify-center text-slate-700">
+        <div v-if="appStore.logs.length === 0" class="h-full flex flex-col items-center justify-center text-slate-700">
            <Activity class="w-12 h-12 mb-2 opacity-20" />
            <span class="italic">{{ t('console.noLogs') }}</span>
         </div>
-        <div v-for="(log, i) in logs" :key="i" class="flex gap-3 hover:bg-white/5 p-0.5 rounded px-2 transition-colors">
+        <div v-for="(log, i) in appStore.logs" :key="i" class="flex gap-3 hover:bg-white/5 p-0.5 rounded px-2 transition-colors">
           <span class="text-slate-600 shrink-0 select-none">{{ log.time }}</span>
           <div class="flex items-start gap-2 break-all w-full">
              <CheckCircle2 v-if="log.type === 'success'" class="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
