@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Home, Settings, Activity, Server, ShieldCheck } from 'lucide-vue-next';
+import { Home, Settings, Activity, Server, ShieldCheck, History } from 'lucide-vue-next';
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { computed } from 'vue';
@@ -9,25 +9,22 @@ const { t } = useI18n();
 
 const menuItems = computed(() => [
   { name: t('sidebar.console'), path: '/', icon: Activity },
+  { name: t('sidebar.history'), path: '/history', icon: History },
   { name: t('sidebar.settings'), path: '/settings', icon: Settings },
 ]);
 </script>
 
 <template>
-  <div class="w-64 bg-[#0f172a] text-white h-screen flex flex-col border-r border-slate-800 shadow-xl z-10">
+  <div class="w-56 bg-[#0f172a] text-white h-screen flex flex-col border-r border-slate-800 shadow-xl z-10">
     <div class="p-6 border-b border-slate-800 bg-slate-900/50">
-      <h1 class="text-xl font-bold flex items-center gap-3 tracking-tight">
-        <div class="w-8 h-8 bg-blue-600 rounded-md flex items-center justify-center shadow-lg shadow-blue-500/20">
+      <h1 class="text-lg font-bold flex items-center gap-3 tracking-tight">
+        <div class="w-8 h-8 bg-blue-600 rounded-md flex items-center justify-center shadow-lg shadow-blue-500/20 shrink-0">
           <Server class="w-5 h-5 text-white" />
         </div>
-        <span class="bg-gradient-to-r from-blue-400 to-cyan-300 bg-clip-text text-transparent">
+        <span class="bg-gradient-to-r from-blue-400 to-cyan-300 bg-clip-text text-transparent truncate">
           {{ t('sidebar.title') }}
         </span>
       </h1>
-      <div class="mt-4 flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 rounded border border-slate-700/50">
-        <div class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-        <span class="text-xs font-mono text-emerald-400 uppercase tracking-wider">System Online</span>
-      </div>
     </div>
     
     <nav class="flex-1 p-4 space-y-2">

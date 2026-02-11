@@ -114,6 +114,7 @@ fn deploy_single_server<R: tauri::Runtime>(
              
              let mut channel = sess.channel_session().unwrap();
              channel.exec(&format!("mkdir -p {}", remote_target)).unwrap();
+             channel.send_eof().unwrap();
              let mut s = String::new();
              channel.read_to_string(&mut s).unwrap();
              channel.wait_close().unwrap();
@@ -131,6 +132,7 @@ fn deploy_single_server<R: tauri::Runtime>(
             
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
             channel.exec(cmd).map_err(|e| e.to_string())?;
+            channel.send_eof().map_err(|e| e.to_string())?;
             
             let mut s = String::new();
             channel.read_to_string(&mut s).map_err(|e| e.to_string())?;
@@ -193,6 +195,9 @@ pub fn deploy_manual<R: tauri::Runtime>(
         if !parent_str.is_empty() {
             let mut channel = sess.channel_session().unwrap();
             channel.exec(&format!("mkdir -p {}", parent_str)).unwrap();
+            channel.send_eof().unwrap();
+            let mut s = String::new();
+            channel.read_to_string(&mut s).unwrap();
             channel.wait_close().unwrap();
         }
     }
@@ -207,6 +212,8 @@ pub fn deploy_manual<R: tauri::Runtime>(
             emit_log(app_handle, format!("$ {}", cmd), "info");
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
             channel.exec(cmd).map_err(|e| e.to_string())?;
+            channel.send_eof().map_err(|e| e.to_string())?;
+            
             let mut s = String::new();
             channel.read_to_string(&mut s).map_err(|e| e.to_string())?;
             channel.wait_close().unwrap();

@@ -3,7 +3,6 @@ import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 import Inspector from 'unplugin-vue-dev-locator/vite'
-import traeBadgePlugin from 'vite-plugin-trae-solo-badge'
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -14,15 +13,6 @@ export default defineConfig({
     vue(),
     tailwindcss(),
     Inspector(),
-    traeBadgePlugin({
-      variant: 'dark',
-      position: 'bottom-right',
-      prodOnly: true,
-      clickable: true,
-      clickUrl: 'https://www.trae.ai/solo?showJoin=1',
-      autoTheme: true,
-      autoThemeTarget: '#app',
-    }),
   ],
   resolve: {
     alias: {
