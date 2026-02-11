@@ -5,6 +5,7 @@ export const messages = {
       console: 'Console',
       history: 'History',
       settings: 'Settings',
+      tasks: 'Task Status',
       version: 'v1.0.0',
     },
     console: {
@@ -118,6 +119,7 @@ export const messages = {
       console: '控制台',
       history: '历史记录',
       settings: '设置',
+      tasks: '任务状态',
       version: 'v1.0.0',
     },
     console: {
