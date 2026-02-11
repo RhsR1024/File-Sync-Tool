@@ -417,8 +417,30 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                          let mut ext_match = true;
                                          if !extensions.is_empty() {
                                              if let Some(ext) = path.extension() {
-                                                 let ext_str = ext.to_string_lossy().to_string();
-                                                 if !extensions.contains(&ext_str) {
+                                                 // The extension() returns "gz" for "tar.gz" usually, or just last part.
+                                                 // If user configured "tar.gz", we need to check full name ends with it.
+                                                 // Standard logic: if any extension in list is contained at end of filename.
+                                                 
+                                                 let name_lower = file_name.to_lowercase();
+                                                 let mut any_match = false;
+                                                 for configured_ext in &extensions {
+                                                     let conf_lower = configured_ext.to_lowercase();
+                                                     // If configured is "tar.gz", and file ends with ".tar.gz", it's a match.
+                                                     // We should check if file_name ends with "." + ext OR if it ends with ext (if user typed .tar.gz)
+                                                     
+                                                     let suffix = if conf_lower.starts_with('.') {
+                                                         conf_lower.clone()
+                                                     } else {
+                                                         format!(".{}", conf_lower)
+                                                     };
+                                                     
+                                                     if name_lower.ends_with(&suffix) {
+                                                         any_match = true;
+                                                         break;
+                                                     }
+                                                 }
+                                                 
+                                                 if !any_match {
                                                      ext_match = false;
                                                  }
                                              } else {
