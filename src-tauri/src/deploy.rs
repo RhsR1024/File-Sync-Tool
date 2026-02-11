@@ -13,6 +13,7 @@ struct LogEvent {
     level: String,
 }
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, serde::Serialize, Clone)]

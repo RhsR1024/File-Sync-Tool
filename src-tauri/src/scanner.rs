@@ -203,7 +203,6 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
 
         // 1. Collect all valid candidates
         let mut candidates: Vec<Candidate> = Vec::new();
-        let mut raw_files_count = 0;
 
         // Collect names for "tree" visualization
         let mut tree_view: Vec<String> = Vec::new();
@@ -213,17 +212,6 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                 emit_log(app_handle, "Scan cancelled by user".to_string(), "info");
                 return result;
             }
-            raw_files_count += 1;
-            let file_name = entry.file_name();
-            let name_str = file_name.to_string_lossy().to_string();
-            
-            // Only add to tree view if it looks like a version folder (optional, or list all?)
-            // Listing ALL might be too much if there are thousands. Let's list matching ones or first 50.
-            // User requested: "Sort by latest date, output top 20"
-            // But we are iterating via ReadDir, which is not sorted.
-            // We need to collect ALL first to sort them?
-            // If directory is huge, collecting all might be slow. But usually < 1000 items is fine.
-            // Let's collect names and sort them.
             
             // Just collect everything first
             let file_name = entry.file_name();
@@ -255,7 +243,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
         candidates.sort_by(|a, b| b.datetime.cmp(&a.datetime));
 
         // Generate tree view for top 20
-        for (i, cand) in candidates.iter().take(20).enumerate() {
+        for cand in candidates.iter().take(20) {
              tree_view.push(format!("├─ {}", cand.name));
         }
         if candidates.len() > 20 {
@@ -332,8 +320,6 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                     // We must manually copy selected files if filters are active.
                     // If filters are empty, we copy whole folder.
                     
-                    let use_filter = !config.file_extensions.is_empty() || !config.filename_includes.is_empty();
-                    
                     let app_handle_clone = app_handle.clone();
                     let folder_name = latest.name.clone();
                     let target_full_path_clone = target_full_path.clone();
@@ -392,12 +378,10 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         // Recursive scan for all cases, applying filters if needed.
                         
                         // Just test access to source dir
-                        if let Ok(entries) = std::fs::read_dir(&source_path) {
-                            // Valid
-                        } else {
-                             let e = std::io::Error::last_os_error();
+                        if let Err(e) = std::fs::read_dir(&source_path) {
+                             let e = e.to_string(); // Use string directly
                              emit_log(&handle, format!("Failed to access source dir: {}", e), "error");
-                             return Err(fs_extra::error::Error::new(fs_extra::error::ErrorKind::Other, &e.to_string()));
+                             return Err(fs_extra::error::Error::new(fs_extra::error::ErrorKind::Other, &e));
                         }
                         
                         // Collect files with filtering (Iterative)
@@ -416,34 +400,30 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                          let file_name = entry.file_name().to_string_lossy().to_string();
                                          let mut ext_match = true;
                                          if !extensions.is_empty() {
-                                             if let Some(ext) = path.extension() {
-                                                 // The extension() returns "gz" for "tar.gz" usually, or just last part.
-                                                 // If user configured "tar.gz", we need to check full name ends with it.
-                                                 // Standard logic: if any extension in list is contained at end of filename.
+                                             // The extension() returns "gz" for "tar.gz" usually, or just last part.
+                                             // If user configured "tar.gz", we need to check full name ends with it.
+                                             // Standard logic: if any extension in list is contained at end of filename.
+                                             
+                                             let name_lower = file_name.to_lowercase();
+                                             let mut any_match = false;
+                                             for configured_ext in &extensions {
+                                                 let conf_lower = configured_ext.to_lowercase();
+                                                 // If configured is "tar.gz", and file ends with ".tar.gz", it's a match.
+                                                 // We should check if file_name ends with "." + ext OR if it ends with ext (if user typed .tar.gz)
                                                  
-                                                 let name_lower = file_name.to_lowercase();
-                                                 let mut any_match = false;
-                                                 for configured_ext in &extensions {
-                                                     let conf_lower = configured_ext.to_lowercase();
-                                                     // If configured is "tar.gz", and file ends with ".tar.gz", it's a match.
-                                                     // We should check if file_name ends with "." + ext OR if it ends with ext (if user typed .tar.gz)
-                                                     
-                                                     let suffix = if conf_lower.starts_with('.') {
-                                                         conf_lower.clone()
-                                                     } else {
-                                                         format!(".{}", conf_lower)
-                                                     };
-                                                     
-                                                     if name_lower.ends_with(&suffix) {
-                                                         any_match = true;
-                                                         break;
-                                                     }
-                                                 }
+                                                 let suffix = if conf_lower.starts_with('.') {
+                                                     conf_lower.clone()
+                                                 } else {
+                                                     format!(".{}", conf_lower)
+                                                 };
                                                  
-                                                 if !any_match {
-                                                     ext_match = false;
+                                                 if name_lower.ends_with(&suffix) {
+                                                     any_match = true;
+                                                     break;
                                                  }
-                                             } else {
+                                             }
+                                             
+                                             if !any_match {
                                                  ext_match = false;
                                              }
                                          }
@@ -481,7 +461,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         let mut copied_bytes_total = 0;
                         let mut copied_files_list = Vec::new();
                         
-                        for (src, size) in filtered_files {
+                        for (src, _size) in filtered_files {
                             // Check cancel before starting file
                              if should_cancel_clone.load(Ordering::SeqCst) {
                                  // Log partial
