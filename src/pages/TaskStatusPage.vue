@@ -195,7 +195,7 @@ onUnmounted(() => {
     <!-- Controls & Task List -->
     <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col relative overflow-hidden flex-1">
         <div class="p-4 flex gap-3 border-b border-slate-100 items-center justify-between">
-            <h3 class="text-lg font-semibold text-slate-700">Scheduler Controls</h3>
+            <h3 class="text-lg font-semibold text-slate-700">{{ t('console.schedulerControls') }}</h3>
             <div class="flex gap-3">
                 <button 
                     @click="isRunning ? stopScheduler() : startScheduler()"
@@ -229,13 +229,12 @@ onUnmounted(() => {
 
             <div v-else class="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
                 <!-- Table Header -->
-                <div class="grid grid-cols-[2fr_1fr_2fr_1.5fr_2fr_0.5fr_2fr_1.5fr_1.5fr_1fr] gap-4 p-3 bg-slate-100 text-slate-600 font-bold border-b border-slate-200 text-sm">
+                <div class="grid grid-cols-[2fr_1fr_2fr_1.5fr_2fr_2fr_1.5fr_1.5fr_1fr] gap-4 p-3 bg-slate-100 text-slate-600 font-bold border-b border-slate-200 text-sm">
                     <div>{{ t('console.name') }}</div>
                     <div>{{ t('console.status') }}</div>
                     <div>{{ t('console.progress') }}</div>
                     <div>{{ t('console.size') }}</div>
                     <div>{{ t('console.localPath') }}</div>
-                    <div class="text-center">&lt;-&gt;</div>
                     <div>{{ t('console.remotePath') }}</div>
                     <div>{{ t('console.speed') }}</div>
                     <div>{{ t('console.eta') }}</div>
@@ -243,7 +242,7 @@ onUnmounted(() => {
                 </div>
 
                 <!-- Table Row -->
-                <div class="grid grid-cols-[2fr_1fr_2fr_1.5fr_2fr_0.5fr_2fr_1.5fr_1.5fr_1fr] gap-4 p-4 bg-white items-center text-sm">
+                <div class="grid grid-cols-[2fr_1fr_2fr_1.5fr_2fr_2fr_1.5fr_1.5fr_1fr] gap-4 p-4 bg-white items-center text-sm">
                     <!-- Name -->
                     <div class="flex items-center gap-2 truncate font-medium text-slate-800" :title="appStore.progress.folder">
                         <div class="w-8 h-8 bg-blue-100 text-blue-600 rounded flex items-center justify-center shrink-0">
@@ -273,11 +272,6 @@ onUnmounted(() => {
                     <!-- Local Path -->
                     <div class="truncate text-slate-500 text-xs" :title="appStore.progress.localPath || '-'">
                         {{ appStore.progress.localPath || '-' }}
-                    </div>
-
-                    <!-- Arrow -->
-                    <div class="text-center flex justify-center">
-                        <div class="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-red-500 font-bold">↑</div>
                     </div>
 
                     <!-- Remote Path -->

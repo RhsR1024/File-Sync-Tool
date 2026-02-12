@@ -40,6 +40,7 @@ export const messages = {
       speed: 'Speed',
       eta: 'ETA',
       elapsed: 'Elapsed',
+      schedulerControls: 'Scheduler Controls',
     },
     settings: {
       title: 'Settings',
@@ -173,6 +174,7 @@ export const messages = {
       speed: '速度',
       eta: '估计剩余时间',
       elapsed: '经过时间',
+      schedulerControls: '定时任务控制',
     },
     settings: {
       title: '设置',
