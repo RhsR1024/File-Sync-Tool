@@ -153,15 +153,12 @@ async fn perform_copy<R: tauri::Runtime>(
     
     emit_log(app_handle, format!("Target local directory: {}", target_full_path.display()), "info");
 
+    // Check if target directory exists, but don't skip entire copy - check for new files
     if target_full_path.exists() {
-         let is_dir = target_full_path.is_dir();
-         let skip_msg = format!("Skipped (Exists): {} -> {} (Is Dir: {})", folder_name, target_full_path.display(), is_dir);
-         emit_log(app_handle, skip_msg.clone(), "warn");
-         result.errors.push(skip_msg);
-         return;
+         emit_log(app_handle, format!("Target directory {} exists. Checking for new files...", target_full_path.display()), "info");
+    } else {
+         emit_log(app_handle, format!("Starting copy: {} -> {}", source_path.display(), target_parent_path.display()), "info");
     }
-
-    emit_log(app_handle, format!("Starting copy: {} -> {}", source_path.display(), target_parent_path.display()), "info");
     
     // Ensure parent dir exists
     if let Err(e) = fs::create_dir_all(target_parent_path).await {
@@ -295,11 +292,17 @@ async fn perform_copy<R: tauri::Runtime>(
                          }
                          
                          if ext_match && inc_match {
-                             if let Ok(meta) = entry.metadata() {
-                                 filtered_files.push((path, meta.len()));
-                                 total_filtered_bytes += meta.len();
-                             }
-                         }
+                            // Check if file already exists locally
+                            let rel_path = path.strip_prefix(&source_path_clone).unwrap_or(&path);
+                            let dst = target_full_path_clone.join(rel_path);
+                            
+                            if !dst.exists() {
+                                if let Ok(meta) = entry.metadata() {
+                                    filtered_files.push((path, meta.len()));
+                                    total_filtered_bytes += meta.len();
+                                }
+                            }
+                        }
                      }
                  }
              }
@@ -638,25 +641,20 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                              let sub_name = entry.file_name().to_string_lossy().to_string();
                              let local_sub_path = local_target_base.join(&sub_name);
                              
-                             if !local_sub_path.exists() {
-                                 found_any_new = true;
-                                 emit_log(app_handle, format!("Found new build directory: {}/{}", target_name, sub_name), "info");
-                                 result.found_folders.push(format!("{}/{}", target_name, sub_name));
-                                 
-                                 perform_copy(
-                                     app_handle,
-                                     sub_path,
-                                     sub_name, // Copy as sub_name
-                                     &local_target_base, // Into local/Date/
-                                     config,
-                                     should_cancel.clone(),
-                                     is_paused.clone(),
-                                     &mut result
-                                 ).await;
-                             } else {
-                                 // Optional: Check if empty or partial? For now assume existence means done.
-                                 // emit_log(app_handle, format!("Skipping existing build: {}/{}", target_name, sub_name), "info");
-                             }
+                             // Always scan subdirectories to support incremental updates
+                             found_any_new = true;
+                             result.found_folders.push(format!("{}/{}", target_name, sub_name));
+                             
+                             perform_copy(
+                                 app_handle,
+                                 sub_path,
+                                 sub_name, // Copy as sub_name
+                                 &local_target_base, // Into local/Date/
+                                 config,
+                                 should_cancel.clone(),
+                                 is_paused.clone(),
+                                 &mut result
+                             ).await;
                          }
                     }
                     

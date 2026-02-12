@@ -1,21 +1,20 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, onActivated } from 'vue';
+import { ref, onMounted, onActivated } from 'vue';
 import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle } from 'lucide-vue-next';
-import { getConfig, scanNow, cancelScan, pauseScan, resumeScan, addSystemEvent, type ScanResult, type AppConfig } from '@/lib/tauri';
+import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, type AppConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { appStore, addLog } from '@/lib/store';
+import { startScheduler, stopScheduler, executeScan } from '@/lib/scheduler';
 
 defineOptions({
   name: 'TaskStatusPage'
 });
 
 const { t } = useI18n();
-const isRunning = ref(false);
-const nextRunTime = ref<string>('-');
+// Removed local state: isRunning, nextRunTime, timer
 const config = ref<AppConfig | null>(null);
 const isCancelling = ref(false);
 const isPaused = ref(false);
-let timer: ReturnType<typeof setInterval> | null = null;
 
 async function handleCancel() {
   if (isCancelling.value) return;
@@ -79,84 +78,24 @@ async function loadConfig() {
   }
 }
 
-async function handleScan() {
-  addLog(t('console.running'), 'info'); 
-  try {
-    const result: ScanResult = await scanNow();
-    addLog(t('console.scanComplete', { scanned: result.scanned_paths, found: result.found_folders.length, copied: result.copied_folders.length }), 'success');
-    
-    if (result.found_folders.length > 0) {
-      result.found_folders.forEach(f => addLog(`Found candidate: ${f}`, 'info'));
-    }
-    if (result.copied_folders.length > 0) {
-      result.copied_folders.forEach(f => addLog(`Successfully copied: ${f}`, 'success'));
-    }
-    if (result.errors.length > 0) {
-      result.errors.forEach(e => addLog(`Error: ${e}`, 'error'));
-    }
-  } catch (e) {
-    addLog(t('console.scanFailed', { error: e }), 'error');
-  } finally {
-    appStore.progress = null; // Ensure progress is cleared when scan finishes
-    isCancelling.value = false; // Reset cancel state
-    isPaused.value = false;
-  }
-}
-
-function startScheduler(isRestart = false) {
-  if (!config.value) return;
-  isRunning.value = true;
-  if (!isRestart) {
-      const msg = t('console.schedulerStarted', { interval: config.value.interval_minutes });
-      addLog(msg, 'info');
-      addSystemEvent('SCHEDULER_START', msg);
-  }
-  
-  if (!isRestart) {
-      handleScan();
-  }
-  
-  const intervalMs = config.value.interval_minutes * 60 * 1000;
-  updateNextRunTime(intervalMs);
-  
-  timer = setInterval(() => {
-    handleScan();
-    updateNextRunTime(intervalMs);
-  }, intervalMs);
-}
-
-function stopScheduler() {
-  isRunning.value = false;
-  if (timer) {
-    clearInterval(timer);
-    timer = null;
-  }
-  nextRunTime.value = '-';
-  const msg = t('console.schedulerStopped');
-  addLog(msg, 'info');
-  addSystemEvent('SCHEDULER_STOP', msg);
-}
-
-function updateNextRunTime(delayMs: number) {
-  const next = new Date(Date.now() + delayMs);
-  nextRunTime.value = next.toLocaleTimeString();
+// Replaced local handleScan with scheduler's executeScan
+async function handleScanClick() {
+    // Only allow manual scan if scheduler is not running to avoid conflicts, 
+    // or if we want to allow it, we should ensure scheduler logic handles concurrent calls.
+    // The previous logic disabled the button if isRunning.
+    if (appStore.isRunning) return;
+    await executeScan();
 }
 
 onActivated(() => {
   loadConfig();
-  if (isRunning.value && config.value) {
-       if (timer) clearInterval(timer);
-       startScheduler(true); 
-   }
 });
 
 onMounted(() => {
   loadConfig();
 });
 
-onUnmounted(() => {
-  if (timer) clearInterval(timer);
-});
+// Removed onUnmounted cleanup
 </script>
 
 <template>
@@ -171,12 +110,12 @@ onUnmounted(() => {
           <Activity class="w-16 h-16 text-blue-600" />
         </div>
         <div class="text-slate-500 text-sm font-medium uppercase tracking-wider mb-2">{{ t('console.status') }}</div>
-        <div class="flex items-center gap-3 font-bold text-2xl" :class="isRunning ? 'text-emerald-600' : 'text-slate-700'">
+        <div class="flex items-center gap-3 font-bold text-2xl" :class="appStore.isRunning ? 'text-emerald-600' : 'text-slate-700'">
           <div class="relative flex h-3 w-3">
-             <span v-if="isRunning" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-             <span class="relative inline-flex rounded-full h-3 w-3" :class="isRunning ? 'bg-emerald-500' : 'bg-slate-400'"></span>
+             <span v-if="appStore.isRunning" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+             <span class="relative inline-flex rounded-full h-3 w-3" :class="appStore.isRunning ? 'bg-emerald-500' : 'bg-slate-400'"></span>
           </div>
-          {{ isRunning ? t('console.running') : t('console.stopped') }}
+          {{ appStore.isRunning ? t('console.running') : t('console.stopped') }}
         </div>
       </div>
       
@@ -187,7 +126,7 @@ onUnmounted(() => {
         </div>
         <div class="text-slate-500 text-sm font-medium uppercase tracking-wider mb-2">{{ t('console.nextRun') }}</div>
         <div class="flex items-center gap-2 font-bold text-2xl text-slate-800 font-mono">
-          {{ nextRunTime }}
+          {{ appStore.nextRunTime }}
         </div>
       </div>
     </div>
@@ -198,23 +137,23 @@ onUnmounted(() => {
             <h3 class="text-lg font-semibold text-slate-700">{{ t('console.schedulerControls') }}</h3>
             <div class="flex gap-3">
                 <button 
-                    @click="isRunning ? stopScheduler() : startScheduler()"
+                    @click="appStore.isRunning ? stopScheduler() : startScheduler()"
                     class="px-6 py-2 rounded-lg font-bold transition-all flex items-center justify-center gap-2 shadow-sm active:scale-95"
-                    :class="isRunning 
+                    :class="appStore.isRunning 
                     ? 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200' 
                     : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-200'"
                 >
-                    <component :is="isRunning ? Square : Play" class="w-4 h-4 fill-current" />
-                    {{ isRunning ? t('console.stop') : t('console.start') }}
+                    <component :is="appStore.isRunning ? Square : Play" class="w-4 h-4 fill-current" />
+                    {{ appStore.isRunning ? t('console.stop') : t('console.start') }}
                 </button>
                 
                 <button 
-                    @click="handleScan"
+                    @click="handleScanClick"
                     class="px-4 py-2 rounded-lg font-bold bg-white text-blue-600 border border-blue-200 hover:bg-blue-50 hover:border-blue-300 transition-all flex items-center gap-2 shadow-sm active:scale-95"
-                    :disabled="isRunning"
-                    :class="{ 'opacity-50 cursor-not-allowed': isRunning }"
+                    :disabled="appStore.isRunning"
+                    :class="{ 'opacity-50 cursor-not-allowed': appStore.isRunning }"
                 >
-                    <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': isRunning }" />
+                    <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': appStore.isRunning }" />
                     {{ t('console.scanNow') }}
                 </button>
             </div>
