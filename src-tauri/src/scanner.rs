@@ -611,19 +611,59 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                 
                 // Check if exists
                 if target_path.exists() && target_path.is_dir() {
-                    emit_log(app_handle, format!("Found candidate: {}", target_name), "success");
-                    result.found_folders.push(target_name.clone());
+                    emit_log(app_handle, format!("Found candidate folder: {}", target_name), "success");
                     
-                    perform_copy(
-                        app_handle,
-                        target_path,
-                        target_name,
-                        local_parent,
-                        config,
-                        should_cancel.clone(),
-                        is_paused.clone(),
-                        &mut result
-                    ).await;
+                    // Instead of treating the folder itself as the unit to copy/skip,
+                    // we now treat it as a container that may hold multiple build directories.
+                    // We need to list its contents and copy them individually if they don't exist locally.
+                    
+                    let local_target_base = local_parent.join(&target_name);
+                    
+                    // Scan subdirectories in the remote folder
+                    let mut sub_entries = match fs::read_dir(&target_path).await {
+                        Ok(e) => e,
+                        Err(e) => {
+                            let err = format!("Failed to list contents of {}: {}", target_path.display(), e);
+                            emit_log(app_handle, err.clone(), "error");
+                            result.errors.push(err);
+                            continue;
+                        }
+                    };
+
+                    let mut found_any_new = false;
+                    
+                    while let Ok(Some(entry)) = sub_entries.next_entry().await {
+                         let sub_path = entry.path();
+                         if sub_path.is_dir() {
+                             let sub_name = entry.file_name().to_string_lossy().to_string();
+                             let local_sub_path = local_target_base.join(&sub_name);
+                             
+                             if !local_sub_path.exists() {
+                                 found_any_new = true;
+                                 emit_log(app_handle, format!("Found new build directory: {}/{}", target_name, sub_name), "info");
+                                 result.found_folders.push(format!("{}/{}", target_name, sub_name));
+                                 
+                                 perform_copy(
+                                     app_handle,
+                                     sub_path,
+                                     sub_name, // Copy as sub_name
+                                     &local_target_base, // Into local/Date/
+                                     config,
+                                     should_cancel.clone(),
+                                     is_paused.clone(),
+                                     &mut result
+                                 ).await;
+                             } else {
+                                 // Optional: Check if empty or partial? For now assume existence means done.
+                                 // emit_log(app_handle, format!("Skipping existing build: {}/{}", target_name, sub_name), "info");
+                             }
+                         }
+                    }
+                    
+                    if !found_any_new {
+                        emit_log(app_handle, format!("No new build directories found in {}", target_name), "info");
+                    }
+
                 } else {
                     emit_log(app_handle, format!("Folder {} does not exist in {}", target_name, task.remote_path), "info");
                 }

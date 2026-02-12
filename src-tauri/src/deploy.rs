@@ -109,7 +109,8 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     let total_size = calculate_size(&local_path_buf);
 
     // Deploy sequentially to avoid UI progress conflicts and ensure stability
-    for server in servers {
+    let server_count = servers.len();
+    for (idx, server) in servers.into_iter().enumerate() {
         if !server.enabled {
             continue;
         }
@@ -126,6 +127,8 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
             emit_log(&app_handle, "Remaining deployments cancelled.".to_string(), "warn");
             break;
         }
+
+        emit_log(&app_handle, format!("Deploying to server {}/{} [{}]", idx + 1, server_count, server.name), "info");
 
         // Run synchronously in the current thread (which is already a background task)
         if let Err(e) = deploy_single_server(&handle, &server, &local, &name, &commands, total_size, cancel, pause) {
