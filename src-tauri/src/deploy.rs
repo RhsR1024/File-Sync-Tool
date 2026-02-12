@@ -142,6 +142,39 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     Ok(())
 }
 
+fn substitute_variables(cmd: &str, folder_name: &str, local_path: &Path) -> String {
+    let mut result = cmd.to_string();
+    
+    // Resolve ${filename} dynamically by scanning for .tar.gz files
+    if result.contains("${filename}") {
+        let replacement = if let Ok(entries) = fs::read_dir(local_path) {
+            let mut found_name = folder_name.to_string();
+            // First, try to find a tar.gz file. We take the first one we find.
+            // Logic: Scan directory, if we see ANY .tar.gz, we use it.
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(name) = path.file_name() {
+                        let name_str = name.to_string_lossy();
+                        if name_str.ends_with(".tar.gz") {
+                             // Found a tar.gz file. Use its stem.
+                            found_name = name_str.trim_end_matches(".tar.gz").to_string();
+                            break; 
+                        }
+                    }
+                }
+            }
+            found_name
+        } else {
+            folder_name.to_string()
+        };
+        
+        result = result.replace("${filename}", &replacement);
+    }
+    
+    result
+}
+
 fn deploy_single_server<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     server: &DeployServer,
@@ -224,10 +257,11 @@ fn deploy_single_server<R: tauri::Runtime>(
                  return Err("Cancelled".to_string());
             }
 
-            emit_log(app_handle, format!("[{}] $ {}", server.name, cmd), "info");
+            let final_cmd = substitute_variables(cmd, folder_name, local_folder_path);
+            emit_log(app_handle, format!("[{}] $ {}", server.name, final_cmd), "info");
             
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-            channel.exec(cmd).map_err(|e| e.to_string())?;
+            channel.exec(&final_cmd).map_err(|e| e.to_string())?;
             channel.send_eof().map_err(|e| e.to_string())?;
             
             let mut s = String::new();
@@ -350,13 +384,17 @@ pub fn deploy_manual<R: tauri::Runtime>(
     // Exec commands
     if !post_commands.is_empty() {
         emit_log(app_handle, "Executing post-deployment commands...".to_string(), "info");
+        let folder_name = local_p.file_name().unwrap_or_default().to_string_lossy();
+        
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
                 return Err("Deployment cancelled".to_string());
             }
-            emit_log(app_handle, format!("$ {}", cmd), "info");
+            
+            let final_cmd = substitute_variables(cmd, &folder_name, local_p);
+             emit_log(app_handle, format!("$ {}", final_cmd), "info");
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-            channel.exec(cmd).map_err(|e| e.to_string())?;
+            channel.exec(&final_cmd).map_err(|e| e.to_string())?;
             channel.send_eof().map_err(|e| e.to_string())?;
             
             let mut s = String::new();

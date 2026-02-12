@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onActivated } from 'vue';
-import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle } from 'lucide-vue-next';
+import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy } from 'lucide-vue-next';
 import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, type AppConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { appStore, addLog } from '@/lib/store';
@@ -67,6 +67,16 @@ function formatDuration(seconds: number) {
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
   return `${m}m ${s}s`;
+}
+
+async function copyToClipboard(text: string) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    addLog(t('console.copied'), 'success');
+  } catch (err) {
+    addLog(`Failed to copy: ${err}`, 'error');
+  }
 }
 
 async function loadConfig() {
@@ -209,13 +219,23 @@ onMounted(() => {
                     </div>
 
                     <!-- Local Path -->
-                    <div class="truncate text-slate-500 text-xs" :title="appStore.progress.localPath || '-'">
-                        {{ appStore.progress.localPath || '-' }}
+                    <div class="flex items-center gap-1 overflow-hidden" :title="appStore.progress.localPath || '-'">
+                        <div class="truncate text-slate-500 text-xs flex-1">
+                            {{ appStore.progress.localPath || '-' }}
+                        </div>
+                        <button v-if="appStore.progress.localPath" @click="copyToClipboard(appStore.progress.localPath)" class="text-slate-400 hover:text-blue-600 transition-colors">
+                            <Copy class="w-3 h-3" />
+                        </button>
                     </div>
 
                     <!-- Remote Path -->
-                    <div class="truncate text-slate-500 text-xs" :title="appStore.progress.remotePath || '-'">
-                        {{ appStore.progress.remotePath || '-' }}
+                    <div class="flex items-center gap-1 overflow-hidden" :title="appStore.progress.remotePath || '-'">
+                         <div class="truncate text-slate-500 text-xs flex-1">
+                            {{ appStore.progress.remotePath || '-' }}
+                        </div>
+                        <button v-if="appStore.progress.remotePath" @click="copyToClipboard(appStore.progress.remotePath)" class="text-slate-400 hover:text-blue-600 transition-colors">
+                            <Copy class="w-3 h-3" />
+                        </button>
                     </div>
 
                     <!-- Speed -->
