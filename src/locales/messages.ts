@@ -2,10 +2,10 @@ export const messages = {
   en: {
     sidebar: {
       title: 'File Sync Tool',
-      console: 'Console',
+      console: 'Execution Logs',
       history: 'History',
       settings: 'Settings',
-      tasks: 'Task Status',
+      tasks: 'Console',
       version: 'v1.0.0',
     },
     console: {
@@ -110,7 +110,10 @@ export const messages = {
       ruleDate: 'Date Directory',
       ruleValuePlaceholderVersion: 'e.g. 1.3.9.P02',
       ruleValuePlaceholderDate: 'e.g. %y%m%d (for 260211)',
-      localPathOverride: 'Local Path Override (Optional)',
+      configPaths: 'App Data Paths',
+      configFile: 'Config File',
+      logFile: 'Log File',
+      pathCopied: 'Path copied to clipboard',
     },
     history: {
       title: 'Operation History',
@@ -130,10 +133,10 @@ export const messages = {
   zh: {
     sidebar: {
       title: '文件同步工具',
-      console: '控制台',
+      console: '执行日志',
       history: '历史记录',
       settings: '设置',
-      tasks: '任务状态',
+      tasks: '控制台',
       version: 'v1.0.0',
     },
     console: {
@@ -238,7 +241,10 @@ export const messages = {
       ruleDate: '日期目录',
       ruleValuePlaceholderVersion: '例如 1.3.9.P02',
       ruleValuePlaceholderDate: '例如 %y%m%d (对应 260211)',
-      localPathOverride: '本地路径覆盖 (可选)',
+      configPaths: '数据路径',
+      configFile: '配置文件',
+      logFile: '日志文件',
+      pathCopied: '路径已复制到剪贴板',
     },
     history: {
       title: '历史记录',

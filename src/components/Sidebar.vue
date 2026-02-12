@@ -8,8 +8,8 @@ const route = useRoute();
 const { t } = useI18n();
 
 const menuItems = computed(() => [
-  { name: t('sidebar.console'), path: '/', icon: Activity },
   { name: t('sidebar.tasks'), path: '/tasks', icon: ListChecks },
+  { name: t('sidebar.console'), path: '/', icon: Activity },
   { name: t('sidebar.history'), path: '/history', icon: History },
   { name: t('sidebar.settings'), path: '/settings', icon: Settings },
 ]);

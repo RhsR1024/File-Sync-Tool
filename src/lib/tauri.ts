@@ -118,3 +118,7 @@ export async function testSshConnection(server: DeployServer): Promise<string> {
 export async function manualDeploy(server: DeployServer, postCommands: string[], localPath: string, remotePath: string): Promise<void> {
   await invoke('manual_deploy', { server, postCommands, localPath, remotePath });
 }
+
+export async function getAppPaths(): Promise<[string, string]> {
+  return await invoke('get_app_paths');
+}

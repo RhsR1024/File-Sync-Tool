@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, CheckCircle, XCircle } from 'lucide-vue-next';
-import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, type AppConfig, type ScanTask } from '@/lib/tauri';
+import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, CheckCircle, XCircle, FileText, Copy } from 'lucide-vue-next';
+import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, type AppConfig, type ScanTask } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { useI18n } from 'vue-i18n';
+import { writeText } from '@tauri-apps/api/clipboard';
 
 const { t, locale } = useI18n();
+const configPath = ref('');
+const logPath = ref('');
 const config = ref<AppConfig>({
   tasks: [],
   remote_paths: [],
@@ -283,9 +286,22 @@ function changeLanguage(lang: string) {
   localStorage.setItem('locale', lang);
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    await writeText(text);
+    statusMsg.value = t('settings.pathCopied');
+    setTimeout(() => statusMsg.value = '', 2000);
+  } catch (e) {
+    console.error('Failed to copy', e);
+  }
+}
+
 async function load() {
   try {
     config.value = await getConfig();
+    const [cfg, log] = await getAppPaths();
+    configPath.value = cfg;
+    logPath.value = log;
   } catch (e) {
     console.error(e);
   }
@@ -343,6 +359,34 @@ onMounted(load);
         >
           English
         </button>
+      </div>
+    </div>
+
+    <!-- App Data Paths -->
+    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+      <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
+        <FileText class="w-5 h-5" />
+        {{ t('settings.configPaths') }}
+      </h3>
+      <div class="space-y-3">
+         <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1 uppercase tracking-wider">{{ t('settings.configFile') }}</label>
+            <div class="flex gap-2">
+               <code class="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 break-all">{{ configPath }}</code>
+               <button @click="copyToClipboard(configPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" title="Copy Path">
+                  <Copy class="w-4 h-4" />
+               </button>
+            </div>
+         </div>
+         <div>
+            <label class="block text-xs font-medium text-slate-500 mb-1 uppercase tracking-wider">{{ t('settings.logFile') }}</label>
+            <div class="flex gap-2">
+               <code class="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 break-all">{{ logPath }}</code>
+               <button @click="copyToClipboard(logPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" title="Copy Path">
+                  <Copy class="w-4 h-4" />
+               </button>
+            </div>
+         </div>
       </div>
     </div>
 

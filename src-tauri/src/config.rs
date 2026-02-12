@@ -150,6 +150,10 @@ pub fn save_config(app_handle: &tauri::AppHandle, config: &AppConfig) -> Result<
     Ok(())
 }
 
-fn get_config_path(app_handle: &tauri::AppHandle) -> PathBuf {
+pub fn get_log_path(app_handle: &tauri::AppHandle) -> PathBuf {
+    app_handle.path().app_data_dir().unwrap().join("app.log")
+}
+
+pub fn get_config_path(app_handle: &tauri::AppHandle) -> PathBuf {
     app_handle.path().app_config_dir().unwrap().join("config.json")
 }

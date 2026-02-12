@@ -95,6 +95,13 @@ async fn manual_deploy(app_handle: tauri::AppHandle, state: State<'_, AppState>,
     result
 }
 
+#[tauri::command]
+fn get_app_paths(app_handle: tauri::AppHandle) -> (String, String) {
+    let config = config::get_config_path(&app_handle).to_string_lossy().to_string();
+    let log = config::get_log_path(&app_handle).to_string_lossy().to_string();
+    (config, log)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -122,7 +129,8 @@ fn main() {
             history::clear_history,
             history::add_system_event,
             test_ssh_connection,
-            manual_deploy
+            manual_deploy,
+            get_app_paths
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
