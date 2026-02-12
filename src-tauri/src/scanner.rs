@@ -405,7 +405,14 @@ async fn perform_copy<R: tauri::Runtime>(
          
          // Deploy
          if config_clone.deploy_enabled {
-              if let Err(e) = deploy_to_remote(&handle, &config_clone, &target_full_path_clone, &folder_name_clone) {
+              if let Err(e) = deploy_to_remote(
+                  &handle, 
+                  &config_clone, 
+                  &target_full_path_clone, 
+                  &folder_name_clone,
+                  should_cancel_clone,
+                  is_paused_clone
+              ) {
                   emit_log(&handle, format!("Deployment failed: {}", e), "error");
               }
          }

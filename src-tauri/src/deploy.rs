@@ -84,7 +84,9 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     config: &AppConfig,
     local_folder_path: &Path,
-    folder_name: &str
+    folder_name: &str,
+    should_cancel: Arc<AtomicBool>,
+    is_paused: Arc<AtomicBool>
 ) -> Result<(), String> {
     if !config.deploy_enabled {
         return Ok(());
@@ -103,7 +105,11 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     let app_handle = app_handle.clone();
     let post_commands = config.post_commands.clone();
 
+    // Calculate total size once for progress reporting
+    let total_size = calculate_size(&local_path_buf);
+
     // Use a thread for each server to deploy in parallel
+    let mut handles = vec![];
     for server in servers {
         if !server.enabled {
             continue;
@@ -113,14 +119,22 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
         let local = local_path_buf.clone();
         let name = folder_name_owned.clone();
         let commands = post_commands.clone();
+        let cancel = should_cancel.clone();
+        let pause = is_paused.clone();
         
-        std::thread::spawn(move || {
-             if let Err(e) = deploy_single_server(&handle, &server, &local, &name, &commands) {
+        let thread_handle = std::thread::spawn(move || {
+             if let Err(e) = deploy_single_server(&handle, &server, &local, &name, &commands, total_size, cancel, pause) {
                  emit_log(&handle, format!("[{}] Deployment failed: {}", server.name, e), "error");
              } else {
                  emit_log(&handle, format!("[{}] Deployment successful", server.name), "success");
              }
         });
+        handles.push(thread_handle);
+    }
+
+    // Wait for all deployments to finish
+    for h in handles {
+        let _ = h.join();
     }
 
     Ok(())
@@ -131,7 +145,10 @@ fn deploy_single_server<R: tauri::Runtime>(
     server: &DeployServer,
     local_folder_path: &Path,
     folder_name: &str,
-    post_commands: &[String]
+    post_commands: &[String],
+    total_size: u64,
+    should_cancel: Arc<AtomicBool>,
+    is_paused: Arc<AtomicBool>
 ) -> Result<(), String> {
     emit_log(app_handle, format!("[{}] Connecting to {}:{}", server.name, server.host, server.remote_path), "info");
 
@@ -150,10 +167,15 @@ fn deploy_single_server<R: tauri::Runtime>(
     
     let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
     
+    // Check if exists logic...
+    // Always force upload or check logic? The original code checked existence.
+    // For auto-deploy, we usually want to overwrite or ensure it's there.
+    
     // Check if exists
-    match sftp.stat(Path::new(&remote_target)) {
+    let should_upload = match sftp.stat(Path::new(&remote_target)) {
         Ok(_) => {
-             emit_log(app_handle, format!("[{}] Remote directory {} already exists. Skipping upload.", server.name, remote_target), "warn");
+             emit_log(app_handle, format!("[{}] Remote directory {} already exists. Continuing upload/overwrite.", server.name, remote_target), "info");
+             true
         },
         Err(_) => {
              emit_log(app_handle, format!("[{}] Uploading to {}", server.name, remote_target), "info");
@@ -164,10 +186,31 @@ fn deploy_single_server<R: tauri::Runtime>(
              let mut s = String::new();
              channel.read_to_string(&mut s).unwrap();
              channel.wait_close().unwrap();
-             
-             // Use simple upload for auto-deploy (no progress bar to avoid spam)
-             upload_recursive(app_handle, &sftp, local_folder_path, Path::new(&remote_target))?;
+             true
         }
+    };
+
+    if should_upload {
+         let mut copied_bytes = 0;
+         let start_time = Instant::now();
+         let mut last_emit_time = Instant::now();
+         let local_path_str = local_folder_path.to_string_lossy();
+         let server_display = format!("[{}] {}:{}", server.name, server.host, remote_target);
+
+         upload_with_progress(
+            app_handle, 
+            &sftp, 
+            local_folder_path, 
+            Path::new(&remote_target),
+            total_size,
+            &mut copied_bytes,
+            start_time,
+            &mut last_emit_time,
+            &local_path_str,
+            &server_display,
+            &should_cancel,
+            &is_paused
+         )?;
     }
 
     // 3. Exec commands
@@ -175,6 +218,10 @@ fn deploy_single_server<R: tauri::Runtime>(
         emit_log(app_handle, format!("[{}] Executing post commands...", server.name), "info");
         
         for cmd in post_commands {
+            if should_cancel.load(Ordering::SeqCst) {
+                 return Err("Cancelled".to_string());
+            }
+
             emit_log(app_handle, format!("[{}] $ {}", server.name, cmd), "info");
             
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
