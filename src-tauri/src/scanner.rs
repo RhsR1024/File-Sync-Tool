@@ -34,6 +34,9 @@ struct ProgressEvent {
     percentage: f64,
     speed: u64, // bytes per second
     eta_seconds: u64,
+    elapsed_seconds: u64,
+    local_path: String,
+    remote_path: String,
 }
 
 #[derive(Debug)]
@@ -70,7 +73,10 @@ fn emit_progress<R: tauri::Runtime>(
     copied: u64, 
     total: u64,
     speed: u64,
-    eta_seconds: u64
+    eta_seconds: u64,
+    elapsed_seconds: u64,
+    local_path: &str,
+    remote_path: &str
 ) {
     let percentage = if total > 0 {
         (copied as f64 / total as f64) * 100.0
@@ -85,6 +91,9 @@ fn emit_progress<R: tauri::Runtime>(
         percentage,
         speed,
         eta_seconds,
+        elapsed_seconds,
+        local_path: local_path.to_string(),
+        remote_path: remote_path.to_string(),
     });
 }
 
@@ -194,6 +203,10 @@ async fn perform_copy<R: tauri::Runtime>(
         let start_time = Instant::now();
         let mut last_emit_time = Instant::now();
         
+        // Prepare paths for display
+        let local_path_display = target_full_path_clone.to_string_lossy().to_string();
+        let remote_path_display = source_path_clone.to_string_lossy().to_string();
+        
         // Helper for speed/eta
         let mut update_stats = |copied: u64, total: u64| {
             let now = Instant::now();
@@ -211,7 +224,17 @@ async fn perform_copy<R: tauri::Runtime>(
                     0
                 };
                 
-                emit_progress(&handle, &folder_name_clone, copied, total, speed, eta);
+                emit_progress(
+                    &handle, 
+                    &folder_name_clone, 
+                    copied, 
+                    total, 
+                    speed, 
+                    eta,
+                    elapsed as u64,
+                    &local_path_display,
+                    &remote_path_display
+                );
                 last_emit_time = now;
             }
         };
