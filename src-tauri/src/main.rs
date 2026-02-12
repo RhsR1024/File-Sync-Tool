@@ -108,6 +108,7 @@ fn main() {
             let _ = app.emit("single-instance", ());
         }))
         .plugin(tauri_plugin_log::Builder::default().build())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let config = config::load_config(app.handle());
             app.manage(AppState {
