@@ -16,9 +16,37 @@ pub struct DeployServer {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", content = "value")]
+pub enum MatchRule {
+    /// Legacy Version Match: Matches YYYY_MM_DD_HH_MM_(Version)
+    /// Value: Target Version (e.g. "1.3.9.P02")
+    VersionMatch(String),
+    /// Date Directory Match: Matches directory with specific date format
+    /// Value: Date Format (e.g. "YYMMDD")
+    DateMatch(String),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScanTask {
+    pub id: String,
+    pub enabled: bool,
+    pub name: String,
+    pub remote_path: String,
+    pub local_path: Option<String>, // Optional override
+    pub rule: MatchRule,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub tasks: Vec<ScanTask>,
+
+    // Legacy fields (kept for migration, but logic will use tasks)
+    #[serde(default)]
     pub remote_paths: Vec<String>,
+    #[serde(default)]
     pub target_versions: Vec<String>,
+    
     pub local_path: String,
     pub interval_minutes: u64,
     pub time_ranges: Vec<String>, // "HH:mm-HH:mm"
@@ -49,6 +77,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            tasks: vec![],
             remote_paths: vec![],
             target_versions: vec![],
             local_path: "E:\\UMS_TEMP".to_string(),
@@ -73,7 +102,7 @@ pub fn load_config(app_handle: &tauri::AppHandle) -> AppConfig {
     if config_path.exists() {
         if let Ok(content) = fs::read_to_string(&config_path) {
             if let Ok(mut config) = serde_json::from_str::<AppConfig>(&content) {
-                // Migration: If servers empty but legacy host exists, migrate it
+                // Migration 1: If servers empty but legacy host exists, migrate it
                 if config.servers.is_empty() && !config.ssh_host.is_empty() {
                     config.servers.push(DeployServer {
                         id: uuid::Uuid::new_v4().to_string(),
@@ -86,6 +115,24 @@ pub fn load_config(app_handle: &tauri::AppHandle) -> AppConfig {
                         remote_path: config.remote_linux_path.clone(),
                     });
                 }
+                
+                // Migration 2: Convert remote_paths/target_versions to tasks
+                if config.tasks.is_empty() && !config.remote_paths.is_empty() {
+                    for (i, path) in config.remote_paths.iter().enumerate() {
+                        let version = config.target_versions.get(i).cloned().unwrap_or_default();
+                        if !path.trim().is_empty() {
+                            config.tasks.push(ScanTask {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                enabled: true,
+                                name: format!("Auto Task {}", i + 1),
+                                remote_path: path.clone(),
+                                local_path: None,
+                                rule: MatchRule::VersionMatch(version),
+                            });
+                        }
+                    }
+                }
+                
                 return config;
             }
         }

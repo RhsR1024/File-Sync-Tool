@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud } from 'lucide-vue-next';
-import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, type AppConfig } from '@/lib/tauri';
+import { ref, onMounted } from 'vue';
+import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, CheckCircle, XCircle } from 'lucide-vue-next';
+import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, type AppConfig, type ScanTask } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { useI18n } from 'vue-i18n';
 
 const { t, locale } = useI18n();
 const config = ref<AppConfig>({
+  tasks: [],
   remote_paths: [],
   target_versions: [],
   local_path: '',
@@ -24,13 +25,69 @@ const config = ref<AppConfig>({
   post_commands: []
 });
 
-const newRemotePath = ref('');
-const newVersion = ref('');
 const newExt = ref('');
 const newInclude = ref('');
 const newCommand = ref('');
 const newTimeRange = ref(''); // "05:00-09:00"
 const statusMsg = ref('');
+
+// Task Management
+const isEditingTask = ref(false);
+const editingTaskIndex = ref(-1);
+const taskForm = ref<ScanTask>({
+    id: '',
+    enabled: true,
+    name: '',
+    remote_path: '',
+    local_path: null,
+    rule: { type: 'VersionMatch', value: '' }
+});
+
+function resetTaskForm() {
+    taskForm.value = {
+        id: crypto.randomUUID(),
+        enabled: true,
+        name: '',
+        remote_path: '',
+        local_path: null,
+        rule: { type: 'VersionMatch', value: '' }
+    };
+    isEditingTask.value = false;
+    editingTaskIndex.value = -1;
+}
+
+function addTask() {
+    resetTaskForm();
+    isEditingTask.value = true;
+}
+
+function editTask(index: number) {
+    editingTaskIndex.value = index;
+    // Deep copy to avoid reactive binding during edit
+    const task = config.value.tasks[index];
+    taskForm.value = {
+        ...task,
+        rule: { ...task.rule }
+    };
+    isEditingTask.value = true;
+}
+
+function saveTask() {
+    if (editingTaskIndex.value > -1) {
+        config.value.tasks[editingTaskIndex.value] = JSON.parse(JSON.stringify(taskForm.value));
+    } else {
+        config.value.tasks.push(JSON.parse(JSON.stringify(taskForm.value)));
+    }
+    save();
+    isEditingTask.value = false;
+}
+
+function removeTask(index: number) {
+    if (confirm('Delete this task?')) {
+        config.value.tasks.splice(index, 1);
+        save();
+    }
+}
 
 // Server Management
 const isEditingServer = ref(false);
@@ -120,9 +177,6 @@ async function testAllServers() {
 const manualLocalPath = ref('');
 const manualRemotePath = ref('/tmp/upload');
 const selectedServerId = ref('');
-// State moved to appStore
-// const isDeploying = ref(false);
-// const deployMsg = ref('');
 
 async function handleManualDeploy() {
     if (!manualLocalPath.value || !manualRemotePath.value || !selectedServerId.value) return;
@@ -142,12 +196,8 @@ async function handleManualDeploy() {
     appStore.manualDeployMsg = '';
     
     try {
-        // Run sequentially or parallel? Parallel is better.
-        // But manualDeploy is one-shot.
-        // We can loop here.
         let successCount = 0;
         let failCount = 0;
-        
         let lastError = '';
         
         for (const server of targets) {
@@ -189,7 +239,6 @@ function removeCommand(index: number) {
 }
 
 function addTimeRange() {
-    // Basic validation regex for HH:MM-HH:MM
     const rangeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]-([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
     if (newTimeRange.value && rangeRegex.test(newTimeRange.value) && !config.value.time_ranges.includes(newTimeRange.value)) {
         config.value.time_ranges.push(newTimeRange.value);
@@ -201,51 +250,6 @@ function addTimeRange() {
 function removeTimeRange(index: number) {
     config.value.time_ranges.splice(index, 1);
     save();
-}
-
-async function load() {
-  try {
-    config.value = await getConfig();
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-async function save() {
-  try {
-    await saveConfig(config.value);
-    statusMsg.value = t('settings.saved');
-    addSystemEvent('CONFIG_CHANGE', t('settings.saved'));
-    setTimeout(() => statusMsg.value = '', 3000);
-  } catch (e) {
-    statusMsg.value = t('settings.saveError', { error: e });
-  }
-}
-
-function addPath() {
-  if (newRemotePath.value && !config.value.remote_paths.includes(newRemotePath.value)) {
-    config.value.remote_paths.push(newRemotePath.value);
-    newRemotePath.value = '';
-    save(); // Auto save
-  }
-}
-
-function removePath(index: number) {
-  config.value.remote_paths.splice(index, 1);
-  save(); // Auto save
-}
-
-function addVersion() {
-  if (newVersion.value && !config.value.target_versions.includes(newVersion.value)) {
-    config.value.target_versions.push(newVersion.value);
-    newVersion.value = '';
-    save(); // Auto save
-  }
-}
-
-function removeVersion(index: number) {
-  config.value.target_versions.splice(index, 1);
-  save(); // Auto save
 }
 
 function addExt() {
@@ -279,11 +283,30 @@ function changeLanguage(lang: string) {
   localStorage.setItem('locale', lang);
 }
 
+async function load() {
+  try {
+    config.value = await getConfig();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function save() {
+  try {
+    await saveConfig(config.value);
+    statusMsg.value = t('settings.saved');
+    addSystemEvent('CONFIG_CHANGE', t('settings.saved'));
+    setTimeout(() => statusMsg.value = '', 3000);
+  } catch (e) {
+    statusMsg.value = t('settings.saveError', { error: e });
+  }
+}
+
 onMounted(load);
 </script>
 
 <template>
-  <div class="p-6 max-w-4xl mx-auto space-y-8">
+  <div class="p-6 max-w-4xl mx-auto space-y-8 pb-20">
     <div class="flex justify-between items-center">
       <h2 class="text-2xl font-bold text-slate-800">{{ t('settings.title') }}</h2>
       <button 
@@ -339,6 +362,96 @@ onMounted(load);
         <p class="text-xs text-slate-400 mt-1">{{ t('settings.localPathDesc') }}</p>
       </div>
     </div>
+    
+    <!-- Tasks Management -->
+    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+        <div class="flex justify-between items-center">
+            <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
+                <ListChecks class="w-5 h-5" />
+                {{ t('settings.scanTasks') }}
+            </h3>
+            <button @click="addTask" class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors">
+                <Plus class="w-3 h-3" /> {{ t('settings.addTask') }}
+            </button>
+        </div>
+
+        <div v-if="config.tasks.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
+            {{ t('settings.noTasks') }}
+        </div>
+        
+        <div v-else class="space-y-3">
+            <div v-for="(task, idx) in config.tasks" :key="task.id" class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-center justify-between gap-4">
+                <div class="flex items-center gap-3 overflow-hidden flex-1">
+                    <div class="shrink-0" title="Enable/Disable">
+                         <input type="checkbox" v-model="task.enabled" @change="save" class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer">
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <div class="font-medium text-slate-800 flex items-center gap-2">
+                            {{ task.name }}
+                            <span class="text-xs px-2 py-0.5 rounded-full border" 
+                                :class="task.rule.type === 'VersionMatch' ? 'bg-purple-50 text-purple-700 border-purple-100' : 'bg-orange-50 text-orange-700 border-orange-100'">
+                                {{ task.rule.type === 'VersionMatch' ? 'Version' : 'Date' }}: {{ task.rule.value }}
+                            </span>
+                        </div>
+                        <div class="text-xs text-slate-500 font-mono truncate" :title="task.remote_path">
+                            {{ task.remote_path }}
+                        </div>
+                    </div>
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                    <button @click="editTask(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
+                        <Edit class="w-4 h-4" />
+                    </button>
+                    <button @click="removeTask(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete">
+                        <Trash2 class="w-4 h-4" />
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Task Edit Modal -->
+    <div v-if="isEditingTask" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all">
+            <h3 class="text-lg font-bold mb-6 text-slate-800">{{ editingTaskIndex > -1 ? t('settings.editTask') : t('settings.addTask') }}</h3>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskName') }}</label>
+                    <input v-model="taskForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Daily Build Scan" />
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.remotePath') }}</label>
+                    <input v-model="taskForm.remote_path" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="\\server\share\path" />
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.localPathOverride') }}</label>
+                    <input v-model="taskForm.local_path" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" :placeholder="t('settings.localPathDesc')" />
+                </div>
+                
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskRuleType') }}</label>
+                        <select v-model="taskForm.rule.type" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+                            <option value="VersionMatch">{{ t('settings.ruleVersion') }}</option>
+                            <option value="DateMatch">{{ t('settings.ruleDate') }}</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskRuleValue') }}</label>
+                        <input 
+                            v-model="taskForm.rule.value" 
+                            class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" 
+                            :placeholder="taskForm.rule.type === 'VersionMatch' ? t('settings.ruleValuePlaceholderVersion') : t('settings.ruleValuePlaceholderDate')"
+                        />
+                    </div>
+                </div>
+            </div>
+            <div class="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-100">
+                <button @click="isEditingTask = false" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">{{ t('console.cancel') }}</button>
+                <button @click="saveTask" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm">{{ t('settings.save') }}</button>
+            </div>
+        </div>
+    </div>
 
     <!-- Interval -->
     <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
@@ -381,56 +494,6 @@ onMounted(load);
               </button>
             </div>
           </div>
-      </div>
-    </div>
-
-    <!-- Remote Paths -->
-    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-      <h3 class="text-lg font-semibold text-slate-700">{{ t('settings.remotePaths') }}</h3>
-      <div class="flex gap-2">
-        <input 
-          v-model="newRemotePath"
-          @keyup.enter="addPath"
-          :placeholder="t('settings.remotePathPlaceholder')"
-          class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-        />
-        <button @click="addPath" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600">
-          <Plus class="w-5 h-5" />
-        </button>
-      </div>
-      <ul class="space-y-2 max-h-48 overflow-y-auto">
-        <li v-for="(path, i) in config.remote_paths" :key="i" class="flex justify-between items-center bg-slate-50 p-3 rounded-lg text-sm border border-slate-100">
-          <span class="text-slate-700 font-mono break-all">{{ path }}</span>
-          <button @click="removePath(i)" class="text-red-400 hover:text-red-600 p-1">
-            <Trash2 class="w-4 h-4" />
-          </button>
-        </li>
-        <li v-if="config.remote_paths.length === 0" class="text-slate-400 text-sm text-center py-4">{{ t('settings.noRemotePaths') }}</li>
-      </ul>
-    </div>
-
-    <!-- Versions -->
-    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-      <h3 class="text-lg font-semibold text-slate-700">{{ t('settings.targetVersions') }}</h3>
-      <div class="flex gap-2">
-        <input 
-          v-model="newVersion"
-          @keyup.enter="addVersion"
-          :placeholder="t('settings.versionPlaceholder')"
-          class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-        />
-        <button @click="addVersion" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600">
-          <Plus class="w-5 h-5" />
-        </button>
-      </div>
-      <div class="flex flex-wrap gap-2">
-        <div v-for="(ver, i) in config.target_versions" :key="i" class="bg-blue-50 text-blue-700 px-3 py-1 rounded-full text-sm font-medium border border-blue-100 flex items-center gap-2">
-          {{ ver }}
-          <button @click="removeVersion(i)" class="hover:text-blue-900">
-            <Trash2 class="w-3 h-3" />
-          </button>
-        </div>
-        <div v-if="config.target_versions.length === 0" class="text-slate-400 text-sm w-full text-center py-4">{{ t('settings.noVersions') }}</div>
       </div>
     </div>
 

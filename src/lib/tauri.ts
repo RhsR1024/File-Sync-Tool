@@ -11,9 +11,27 @@ export interface DeployServer {
   remote_path: string;
 }
 
+export interface MatchRule {
+  type: 'VersionMatch' | 'DateMatch';
+  value: string;
+}
+
+export interface ScanTask {
+  id: string;
+  enabled: boolean;
+  name: string;
+  remote_path: string;
+  local_path: string | null;
+  rule: MatchRule;
+}
+
 export interface AppConfig {
+  tasks: ScanTask[];
+  
+  // Legacy (kept for type compatibility if needed, but UI should focus on tasks)
   remote_paths: string[];
   target_versions: string[];
+  
   local_path: string;
   interval_minutes: number;
   time_ranges: string[]; // Format "HH:mm-HH:mm" e.g. "05:00-09:00"
