@@ -108,8 +108,7 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     // Calculate total size once for progress reporting
     let total_size = calculate_size(&local_path_buf);
 
-    // Use a thread for each server to deploy in parallel
-    let mut handles = vec![];
+    // Deploy sequentially to avoid UI progress conflicts and ensure stability
     for server in servers {
         if !server.enabled {
             continue;
@@ -122,19 +121,19 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
         let cancel = should_cancel.clone();
         let pause = is_paused.clone();
         
-        let thread_handle = std::thread::spawn(move || {
-             if let Err(e) = deploy_single_server(&handle, &server, &local, &name, &commands, total_size, cancel, pause) {
-                 emit_log(&handle, format!("[{}] Deployment failed: {}", server.name, e), "error");
-             } else {
-                 emit_log(&handle, format!("[{}] Deployment successful", server.name), "success");
-             }
-        });
-        handles.push(thread_handle);
-    }
+        // Check cancel before starting next server
+        if cancel.load(Ordering::SeqCst) {
+            emit_log(&app_handle, "Remaining deployments cancelled.".to_string(), "warn");
+            break;
+        }
 
-    // Wait for all deployments to finish
-    for h in handles {
-        let _ = h.join();
+        // Run synchronously in the current thread (which is already a background task)
+        if let Err(e) = deploy_single_server(&handle, &server, &local, &name, &commands, total_size, cancel, pause) {
+             emit_log(&handle, format!("[{}] Deployment failed: {}", server.name, e), "error");
+             // Continue to next server even if one fails
+        } else {
+             emit_log(&handle, format!("[{}] Deployment successful", server.name), "success");
+        }
     }
 
     Ok(())
