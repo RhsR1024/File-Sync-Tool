@@ -4,7 +4,7 @@ import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadC
 import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, type AppConfig, type ScanTask } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { useI18n } from 'vue-i18n';
-import { writeText } from '@tauri-apps/api/clipboard';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 const { t, locale } = useI18n();
 const configPath = ref('');
@@ -487,12 +487,13 @@ onMounted(load);
                             class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" 
                             :placeholder="taskForm.rule.type === 'VersionMatch' ? t('settings.ruleValuePlaceholderVersion') : t('settings.ruleValuePlaceholderDate')"
                         />
+                         <p class="text-xs text-slate-400 mt-1" v-if="taskForm.rule.type === 'DateMatch'">{{ t('settings.ruleDateHint') }}</p>
                     </div>
                 </div>
             </div>
             <div class="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-100">
                 <button @click="isEditingTask = false" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">{{ t('console.cancel') }}</button>
-                <button @click="saveTask" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm">{{ t('settings.save') }}</button>
+                <button @click="saveTask" :disabled="!taskForm.rule.value" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">{{ t('settings.save') }}</button>
             </div>
         </div>
     </div>
