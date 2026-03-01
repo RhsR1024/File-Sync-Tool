@@ -8,7 +8,6 @@ mod deploy;
 
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
-use history::HistoryStore;
 use std::sync::{Mutex, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 

@@ -237,7 +237,6 @@ async fn perform_copy<R: tauri::Runtime>(
     let extensions = config.file_extensions.clone();
     let includes = config.filename_includes.clone();
     let stability_check_secs = config.stability_check_secs;
-    let config_clone = config.clone();
     let should_cancel_clone = should_cancel.clone();
     let is_paused_clone = is_paused.clone();
     let live_config_clone = live_config.clone();
@@ -766,7 +765,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                          let sub_path = entry.path();
                          if sub_path.is_dir() {
                              let sub_name = entry.file_name().to_string_lossy().to_string();
-                             let local_sub_path = local_target_base.join(&sub_name);
+                             let _local_sub_path = local_target_base.join(&sub_name);
                              
                              // Always scan subdirectories to support incremental updates
                              found_any_new = true;

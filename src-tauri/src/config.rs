@@ -139,6 +139,7 @@ pub fn load_config(app_handle: &tauri::AppHandle) -> AppConfig {
                                 remote_path: path.clone(),
                                 local_path: None,
                                 rule: MatchRule::VersionMatch(version),
+                                deploy_server_ids: vec![],
                             });
                         }
                     }
