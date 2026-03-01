@@ -76,13 +76,15 @@ export function upsertTaskRecord(payload: {
     local_path: string;
     remote_path: string;
 }) {
-    const isRemoteDeploy = !!payload.remote_path && payload.remote_path !== '-';
+    // During local copy:  remote_path = Windows UNC source path (e.g. \\server\share\...)
+    // During SFTP deploy: remote_path = "[ServerName] host:/linux/path"
+    // Distinguish by checking if it starts with '[' (deploy display format)
+    const isRemoteDeploy = payload.remote_path.startsWith('[');
 
     if (!isRemoteDeploy) {
         // --- Local copy phase ---
-        // Look for the most recent non-completed record with same folder
         const existing = appStore.taskRecords.find(
-            r => r.folder === payload.folder && (r.phase === 'copying')
+            r => r.folder === payload.folder && r.phase === 'copying'
         );
         if (existing) {
             existing.copyPercentage = payload.percentage;
@@ -92,13 +94,13 @@ export function upsertTaskRecord(payload: {
             existing.copyTotal = payload.total_bytes;
             if (payload.percentage >= 100) {
                 existing.copyCompleted = true;
-                existing.phase = 'deploying'; // may become 'completed' if no remote follows
-                // Mark as completed after a short grace period if no deploy comes
+                existing.phase = 'deploying';
+                // If no deploy events follow within 8s, mark as completed
                 setTimeout(() => {
                     if (existing.phase === 'deploying' && !existing.hasRemote) {
                         existing.phase = 'completed';
                     }
-                }, 5000);
+                }, 8000);
             }
         } else {
             // New record
@@ -122,9 +124,10 @@ export function upsertTaskRecord(payload: {
             if (appStore.taskRecords.length > 50) appStore.taskRecords.pop();
         }
     } else {
-        // --- Remote deploy phase ---
-        // Attach to the most recent record that's in 'deploying' phase
-        const target = appStore.taskRecords.find(r => r.phase === 'deploying') ?? appStore.taskRecords[0];
+        // --- Remote SFTP deploy phase ---
+        // Find the most recent record in 'deploying' phase to attach to
+        const target = appStore.taskRecords.find(r => r.phase === 'deploying')
+            ?? appStore.taskRecords[0];
         if (target) {
             target.hasRemote = true;
             target.phase = 'deploying';
