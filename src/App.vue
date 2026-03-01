@@ -3,7 +3,7 @@ import Sidebar from '@/components/Sidebar.vue';
 import { RouterView } from 'vue-router';
 import { onMounted, onUnmounted } from 'vue';
 import { listen } from '@tauri-apps/api/event';
-import { appStore, addLog } from '@/lib/store';
+import { appStore, addLog, upsertTaskRecord } from '@/lib/store';
 
 let unlistenLog: (() => void) | null = null;
 let unlistenProgress: (() => void) | null = null;
@@ -30,7 +30,7 @@ onMounted(async () => {
             localPath: p.local_path,
             remotePath: p.remote_path
         };
-        // Reset progress when done (100%)
+        // Reset live progress when done (100%)
         if (p.percentage >= 100) {
             setTimeout(() => {
                 if (appStore.progress?.folder === p.folder) {
@@ -38,6 +38,8 @@ onMounted(async () => {
                 }
             }, 2000);
         }
+        // Update persistent task records in console
+        upsertTaskRecord(p);
     });
 });
 

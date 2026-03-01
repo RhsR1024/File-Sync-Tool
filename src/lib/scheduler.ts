@@ -20,12 +20,12 @@ export async function executeScan() {
     try {
         const result: ScanResult = await scanNow();
         addLog(t('console.scanComplete', { scanned: result.scanned_paths, found: result.found_folders.length, copied: result.copied_folders.length }), 'success');
-        
+
         if (result.found_folders.length > 0) {
-            result.found_folders.forEach(f => addLog(`Found candidate: ${f}`, 'info'));
+            result.found_folders.forEach(f => addLog(`Checked: ${f}`, 'info'));
         }
         if (result.copied_folders.length > 0) {
-            result.copied_folders.forEach(f => addLog(`Successfully copied: ${f}`, 'success'));
+            result.copied_folders.forEach(f => addLog(`Copied new files: ${f}`, 'success'));
         }
         if (result.errors.length > 0) {
             result.errors.forEach(e => addLog(`Error: ${e}`, 'error'));
@@ -87,4 +87,10 @@ export function stopScheduler() {
     const msg = t('console.schedulerStopped');
     addLog(msg, 'info');
     addSystemEvent('SCHEDULER_STOP', msg);
+}
+
+/** Called after saving config while scheduler is running — reloads interval without re-triggering an immediate scan */
+export async function restartSchedulerInterval() {
+    if (!appStore.isRunning) return;
+    await startScheduler(true);
 }

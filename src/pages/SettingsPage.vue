@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, CheckCircle, XCircle, FileText, Copy } from 'lucide-vue-next';
 import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, type AppConfig, type ScanTask } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
+import { restartSchedulerInterval } from '@/lib/scheduler';
 import { useI18n } from 'vue-i18n';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -25,7 +26,8 @@ const config = ref<AppConfig>({
   ssh_user: '',
   ssh_password: '',
   remote_linux_path: '',
-  post_commands: []
+  post_commands: [],
+  stability_check_secs: 30
 });
 
 const newExt = ref('');
@@ -149,30 +151,31 @@ function removeServer(index: number) {
     }
 }
 
+// Server connection status: 'idle' | 'testing' | 'ok' | 'error'
+const serverTestStatus = ref<Record<string, { state: 'idle' | 'testing' | 'ok' | 'error'; msg: string }>>({});
+
+function getServerStatus(id: string) {
+    return serverTestStatus.value[id] ?? { state: 'idle', msg: '' };
+}
+
 async function testServerConnection(index: number) {
     const server = config.value.servers[index];
+    serverTestStatus.value[server.id] = { state: 'testing', msg: '' };
     try {
         const res = await testSshConnection(server);
-        alert(res);
+        serverTestStatus.value[server.id] = { state: 'ok', msg: res };
     } catch (e) {
-        alert(`Connection failed: ${e}`);
+        serverTestStatus.value[server.id] = { state: 'error', msg: String(e) };
     }
 }
 
 async function testAllServers() {
-    const results: string[] = [];
-    statusMsg.value = 'Testing connections...';
-    
-    for (const server of config.value.servers) {
+    statusMsg.value = t('settings.testing');
+    for (let i = 0; i < config.value.servers.length; i++) {
+        const server = config.value.servers[i];
         if (!server.enabled) continue;
-        try {
-            await testSshConnection(server);
-            results.push(`✅ ${server.name || server.host}: OK`);
-        } catch (e) {
-            results.push(`❌ ${server.name || server.host}: Failed (${e})`);
-        }
+        await testServerConnection(i);
     }
-    alert(results.join('\n'));
     statusMsg.value = '';
 }
 
@@ -313,6 +316,8 @@ async function save() {
     statusMsg.value = t('settings.saved');
     addSystemEvent('CONFIG_CHANGE', t('settings.saved'));
     setTimeout(() => statusMsg.value = '', 3000);
+    // Restart scheduler interval if it's currently running so new interval takes effect
+    await restartSchedulerInterval();
   } catch (e) {
     statusMsg.value = t('settings.saveError', { error: e });
   }
@@ -512,6 +517,25 @@ onMounted(load);
         <span class="text-xs text-amber-500 ml-2">{{ t('settings.minInterval') }}</span>
       </div>
 
+      <!-- Stability Check -->
+      <div class="pt-4 border-t border-slate-100 space-y-3">
+        <h4 class="text-md font-medium text-slate-700 flex items-center gap-2">
+          <Clock class="w-4 h-4 text-blue-500" />
+          {{ t('settings.stabilityCheck') }}
+        </h4>
+        <p class="text-xs text-slate-400">{{ t('settings.stabilityCheckDesc') }}</p>
+        <div class="flex items-center gap-4">
+          <input
+            v-model.number="config.stability_check_secs"
+            type="number"
+            min="0"
+            class="w-24 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+          />
+          <span class="text-slate-600">{{ t('settings.seconds') }}</span>
+          <span class="text-xs text-slate-400">{{ t('settings.stabilityCheckHint') }}</span>
+        </div>
+      </div>
+
       <!-- Time Ranges -->
       <div class="pt-4 border-t border-slate-100 space-y-3">
           <h4 class="text-md font-medium text-slate-700 flex items-center gap-2">
@@ -519,7 +543,7 @@ onMounted(load);
               {{ t('settings.timeRanges') }}
           </h4>
           <p class="text-xs text-slate-400">{{ t('settings.timeRangesDesc') }}</p>
-          
+
           <div class="flex gap-2">
             <input 
               v-model="newTimeRange"
@@ -631,27 +655,62 @@ onMounted(load);
               </div>
               
               <div v-else class="space-y-3">
-                  <div v-for="(server, idx) in config.servers" :key="server.id" class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-center justify-between">
-                      <div class="flex items-center gap-3 overflow-hidden">
-                          <input type="checkbox" v-model="server.enabled" @change="save" class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer">
-                          <div class="truncate">
-                              <div class="font-medium text-slate-800 flex items-center gap-2">
-                                  {{ server.name || server.host }}
-                                  <span v-if="!server.enabled" class="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">Disabled</span>
+                  <div v-for="(server, idx) in config.servers" :key="server.id" class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow">
+                      <div class="flex items-center justify-between">
+                          <div class="flex items-center gap-3 overflow-hidden flex-1">
+                              <input type="checkbox" v-model="server.enabled" @change="save" class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer">
+                              <div class="truncate flex-1 min-w-0">
+                                  <div class="font-medium text-slate-800 flex items-center gap-2">
+                                      {{ server.name || server.host }}
+                                      <span v-if="!server.enabled" class="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">Disabled</span>
+                                  </div>
+                                  <div class="text-xs text-slate-500 font-mono truncate">{{ server.user }}@{{ server.host }}:{{ server.port }} <span class="text-slate-300">|</span> {{ server.remote_path }}</div>
                               </div>
-                              <div class="text-xs text-slate-500 font-mono truncate">{{ server.user }}@{{ server.host }}:{{ server.port }} <span class="text-slate-300">|</span> {{ server.remote_path }}</div>
+                          </div>
+                          <div class="flex items-center gap-1 shrink-0">
+                              <!-- Inline test button with status indicator -->
+                              <button @click="testServerConnection(idx)"
+                                      class="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg transition-colors border font-medium"
+                                      :class="{
+                                        'text-slate-500 border-slate-200 hover:text-blue-600 hover:bg-blue-50 hover:border-blue-200': getServerStatus(server.id).state === 'idle',
+                                        'text-blue-500 border-blue-200 bg-blue-50 cursor-not-allowed': getServerStatus(server.id).state === 'testing',
+                                        'text-emerald-600 border-emerald-200 bg-emerald-50': getServerStatus(server.id).state === 'ok',
+                                        'text-red-600 border-red-200 bg-red-50': getServerStatus(server.id).state === 'error',
+                                      }"
+                                      :disabled="getServerStatus(server.id).state === 'testing'"
+                                      :title="getServerStatus(server.id).msg || t('settings.testConnection')">
+                                  <!-- idle: server icon -->
+                                  <Server v-if="getServerStatus(server.id).state === 'idle'" class="w-3.5 h-3.5" />
+                                  <!-- testing: spinner -->
+                                  <svg v-else-if="getServerStatus(server.id).state === 'testing'" class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/>
+                                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                                  </svg>
+                                  <!-- ok: green dot -->
+                                  <span v-else-if="getServerStatus(server.id).state === 'ok'" class="relative flex h-2 w-2">
+                                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                      <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                  </span>
+                                  <!-- error: red X -->
+                                  <XCircle v-else class="w-3.5 h-3.5" />
+                                  <span>{{
+                                    getServerStatus(server.id).state === 'testing' ? t('settings.testing') :
+                                    getServerStatus(server.id).state === 'ok' ? t('settings.connected') :
+                                    getServerStatus(server.id).state === 'error' ? t('settings.failed') :
+                                    t('settings.testConnection')
+                                  }}</span>
+                              </button>
+                              <button @click="editServer(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
+                                  <Edit class="w-4 h-4" />
+                              </button>
+                              <button @click="removeServer(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete">
+                                  <Trash2 class="w-4 h-4" />
+                              </button>
                           </div>
                       </div>
-                      <div class="flex items-center gap-1 shrink-0">
-                          <button @click="testServerConnection(idx)" class="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" :title="t('settings.testConnection')">
-                              <Server class="w-4 h-4" />
-                          </button>
-                          <button @click="editServer(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
-                              <span class="text-xs font-bold">{{ t('settings.edit') }}</span>
-                          </button>
-                          <button @click="removeServer(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete">
-                              <Trash2 class="w-4 h-4" />
-                          </button>
+                      <!-- Inline error message -->
+                      <div v-if="getServerStatus(server.id).state === 'error'" class="mt-2 text-xs text-red-600 bg-red-50 border border-red-100 rounded px-2.5 py-1.5 font-mono break-all">
+                          {{ getServerStatus(server.id).msg }}
                       </div>
                   </div>
               </div>
