@@ -1,5 +1,152 @@
-# Vue 3 + TypeScript + Vite
+# Copy — 自动文件同步与远程部署工具
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+一款基于 **Tauri 2 + Vue 3 + Rust** 构建的 Windows 桌面应用，用于从网络共享目录自动扫描、增量复制构建产物，并可通过 SSH/SFTP 自动部署到 Linux 服务器。
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+---
+
+## 核心功能
+
+### 📁 文件扫描与复制
+- **定时自动扫描**：按配置间隔周期执行，可限制运行时间范围
+- **智能版本匹配**：支持 VersionMatch（精确版本号）和 DateMatch（日期格式）两种规则
+- **增量同步**：只复制新增文件，避免重复传输
+- **灵活过滤**：按扩展名和文件名关键字过滤
+- **实时控制**：支持暂停、继续、取消正在进行的任务
+
+### 🚀 远程部署（Linux SSH）
+- **多服务器支持**：配置多个部署目标，按顺序执行
+- **自动触发**：复制完成后自动部署（支持热启用）
+- **手动部署**：指定路径进行一次性部署
+- **SFTP 上传**：分块上传，支持暂停/取消
+- **后置命令**：上传完成后执行 Shell 命令，支持变量替换
+- **连接测试**：保存前可一键测试 SSH 连通性
+
+### 📊 进度监控
+- **实时进度面板**：显示进度条、速度、预计时间、已用时间
+- **路径显示**：实时显示本地和远程路径，一键复制
+- **历史记录**：保存最近 100 条操作记录
+- **日志输出**：完整的操作日志，便于追踪
+
+### 🌍 其他特性
+- **中英双语**：内置 i18n 支持
+- **单实例保护**：防止重复运行
+- **日志文件**：持久化存储所有操作日志
+
+---
+
+## 快速开始
+
+### 系统要求
+- Windows 10/11 64 位
+- 网络访问权限（UNC 共享目录）
+- SSH 访问权限（若需要远程部署）
+
+### 安装
+从 [GitHub Releases](https://github.com/your-repo/releases) 下载最新版本的安装包，双击安装。
+
+### 基本使用
+
+1. **打开应用**，进入「设置」页面
+2. **配置扫描任务**：
+   - 填写远程路径（如 `\\server\builds`）
+   - 选择匹配规则和目标版本
+   - 设置本地保存路径
+3. **配置部署服务器**（可选）：
+   - 添加 SSH 服务器信息
+   - 设置远程路径和后置命令
+4. **启动定时任务**：
+   - 在「任务」页面点击「启动」按钮
+   - 应用将按配置间隔自动扫描和复制
+5. **实时监控**：
+   - 「任务」页面显示当前进度
+   - 「控制台」页面显示实时日志
+   - 「历史」页面查看过往操作记录
+
+---
+
+## 配置说明
+
+### MatchRule（匹配规则）
+
+#### VersionMatch
+适用于目录名为 `YYYY_MM_DD_HH_MM(版本号)` 的场景。
+
+示例：`2026_02_26_08_30(1.3.9.P02)`
+
+规则：只处理**今天或昨天**日期的指定版本目录。
+
+#### DateMatch
+适用于按日期组织的目录结构。
+
+格式字符串示例：`%y%m%d`（如 `260226` 表示 2026-02-26）
+
+目录结构：
+```
+远程目录\
+  └─ 260226\          ← 日期文件夹
+       ├─ build_001\  ← 子目录（逐个复制）
+       └─ build_002\
+```
+
+### 文件过滤
+
+- **扩展名过滤**：配置后只复制符合扩展名的文件（如 `exe`、`tar.gz`）
+- **文件名过滤**：配置后只复制文件名包含指定关键字的文件（如 `UMS`、`VMS`，多个关键字为 OR 逻辑）
+
+### 时间范围
+
+配置格式：`HH:MM-HH:MM`，如 `05:00-09:00`
+
+在该时间范围内，应用才会执行扫描任务。
+
+---
+
+## 后置命令变量替换
+
+在部署配置的「后置命令」中可使用 `${filename}` 占位符，程序会自动查找目录中的 `.tar.gz` 文件并替换。
+
+示例：
+```bash
+# 配置
+tar -zxvf ${filename}.tar.gz -C /opt/app && systemctl restart service
+
+# 若文件为 app_1.3.9.P02.tar.gz，实际执行
+tar -zxvf app_1.3.9.P02.tar.gz -C /opt/app && systemctl restart service
+```
+
+---
+
+## 常见问题
+
+**Q：为什么无法访问远程共享目录？**
+A：请检查：
+- Windows 当前登录用户是否有权限访问该 UNC 路径
+- 网络连通性是否正常
+- 路径格式是否正确（如 `\\server\share\path`）
+
+**Q：支持代理连接吗？**
+A：暂不支持代理，请确保有直接网络访问权限。
+
+**Q：为什么复制后没有立即部署？**
+A：请检查：
+- 「设置」→「部署」中「启用远程部署」是否开启
+- SSH 服务器配置是否正确
+- 检查「控制台」日志确认部署过程
+
+**Q：如何查看详细错误日志？**
+A：日志保存位置：`%APPDATA%\Copy\app_data\app.log`
+
+---
+
+## 更新和支持
+
+- 检查更新：打开应用后，若有新版本会自动提示
+- 问题反馈：[提交 GitHub Issue](https://github.com/your-repo/issues)
+- 完整文档：查看项目目录中的 `CLAUDE.md`（开发者文档）
+
+---
+
+## 许可证
+
+[Your License Here]
+

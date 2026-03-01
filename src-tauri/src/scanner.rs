@@ -2,11 +2,13 @@ use crate::config::{AppConfig, MatchRule};
 use crate::history::{add_history_entry, HistoryEntry};
 use crate::deploy::deploy_to_remote;
 use chrono::{Local, NaiveDateTime, Duration, NaiveTime};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tauri::{Emitter, Manager};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use std::io::{Read, Write};
@@ -47,6 +49,60 @@ struct Candidate {
     datetime: NaiveDateTime,
 }
 
+// Global mutex to serialize log rotation + write, preventing concurrent rotation races
+static LOG_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+fn get_log_mutex() -> &'static Mutex<()> {
+    LOG_MUTEX.get_or_init(|| Mutex::new(()))
+}
+
+/// Compress `src` into a gzip file at `dst`.
+fn compress_log(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut input = std::fs::File::open(src)?;
+    let output = std::fs::File::create(dst)?;
+    let mut encoder = GzEncoder::new(output, Compression::default());
+    std::io::copy(&mut input, &mut encoder)?;
+    encoder.finish()?;
+    Ok(())
+}
+
+/// Rotate log files if `log_path` has reached 5 MB.
+/// Keeps up to MAX_ROTATED compressed files; deletes the oldest when exceeded.
+fn rotate_log_if_needed(log_path: &Path) {
+    const MAX_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
+    const MAX_ROTATED: u32 = 5;
+
+    let size = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
+    if size < MAX_SIZE {
+        return;
+    }
+
+    let dir = match log_path.parent() {
+        Some(d) => d,
+        None => return,
+    };
+    let base = log_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+    // Delete oldest rotated file if it exists
+    let oldest = dir.join(format!("{}.{}.gz", base, MAX_ROTATED));
+    let _ = std::fs::remove_file(&oldest);
+
+    // Shift: app.log.4.gz -> app.log.5.gz, ..., app.log.1.gz -> app.log.2.gz
+    for n in (1..MAX_ROTATED).rev() {
+        let from = dir.join(format!("{}.{}.gz", base, n));
+        let to   = dir.join(format!("{}.{}.gz", base, n + 1));
+        if from.exists() {
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+
+    // Compress current log -> app.log.1.gz
+    let gz_path = dir.join(format!("{}.1.gz", base));
+    if compress_log(log_path, &gz_path).is_ok() {
+        // Remove the original log so a fresh one is created on next write
+        let _ = std::fs::remove_file(log_path);
+    }
+}
+
 // Helper to emit logs to frontend in real-time
 fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
     let _ = app_handle.emit("log-message", LogEvent {
@@ -54,16 +110,18 @@ fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, le
         level: level.to_string(),
     });
 
-    // Also write to log file
+    // Also write to log file with rotation support
     if let Ok(app_dir) = app_handle.path().app_data_dir() {
-         let path_buf = app_dir.clone();
-         if let Ok(_) = std::fs::create_dir_all(&path_buf) {
-             let log_path = path_buf.join("app.log");
-             if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
-                 let time = Local::now().format("%Y-%m-%d %H:%M:%S");
-                 let _ = writeln!(file, "[{}] [{}] {}", time, level.to_uppercase(), msg);
-             }
-         }
+        if std::fs::create_dir_all(&app_dir).is_ok() {
+            let log_path = app_dir.join("app.log");
+            // Serialize rotation + write to avoid concurrent rotation
+            let _guard = get_log_mutex().lock().unwrap();
+            rotate_log_if_needed(&log_path);
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+                let time = Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(file, "[{}] [{}] {}", time, level.to_uppercase(), msg);
+            }
+        }
     }
 }
 
@@ -145,9 +203,11 @@ async fn perform_copy<R: tauri::Runtime>(
     folder_name: String,
     target_parent_path: &Path,
     config: &AppConfig,
+    live_config: Arc<Mutex<AppConfig>>,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
-    result: &mut ScanResult
+    result: &mut ScanResult,
+    deploy_server_ids: Vec<String>,
 ) {
     let target_full_path = target_parent_path.join(&folder_name);
     
@@ -172,70 +232,24 @@ async fn perform_copy<R: tauri::Runtime>(
     let folder_name_clone = folder_name.clone();
     let source_path_clone = source_path.clone();
     let target_full_path_clone = target_full_path.clone();
-    
+
     // Clone config for closure
     let extensions = config.file_extensions.clone();
     let includes = config.filename_includes.clone();
+    let stability_check_secs = config.stability_check_secs;
     let config_clone = config.clone();
     let should_cancel_clone = should_cancel.clone();
     let is_paused_clone = is_paused.clone();
+    let live_config_clone = live_config.clone();
+    let deploy_server_ids_clone = deploy_server_ids.clone();
 
     let copy_task = tauri::async_runtime::spawn_blocking(move || {
         let handle = app_handle_clone;
-        
-        // Log START event to history
-        add_history_entry(&handle, HistoryEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Local::now().to_rfc3339(),
-            action_type: "COPY_STARTED".to_string(),
-            description: format!("Started copying {}", folder_name_clone),
-            folder_name: folder_name_clone.clone(),
-            source_path: source_path_clone.to_string_lossy().to_string(),
-            target_path: target_full_path_clone.to_string_lossy().to_string(),
-            copied_files_count: 0,
-            total_size: 0,
-            files: vec![],
-        });
 
-        let start_time = Instant::now();
-        let mut last_emit_time = Instant::now();
-        
-        // Prepare paths for display
+        // Prepare paths for display (needed later for progress events)
         let local_path_display = target_full_path_clone.to_string_lossy().to_string();
         let remote_path_display = source_path_clone.to_string_lossy().to_string();
-        
-        // Helper for speed/eta
-        let mut update_stats = |copied: u64, total: u64| {
-            let now = Instant::now();
-            if now.duration_since(last_emit_time).as_millis() > 500 || copied == total {
-                let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 {
-                    (copied as f64 / elapsed) as u64
-                } else {
-                    0
-                };
-                
-                let eta = if speed > 0 && total > copied {
-                    (total - copied) / speed
-                } else {
-                    0
-                };
-                
-                emit_progress(
-                    &handle, 
-                    &folder_name_clone, 
-                    copied, 
-                    total, 
-                    speed, 
-                    eta,
-                    elapsed as u64,
-                    &local_path_display,
-                    &remote_path_display
-                );
-                last_emit_time = now;
-            }
-        };
-        
+
         // Just test access to source dir
         if let Err(e) = std::fs::read_dir(&source_path_clone) {
              let e = e.to_string(); 
@@ -309,11 +323,108 @@ async fn perform_copy<R: tauri::Runtime>(
         }
         
         if filtered_files.is_empty() {
-            emit_log(&handle, format!("No files found to copy in {}", folder_name_clone), "warn");
-            return Ok(0);
+            emit_log(&handle, format!("'{}' is up to date — no new files to copy.", folder_name_clone), "info");
+            return Ok(0u64);
         }
-        
-        emit_log(&handle, format!("Found {} files ({}) to copy.", filtered_files.len(), total_filtered_bytes), "info");
+
+        // --- Stability check ---
+        // Wait `stability_check_secs` seconds, then re-verify each file's size hasn't changed.
+        // Files still being written by a remote process will be skipped and retried next scan.
+        if stability_check_secs > 0 {
+            emit_log(
+                &handle,
+                format!(
+                    "Waiting {}s to verify {} file(s) are fully written...",
+                    stability_check_secs,
+                    filtered_files.len()
+                ),
+                "info",
+            );
+            // Sleep in 200 ms intervals so we can honour cancel requests promptly
+            let intervals = stability_check_secs * 5;
+            for _ in 0..intervals {
+                if should_cancel_clone.load(Ordering::SeqCst) {
+                    return Err(fs_extra::error::Error::new(
+                        fs_extra::error::ErrorKind::Interrupted,
+                        "Cancelled by user",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            // Re-check sizes; skip any file whose size has changed
+            let mut stable_files: Vec<(PathBuf, u64)> = Vec::new();
+            for (path, original_size) in filtered_files {
+                match std::fs::metadata(&path) {
+                    Ok(meta) => {
+                        let current_size = meta.len();
+                        if current_size == original_size {
+                            stable_files.push((path, original_size));
+                        } else {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            emit_log(
+                                &handle,
+                                format!(
+                                    "Skipping '{}' — size changed ({} -> {} bytes), will retry next scan",
+                                    name, original_size, current_size
+                                ),
+                                "warn",
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        emit_log(&handle, format!("Cannot stat '{}': {}", name, e), "warn");
+                    }
+                }
+            }
+            filtered_files = stable_files;
+            total_filtered_bytes = filtered_files.iter().map(|(_, s)| *s).sum();
+
+            if filtered_files.is_empty() {
+                emit_log(&handle, "All candidate files are still being written. Will retry next scan.".to_string(), "warn");
+                return Ok(0u64);
+            }
+            emit_log(&handle, format!("{} file(s) confirmed stable, proceeding with copy.", filtered_files.len()), "info");
+        }
+
+        // ---- Confirmed: we have files to copy ----
+        // Record COPY_STARTED only now, so history is clean when nothing needs copying.
+        add_history_entry(&handle, HistoryEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Local::now().to_rfc3339(),
+            action_type: "COPY_STARTED".to_string(),
+            description: format!("Started copying {}", folder_name_clone),
+            folder_name: folder_name_clone.clone(),
+            source_path: source_path_clone.to_string_lossy().to_string(),
+            target_path: target_full_path_clone.to_string_lossy().to_string(),
+            copied_files_count: 0,
+            total_size: 0,
+            files: vec![],
+        });
+
+        let start_time = Instant::now();
+        let mut last_emit_time = Instant::now();
+
+        // Helper for speed/eta progress events
+        let mut update_stats = |copied: u64, total: u64| {
+            let now = Instant::now();
+            if now.duration_since(last_emit_time).as_millis() > 500 || copied == total {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let speed = if elapsed > 0.0 { (copied as f64 / elapsed) as u64 } else { 0 };
+                let eta   = if speed > 0 && total > copied { (total - copied) / speed } else { 0 };
+                emit_progress(
+                    &handle,
+                    &folder_name_clone,
+                    copied, total, speed, eta,
+                    elapsed as u64,
+                    &local_path_display,
+                    &remote_path_display
+                );
+                last_emit_time = now;
+            }
+        };
+
+        emit_log(&handle, format!("Copying {} new file(s) ({} bytes) from '{}'...", filtered_files.len(), total_filtered_bytes, folder_name_clone), "info");
         
         // Create target directory structure and Copy
         let mut copied_bytes_total = 0;
@@ -406,12 +517,23 @@ async fn perform_copy<R: tauri::Runtime>(
              files: copied_files_list.clone(),
          });
          
-         // Deploy
-         if config_clone.deploy_enabled {
+         // Deploy: Re-read the latest config so that enabling deploy after scheduler
+         // start is detected without needing to restart the scheduler.
+         let current_config = live_config_clone.lock().unwrap().clone();
+         if current_config.deploy_enabled {
+              // Filter servers: if the task specifies deploy_server_ids, use only those;
+              // otherwise fall through to all enabled servers (handled inside deploy_to_remote).
+              let mut deploy_config = current_config.clone();
+              if !deploy_server_ids_clone.is_empty() {
+                  deploy_config.servers = deploy_config.servers
+                      .into_iter()
+                      .filter(|s| deploy_server_ids_clone.contains(&s.id))
+                      .collect();
+              }
               if let Err(e) = deploy_to_remote(
-                  &handle, 
-                  &config_clone, 
-                  &target_full_path_clone, 
+                  &handle,
+                  &deploy_config,
+                  &target_full_path_clone,
                   &folder_name_clone,
                   should_cancel_clone,
                   is_paused_clone
@@ -424,9 +546,11 @@ async fn perform_copy<R: tauri::Runtime>(
     });
 
     match copy_task.await {
+        Ok(Ok(0)) => {
+            // Nothing was copied (all files already up to date) — do not count as "copied"
+        },
         Ok(Ok(_)) => {
-            let success_msg = format!("Successfully copied: {}", folder_name);
-            emit_log(app_handle, success_msg.clone(), "success");
+            emit_log(app_handle, format!("Successfully copied: {}", folder_name), "success");
             result.copied_folders.push(folder_name);
         },
         Ok(Err(e)) => {
@@ -448,8 +572,9 @@ async fn perform_copy<R: tauri::Runtime>(
 }
 
 pub async fn scan_and_copy<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>, 
+    app_handle: &tauri::AppHandle<R>,
     config: &AppConfig,
+    live_config: Arc<Mutex<AppConfig>>,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>
 ) -> ScanResult {
@@ -587,16 +712,18 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
 
                     if folder_date == today || folder_date == yesterday {
                         result.found_folders.push(latest.name.clone());
-                        
+
                         perform_copy(
                             app_handle,
                             latest.path.clone(),
                             latest.name.clone(),
                             local_parent,
                             config,
+                            live_config.clone(),
                             should_cancel.clone(),
                             is_paused.clone(),
-                            &mut result
+                            &mut result,
+                            task.deploy_server_ids.clone(),
                         ).await;
                         
                     } else {
@@ -644,16 +771,18 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                              // Always scan subdirectories to support incremental updates
                              found_any_new = true;
                              result.found_folders.push(format!("{}/{}", target_name, sub_name));
-                             
+
                              perform_copy(
                                  app_handle,
                                  sub_path,
                                  sub_name, // Copy as sub_name
                                  &local_target_base, // Into local/Date/
                                  config,
+                                 live_config.clone(),
                                  should_cancel.clone(),
                                  is_paused.clone(),
-                                 &mut result
+                                 &mut result,
+                                 task.deploy_server_ids.clone(),
                              ).await;
                          }
                     }

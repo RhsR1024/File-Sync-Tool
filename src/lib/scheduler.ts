@@ -31,7 +31,13 @@ export async function executeScan() {
             result.errors.forEach(e => addLog(`Error: ${e}`, 'error'));
         }
     } catch (e) {
-        addLog(t('console.scanFailed', { error: e }), 'error');
+        const errMsg = String(e);
+        if (errMsg.includes('already in progress')) {
+            // Previous scan/deploy still running — this is normal, just skip quietly
+            addLog(t('console.scanSkipped'), 'info');
+        } else {
+            addLog(t('console.scanFailed', { error: e }), 'error');
+        }
     } finally {
         appStore.progress = null; // Ensure progress is cleared when scan finishes
     }

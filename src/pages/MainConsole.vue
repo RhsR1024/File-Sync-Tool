@@ -92,27 +92,27 @@ onMounted(() => { getConfig(); });
             <!-- Top row: timestamp + name + badge -->
             <div class="flex items-start justify-between gap-2 mb-2">
               <div class="flex-1 min-w-0">
-                <div class="text-[9.5px] text-slate-600 mb-0.5 tabular-nums">{{ rec.startTime }}</div>
-                <div class="text-[12.5px] font-bold text-slate-200 truncate leading-snug" :title="rec.folder">
+                <div class="text-[11px] text-slate-400 mb-0.5 tabular-nums">{{ rec.startTime }}</div>
+                <div class="text-sm font-bold text-slate-200 truncate leading-snug" :title="rec.folder">
                   {{ rec.folder }}
                 </div>
               </div>
               <!-- Phase badge -->
               <div class="shrink-0 mt-3">
                 <span v-if="rec.phase==='copying'"
-                      class="inline-flex items-center gap-1 text-[9.5px] font-bold px-1.5 py-px rounded-sm"
+                      class="inline-flex items-center gap-1 text-xs font-bold px-1.5 py-px rounded-sm"
                       style="background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.28);">
                   <span class="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse inline-block"/>COPYING
                 </span>
                 <span v-else-if="rec.phase==='deploying'"
-                      class="inline-flex items-center gap-1 text-[9.5px] font-bold px-1.5 py-px rounded-sm"
+                      class="inline-flex items-center gap-1 text-xs font-bold px-1.5 py-px rounded-sm"
                       style="background:rgba(168,85,247,.12);color:#c084fc;border:1px solid rgba(168,85,247,.28);">
                   <span class="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse inline-block"/>DEPLOYING
                 </span>
                 <span v-else
-                      class="inline-flex items-center gap-1 text-[9.5px] font-bold px-1.5 py-px rounded-sm"
+                      class="inline-flex items-center gap-1 text-xs font-bold px-1.5 py-px rounded-sm"
                       style="background:rgba(16,185,129,.1);color:#34d399;border:1px solid rgba(16,185,129,.25);">
-                  <CheckCircle2 class="w-2.5 h-2.5"/>DONE
+                  <CheckCircle2 class="w-3 h-3"/>DONE
                 </span>
               </div>
             </div>
@@ -121,23 +121,23 @@ onMounted(() => { getConfig(); });
             <div class="space-y-1 mb-0.5">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-1.5">
-                  <Copy class="w-2.5 h-2.5"
+                  <Copy class="w-3 h-3"
                         :class="rec.copyCompleted?'text-emerald-500 opacity-70':'text-blue-400 opacity-60'"/>
-                  <span class="text-[9.5px] uppercase tracking-wider"
+                  <span class="text-xs uppercase tracking-wider"
                         :class="rec.copyCompleted?'text-emerald-400':'text-slate-400'">
                     {{ t('console.localCopy') }}
                   </span>
                 </div>
                 <div class="flex items-center gap-1.5">
                   <span v-if="rec.phase==='copying' && rec.speed>0"
-                        class="text-[9.5px] text-blue-400 tabular-nums animate-pulse">
+                        class="text-[11px] text-blue-400 tabular-nums animate-pulse">
                     {{ formatRecordSpeed(rec.speed) }}
                   </span>
-                  <span class="text-[9.5px] font-bold tabular-nums"
+                  <span class="text-xs font-bold tabular-nums"
                         :class="rec.copyCompleted?'text-emerald-400':'text-blue-400'">
                     {{ rec.copyPercentage.toFixed(0) }}%
                   </span>
-                  <CheckCircle2 v-if="rec.copyCompleted" class="w-3 h-3 text-emerald-500"/>
+                  <CheckCircle2 v-if="rec.copyCompleted" class="w-3.5 h-3.5 text-emerald-500"/>
                 </div>
               </div>
               <!-- Progress bar -->
@@ -151,7 +151,7 @@ onMounted(() => { getConfig(); });
                        boxShadow:rec.copyCompleted?'0 0 5px rgba(16,185,129,.5)':'0 0 5px rgba(59,130,246,.6)'
                      }"/>
               </div>
-              <div v-if="rec.localPath" class="text-[9px] text-slate-700 truncate" :title="rec.localPath">
+              <div v-if="rec.localPath" class="text-[11px] text-slate-400 truncate" :title="rec.localPath">
                 → {{ rec.localPath }}
               </div>
             </div>
@@ -166,23 +166,23 @@ onMounted(() => { getConfig(); });
             <div v-if="rec.hasRemote" class="space-y-1">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-1.5">
-                  <UploadCloud class="w-2.5 h-2.5"
+                  <UploadCloud class="w-3 h-3"
                                :class="rec.deployCompleted?'text-emerald-500 opacity-70':'text-purple-400 opacity-70'"/>
-                  <span class="text-[9.5px] uppercase tracking-wider"
+                  <span class="text-xs uppercase tracking-wider"
                         :class="rec.deployCompleted?'text-emerald-400':'text-purple-400'">
                     {{ t('console.remotePush') }}
                   </span>
                 </div>
                 <div class="flex items-center gap-1.5">
                   <span v-if="rec.phase==='deploying' && rec.speed>0"
-                        class="text-[9.5px] text-purple-400 tabular-nums animate-pulse">
+                        class="text-[11px] text-purple-400 tabular-nums animate-pulse">
                     {{ formatRecordSpeed(rec.speed) }}
                   </span>
-                  <span class="text-[9.5px] font-bold tabular-nums"
+                  <span class="text-xs font-bold tabular-nums"
                         :class="rec.deployCompleted?'text-emerald-400':'text-purple-400'">
                     {{ rec.deployPercentage.toFixed(0) }}%
                   </span>
-                  <CheckCircle2 v-if="rec.deployCompleted" class="w-3 h-3 text-emerald-500"/>
+                  <CheckCircle2 v-if="rec.deployCompleted" class="w-3.5 h-3.5 text-emerald-500"/>
                 </div>
               </div>
               <div class="h-[3px] rounded-full overflow-hidden" style="background:rgba(255,255,255,.05);">
@@ -195,7 +195,7 @@ onMounted(() => { getConfig(); });
                        boxShadow:rec.deployCompleted?'0 0 5px rgba(16,185,129,.5)':'0 0 5px rgba(168,85,247,.6)'
                      }"/>
               </div>
-              <div v-if="rec.remotePath" class="text-[9px] text-slate-700 truncate" :title="rec.remotePath">
+              <div v-if="rec.remotePath" class="text-[11px] text-slate-400 truncate" :title="rec.remotePath">
                 → {{ rec.remotePath }}
               </div>
             </div>
@@ -206,7 +206,7 @@ onMounted(() => { getConfig(); });
               <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
                 <circle cx="5" cy="5" r="4" stroke="#94a3b8" stroke-width="1" stroke-dasharray="2 1.5"/>
               </svg>
-              <span class="text-[9.5px] text-slate-500 uppercase tracking-wider">
+              <span class="text-xs text-slate-500 uppercase tracking-wider">
                 {{ t('console.remotePush') }} · {{ t('console.waiting') }}
               </span>
             </div>

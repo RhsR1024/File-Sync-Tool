@@ -34,6 +34,9 @@ pub struct ScanTask {
     pub remote_path: String,
     pub local_path: Option<String>, // Optional override
     pub rule: MatchRule,
+    /// Server IDs to deploy to after copying. Empty = all enabled servers.
+    #[serde(default)]
+    pub deploy_server_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -72,7 +75,14 @@ pub struct AppConfig {
     pub remote_linux_path: String,
     
     pub post_commands: Vec<String>,
+
+    /// Seconds to wait after discovering files before copying, to verify they are fully written.
+    /// Set to 0 to disable. Default: 30.
+    #[serde(default = "default_stability_secs")]
+    pub stability_check_secs: u64,
 }
+
+fn default_stability_secs() -> u64 { 30 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -93,6 +103,7 @@ impl Default for AppConfig {
             ssh_password: "".to_string(),
             remote_linux_path: "/tmp/upload".to_string(),
             post_commands: vec![],
+            stability_check_secs: 30,
         }
     }
 }

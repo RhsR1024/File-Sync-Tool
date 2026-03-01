@@ -359,7 +359,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
     let mut last_emit_time = Instant::now();
     
     // Initial emit
-    let server_display = format!("{}:{}/{}", server.host, server.remote_path.trim_end_matches('/'), target_path_str.split('/').last().unwrap_or_default());
+    let server_display = format!("{}:{}", server.host, target_path_str);
     emit_progress(app_handle, &local_p.file_name().unwrap_or_default().to_string_lossy(), 0, total_size, 0, 0, 0, local_path, &server_display);
 
     upload_with_progress(

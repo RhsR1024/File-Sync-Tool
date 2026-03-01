@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{State, Manager, Emitter};
 
 struct AppState {
-    config: Mutex<AppConfig>,
+    config: Arc<Mutex<AppConfig>>,
     is_scanning: Arc<AtomicBool>,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
@@ -37,14 +37,15 @@ async fn scan_now(app_handle: tauri::AppHandle, state: State<'_, AppState>) -> R
     if state.is_scanning.load(Ordering::SeqCst) {
         return Err("Scan already in progress".to_string());
     }
-    
+
     state.is_scanning.store(true, Ordering::SeqCst);
     state.should_cancel.store(false, Ordering::SeqCst);
     state.is_paused.store(false, Ordering::SeqCst);
-    
+
     let config = state.config.lock().unwrap().clone();
-    let result = scanner::scan_and_copy(&app_handle, &config, state.should_cancel.clone(), state.is_paused.clone()).await;
-    
+    let live_config = state.config.clone();
+    let result = scanner::scan_and_copy(&app_handle, &config, live_config, state.should_cancel.clone(), state.is_paused.clone()).await;
+
     state.is_scanning.store(false, Ordering::SeqCst);
     Ok(result)
 }
@@ -112,7 +113,7 @@ fn main() {
         .setup(|app| {
             let config = config::load_config(app.handle());
             app.manage(AppState {
-                config: Mutex::new(config),
+                config: Arc::new(Mutex::new(config)),
                 is_scanning: Arc::new(AtomicBool::new(false)),
                 should_cancel: Arc::new(AtomicBool::new(false)),
                 is_paused: Arc::new(AtomicBool::new(false)),

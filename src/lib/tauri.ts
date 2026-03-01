@@ -23,6 +23,8 @@ export interface ScanTask {
   remote_path: string;
   local_path: string | null;
   rule: MatchRule;
+  /** Server IDs this task deploys to. Empty = all enabled servers. */
+  deploy_server_ids: string[];
 }
 
 export interface AppConfig {
@@ -49,6 +51,9 @@ export interface AppConfig {
   remote_linux_path: string;
   
   post_commands: string[];
+
+  /** Seconds to wait before copying to verify files are fully written. 0 = disabled. Default: 30. */
+  stability_check_secs: number;
 }
 
 export interface ScanResult {

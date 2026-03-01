@@ -45,7 +45,8 @@ const taskForm = ref<ScanTask>({
     name: '',
     remote_path: '',
     local_path: null,
-    rule: { type: 'VersionMatch', value: '' }
+    rule: { type: 'VersionMatch', value: '' },
+    deploy_server_ids: [],
 });
 
 function resetTaskForm() {
@@ -55,7 +56,8 @@ function resetTaskForm() {
         name: '',
         remote_path: '',
         local_path: null,
-        rule: { type: 'VersionMatch', value: '' }
+        rule: { type: 'VersionMatch', value: '' },
+        deploy_server_ids: [],
     };
     isEditingTask.value = false;
     editingTaskIndex.value = -1;
@@ -72,7 +74,8 @@ function editTask(index: number) {
     const task = config.value.tasks[index];
     taskForm.value = {
         ...task,
-        rule: { ...task.rule }
+        rule: { ...task.rule },
+        deploy_server_ids: [...(task.deploy_server_ids ?? [])],
     };
     isEditingTask.value = true;
 }
@@ -435,11 +438,22 @@ onMounted(load);
                          <input type="checkbox" v-model="task.enabled" @change="save" class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer">
                     </div>
                     <div class="flex-1 min-w-0">
-                        <div class="font-medium text-slate-800 flex items-center gap-2">
+                        <div class="font-medium text-slate-800 flex items-center gap-2 flex-wrap">
                             {{ task.name }}
-                            <span class="text-xs px-2 py-0.5 rounded-full border" 
+                            <span class="text-xs px-2 py-0.5 rounded-full border"
                                 :class="task.rule.type === 'VersionMatch' ? 'bg-purple-50 text-purple-700 border-purple-100' : 'bg-orange-50 text-orange-700 border-orange-100'">
                                 {{ task.rule.type === 'VersionMatch' ? 'Version' : 'Date' }}: {{ task.rule.value }}
+                            </span>
+                            <!-- Associated servers badges -->
+                            <template v-if="task.deploy_server_ids && task.deploy_server_ids.length > 0">
+                                <span v-for="sid in task.deploy_server_ids" :key="sid"
+                                      class="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100 flex items-center gap-1">
+                                    <Server class="w-2.5 h-2.5" />
+                                    {{ config.servers.find(s => s.id === sid)?.name || config.servers.find(s => s.id === sid)?.host || sid.substring(0, 8) }}
+                                </span>
+                            </template>
+                            <span v-else-if="config.deploy_enabled" class="text-xs px-2 py-0.5 rounded-full bg-slate-50 text-slate-400 border border-slate-200">
+                                {{ t('settings.taskDeployAll') }}
                             </span>
                         </div>
                         <div class="text-xs text-slate-500 font-mono truncate" :title="task.remote_path">
@@ -494,6 +508,33 @@ onMounted(load);
                         />
                          <p class="text-xs text-slate-400 mt-1" v-if="taskForm.rule.type === 'DateMatch'">{{ t('settings.ruleDateHint') }}</p>
                     </div>
+                </div>
+
+                <!-- Deploy server binding (only shown when deploy is enabled and servers exist) -->
+                <div v-if="config.deploy_enabled && config.servers.length > 0" class="pt-3 border-t border-slate-100">
+                    <label class="block text-sm font-medium mb-2 text-slate-700 flex items-center gap-1.5">
+                        <Server class="w-4 h-4 text-blue-500" />
+                        {{ t('settings.taskDeployServers') }}
+                    </label>
+                    <p class="text-xs text-slate-400 mb-2">{{ t('settings.taskDeployServersDesc') }}</p>
+                    <div class="space-y-2">
+                        <label v-for="server in config.servers" :key="server.id"
+                               class="flex items-center gap-2.5 p-2 rounded-lg border cursor-pointer transition-colors"
+                               :class="taskForm.deploy_server_ids.includes(server.id)
+                                 ? 'bg-blue-50 border-blue-200 text-blue-800'
+                                 : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'">
+                            <input type="checkbox"
+                                   :value="server.id"
+                                   v-model="taskForm.deploy_server_ids"
+                                   class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer" />
+                            <div class="flex-1 min-w-0">
+                                <div class="font-medium text-sm">{{ server.name || server.host }}</div>
+                                <div class="text-xs font-mono opacity-60">{{ server.user }}@{{ server.host }}:{{ server.port }}</div>
+                            </div>
+                            <span v-if="!server.enabled" class="text-xs bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded">Disabled</span>
+                        </label>
+                    </div>
+                    <p class="text-xs text-slate-400 mt-2 italic">{{ t('settings.taskDeployServersHint') }}</p>
                 </div>
             </div>
             <div class="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-100">

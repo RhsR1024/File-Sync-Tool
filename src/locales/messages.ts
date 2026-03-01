@@ -48,6 +48,7 @@ export const messages = {
       localCopy: 'Local Copy',
       remotePush: 'Remote Push',
       waiting: 'Waiting',
+      scanSkipped: 'Scan skipped — previous scan still in progress',
     },
     settings: {
       title: 'Settings',
@@ -131,6 +132,10 @@ export const messages = {
       stabilityCheckSeconds: 'Wait duration',
       seconds: 'seconds',
       stabilityCheckHint: '0 = disabled. Recommended: 30–60 s.',
+      taskDeployServers: 'Deploy Servers',
+      taskDeployServersDesc: 'Select which servers this task deploys to after copying. Leave empty to use all enabled servers.',
+      taskDeployServersHint: 'If no servers are selected, deploys to all enabled servers.',
+      taskDeployAll: 'All Servers',
     },
     history: {
       title: 'Operation History',
@@ -196,6 +201,7 @@ export const messages = {
       localCopy: '本地复制',
       remotePush: '远程推送',
       waiting: '等待中',
+      scanSkipped: '跳过扫描 — 上次扫描仍在进行中',
     },
     settings: {
       title: '设置',
@@ -279,6 +285,10 @@ export const messages = {
       stabilityCheckSeconds: '等待时长',
       seconds: '秒',
       stabilityCheckHint: '0 = 禁用。建议设置 30–60 秒。',
+      taskDeployServers: '部署服务器',
+      taskDeployServersDesc: '选择此任务复制完成后部署到哪些服务器，留空则部署到所有已启用的服务器。',
+      taskDeployServersHint: '若未选择服务器，将部署到所有已启用的服务器。',
+      taskDeployAll: '所有服务器',
     },
     history: {
       title: '历史记录',
