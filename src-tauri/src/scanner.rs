@@ -732,23 +732,37 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
             },
             MatchRule::DateMatch(format_str) => {
                 let fmt = if format_str.is_empty() { "%y%m%d" } else { format_str };
-                let target_name = now_local.format(fmt).to_string();
-                
-                emit_log(app_handle, format!("Checking for date-based folder: {}", target_name), "info");
-                
-                let target_path = path.join(&target_name);
-                
-                // Check if exists
-                if target_path.exists() && target_path.is_dir() {
+                let today_name    = now_local.format(fmt).to_string();
+                let yesterday_name = (now_local - Duration::days(1)).format(fmt).to_string();
+
+                // Always check both today and yesterday to avoid missing files
+                // generated near midnight (between last scan of day N and first of N+1).
+                // perform_copy is incremental so re-scanning costs nothing if already copied.
+                let dirs_to_check: Vec<String> = if yesterday_name != today_name {
+                    vec![today_name.clone(), yesterday_name]
+                } else {
+                    vec![today_name.clone()]
+                };
+
+                emit_log(app_handle, format!("Checking date-based folder(s): {}", dirs_to_check.join(", ")), "info");
+
+                for target_name in dirs_to_check {
+                    if should_cancel.load(Ordering::SeqCst) {
+                        emit_log(app_handle, "Scan cancelled by user".to_string(), "info");
+                        return result;
+                    }
+
+                    let target_path = path.join(&target_name);
+
+                    if !target_path.exists() || !target_path.is_dir() {
+                        emit_log(app_handle, format!("Folder {} does not exist in {}", target_name, task.remote_path), "info");
+                        continue;
+                    }
+
                     emit_log(app_handle, format!("Found candidate folder: {}", target_name), "success");
-                    
-                    // Instead of treating the folder itself as the unit to copy/skip,
-                    // we now treat it as a container that may hold multiple build directories.
-                    // We need to list its contents and copy them individually if they don't exist locally.
-                    
+
                     let local_target_base = local_parent.join(&target_name);
-                    
-                    // Scan subdirectories in the remote folder
+
                     let mut sub_entries = match fs::read_dir(&target_path).await {
                         Ok(e) => e,
                         Err(e) => {
@@ -759,39 +773,33 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         }
                     };
 
-                    let mut found_any_new = false;
-                    
+                    let mut found_any = false;
+
                     while let Ok(Some(entry)) = sub_entries.next_entry().await {
-                         let sub_path = entry.path();
-                         if sub_path.is_dir() {
-                             let sub_name = entry.file_name().to_string_lossy().to_string();
-                             let _local_sub_path = local_target_base.join(&sub_name);
-                             
-                             // Always scan subdirectories to support incremental updates
-                             found_any_new = true;
-                             result.found_folders.push(format!("{}/{}", target_name, sub_name));
+                        let sub_path = entry.path();
+                        if sub_path.is_dir() {
+                            let sub_name = entry.file_name().to_string_lossy().to_string();
+                            found_any = true;
+                            result.found_folders.push(format!("{}/{}", target_name, sub_name));
 
-                             perform_copy(
-                                 app_handle,
-                                 sub_path,
-                                 sub_name, // Copy as sub_name
-                                 &local_target_base, // Into local/Date/
-                                 config,
-                                 live_config.clone(),
-                                 should_cancel.clone(),
-                                 is_paused.clone(),
-                                 &mut result,
-                                 task.deploy_server_ids.clone(),
-                             ).await;
-                         }
-                    }
-                    
-                    if !found_any_new {
-                        emit_log(app_handle, format!("No new build directories found in {}", target_name), "info");
+                            perform_copy(
+                                app_handle,
+                                sub_path,
+                                sub_name,
+                                &local_target_base,
+                                config,
+                                live_config.clone(),
+                                should_cancel.clone(),
+                                is_paused.clone(),
+                                &mut result,
+                                task.deploy_server_ids.clone(),
+                            ).await;
+                        }
                     }
 
-                } else {
-                    emit_log(app_handle, format!("Folder {} does not exist in {}", target_name, task.remote_path), "info");
+                    if !found_any {
+                        emit_log(app_handle, format!("No build directories found in {}", target_name), "info");
+                    }
                 }
             }
         }

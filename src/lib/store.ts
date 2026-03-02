@@ -20,6 +20,14 @@ export interface ProgressState {
 
 export type TaskRecordPhase = 'copying' | 'deploying' | 'completed' | 'cancelled';
 
+export interface RemoteServerRecord {
+    key: string;        // e.g. "[ServerName]"
+    label: string;      // full display: "[ServerName] host:/path"
+    percentage: number;
+    completed: boolean;
+    speed: number;
+}
+
 export interface TaskRecord {
     id: string;
     startTime: string;   // full datetime string
@@ -31,7 +39,8 @@ export interface TaskRecord {
     copyTotal: number;
     // remote deploy
     hasRemote: boolean;
-    remotePath?: string;
+    remoteServers: RemoteServerRecord[];  // one entry per deploy target
+    remoteExpanded: boolean;             // UI expand/collapse for >3 servers
     deployPercentage: number;
     deployCompleted: boolean;
     // live metrics (only meaningful while active)
@@ -113,6 +122,8 @@ export function upsertTaskRecord(payload: {
                 copyCompleted: payload.percentage >= 100,
                 copyTotal: payload.total_bytes,
                 hasRemote: false,
+                remoteServers: [],
+                remoteExpanded: false,
                 deployPercentage: 0,
                 deployCompleted: false,
                 speed: payload.speed,
@@ -131,14 +142,39 @@ export function upsertTaskRecord(payload: {
         if (target) {
             target.hasRemote = true;
             target.phase = 'deploying';
-            target.remotePath = payload.remote_path;
             target.deployPercentage = payload.percentage;
             target.speed = payload.speed;
             target.copied = payload.copied_bytes;
             target.total = payload.total_bytes;
+
+            // Extract server key from "[ServerName] host:/path" format
+            const spaceIdx = payload.remote_path.indexOf(' ');
+            const serverKey = spaceIdx > 0 ? payload.remote_path.substring(0, spaceIdx) : payload.remote_path;
+
+            // Find or create server entry
+            const existingServer = target.remoteServers.find(s => s.key === serverKey);
+            if (existingServer) {
+                existingServer.percentage = payload.percentage;
+                existingServer.speed = payload.speed;
+                existingServer.completed = payload.percentage >= 100;
+            } else {
+                target.remoteServers.push({
+                    key: serverKey,
+                    label: payload.remote_path,
+                    percentage: payload.percentage,
+                    completed: payload.percentage >= 100,
+                    speed: payload.speed,
+                });
+            }
+
+            // When a server upload reaches 100%, start a timer to detect if all are done
             if (payload.percentage >= 100) {
-                target.deployCompleted = true;
-                target.phase = 'completed';
+                setTimeout(() => {
+                    if (target.phase === 'deploying' && target.remoteServers.every(s => s.completed)) {
+                        target.deployCompleted = true;
+                        target.phase = 'completed';
+                    }
+                }, 8000);
             }
         }
     }

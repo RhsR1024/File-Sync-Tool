@@ -172,6 +172,9 @@ onMounted(() => { getConfig(); });
                         :class="rec.deployCompleted?'text-emerald-400':'text-purple-400'">
                     {{ t('console.remotePush') }}
                   </span>
+                  <span class="text-[10px] text-slate-600 tabular-nums">
+                    {{ rec.remoteServers.filter(s=>s.completed).length }}/{{ rec.remoteServers.length }}
+                  </span>
                 </div>
                 <div class="flex items-center gap-1.5">
                   <span v-if="rec.phase==='deploying' && rec.speed>0"
@@ -195,8 +198,23 @@ onMounted(() => { getConfig(); });
                        boxShadow:rec.deployCompleted?'0 0 5px rgba(16,185,129,.5)':'0 0 5px rgba(168,85,247,.6)'
                      }"/>
               </div>
-              <div v-if="rec.remotePath" class="text-[11px] text-slate-400 truncate" :title="rec.remotePath">
-                → {{ rec.remotePath }}
+              <!-- Server list -->
+              <div class="space-y-0.5 mt-0.5">
+                <div v-for="srv in (rec.remoteExpanded ? rec.remoteServers : rec.remoteServers.slice(0,3))"
+                     :key="srv.key"
+                     class="flex items-center gap-1 text-[11px] leading-snug">
+                  <span class="shrink-0" :class="srv.completed?'text-emerald-400':'text-purple-400'">→</span>
+                  <span class="truncate text-slate-400 flex-1" :title="srv.label">{{ srv.label }}</span>
+                  <CheckCircle2 v-if="srv.completed" class="w-3 h-3 text-emerald-500 shrink-0"/>
+                  <span v-else class="text-[10px] text-purple-400 tabular-nums shrink-0">
+                    {{ srv.percentage.toFixed(0) }}%
+                  </span>
+                </div>
+                <button v-if="rec.remoteServers.length > 3"
+                        @click.stop="rec.remoteExpanded = !rec.remoteExpanded"
+                        class="text-[10px] text-slate-500 hover:text-slate-300 transition-colors mt-0.5 pl-2">
+                  {{ rec.remoteExpanded ? '▲ 收起' : `▼ 还有 ${rec.remoteServers.length - 3} 台...` }}
+                </button>
               </div>
             </div>
 
