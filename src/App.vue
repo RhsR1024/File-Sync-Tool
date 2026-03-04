@@ -3,7 +3,9 @@ import Sidebar from '@/components/Sidebar.vue';
 import { RouterView } from 'vue-router';
 import { onMounted, onUnmounted } from 'vue';
 import { listen } from '@tauri-apps/api/event';
-import { appStore, addLog, upsertTaskRecord } from '@/lib/store';
+import { appStore, addLog, upsertTaskRecord, syncTaskRecordByLog } from '@/lib/store';
+import { getConfig } from '@/lib/tauri';
+import { startScheduler } from '@/lib/scheduler';
 
 let unlistenLog: (() => void) | null = null;
 let unlistenProgress: (() => void) | null = null;
@@ -15,6 +17,7 @@ onMounted(async () => {
         if (payload.level === 'error') type = 'error';
         if (payload.level === 'success') type = 'success';
         addLog(payload.msg, type);
+        syncTaskRecordByLog(payload.msg, payload.level);
     });
 
     unlistenProgress = await listen('copy-progress', (event: any) => {
@@ -41,6 +44,15 @@ onMounted(async () => {
         // Update persistent task records in console
         upsertTaskRecord(p);
     });
+
+    try {
+        const cfg = await getConfig();
+        if (cfg.launch_and_auto_scan && !appStore.isRunning) {
+            await startScheduler();
+        }
+    } catch (e) {
+        addLog(`Auto-start check failed: ${e}`, 'error');
+    }
 });
 
 onUnmounted(() => {

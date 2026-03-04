@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, CheckCircle, XCircle, FileText, Copy } from 'lucide-vue-next';
-import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, type AppConfig, type ScanTask } from '@/lib/tauri';
+import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, openPathParent, type AppConfig, type ScanTask } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { restartSchedulerInterval } from '@/lib/scheduler';
 import { useI18n } from 'vue-i18n';
@@ -27,7 +27,8 @@ const config = ref<AppConfig>({
   ssh_password: '',
   remote_linux_path: '',
   post_commands: [],
-  stability_check_secs: 30
+  stability_check_secs: 30,
+  launch_and_auto_scan: false
 });
 
 const newExt = ref('');
@@ -302,6 +303,15 @@ async function copyToClipboard(text: string) {
   }
 }
 
+async function openParentFolder(path: string) {
+  if (!path) return;
+  try {
+    await openPathParent(path);
+  } catch (e) {
+    console.error('Failed to open folder', e);
+  }
+}
+
 async function load() {
   try {
     config.value = await getConfig();
@@ -346,6 +356,24 @@ onMounted(load);
       {{ statusMsg }}
     </div>
 
+    <!-- Startup Behavior -->
+    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+      <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
+        <Clock class="w-5 h-5" />
+        {{ t('settings.startupOptions') }}
+      </h3>
+      <label class="flex items-center justify-between gap-3">
+        <div>
+          <div class="text-sm font-medium text-slate-700">{{ t('settings.launchAndAutoScan') }}</div>
+          <p class="text-xs text-slate-400 mt-1">{{ t('settings.launchAndAutoScanDesc') }}</p>
+        </div>
+        <div class="shrink-0 relative inline-flex items-center cursor-pointer">
+          <input type="checkbox" v-model="config.launch_and_auto_scan" class="sr-only peer">
+          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+        </div>
+      </label>
+    </div>
+
     <!-- Language Settings -->
     <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
       <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
@@ -381,8 +409,11 @@ onMounted(load);
             <label class="block text-xs font-medium text-slate-500 mb-1 uppercase tracking-wider">{{ t('settings.configFile') }}</label>
             <div class="flex gap-2">
                <code class="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 break-all">{{ configPath }}</code>
-               <button @click="copyToClipboard(configPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" title="Copy Path">
+               <button @click="copyToClipboard(configPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.copyPath')">
                   <Copy class="w-4 h-4" />
+               </button>
+               <button @click="openParentFolder(configPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.openFolder')">
+                  <FolderOpen class="w-4 h-4" />
                </button>
             </div>
          </div>
@@ -390,8 +421,11 @@ onMounted(load);
             <label class="block text-xs font-medium text-slate-500 mb-1 uppercase tracking-wider">{{ t('settings.logFile') }}</label>
             <div class="flex gap-2">
                <code class="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 break-all">{{ logPath }}</code>
-               <button @click="copyToClipboard(logPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" title="Copy Path">
+               <button @click="copyToClipboard(logPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.copyPath')">
                   <Copy class="w-4 h-4" />
+               </button>
+               <button @click="openParentFolder(logPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.openFolder')">
+                  <FolderOpen class="w-4 h-4" />
                </button>
             </div>
          </div>

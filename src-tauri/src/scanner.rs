@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, MatchRule};
 use crate::history::{add_history_entry, HistoryEntry};
 use crate::deploy::deploy_to_remote;
-use chrono::{Local, NaiveDateTime, Duration, NaiveTime};
+use chrono::{Local, NaiveDateTime, Duration, NaiveTime, Timelike};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use regex::Regex;
@@ -735,10 +735,12 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                 let today_name    = now_local.format(fmt).to_string();
                 let yesterday_name = (now_local - Duration::days(1)).format(fmt).to_string();
 
-                // Always check both today and yesterday to avoid missing files
-                // generated near midnight (between last scan of day N and first of N+1).
-                // perform_copy is incremental so re-scanning costs nothing if already copied.
-                let dirs_to_check: Vec<String> = if yesterday_name != today_name {
+                // Only check yesterday during the first hour of a new day (00:00–01:00),
+                // to catch files that were generated near midnight but missed by the last
+                // scan of the previous day. perform_copy is incremental so re-scanning
+                // yesterday costs nothing once all files have already been copied.
+                let is_first_hour = now_local.hour() == 0;
+                let dirs_to_check: Vec<String> = if is_first_hour && yesterday_name != today_name {
                     vec![today_name.clone(), yesterday_name]
                 } else {
                     vec![today_name.clone()]

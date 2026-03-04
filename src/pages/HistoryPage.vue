@@ -14,10 +14,8 @@ async function load() {
 }
 
 async function clear() {
-  if (confirm(t('history.clearConfirm') || 'Are you sure you want to clear all history records? This action cannot be undone.')) {
-    await clearHistory();
-    history.value = [];
-  }
+  await clearHistory();
+  history.value = [];
 }
 
 function toggleExpand(id: string) {

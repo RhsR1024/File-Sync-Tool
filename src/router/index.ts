@@ -1,10 +1,10 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import MainConsole from '@/pages/MainConsole.vue'
 import TaskStatusPage from '@/pages/TaskStatusPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import HistoryPage from '@/pages/HistoryPage.vue'
 
-const routes = [
+const routes: RouteRecordRaw[] = [
   {
     path: '/',
     name: 'console',

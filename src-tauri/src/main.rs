@@ -10,6 +10,8 @@ use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
 use std::sync::{Mutex, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
+use std::process::Command;
 
 use tauri::{State, Manager, Emitter};
 
@@ -20,6 +22,38 @@ struct AppState {
     is_paused: Arc<AtomicBool>,
 }
 
+fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        const RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        const VALUE_NAME: &str = "FileSyncToolAutoStart";
+
+        if enabled {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let exe_quoted = format!("\"{}\"", exe.to_string_lossy());
+            let status = Command::new("reg")
+                .args(["add", RUN_KEY, "/v", VALUE_NAME, "/t", "REG_SZ", "/d", &exe_quoted, "/f"])
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err("Failed to enable launch on startup".to_string());
+            }
+        } else {
+            // Ignore delete failure if value does not exist.
+            let _ = Command::new("reg")
+                .args(["delete", RUN_KEY, "/v", VALUE_NAME, "/f"])
+                .status();
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enabled;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 fn get_config(state: State<AppState>) -> AppConfig {
     state.config.lock().unwrap().clone()
@@ -27,6 +61,7 @@ fn get_config(state: State<AppState>) -> AppConfig {
 
 #[tauri::command]
 fn save_config_cmd(app_handle: tauri::AppHandle, state: State<AppState>, config: AppConfig) -> Result<(), String> {
+    sync_launch_on_startup(config.launch_and_auto_scan)?;
     *state.config.lock().unwrap() = config.clone();
     config::save_config(&app_handle, &config)
 }
@@ -102,6 +137,48 @@ fn get_app_paths(app_handle: tauri::AppHandle) -> (String, String) {
     (config, log)
 }
 
+#[tauri::command]
+fn open_path_parent(path: String) -> Result<(), String> {
+    let raw = PathBuf::from(path);
+    let target_dir = if raw.is_dir() {
+        raw
+    } else {
+        raw.parent()
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| "Invalid path: no parent directory".to_string())?
+    };
+
+    if !target_dir.exists() {
+        return Err(format!("Directory does not exist: {}", target_dir.display()));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(target_dir.as_os_str())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(target_dir.as_os_str())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(target_dir.as_os_str())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -111,6 +188,7 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let config = config::load_config(app.handle());
+            let _ = sync_launch_on_startup(config.launch_and_auto_scan);
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
                 is_scanning: Arc::new(AtomicBool::new(false)),
@@ -131,7 +209,8 @@ fn main() {
             history::add_system_event,
             test_ssh_connection,
             manual_deploy,
-            get_app_paths
+            get_app_paths,
+            open_path_parent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

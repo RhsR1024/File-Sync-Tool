@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Home, Settings, Activity, Server, ShieldCheck, History, ListChecks } from 'lucide-vue-next';
+import { Settings, Activity, Server, ShieldCheck, History, ListChecks } from 'lucide-vue-next';
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { computed } from 'vue';

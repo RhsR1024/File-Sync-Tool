@@ -241,11 +241,25 @@ fn deploy_single_server<R: tauri::Runtime>(
             &mut copied_bytes,
             start_time,
             &mut last_emit_time,
+            folder_name,
             &local_path_str,
             &server_display,
             &should_cancel,
             &is_paused
          )?;
+
+         // Ensure final 100% event is always emitted for this server.
+         emit_progress(
+            app_handle,
+            folder_name,
+            total_size,
+            total_size,
+            0,
+            0,
+            start_time.elapsed().as_secs(),
+            &local_path_str,
+            &server_display
+         );
     }
 
     // 3. Exec commands
@@ -371,6 +385,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
         &mut copied_bytes, 
         start_time, 
         &mut last_emit_time,
+        &local_p.file_name().unwrap_or_default().to_string_lossy(),
         local_path,
         &server_display,
         &should_cancel,
@@ -448,6 +463,7 @@ fn upload_with_progress<R: tauri::Runtime>(
     copied_bytes: &mut u64,
     start_time: Instant,
     last_emit_time: &mut Instant,
+    folder_display: &str,
     local_path_str: &str,
     remote_path_display: &str,
     should_cancel: &Arc<AtomicBool>,
@@ -468,7 +484,21 @@ fn upload_with_progress<R: tauri::Runtime>(
             let remote_child_str = format!("{}/{}", remote_parent_str.trim_end_matches('/'), child_name_str);
             let remote_child_path = Path::new(&remote_child_str);
             
-            upload_with_progress(app_handle, sftp, &path, remote_child_path, total_size, copied_bytes, start_time, last_emit_time, local_path_str, remote_path_display, should_cancel, is_paused)?;
+            upload_with_progress(
+                app_handle,
+                sftp,
+                &path,
+                remote_child_path,
+                total_size,
+                copied_bytes,
+                start_time,
+                last_emit_time,
+                folder_display,
+                local_path_str,
+                remote_path_display,
+                should_cancel,
+                is_paused
+            )?;
         }
     } else {
         let mut local_file = fs::File::open(local_path).map_err(|e| e.to_string())?;
@@ -511,7 +541,7 @@ fn upload_with_progress<R: tauri::Runtime>(
                 
                 emit_progress(
                     app_handle, 
-                    &local_path.file_name().unwrap_or_default().to_string_lossy(),
+                    folder_display,
                     *copied_bytes, 
                     total_size, 
                     speed, 

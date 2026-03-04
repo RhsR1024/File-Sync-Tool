@@ -54,6 +54,9 @@ export interface AppConfig {
 
   /** Seconds to wait before copying to verify files are fully written. 0 = disabled. Default: 30. */
   stability_check_secs: number;
+
+  /** One switch: launch on startup + auto start scheduler scan after app launch */
+  launch_and_auto_scan: boolean;
 }
 
 export interface ScanResult {
@@ -126,4 +129,8 @@ export async function manualDeploy(server: DeployServer, postCommands: string[],
 
 export async function getAppPaths(): Promise<[string, string]> {
   return await invoke('get_app_paths');
+}
+
+export async function openPathParent(path: string): Promise<void> {
+  await invoke('open_path_parent', { path });
 }

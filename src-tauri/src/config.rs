@@ -80,6 +80,12 @@ pub struct AppConfig {
     /// Set to 0 to disable. Default: 30.
     #[serde(default = "default_stability_secs")]
     pub stability_check_secs: u64,
+
+    /// One switch for:
+    /// 1) launch app on OS startup
+    /// 2) auto start scheduler scan when app starts
+    #[serde(default)]
+    pub launch_and_auto_scan: bool,
 }
 
 fn default_stability_secs() -> u64 { 30 }
@@ -104,6 +110,7 @@ impl Default for AppConfig {
             remote_linux_path: "/tmp/upload".to_string(),
             post_commands: vec![],
             stability_check_secs: 30,
+            launch_and_auto_scan: false,
         }
     }
 }
