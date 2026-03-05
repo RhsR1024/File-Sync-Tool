@@ -12,6 +12,7 @@ use std::sync::{Mutex, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 use std::process::Command;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use tauri::{State, Manager, Emitter};
 
@@ -20,6 +21,14 @@ struct AppState {
     is_scanning: Arc<AtomicBool>,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
@@ -182,11 +191,27 @@ fn open_path_parent(path: String) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
             let _ = app.emit("single-instance", ());
         }))
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            let app_handle = app.handle().clone();
+            let _ = TrayIconBuilder::new()
+                .tooltip("File Sync Tool")
+                .on_tray_icon_event(move |_tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(&app_handle);
+                    }
+                })
+                .build(app)?;
+
             let config = config::load_config(app.handle());
             let _ = sync_launch_on_startup(config.launch_and_auto_scan);
             app.manage(AppState {

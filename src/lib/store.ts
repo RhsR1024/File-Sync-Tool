@@ -322,18 +322,16 @@ export function upsertTaskRecord(payload: {
         target.phase = 'remote_pushing';
     }
 
-    const spaceIdx = payload.remote_path.indexOf(' ');
-    const serverKey = spaceIdx > 0 ? payload.remote_path.substring(0, spaceIdx) : payload.remote_path;
-
-    const existingServer = target.remoteServers.find(s => s.key === serverKey);
+    const serverLabel = payload.remote_path.trim();
+    const existingServer = target.remoteServers.find(s => s.label === serverLabel);
     if (existingServer) {
         existingServer.percentage = payload.percentage;
         existingServer.speed = payload.speed;
         existingServer.completed = payload.percentage >= 100;
     } else {
         target.remoteServers.push({
-            key: serverKey,
-            label: payload.remote_path,
+            key: serverLabel,
+            label: serverLabel,
             percentage: payload.percentage,
             completed: payload.percentage >= 100,
             speed: payload.speed,
@@ -381,9 +379,14 @@ function extractFolderByPrefix(msg: string, prefix: string): string | undefined 
 function completeFromServerSuccess(target: TaskRecord, lowerMsg: string) {
     const matched = /^\[(.+?)\]\s+deployment successful$/.exec(lowerMsg);
     if (matched) {
-        const key = `[${matched[1]}]`;
-        const server = target.remoteServers.find(s => s.key === key || s.key.toLowerCase().startsWith(key.toLowerCase()));
-        if (server) server.completed = true;
+        const key = `[${matched[1].toLowerCase()}]`;
+        for (const server of target.remoteServers) {
+            const labelLower = server.label.toLowerCase();
+            if (labelLower.startsWith(`${key} `) || labelLower === key || server.key.toLowerCase() === key) {
+                server.completed = true;
+                server.percentage = Math.max(server.percentage, 100);
+            }
+        }
     }
 
     if (target.remoteServers.length > 0 && target.remoteServers.every(s => s.completed)) {

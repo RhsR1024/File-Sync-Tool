@@ -170,8 +170,18 @@ function displayElapsed(rec: TaskRecord): string {
 }
 
 function remotePathOf(rec: TaskRecord) {
-  if (rec.remoteServers.length > 0) return rec.remoteServers[0].label;
-  return liveProgress(rec)?.remotePath || '-';
+  const byServers = rec.remoteServers.map(s => s.label).filter(Boolean);
+  if (byServers.length > 0) {
+    return Array.from(new Set(byServers));
+  }
+
+  const live = liveProgress(rec)?.remotePath;
+  return live ? [live] : [];
+}
+
+function remotePathText(rec: TaskRecord) {
+  const paths = remotePathOf(rec);
+  return paths.length > 0 ? paths.join('\n') : '-';
 }
 
 async function copyToClipboard(text: string) {
@@ -332,9 +342,16 @@ watch(activeActionRecord, (val) => {
                 </button>
               </div>
 
-              <div class="flex items-center gap-1 overflow-hidden" :title="remotePathOf(rec)">
-                <div class="truncate text-slate-500 text-xs flex-1">{{ remotePathOf(rec) }}</div>
-                <button v-if="remotePathOf(rec) !== '-'" @click="copyToClipboard(remotePathOf(rec))" class="text-slate-400 hover:text-blue-600 transition-colors">
+              <div class="flex items-start gap-1 overflow-hidden" :title="remotePathText(rec)">
+                <div class="text-slate-500 text-xs flex-1 max-h-14 overflow-auto pr-1">
+                  <template v-if="remotePathOf(rec).length > 0">
+                    <div v-for="(rp, idx) in remotePathOf(rec)" :key="`${rec.id}-rp-${idx}`" class="truncate leading-5">
+                      {{ rp }}
+                    </div>
+                  </template>
+                  <div v-else class="truncate">-</div>
+                </div>
+                <button v-if="remotePathOf(rec).length > 0" @click="copyToClipboard(remotePathText(rec))" class="text-slate-400 hover:text-blue-600 transition-colors">
                   <Copy class="w-3 h-3" />
                 </button>
               </div>
