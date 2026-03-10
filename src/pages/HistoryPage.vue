@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue';
 import { getHistory, clearHistory, type HistoryEntry } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { Trash2, Folder, FileText, ChevronDown, ChevronRight, HardDrive, Play, Pause, Save, Settings, XCircle, CheckCircle } from 'lucide-vue-next';
+import Empty from '@/components/Empty.vue';
 
 const { t } = useI18n();
 const history = ref<HistoryEntry[]>([]);
@@ -72,10 +73,12 @@ onMounted(load);
     </div>
 
     <div class="flex-1 overflow-auto bg-white rounded-xl border border-slate-200 shadow-sm custom-scrollbar">
-      <div v-if="history.length === 0" class="h-full flex flex-col items-center justify-center text-slate-400">
-        <Folder class="w-16 h-16 mb-3 opacity-20" />
-        <span>{{ t('history.noHistory') }}</span>
-      </div>
+      <Empty
+        v-if="history.length === 0"
+        :icon="Folder"
+        :title="t('history.noHistory')"
+        class="h-full"
+      />
       
       <div v-else class="divide-y divide-slate-100">
         <div v-for="entry in history" :key="entry.id" class="p-4 hover:bg-slate-50 transition-colors">

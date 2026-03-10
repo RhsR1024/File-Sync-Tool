@@ -1,6 +1,7 @@
 ﻿<script setup lang="ts">
 import { onMounted, onActivated } from 'vue';
 import { Trash2, Activity, AlertCircle, CheckCircle2 } from 'lucide-vue-next';
+import Empty from '@/components/Empty.vue';
 import { getConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { appStore } from '@/lib/store';
@@ -36,11 +37,13 @@ onMounted(() => { getConfig(); });
         </button>
       </div>
       <div class="flex-1 overflow-auto p-4 font-mono text-xs md:text-sm space-y-1.5 custom-scrollbar">
-        <div v-if="appStore.logs.length === 0"
-             class="h-full flex flex-col items-center justify-center text-slate-700">
-          <Activity class="w-12 h-12 mb-2 opacity-20" />
-          <span class="italic">{{ t('console.noLogs') }}</span>
-        </div>
+        <Empty
+          v-if="appStore.logs.length === 0"
+          :icon="Activity"
+          :title="t('console.noLogs')"
+          :dashed="false"
+          class="h-full text-slate-700"
+        />
         <div v-for="(log, i) in appStore.logs" :key="i"
              class="flex gap-3 hover:bg-white/5 p-0.5 rounded px-2 transition-colors">
           <span class="text-slate-600 shrink-0 select-none">{{ log.time }}</span>

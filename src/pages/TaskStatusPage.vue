@@ -1,6 +1,7 @@
 ﻿<script setup lang="ts">
 import { ref, onMounted, onActivated, watch, computed } from 'vue';
 import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2 } from 'lucide-vue-next';
+import Empty from '@/components/Empty.vue';
 import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, type AppConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { appStore, addLog, markTaskRecordCancelled, setTaskRecordPaused, type TaskRecord } from '@/lib/store';
@@ -76,12 +77,12 @@ function clearRecords() {
 }
 
 function formatStatus(phase: TaskRecord['phase']) {
-  if (phase === 'paused') return '暂停中';
-  if (phase === 'remote_pushing') return '远程推送中';
-  if (phase === 'remote_deploying') return '远程部署中';
-  if (phase === 'cancelled') return '已取消';
-  if (phase === 'completed') return '已完成';
-  return '复制中';
+  if (phase === 'paused') return t('console.phasePaused');
+  if (phase === 'remote_pushing') return t('console.phaseRemotePushing');
+  if (phase === 'remote_deploying') return t('console.phaseRemoteDeploying');
+  if (phase === 'cancelled') return t('console.phaseCancelled');
+  if (phase === 'completed') return t('console.phaseCompleted');
+  return t('console.phaseCopying');
 }
 
 function statusClass(phase: TaskRecord['phase']) {
@@ -289,10 +290,12 @@ watch(activeActionRecord, (val) => {
           </button>
         </div>
 
-        <div v-if="!orderedRecords.length" class="min-h-[220px] flex flex-col items-center justify-center text-slate-400 border-2 border-dashed border-slate-200 rounded-lg bg-white">
-          <Activity class="w-12 h-12 mb-2 opacity-20" />
-          <span>No active tasks running</span>
-        </div>
+        <Empty
+          v-if="!orderedRecords.length"
+          :icon="Activity"
+          :title="t('console.noRecords')"
+          class="min-h-[220px]"
+        />
 
         <div v-else class="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
           <div :class="['grid gap-3 p-3 bg-slate-100 text-slate-600 font-bold border-b border-slate-200 text-sm', taskTableCols]">
@@ -324,9 +327,11 @@ watch(activeActionRecord, (val) => {
                 {{ formatStatus(rec.phase) }}
               </div>
 
-              <div class="relative h-5 bg-slate-100 rounded-full overflow-hidden border border-slate-200 w-full max-w-[170px]">
-                <div class="absolute inset-0 transition-all duration-300" :class="progressClass(rec.phase)" :style="{ width: `${progressValue(rec)}%` }"></div>
-                <div class="absolute inset-0 flex items-center justify-center text-[11px] text-white font-bold drop-shadow-md z-10">
+              <div class="flex flex-col gap-1 w-full max-w-[170px]">
+                <div class="relative h-2 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
+                  <div class="absolute inset-y-0 left-0 transition-all duration-300 rounded-full" :class="progressClass(rec.phase)" :style="{ width: `${progressValue(rec)}%` }"></div>
+                </div>
+                <div class="text-[11px] font-semibold tabular-nums" :class="progressValue(rec) >= 100 ? 'text-emerald-600' : 'text-slate-500'">
                   {{ progressValue(rec).toFixed(1) }}%
                 </div>
               </div>

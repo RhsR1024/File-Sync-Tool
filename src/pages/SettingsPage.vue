@@ -1,7 +1,7 @@
-<script setup lang="ts">
-import { ref, onMounted } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, CheckCircle, XCircle, FileText, Copy } from 'lucide-vue-next';
-import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, openPathParent, type AppConfig, type ScanTask } from '@/lib/tauri';
+﻿<script setup lang="ts">
+import { ref, onMounted, computed } from 'vue';
+import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy } from 'lucide-vue-next';
+import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, openPathParent, type AppConfig, type ScanTask, type DeployServer } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { restartSchedulerInterval } from '@/lib/scheduler';
 import { useI18n } from 'vue-i18n';
@@ -28,7 +28,9 @@ const config = ref<AppConfig>({
   remote_linux_path: '',
   post_commands: [],
   stability_check_secs: 30,
-  launch_and_auto_scan: false
+  recent_file_guard_mins: 3,
+  launch_and_auto_scan: false,
+  close_to_tray: false
 });
 
 const newExt = ref('');
@@ -36,6 +38,39 @@ const newInclude = ref('');
 const newCommand = ref('');
 const newTimeRange = ref(''); // "05:00-09:00"
 const statusMsg = ref('');
+const isServerManagerOpen = ref(false);
+const isTaskServerPickerOpen = ref(false);
+
+const enabledServerCount = computed(() => config.value.servers.filter(server => server.enabled).length);
+const selectedTaskServers = computed(() => config.value.servers.filter(server => taskForm.value.deploy_server_ids.includes(server.id)));
+const intervalError = computed(() => config.value.interval_minutes < 5 ? t('settings.minIntervalError', { min: 5 }) : '');
+const stabilityCheckError = computed(() => config.value.stability_check_secs < 60 ? t('settings.minStabilityCheckError', { min: 60 }) : '');
+const recentFileGuardError = computed(() => config.value.recent_file_guard_mins < 3 ? t('settings.minRecentFileGuardError', { min: 3 }) : '');
+const hasConfigErrors = computed(() => Boolean(intervalError.value || stabilityCheckError.value || recentFileGuardError.value));
+
+function serverDisplayName(server: DeployServer) {
+    return server.name || server.host;
+}
+
+function openServerManager() {
+    isServerManagerOpen.value = true;
+}
+
+function closeServerManager() {
+    isServerManagerOpen.value = false;
+}
+
+function openTaskServerPicker() {
+    isTaskServerPickerOpen.value = true;
+}
+
+function closeTaskServerPicker() {
+    isTaskServerPickerOpen.value = false;
+}
+
+function selectAllTaskServers() {
+    taskForm.value.deploy_server_ids = config.value.servers.map(server => server.id);
+}
 
 // Task Management
 const isEditingTask = ref(false);
@@ -92,7 +127,7 @@ function saveTask() {
 }
 
 function removeTask(index: number) {
-    if (confirm('Delete this task?')) {
+    if (confirm(t('settings.confirmDeleteTask'))) {
         config.value.tasks.splice(index, 1);
         save();
     }
@@ -129,12 +164,14 @@ function resetServerForm() {
 
 function addServer() {
     resetServerForm();
+    isServerManagerOpen.value = true;
     isEditingServer.value = true;
 }
 
 function editServer(index: number) {
     editingServerIndex.value = index;
     serverForm.value = { ...config.value.servers[index] };
+    isServerManagerOpen.value = true;
     isEditingServer.value = true;
 }
 
@@ -149,7 +186,7 @@ function saveServer() {
 }
 
 function removeServer(index: number) {
-    if (confirm('Delete this server configuration?')) {
+    if (confirm(t('settings.confirmDeleteServer'))) {
         config.value.servers.splice(index, 1);
         save();
     }
@@ -187,6 +224,7 @@ async function testAllServers() {
 const manualLocalPath = ref('');
 const manualRemotePath = ref('/tmp/upload');
 const selectedServerId = ref('');
+const manualDeployMsgType = ref<'success' | 'error' | ''>('');
 
 async function handleManualDeploy() {
     if (!manualLocalPath.value || !manualRemotePath.value || !selectedServerId.value) return;
@@ -204,6 +242,7 @@ async function handleManualDeploy() {
 
     appStore.isManualDeploying = true;
     appStore.manualDeployMsg = '';
+    manualDeployMsgType.value = '';
     
     try {
         let successCount = 0;
@@ -222,14 +261,17 @@ async function handleManualDeploy() {
         }
         
         if (failCount === 0) {
-            appStore.manualDeployMsg = `Deployment successful to ${successCount} servers!`;
-            addSystemEvent('MANUAL_DEPLOY', `Deployed to ${successCount} servers successfully.`);
+            appStore.manualDeployMsg = t('settings.deploySuccess', { count: successCount });
+            manualDeployMsgType.value = 'success';
+            addSystemEvent('MANUAL_DEPLOY', t('settings.deploySuccessEvent', { count: successCount }));
         } else {
-            appStore.manualDeployMsg = `Deployment finished. Success: ${successCount}, Failed: ${failCount}. Error: ${lastError}`;
+            appStore.manualDeployMsg = t('settings.deployFinished', { success: successCount, failed: failCount, error: lastError });
+            manualDeployMsgType.value = 'error';
         }
         
     } catch (e) {
-        appStore.manualDeployMsg = `Deployment error: ${e}`;
+        appStore.manualDeployMsg = t('settings.deployError', { error: String(e) });
+        manualDeployMsgType.value = 'error';
     } finally {
         appStore.isManualDeploying = false;
     }
@@ -324,6 +366,10 @@ async function load() {
 }
 
 async function save() {
+  if (hasConfigErrors.value) {
+    return;
+  }
+
   try {
     await saveConfig(config.value);
     statusMsg.value = t('settings.saved');
@@ -343,25 +389,31 @@ onMounted(load);
   <div class="p-6 max-w-4xl mx-auto space-y-8 pb-20">
     <div class="flex justify-between items-center">
       <h2 class="text-2xl font-bold text-slate-800">{{ t('settings.title') }}</h2>
-      <button 
+      <button
         @click="save"
+        :disabled="hasConfigErrors"
         class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors shadow-sm"
+        :class="hasConfigErrors ? 'opacity-50 cursor-not-allowed hover:bg-blue-600' : ''"
       >
         <Save class="w-4 h-4" />
         {{ t('settings.save') }}
       </button>
     </div>
 
-    <div v-if="statusMsg" class="bg-green-100 text-green-700 p-3 rounded-lg text-sm font-medium">
+    <div v-if="statusMsg" class="bg-green-50 text-green-700 p-3 rounded-lg text-sm font-medium border border-green-200 flex items-center gap-2">
+      <span class="w-2 h-2 rounded-full bg-green-500 shrink-0"></span>
       {{ statusMsg }}
     </div>
 
     <!-- Startup Behavior -->
-    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-      <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
-        <Clock class="w-5 h-5" />
-        {{ t('settings.startupOptions') }}
-      </h3>
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-violet-100 text-violet-600 flex items-center justify-center shrink-0">
+          <Clock class="w-4 h-4" />
+        </div>
+        <h3 class="text-base font-semibold text-slate-700">{{ t('settings.startupOptions') }}</h3>
+      </div>
+      <div class="p-6 space-y-4">
       <label class="flex items-center justify-between gap-3">
         <div>
           <div class="text-sm font-medium text-slate-700">{{ t('settings.launchAndAutoScan') }}</div>
@@ -372,21 +424,35 @@ onMounted(load);
           <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
         </div>
       </label>
+      <label class="flex items-center justify-between gap-3">
+        <div>
+          <div class="text-sm font-medium text-slate-700">{{ t('settings.closeToTray') }}</div>
+          <p class="text-xs text-slate-400 mt-1">{{ t('settings.closeToTrayDesc') }}</p>
+        </div>
+        <div class="shrink-0 relative inline-flex items-center cursor-pointer">
+          <input type="checkbox" v-model="config.close_to_tray" @change="save" class="sr-only peer">
+          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+        </div>
+      </label>
+      </div>
     </div>
 
     <!-- Language Settings -->
-    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-      <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
-        <Globe class="w-5 h-5" />
-        {{ t('settings.language') }}
-      </h3>
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center shrink-0">
+          <Globe class="w-4 h-4" />
+        </div>
+        <h3 class="text-base font-semibold text-slate-700">{{ t('settings.language') }}</h3>
+      </div>
+      <div class="p-6 space-y-4">
       <div class="flex gap-4">
         <button 
           @click="changeLanguage('zh')" 
           class="px-4 py-2 rounded-lg border transition-colors"
           :class="locale === 'zh' ? 'bg-blue-50 border-blue-500 text-blue-700 font-medium' : 'border-slate-300 text-slate-600 hover:bg-slate-50'"
         >
-          中文
+          {{ t('settings.languageChinese') }}
         </button>
         <button 
           @click="changeLanguage('en')" 
@@ -396,14 +462,18 @@ onMounted(load);
           English
         </button>
       </div>
+      </div>
     </div>
 
     <!-- App Data Paths -->
-    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-      <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
-        <FileText class="w-5 h-5" />
-        {{ t('settings.configPaths') }}
-      </h3>
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center shrink-0">
+          <FileText class="w-4 h-4" />
+        </div>
+        <h3 class="text-base font-semibold text-slate-700">{{ t('settings.configPaths') }}</h3>
+      </div>
+      <div class="p-6 space-y-4">
       <div class="space-y-3">
          <div>
             <label class="block text-xs font-medium text-slate-500 mb-1 uppercase tracking-wider">{{ t('settings.configFile') }}</label>
@@ -430,14 +500,18 @@ onMounted(load);
             </div>
          </div>
       </div>
+      </div>
     </div>
 
     <!-- Local Path -->
-    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-      <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
-        <FolderOpen class="w-5 h-5" />
-        {{ t('settings.localStorage') }}
-      </h3>
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
+          <FolderOpen class="w-4 h-4" />
+        </div>
+        <h3 class="text-base font-semibold text-slate-700">{{ t('settings.localStorage') }}</h3>
+      </div>
+      <div class="p-6 space-y-4">
       <div>
         <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.localPath') }}</label>
         <input 
@@ -447,28 +521,31 @@ onMounted(load);
         />
         <p class="text-xs text-slate-400 mt-1">{{ t('settings.localPathDesc') }}</p>
       </div>
+      </div>
     </div>
-    
+
     <!-- Tasks Management -->
-    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-        <div class="flex justify-between items-center">
-            <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
-                <ListChecks class="w-5 h-5" />
-                {{ t('settings.scanTasks') }}
-            </h3>
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center shrink-0">
+            <ListChecks class="w-4 h-4" />
+          </div>
+          <h3 class="text-base font-semibold text-slate-700">{{ t('settings.scanTasks') }}</h3>
+        </div>
             <button @click="addTask" class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors">
                 <Plus class="w-3 h-3" /> {{ t('settings.addTask') }}
             </button>
-        </div>
-
+      </div>
+      <div class="p-6 space-y-3">
         <div v-if="config.tasks.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
             {{ t('settings.noTasks') }}
         </div>
-        
+
         <div v-else class="space-y-3">
             <div v-for="(task, idx) in config.tasks" :key="task.id" class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-center justify-between gap-4">
                 <div class="flex items-center gap-3 overflow-hidden flex-1">
-                    <div class="shrink-0" title="Enable/Disable">
+                    <div class="shrink-0" :title="t('settings.enableToggle')">
                          <input type="checkbox" v-model="task.enabled" @change="save" class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer">
                     </div>
                     <div class="flex-1 min-w-0">
@@ -476,7 +553,7 @@ onMounted(load);
                             {{ task.name }}
                             <span class="text-xs px-2 py-0.5 rounded-full border"
                                 :class="task.rule.type === 'VersionMatch' ? 'bg-purple-50 text-purple-700 border-purple-100' : 'bg-orange-50 text-orange-700 border-orange-100'">
-                                {{ task.rule.type === 'VersionMatch' ? 'Version' : 'Date' }}: {{ task.rule.value }}
+                                {{ task.rule.type === 'VersionMatch' ? t('settings.ruleVersionShort') : t('settings.ruleDateShort') }}: {{ task.rule.value }}
                             </span>
                             <!-- Associated servers badges -->
                             <template v-if="task.deploy_server_ids && task.deploy_server_ids.length > 0">
@@ -487,7 +564,7 @@ onMounted(load);
                                 </span>
                             </template>
                             <span v-else-if="config.deploy_enabled" class="text-xs px-2 py-0.5 rounded-full bg-slate-50 text-slate-400 border border-slate-200">
-                                {{ t('settings.taskDeployAll') }}
+                                {{ t('settings.taskDeployNone') }}
                             </span>
                         </div>
                         <div class="text-xs text-slate-500 font-mono truncate" :title="task.remote_path">
@@ -499,14 +576,15 @@ onMounted(load);
                     <button @click="editTask(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
                         <Edit class="w-4 h-4" />
                     </button>
-                    <button @click="removeTask(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete">
+                    <button @click="removeTask(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')">
                         <Trash2 class="w-4 h-4" />
                     </button>
                 </div>
             </div>
         </div>
+      </div>
     </div>
-    
+
     <!-- Task Edit Modal -->
     <div v-if="isEditingTask" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
         <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all">
@@ -514,7 +592,7 @@ onMounted(load);
             <div class="space-y-4">
                 <div>
                     <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskName') }}</label>
-                    <input v-model="taskForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Daily Build Scan" />
+                    <input v-model="taskForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" :placeholder="t('settings.taskNamePlaceholder')" />
                 </div>
                 <div>
                     <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.remotePath') }}</label>
@@ -551,22 +629,21 @@ onMounted(load);
                         {{ t('settings.taskDeployServers') }}
                     </label>
                     <p class="text-xs text-slate-400 mb-2">{{ t('settings.taskDeployServersDesc') }}</p>
-                    <div class="space-y-2">
-                        <label v-for="server in config.servers" :key="server.id"
-                               class="flex items-center gap-2.5 p-2 rounded-lg border cursor-pointer transition-colors"
-                               :class="taskForm.deploy_server_ids.includes(server.id)
-                                 ? 'bg-blue-50 border-blue-200 text-blue-800'
-                                 : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'">
-                            <input type="checkbox"
-                                   :value="server.id"
-                                   v-model="taskForm.deploy_server_ids"
-                                   class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer" />
-                            <div class="flex-1 min-w-0">
-                                <div class="font-medium text-sm">{{ server.name || server.host }}</div>
-                                <div class="text-xs font-mono opacity-60">{{ server.user }}@{{ server.host }}:{{ server.port }}</div>
+                    <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-3">
+                        <div class="flex items-center justify-between gap-3 flex-wrap">
+                            <div class="text-sm text-slate-600">
+                                <span v-if="selectedTaskServers.length > 0">{{ t('settings.selectedServersCount', { count: selectedTaskServers.length }) }}</span>
+                                <span v-else>{{ t('settings.taskDeployNone') }}</span>
                             </div>
-                            <span v-if="!server.enabled" class="text-xs bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded">Disabled</span>
-                        </label>
+                            <button @click="openTaskServerPicker" type="button" class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium bg-white hover:bg-blue-50 border border-blue-100 px-3 py-1.5 rounded-lg transition-colors">
+                                <Server class="w-3 h-3" /> {{ t('settings.selectServersAction') }}
+                            </button>
+                        </div>
+                        <div v-if="selectedTaskServers.length > 0" class="flex flex-wrap gap-2">
+                            <span v-for="server in selectedTaskServers" :key="server.id" class="text-xs px-2 py-1 rounded-full bg-white border border-slate-200 text-slate-700">
+                                {{ serverDisplayName(server) }}
+                            </span>
+                        </div>
                     </div>
                     <p class="text-xs text-slate-400 mt-2 italic">{{ t('settings.taskDeployServersHint') }}</p>
                 </div>
@@ -578,60 +655,133 @@ onMounted(load);
         </div>
     </div>
 
-    <!-- Interval -->
-    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-      <h3 class="text-lg font-semibold text-slate-700">{{ t('settings.scanInterval') }}</h3>
-      <div class="flex items-center gap-4">
+    <div v-if="isTaskServerPickerOpen" class="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
+        <div class="bg-white rounded-xl p-6 w-full max-w-2xl shadow-2xl max-h-[80vh] overflow-hidden flex flex-col">
+            <div class="flex items-center justify-between gap-4 mb-4">
+                <div>
+                    <h3 class="text-lg font-bold text-slate-800">{{ t('settings.selectDeployServers') }}</h3>
+                    <p class="text-sm text-slate-400 mt-1">{{ t('settings.selectDeployServersDesc') }}</p>
+                </div>
+                <button @click="closeTaskServerPicker" class="px-3 py-1.5 text-slate-500 hover:bg-slate-100 rounded-lg transition-colors">{{ t('settings.close') }}</button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto space-y-2 pr-1">
+                <label v-for="server in config.servers" :key="server.id"
+                       class="flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-colors"
+                       :class="taskForm.deploy_server_ids.includes(server.id)
+                         ? 'bg-blue-50 border-blue-200 text-blue-800'
+                         : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'">
+                    <input type="checkbox"
+                           :value="server.id"
+                           v-model="taskForm.deploy_server_ids"
+                           class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer" />
+                    <div class="flex-1 min-w-0">
+                        <div class="font-medium text-sm flex items-center gap-2 flex-wrap">
+                            {{ serverDisplayName(server) }}
+                            <span v-if="!server.enabled" class="text-[11px] bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded">{{ t('settings.disabled') }}</span>
+                        </div>
+                        <div class="text-xs font-mono opacity-70 break-all">{{ server.user }}@{{ server.host }}:{{ server.port }} · {{ server.remote_path }}</div>
+                    </div>
+                </label>
+            </div>
+
+            <div class="flex justify-between items-center gap-3 mt-5 pt-4 border-t border-slate-100">
+                <div class="flex items-center gap-2">
+                    <button @click="selectAllTaskServers" type="button" class="px-4 py-2 text-blue-600 hover:bg-blue-50 rounded-lg font-medium transition-colors">{{ t('settings.selectAllServers') }}</button>
+                    <button @click="taskForm.deploy_server_ids = []" type="button" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">{{ t('settings.clearSelection') }}</button>
+                </div>
+                <button @click="closeTaskServerPicker" type="button" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm">{{ t('settings.save') }}</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scan Timing -->
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
+          <Clock class="w-4 h-4" />
+        </div>
+        <h3 class="text-base font-semibold text-slate-700">{{ t('settings.scanTime') }}</h3>
+      </div>
+      <div class="p-6 space-y-5">
+      <div class="space-y-3">
+        <label class="block text-base font-medium text-slate-700">{{ t('settings.scanInterval') }}</label>
+        <div class="flex items-center gap-3">
         <input 
           v-model.number="config.interval_minutes"
           type="number"
           min="5"
-          class="w-24 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+          class="w-28 h-10 px-3 border rounded-lg text-slate-700 focus:ring-2 outline-none"
+          :class="intervalError ? 'border-red-400 focus:ring-red-200 focus:border-red-400 bg-red-50' : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'"
         />
-        <span class="text-slate-600">{{ t('settings.minutes') }}</span>
-        <span class="text-xs text-amber-500 ml-2">{{ t('settings.minInterval') }}</span>
+        <span class="text-sm font-medium text-slate-500">{{ t('settings.minutes') }}</span>
+        <span class="text-xs leading-5 text-slate-400">{{ t('settings.minInterval') }}</span>
+        </div>
+        <p v-if="intervalError" class="text-xs leading-5 text-red-500">{{ intervalError }}</p>
       </div>
 
       <!-- Stability Check -->
-      <div class="pt-4 border-t border-slate-100 space-y-3">
-        <h4 class="text-md font-medium text-slate-700 flex items-center gap-2">
-          <Clock class="w-4 h-4 text-blue-500" />
+      <div class="pt-5 border-t border-slate-100 space-y-4">
+        <h4 class="text-base font-medium text-slate-700">
           {{ t('settings.stabilityCheck') }}
         </h4>
-        <p class="text-xs text-slate-400">{{ t('settings.stabilityCheckDesc') }}</p>
-        <div class="flex items-center gap-4">
-          <input
-            v-model.number="config.stability_check_secs"
-            type="number"
-            min="0"
-            class="w-24 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-          />
-          <span class="text-slate-600">{{ t('settings.seconds') }}</span>
-          <span class="text-xs text-slate-400">{{ t('settings.stabilityCheckHint') }}</span>
+        <p class="text-sm leading-6 text-slate-500">{{ t('settings.stabilityCheckDesc') }}</p>
+        <div class="space-y-4">
+          <div class="space-y-3">
+            <label class="block text-base font-medium text-slate-700">{{ t('settings.recentFileGuard') }}</label>
+            <div class="flex items-center gap-3">
+              <input
+                v-model.number="config.recent_file_guard_mins"
+                type="number"
+                min="3"
+                class="w-28 h-10 px-3 border rounded-lg text-slate-700 focus:ring-2 outline-none"
+                :class="recentFileGuardError ? 'border-red-400 focus:ring-red-200 focus:border-red-400 bg-red-50' : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'"
+              />
+              <span class="text-sm font-medium text-slate-500">{{ t('settings.minutes') }}</span>
+            </div>
+            <p v-if="recentFileGuardError" class="text-xs leading-5 text-red-500">{{ recentFileGuardError }}</p>
+            <p class="text-sm leading-6 text-slate-500">{{ t('settings.recentFileGuardDesc') }}</p>
+            <p class="text-xs leading-5 text-slate-400">{{ t('settings.recentFileGuardHint') }}</p>
+          </div>
+
+          <div class="space-y-3">
+            <label class="block text-base font-medium text-slate-700">{{ t('settings.stabilityCheckSeconds') }}</label>
+            <div class="flex items-center gap-3">
+              <input
+                v-model.number="config.stability_check_secs"
+                type="number"
+                min="60"
+                class="w-28 h-10 px-3 border rounded-lg text-slate-700 focus:ring-2 outline-none"
+                :class="stabilityCheckError ? 'border-red-400 focus:ring-red-200 focus:border-red-400 bg-red-50' : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'"
+              />
+              <span class="text-sm font-medium text-slate-500">{{ t('settings.seconds') }}</span>
+            </div>
+            <p v-if="stabilityCheckError" class="text-xs leading-5 text-red-500">{{ stabilityCheckError }}</p>
+            <p class="text-xs leading-5 text-slate-400">{{ t('settings.stabilityCheckHint') }}</p>
+          </div>
         </div>
       </div>
 
       <!-- Time Ranges -->
-      <div class="pt-4 border-t border-slate-100 space-y-3">
-          <h4 class="text-md font-medium text-slate-700 flex items-center gap-2">
-              <Clock class="w-4 h-4" />
+      <div class="pt-5 border-t border-slate-100 space-y-4">
+          <h4 class="text-base font-medium text-slate-700">
               {{ t('settings.timeRanges') }}
           </h4>
-          <p class="text-xs text-slate-400">{{ t('settings.timeRangesDesc') }}</p>
+          <p class="text-sm leading-6 text-slate-500">{{ t('settings.timeRangesDesc') }}</p>
 
-          <div class="flex gap-2">
+          <div class="flex items-center gap-3">
             <input 
               v-model="newTimeRange"
               @keyup.enter="addTimeRange"
               placeholder="09:00-18:00"
-              class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+              class="flex-1 h-10 px-3 border border-slate-300 rounded-lg text-slate-700 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500 outline-none"
             />
-            <button @click="addTimeRange" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600">
+            <button @click="addTimeRange" class="h-10 w-10 shrink-0 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 flex items-center justify-center transition-colors">
               <Plus class="w-5 h-5" />
             </button>
           </div>
           <div class="flex flex-wrap gap-2">
-            <div v-for="(range, i) in config.time_ranges" :key="i" class="bg-amber-50 text-amber-700 px-3 py-1 rounded-full text-sm font-medium border border-amber-100 flex items-center gap-2">
+            <div v-for="(range, i) in config.time_ranges" :key="i" class="bg-amber-50 text-amber-700 px-3 py-1.5 rounded-full text-sm font-medium border border-amber-100 flex items-center gap-2">
               {{ range }}
               <button @click="removeTimeRange(i)" class="hover:text-amber-900">
                 <Trash2 class="w-3 h-3" />
@@ -639,16 +789,23 @@ onMounted(load);
             </div>
           </div>
       </div>
+      </div>
     </div>
 
     <!-- File Filters -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
       <!-- File Extensions -->
-      <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-        <h3 class="text-lg font-semibold text-slate-700">{{ t('settings.fileExtensions') }}</h3>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0">
+            <FileText class="w-4 h-4" />
+          </div>
+          <h3 class="text-base font-semibold text-slate-700">{{ t('settings.fileExtensions') }}</h3>
+        </div>
+        <div class="p-6 space-y-4">
         <p class="text-xs text-slate-400">{{ t('settings.fileExtensionsDesc') }}</p>
         <div class="flex gap-2">
-          <input 
+          <input
             v-model="newExt"
             @keyup.enter="addExt"
             placeholder="exe"
@@ -666,14 +823,21 @@ onMounted(load);
             </button>
           </div>
         </div>
+        </div>
       </div>
 
       <!-- Filename Includes -->
-      <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
-        <h3 class="text-lg font-semibold text-slate-700">{{ t('settings.filenameKeywords') }}</h3>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-purple-100 text-purple-600 flex items-center justify-center shrink-0">
+            <ListChecks class="w-4 h-4" />
+          </div>
+          <h3 class="text-base font-semibold text-slate-700">{{ t('settings.filenameKeywords') }}</h3>
+        </div>
+        <div class="p-6 space-y-4">
         <p class="text-xs text-slate-400">{{ t('settings.filenameKeywordsDesc') }}</p>
         <div class="flex gap-2">
-          <input 
+          <input
             v-model="newInclude"
             @keyup.enter="addInclude"
             placeholder="UMS"
@@ -691,33 +855,37 @@ onMounted(load);
             </button>
           </div>
         </div>
+        </div>
       </div>
     </div>
 
     <!-- Deploy Settings -->
-    <div class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-6">
-      <div class="flex items-center justify-between">
-         <h3 class="text-lg font-semibold text-slate-700 flex items-center gap-2">
-           <Server class="w-5 h-5" />
-           {{ t('settings.remoteDeployment') }}
-         </h3>
-         <div class="flex items-center gap-2">
-             <label class="relative inline-flex items-center cursor-pointer">
-               <input type="checkbox" v-model="config.deploy_enabled" class="sr-only peer">
-               <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-               <span class="ml-3 text-sm font-medium text-slate-700">{{ t('settings.enable') }}</span>
-             </label>
-         </div>
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+            <Server class="w-4 h-4" />
+          </div>
+          <h3 class="text-base font-semibold text-slate-700">{{ t('settings.remoteDeployment') }}</h3>
+        </div>
+        <label class="relative inline-flex items-center cursor-pointer">
+          <input type="checkbox" v-model="config.deploy_enabled" class="sr-only peer">
+          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+          <span class="ml-3 text-sm font-medium text-slate-700">{{ t('settings.enable') }}</span>
+        </label>
       </div>
 
-      <div v-if="config.deploy_enabled" class="space-y-6">
+      <div v-if="config.deploy_enabled" class="p-6 space-y-6">
           <!-- Server List -->
           <div>
-              <div class="flex justify-between items-center mb-3">
-                  <h4 class="font-medium text-slate-700">{{ t('settings.servers') }}</h4>
+              <div class="flex justify-between items-start gap-4 mb-3">
+                  <div>
+                      <h4 class="font-medium text-slate-700">{{ t('settings.servers') }}</h4>
+                      <p class="text-xs text-slate-400 mt-1">{{ t('settings.manageModeDesc') }}</p>
+                  </div>
                   <div class="flex gap-2">
-                      <button @click="testAllServers" class="text-xs text-slate-600 hover:text-slate-800 flex items-center gap-1 font-medium bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg transition-colors" v-if="config.servers.length > 0">
-                           <Server class="w-3 h-3" /> {{ t('settings.testAll') }}
+                      <button @click="openServerManager" class="text-xs text-slate-600 hover:text-slate-800 flex items-center gap-1 font-medium bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg transition-colors" v-if="config.servers.length > 0">
+                           <Server class="w-3 h-3" /> {{ t('settings.detailsList') }}
                       </button>
                       <button @click="addServer" class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors">
                           <Plus class="w-3 h-3" /> {{ t('settings.addServer') }}
@@ -729,76 +897,108 @@ onMounted(load);
                   {{ t('settings.noServers') }}
               </div>
               
-              <div v-else class="space-y-3">
-                  <div v-for="(server, idx) in config.servers" :key="server.id" class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow">
-                      <div class="flex items-center justify-between">
-                          <div class="flex items-center gap-3 overflow-hidden flex-1">
-                              <input type="checkbox" v-model="server.enabled" @change="save" class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer">
-                              <div class="truncate flex-1 min-w-0">
-                                  <div class="font-medium text-slate-800 flex items-center gap-2">
-                                      {{ server.name || server.host }}
-                                      <span v-if="!server.enabled" class="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">Disabled</span>
+              <div v-else class="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-4">
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div class="rounded-xl bg-white border border-slate-200 p-4">
+                          <div class="text-xs text-slate-400">{{ t('settings.serverCount') }}</div>
+                          <div class="text-2xl font-bold text-slate-800 mt-1">{{ config.servers.length }}</div>
+                      </div>
+                      <div class="rounded-xl bg-white border border-slate-200 p-4">
+                          <div class="text-xs text-slate-400">{{ t('settings.enabledCount') }}</div>
+                          <div class="text-2xl font-bold text-emerald-600 mt-1">{{ enabledServerCount }}</div>
+                      </div>
+                  </div>
+
+                  <div class="flex flex-wrap gap-2">
+                      <span v-for="server in config.servers.slice(0, 3)" :key="server.id" class="text-xs px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700">
+                          {{ serverDisplayName(server) }}
+                      </span>
+                      <span v-if="config.servers.length > 3" class="text-xs px-2.5 py-1 rounded-full bg-slate-200 text-slate-600">+{{ config.servers.length - 3 }} 台</span>
+                  </div>
+              </div>
+          </div>
+
+          <div v-if="isServerManagerOpen" class="fixed inset-0 bg-black/50 flex items-center justify-center z-[55] p-4">
+              <div class="bg-white rounded-xl p-6 w-full max-w-5xl shadow-2xl max-h-[86vh] overflow-hidden flex flex-col">
+                  <div class="flex items-center justify-between gap-4 mb-4">
+                      <div>
+                          <h3 class="text-lg font-bold text-slate-800">{{ t('settings.serverDetailsTitle') }}</h3>
+                          <p class="text-sm text-slate-400 mt-1">{{ t('settings.serverDetailsDesc') }}</p>
+                      </div>
+                      <div class="flex items-center gap-2">
+                          <button @click="testAllServers" class="text-xs text-slate-600 hover:text-slate-800 flex items-center gap-1 font-medium bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg transition-colors" v-if="config.servers.length > 0">
+                              <Server class="w-3 h-3" /> {{ t('settings.testAll') }}
+                          </button>
+                          <button @click="closeServerManager" class="px-3 py-1.5 text-slate-500 hover:bg-slate-100 rounded-lg transition-colors">{{ t('settings.close') }}</button>
+                      </div>
+                  </div>
+
+                  <div class="flex-1 overflow-y-auto pr-1 space-y-3">
+                      <div v-for="(server, idx) in config.servers" :key="server.id" class="border border-slate-200 rounded-xl p-4 bg-white hover:shadow-sm transition-shadow">
+                          <div class="flex items-start justify-between gap-4 flex-wrap">
+                              <div class="flex items-start gap-3 flex-1 min-w-[280px]">
+                                  <input type="checkbox" v-model="server.enabled" @change="save" class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer mt-1">
+                                  <div class="flex-1 min-w-0">
+                                      <div class="font-medium text-slate-800 flex items-center gap-2 flex-wrap">
+                                          {{ serverDisplayName(server) }}
+                                          <span v-if="!server.enabled" class="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">{{ t('settings.disabled') }}</span>
+                                      </div>
+                                      <div class="text-xs text-slate-500 font-mono break-all mt-1">{{ server.user }}@{{ server.host }}:{{ server.port }}</div>
+                                      <div class="text-xs text-slate-400 font-mono break-all mt-1">{{ server.remote_path }}</div>
                                   </div>
-                                  <div class="text-xs text-slate-500 font-mono truncate">{{ server.user }}@{{ server.host }}:{{ server.port }} <span class="text-slate-300">|</span> {{ server.remote_path }}</div>
+                              </div>
+                              <div class="flex items-center gap-1 shrink-0">
+                                  <button @click="testServerConnection(idx)"
+                                          class="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg transition-colors border font-medium"
+                                          :class="{
+                                            'text-slate-500 border-slate-200 hover:text-blue-600 hover:bg-blue-50 hover:border-blue-200': getServerStatus(server.id).state === 'idle',
+                                            'text-blue-500 border-blue-200 bg-blue-50 cursor-not-allowed': getServerStatus(server.id).state === 'testing',
+                                            'text-emerald-600 border-emerald-200 bg-emerald-50': getServerStatus(server.id).state === 'ok',
+                                            'text-red-600 border-red-200 bg-red-50': getServerStatus(server.id).state === 'error',
+                                          }"
+                                          :disabled="getServerStatus(server.id).state === 'testing'"
+                                          :title="getServerStatus(server.id).msg || t('settings.testConnection')">
+                                      <Server v-if="getServerStatus(server.id).state === 'idle'" class="w-3.5 h-3.5" />
+                                      <svg v-else-if="getServerStatus(server.id).state === 'testing'" class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                                          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/>
+                                          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                                      </svg>
+                                      <span v-else-if="getServerStatus(server.id).state === 'ok'" class="relative flex h-2 w-2">
+                                          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                          <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                      </span>
+                                      <XCircle v-else class="w-3.5 h-3.5" />
+                                      <span>{{
+                                        getServerStatus(server.id).state === 'testing' ? t('settings.testing') :
+                                        getServerStatus(server.id).state === 'ok' ? t('settings.connected') :
+                                        getServerStatus(server.id).state === 'error' ? t('settings.failed') :
+                                        t('settings.testConnection')
+                                      }}</span>
+                                  </button>
+                                  <button @click="editServer(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
+                                      <Edit class="w-4 h-4" />
+                                  </button>
+                                  <button @click="removeServer(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')">
+                                      <Trash2 class="w-4 h-4" />
+                                  </button>
                               </div>
                           </div>
-                          <div class="flex items-center gap-1 shrink-0">
-                              <!-- Inline test button with status indicator -->
-                              <button @click="testServerConnection(idx)"
-                                      class="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg transition-colors border font-medium"
-                                      :class="{
-                                        'text-slate-500 border-slate-200 hover:text-blue-600 hover:bg-blue-50 hover:border-blue-200': getServerStatus(server.id).state === 'idle',
-                                        'text-blue-500 border-blue-200 bg-blue-50 cursor-not-allowed': getServerStatus(server.id).state === 'testing',
-                                        'text-emerald-600 border-emerald-200 bg-emerald-50': getServerStatus(server.id).state === 'ok',
-                                        'text-red-600 border-red-200 bg-red-50': getServerStatus(server.id).state === 'error',
-                                      }"
-                                      :disabled="getServerStatus(server.id).state === 'testing'"
-                                      :title="getServerStatus(server.id).msg || t('settings.testConnection')">
-                                  <!-- idle: server icon -->
-                                  <Server v-if="getServerStatus(server.id).state === 'idle'" class="w-3.5 h-3.5" />
-                                  <!-- testing: spinner -->
-                                  <svg v-else-if="getServerStatus(server.id).state === 'testing'" class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/>
-                                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
-                                  </svg>
-                                  <!-- ok: green dot -->
-                                  <span v-else-if="getServerStatus(server.id).state === 'ok'" class="relative flex h-2 w-2">
-                                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                                      <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                                  </span>
-                                  <!-- error: red X -->
-                                  <XCircle v-else class="w-3.5 h-3.5" />
-                                  <span>{{
-                                    getServerStatus(server.id).state === 'testing' ? t('settings.testing') :
-                                    getServerStatus(server.id).state === 'ok' ? t('settings.connected') :
-                                    getServerStatus(server.id).state === 'error' ? t('settings.failed') :
-                                    t('settings.testConnection')
-                                  }}</span>
-                              </button>
-                              <button @click="editServer(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
-                                  <Edit class="w-4 h-4" />
-                              </button>
-                              <button @click="removeServer(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete">
-                                  <Trash2 class="w-4 h-4" />
-                              </button>
+                          <div v-if="getServerStatus(server.id).state === 'error'" class="mt-3 text-xs text-red-600 bg-red-50 border border-red-100 rounded px-2.5 py-1.5 font-mono break-all">
+                              {{ getServerStatus(server.id).msg }}
                           </div>
-                      </div>
-                      <!-- Inline error message -->
-                      <div v-if="getServerStatus(server.id).state === 'error'" class="mt-2 text-xs text-red-600 bg-red-50 border border-red-100 rounded px-2.5 py-1.5 font-mono break-all">
-                          {{ getServerStatus(server.id).msg }}
                       </div>
                   </div>
               </div>
           </div>
 
           <!-- Server Edit Modal -->
-          <div v-if="isEditingServer" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div v-if="isEditingServer" class="fixed inset-0 bg-black/50 flex items-center justify-center z-[65] p-4">
               <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all">
                   <h3 class="text-lg font-bold mb-6 text-slate-800">{{ editingServerIndex > -1 ? t('settings.editServer') : t('settings.addServer') }}</h3>
                   <div class="space-y-4">
                       <div>
                           <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.nameAlias') }}</label>
-                          <input v-model="serverForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Production Server 1" />
+                          <input v-model="serverForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" :placeholder="t('settings.serverNamePlaceholder')" />
                       </div>
                       <div class="grid grid-cols-3 gap-4">
                           <div class="col-span-2">
@@ -887,11 +1087,11 @@ onMounted(load);
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                       <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.localPath') }}</label>
-                      <input v-model="manualLocalPath" type="text" placeholder="C:\Path\To\Package.zip" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
+                      <input v-model="manualLocalPath" type="text" :placeholder="t('settings.manualLocalPlaceholder')" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                   </div>
                   <div>
                       <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.remotePath') }}</label>
-                      <input v-model="manualRemotePath" type="text" placeholder="/opt/app/deploy" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
+                      <input v-model="manualRemotePath" type="text" :placeholder="t('settings.manualRemotePlaceholder')" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                   </div>
               </div>
               
@@ -904,7 +1104,7 @@ onMounted(load);
                     <UploadCloud class="w-4 h-4" />
                     {{ appStore.isManualDeploying ? t('settings.deploying') : t('settings.deployNow') }}
                   </button>
-                  <span v-if="appStore.manualDeployMsg" :class="appStore.manualDeployMsg.includes('successful') ? 'text-green-600' : 'text-red-500'" class="text-sm font-medium">
+                  <span v-if="appStore.manualDeployMsg" :class="manualDeployMsgType === 'success' ? 'text-green-600' : 'text-red-500'" class="text-sm font-medium">
                       {{ appStore.manualDeployMsg }}
                       <span v-if="appStore.isManualDeploying && appStore.progress" class="ml-2 text-blue-600">
                           ({{ appStore.progress.percentage.toFixed(0) }}%)
