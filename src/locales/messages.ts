@@ -7,7 +7,7 @@ export const messages = {
       history: 'History',
       settings: 'Settings',
       tasks: 'Console',
-      version: 'v1.0.0',
+      version: 'v1.0.0 · 2026.03.10',
     },
     console: {
       status: 'Status',
@@ -246,7 +246,7 @@ export const messages = {
       history: '历史记录',
       settings: '设置',
       tasks: '控制台',
-      version: 'v1.0.0',
+      version: 'v1.0.0 · 2026.03.10',
     },
     console: {
       status: '状态',
