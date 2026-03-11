@@ -31,9 +31,11 @@ struct ProgressEvent {
 
 fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
     let _ = app_handle.emit("log-message", LogEvent {
-        msg,
+        msg: msg.clone(),
         level: level.to_string(),
     });
+    // Also write to the persistent log file (shared mutex in scanner module)
+    crate::scanner::write_log_to_file(app_handle, &msg, level);
 }
 
 fn emit_progress<R: tauri::Runtime>(
@@ -86,7 +88,8 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     local_folder_path: &Path,
     folder_name: &str,
     should_cancel: Arc<AtomicBool>,
-    is_paused: Arc<AtomicBool>
+    is_paused: Arc<AtomicBool>,
+    task_post_commands: &[String],
 ) -> Result<(), String> {
     if !config.deploy_enabled {
         return Ok(());
@@ -103,7 +106,12 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     let local_path_buf = local_folder_path.to_path_buf();
     let folder_name_owned = folder_name.to_string();
     let app_handle = app_handle.clone();
-    let post_commands = config.post_commands.clone();
+    // Task-specific post commands take precedence; fall back to global config
+    let post_commands = if task_post_commands.is_empty() {
+        config.post_commands.clone()
+    } else {
+        task_post_commands.to_vec()
+    };
 
     // Calculate total size once for progress reporting
     let total_size = calculate_size(&local_path_buf);
@@ -142,24 +150,27 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     Ok(())
 }
 
-fn substitute_variables(cmd: &str, folder_name: &str, local_path: &Path) -> String {
+fn substitute_variables(cmd: &str, folder_name: &str, local_path: &Path, remote_target: &str) -> String {
     let mut result = cmd.to_string();
-    
+
+    // ${folder_name} — the deployed folder name (e.g. "C1773193540956024166")
+    result = result.replace("${folder_name}", folder_name);
+
+    // ${remote_target} — full remote upload path (e.g. "/root/C1773193540956024166")
+    result = result.replace("${remote_target}", remote_target);
+
     // Resolve ${filename} dynamically by scanning for .tar.gz files
     if result.contains("${filename}") {
         let replacement = if let Ok(entries) = fs::read_dir(local_path) {
             let mut found_name = folder_name.to_string();
-            // First, try to find a tar.gz file. We take the first one we find.
-            // Logic: Scan directory, if we see ANY .tar.gz, we use it.
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() {
                     if let Some(name) = path.file_name() {
                         let name_str = name.to_string_lossy();
                         if name_str.ends_with(".tar.gz") {
-                             // Found a tar.gz file. Use its stem.
                             found_name = name_str.trim_end_matches(".tar.gz").to_string();
-                            break; 
+                            break;
                         }
                     }
                 }
@@ -168,10 +179,10 @@ fn substitute_variables(cmd: &str, folder_name: &str, local_path: &Path) -> Stri
         } else {
             folder_name.to_string()
         };
-        
+
         result = result.replace("${filename}", &replacement);
     }
-    
+
     result
 }
 
@@ -265,29 +276,54 @@ fn deploy_single_server<R: tauri::Runtime>(
     // 3. Exec commands
     if !post_commands.is_empty() {
         emit_log(app_handle, format!("[{}] Executing post commands...", server.name), "info");
-        
+
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
                  return Err("Cancelled".to_string());
             }
 
-            let final_cmd = substitute_variables(cmd, folder_name, local_folder_path);
-            emit_log(app_handle, format!("[{}] $ {}", server.name, final_cmd), "info");
-            
+            let final_cmd = substitute_variables(cmd, folder_name, local_folder_path, &remote_target);
+            emit_log(app_handle, format!("[{}] $ {}", server.name, final_cmd), "command");
+
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
+            // Merge stderr into stdout so we get all output in one stream
+            channel.handle_extended_data(ssh2::ExtendedData::Merge).map_err(|e| e.to_string())?;
             channel.exec(&final_cmd).map_err(|e| e.to_string())?;
             channel.send_eof().map_err(|e| e.to_string())?;
-            
-            let mut s = String::new();
-            channel.read_to_string(&mut s).map_err(|e| e.to_string())?;
-            channel.wait_close().unwrap();
-            
-            if !s.is_empty() {
-                emit_log(app_handle, format!("[{}] > {}", server.name, s.trim()), "info");
+
+            // Stream output line by line for real-time log display
+            let mut output_buf = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match channel.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]);
+                        output_buf.push_str(&chunk);
+                        while let Some(pos) = output_buf.find('\n') {
+                            let line = output_buf[..pos].trim_end_matches('\r').to_string();
+                            if !line.is_empty() {
+                                emit_log(app_handle, format!("[{}] > {}", server.name, line), "info");
+                            }
+                            output_buf = output_buf[pos + 1..].to_string();
+                        }
+                    }
+                    Err(e) => {
+                        emit_log(app_handle, format!("[{}] Read error: {}", server.name, e), "warn");
+                        break;
+                    }
+                }
             }
-            
-            if channel.exit_status().unwrap() != 0 {
-                emit_log(app_handle, format!("[{}] Command failed (exit {})", server.name, channel.exit_status().unwrap()), "error");
+            // Emit any remaining partial line
+            if !output_buf.trim().is_empty() {
+                emit_log(app_handle, format!("[{}] > {}", server.name, output_buf.trim()), "info");
+            }
+
+            channel.wait_close().unwrap();
+
+            let exit_code = channel.exit_status().unwrap_or(-1);
+            if exit_code != 0 {
+                emit_log(app_handle, format!("[{}] Command exited with code {}", server.name, exit_code), "error");
             }
         }
     }
@@ -400,30 +436,56 @@ pub fn deploy_manual<R: tauri::Runtime>(
     if !post_commands.is_empty() {
         emit_log(app_handle, "Executing post-deployment commands...".to_string(), "info");
         let folder_name = local_p.file_name().unwrap_or_default().to_string_lossy();
-        
+
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
                 return Err("Deployment cancelled".to_string());
             }
-            
-            let final_cmd = substitute_variables(cmd, &folder_name, local_p);
-             emit_log(app_handle, format!("$ {}", final_cmd), "info");
+
+            let final_cmd = substitute_variables(cmd, &folder_name, local_p, &target_path_str);
+            emit_log(app_handle, format!("$ {}", final_cmd), "command");
+
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
+            channel.handle_extended_data(ssh2::ExtendedData::Merge).map_err(|e| e.to_string())?;
             channel.exec(&final_cmd).map_err(|e| e.to_string())?;
             channel.send_eof().map_err(|e| e.to_string())?;
-            
-            let mut s = String::new();
-            channel.read_to_string(&mut s).map_err(|e| e.to_string())?;
-            channel.wait_close().unwrap();
-            if !s.is_empty() {
-                emit_log(app_handle, format!("> {}", s.trim()), "info");
+
+            // Stream output line by line
+            let mut output_buf = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match channel.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]);
+                        output_buf.push_str(&chunk);
+                        while let Some(pos) = output_buf.find('\n') {
+                            let line = output_buf[..pos].trim_end_matches('\r').to_string();
+                            if !line.is_empty() {
+                                emit_log(app_handle, format!("> {}", line), "info");
+                            }
+                            output_buf = output_buf[pos + 1..].to_string();
+                        }
+                    }
+                    Err(e) => {
+                        emit_log(app_handle, format!("Read error: {}", e), "warn");
+                        break;
+                    }
+                }
             }
-            if channel.exit_status().unwrap() != 0 {
-                emit_log(app_handle, format!("Command failed with exit code {}", channel.exit_status().unwrap()), "error");
+            if !output_buf.trim().is_empty() {
+                emit_log(app_handle, format!("> {}", output_buf.trim()), "info");
+            }
+
+            channel.wait_close().unwrap();
+            let exit_code = channel.exit_status().unwrap_or(-1);
+            if exit_code != 0 {
+                emit_log(app_handle, format!("Command exited with code {}", exit_code), "error");
             }
         }
     }
 
+    emit_log(app_handle, format!("[{}] Deployment successful", server.name), "success");
     Ok(())
 }
 

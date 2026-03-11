@@ -10,7 +10,7 @@ use tokio::fs;
 use tauri::{Emitter, Manager};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration as StdDuration, Instant, SystemTime};
 use std::io::{Read, Write};
 use std::fs::OpenOptions;
 
@@ -103,18 +103,11 @@ fn rotate_log_if_needed(log_path: &Path) {
     }
 }
 
-// Helper to emit logs to frontend in real-time
-fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
-    let _ = app_handle.emit("log-message", LogEvent {
-        msg: msg.clone(),
-        level: level.to_string(),
-    });
-
-    // Also write to log file with rotation support
+/// Write a log entry to the app log file. Thread-safe. Used by both scanner and deploy modules.
+pub fn write_log_to_file<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: &str, level: &str) {
     if let Ok(app_dir) = app_handle.path().app_data_dir() {
         if std::fs::create_dir_all(&app_dir).is_ok() {
             let log_path = app_dir.join("app.log");
-            // Serialize rotation + write to avoid concurrent rotation
             let _guard = get_log_mutex().lock().unwrap();
             rotate_log_if_needed(&log_path);
             if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
@@ -123,6 +116,15 @@ fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, le
             }
         }
     }
+}
+
+// Helper to emit logs to frontend in real-time
+fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
+    let _ = app_handle.emit("log-message", LogEvent {
+        msg: msg.clone(),
+        level: level.to_string(),
+    });
+    write_log_to_file(app_handle, &msg, level);
 }
 
 fn emit_progress<R: tauri::Runtime>(
@@ -208,6 +210,8 @@ async fn perform_copy<R: tauri::Runtime>(
     is_paused: Arc<AtomicBool>,
     result: &mut ScanResult,
     deploy_server_ids: Vec<String>,
+    allow_deploy: bool,
+    task_post_commands: Vec<String>,
 ) {
     let target_full_path = target_parent_path.join(&folder_name);
     
@@ -237,10 +241,12 @@ async fn perform_copy<R: tauri::Runtime>(
     let extensions = config.file_extensions.clone();
     let includes = config.filename_includes.clone();
     let stability_check_secs = config.stability_check_secs;
+    let recent_file_guard_mins = config.recent_file_guard_mins;
     let should_cancel_clone = should_cancel.clone();
     let is_paused_clone = is_paused.clone();
     let live_config_clone = live_config.clone();
     let deploy_server_ids_clone = deploy_server_ids.clone();
+    let task_post_commands_clone = task_post_commands.clone();
 
     let copy_task = tauri::async_runtime::spawn_blocking(move || {
         let handle = app_handle_clone;
@@ -257,8 +263,9 @@ async fn perform_copy<R: tauri::Runtime>(
         }
         
         // Collect files with filtering (Iterative)
-        let mut filtered_files = Vec::new();
-        let mut total_filtered_bytes = 0;
+        let mut filtered_files: Vec<(PathBuf, u64, bool)> = Vec::new();
+        let recent_file_guard_secs = recent_file_guard_mins * 60;
+        let now_system = SystemTime::now();
         
         let mut dirs_to_visit = vec![source_path_clone.clone()];
         while let Some(current_dir) = dirs_to_visit.pop() {
@@ -311,8 +318,15 @@ async fn perform_copy<R: tauri::Runtime>(
                             
                             if !dst.exists() {
                                 if let Ok(meta) = entry.metadata() {
-                                    filtered_files.push((path, meta.len()));
-                                    total_filtered_bytes += meta.len();
+                                    let file_size = meta.len();
+                                    let is_recent = meta
+                                        .modified()
+                                        .ok()
+                                        .and_then(|modified| now_system.duration_since(modified).ok())
+                                        .map(|age| age < StdDuration::from_secs(recent_file_guard_secs))
+                                        .unwrap_or(true);
+
+                                    filtered_files.push((path, file_size, is_recent));
                                 }
                             }
                         }
@@ -327,19 +341,41 @@ async fn perform_copy<R: tauri::Runtime>(
         }
 
         // --- Stability check ---
-        // Wait `stability_check_secs` seconds, then re-verify each file's size hasn't changed.
-        // Files still being written by a remote process will be skipped and retried next scan.
-        if stability_check_secs > 0 {
+        // Only files modified within the configured recent-file window enter the waiting flow.
+        // Older files are copied directly; recent files wait `stability_check_secs` then re-check size.
+        let mut files_ready_now: Vec<(PathBuf, u64)> = filtered_files
+            .iter()
+            .filter(|(_, _, is_recent)| !*is_recent)
+            .map(|(path, size, _)| (path.clone(), *size))
+            .collect();
+        let recent_files: Vec<(PathBuf, u64)> = filtered_files
+            .into_iter()
+            .filter(|(_, _, is_recent)| *is_recent)
+            .map(|(path, size, _)| (path, size))
+            .collect();
+
+        if !files_ready_now.is_empty() {
             emit_log(
                 &handle,
                 format!(
-                    "Waiting {}s to verify {} file(s) are fully written...",
-                    stability_check_secs,
-                    filtered_files.len()
+                    "{} file(s) were last modified over {} minute(s) ago and will be copied immediately.",
+                    files_ready_now.len(),
+                    recent_file_guard_mins
                 ),
                 "info",
             );
-            // Sleep in 200 ms intervals so we can honour cancel requests promptly
+        }
+
+        if stability_check_secs > 0 && !recent_files.is_empty() {
+            emit_log(
+                &handle,
+                format!(
+                    "Waiting {}s to verify {} recently modified file(s) are fully written...",
+                    stability_check_secs,
+                    recent_files.len()
+                ),
+                "info",
+            );
             let intervals = stability_check_secs * 5;
             for _ in 0..intervals {
                 if should_cancel_clone.load(Ordering::SeqCst) {
@@ -350,14 +386,13 @@ async fn perform_copy<R: tauri::Runtime>(
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            // Re-check sizes; skip any file whose size has changed
-            let mut stable_files: Vec<(PathBuf, u64)> = Vec::new();
-            for (path, original_size) in filtered_files {
+
+            for (path, original_size) in recent_files {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         let current_size = meta.len();
                         if current_size == original_size {
-                            stable_files.push((path, original_size));
+                            files_ready_now.push((path, original_size));
                         } else {
                             let name = path.file_name().unwrap_or_default().to_string_lossy();
                             emit_log(
@@ -376,15 +411,18 @@ async fn perform_copy<R: tauri::Runtime>(
                     }
                 }
             }
-            filtered_files = stable_files;
-            total_filtered_bytes = filtered_files.iter().map(|(_, s)| *s).sum();
-
-            if filtered_files.is_empty() {
-                emit_log(&handle, "All candidate files are still being written. Will retry next scan.".to_string(), "warn");
-                return Ok(0u64);
-            }
-            emit_log(&handle, format!("{} file(s) confirmed stable, proceeding with copy.", filtered_files.len()), "info");
+        } else if !recent_files.is_empty() {
+            files_ready_now.extend(recent_files);
         }
+
+        let filtered_files: Vec<(PathBuf, u64)> = files_ready_now;
+        let total_filtered_bytes: u64 = filtered_files.iter().map(|(_, s)| *s).sum();
+
+        if filtered_files.is_empty() {
+            emit_log(&handle, "All recent candidate files are still being written. Will retry next scan.".to_string(), "warn");
+            return Ok(0u64);
+        }
+        emit_log(&handle, format!("{} file(s) confirmed ready, proceeding with copy.", filtered_files.len()), "info");
 
         // ---- Confirmed: we have files to copy ----
         // Record COPY_STARTED only now, so history is clean when nothing needs copying.
@@ -519,23 +557,33 @@ async fn perform_copy<R: tauri::Runtime>(
          // Deploy: Re-read the latest config so that enabling deploy after scheduler
          // start is detected without needing to restart the scheduler.
          let current_config = live_config_clone.lock().unwrap().clone();
-         if current_config.deploy_enabled {
-              // Filter servers: if the task specifies deploy_server_ids, use only those;
-              // otherwise fall through to all enabled servers (handled inside deploy_to_remote).
-              let mut deploy_config = current_config.clone();
-              if !deploy_server_ids_clone.is_empty() {
-                  deploy_config.servers = deploy_config.servers
-                      .into_iter()
-                      .filter(|s| deploy_server_ids_clone.contains(&s.id))
-                      .collect();
+         if allow_deploy && current_config.deploy_enabled {
+              // If no deploy servers are selected for this task, skip deployment entirely.
+              if deploy_server_ids_clone.is_empty() {
+                  emit_log(&handle, format!("No deploy servers selected for task '{}', skipping deployment.", folder_name_clone), "info");
+                  return Ok(copied_bytes_total);
               }
+
+              // Filter servers to only those explicitly selected by the task.
+              let mut deploy_config = current_config.clone();
+              deploy_config.servers = deploy_config.servers
+                  .into_iter()
+                  .filter(|s| deploy_server_ids_clone.contains(&s.id))
+                  .collect();
+
+              if deploy_config.servers.is_empty() {
+                  emit_log(&handle, format!("Selected deploy servers for task '{}' are unavailable or disabled, skipping deployment.", folder_name_clone), "warn");
+                  return Ok(copied_bytes_total);
+              }
+
               if let Err(e) = deploy_to_remote(
                   &handle,
                   &deploy_config,
                   &target_full_path_clone,
                   &folder_name_clone,
                   should_cancel_clone,
-                  is_paused_clone
+                  is_paused_clone,
+                  &task_post_commands_clone,
               ) {
                   emit_log(&handle, format!("Deployment failed: {}", e), "error");
               }
@@ -567,6 +615,85 @@ async fn perform_copy<R: tauri::Runtime>(
             emit_log(app_handle, err_msg.clone(), "error");
             result.errors.push(err_msg);
         }
+    }
+}
+
+pub async fn temporary_copy<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    live_config: Arc<Mutex<AppConfig>>,
+    source_path: String,
+    target_root_path: String,
+    should_cancel: Arc<AtomicBool>,
+    is_paused: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let source_path = PathBuf::from(source_path.trim());
+    let target_root_path = PathBuf::from(target_root_path.trim());
+
+    if source_path.as_os_str().is_empty() {
+        return Err("Source path is required".to_string());
+    }
+    if target_root_path.as_os_str().is_empty() {
+        return Err("Target root path is required".to_string());
+    }
+    if !source_path.exists() {
+        return Err(format!("Source path does not exist: {}", source_path.display()));
+    }
+    if !source_path.is_dir() {
+        return Err(format!("Source path must be a directory: {}", source_path.display()));
+    }
+
+    let folder_name = source_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "temporary-copy".to_string());
+
+    let target_full_path = target_root_path.join(&folder_name);
+    if target_full_path == source_path || target_full_path.starts_with(&source_path) {
+        return Err(format!(
+            "Target path would be created inside source path, which may cause recursive copying: {}",
+            target_full_path.display()
+        ));
+    }
+
+    emit_log(
+        app_handle,
+        format!(
+            "Starting temporary copy: {} -> {}",
+            source_path.display(),
+            target_root_path.display()
+        ),
+        "info",
+    );
+
+    let mut result = ScanResult {
+        scanned_paths: 1,
+        found_folders: vec![folder_name.clone()],
+        copied_folders: vec![],
+        errors: vec![],
+    };
+
+    perform_copy(
+        app_handle,
+        source_path,
+        folder_name,
+        &target_root_path,
+        config,
+        live_config,
+        should_cancel,
+        is_paused,
+        &mut result,
+        vec![],
+        false,
+        vec![],
+    )
+    .await;
+
+    if result.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(result.errors.join("; "))
     }
 }
 
@@ -604,8 +731,9 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                     if current_time >= start && current_time <= end {
                         in_range = true;
                         break;
-                    }
-                }
+    }
+}
+
             }
         }
         
@@ -723,6 +851,8 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             is_paused.clone(),
                             &mut result,
                             task.deploy_server_ids.clone(),
+                            true,
+                            task.post_commands.clone(),
                         ).await;
                         
                     } else {
@@ -795,6 +925,8 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                 is_paused.clone(),
                                 &mut result,
                                 task.deploy_server_ids.clone(),
+                                true,
+                                task.post_commands.clone(),
                             ).await;
                         }
                     }

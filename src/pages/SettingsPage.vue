@@ -27,15 +27,17 @@ const config = ref<AppConfig>({
   ssh_password: '',
   remote_linux_path: '',
   post_commands: [],
-  stability_check_secs: 30,
+  stability_check_secs: 120,
   recent_file_guard_mins: 3,
   launch_and_auto_scan: false,
-  close_to_tray: false
+  close_to_tray: false,
+  max_log_lines: 200
 });
 
 const newExt = ref('');
 const newInclude = ref('');
 const newCommand = ref('');
+const newTaskCommand = ref('');
 const newTimeRange = ref(''); // "05:00-09:00"
 const statusMsg = ref('');
 const isServerManagerOpen = ref(false);
@@ -83,6 +85,7 @@ const taskForm = ref<ScanTask>({
     local_path: null,
     rule: { type: 'VersionMatch', value: '' },
     deploy_server_ids: [],
+    post_commands: [],
 });
 
 function resetTaskForm() {
@@ -94,6 +97,7 @@ function resetTaskForm() {
         local_path: null,
         rule: { type: 'VersionMatch', value: '' },
         deploy_server_ids: [],
+        post_commands: [],
     };
     isEditingTask.value = false;
     editingTaskIndex.value = -1;
@@ -112,6 +116,7 @@ function editTask(index: number) {
         ...task,
         rule: { ...task.rule },
         deploy_server_ids: [...(task.deploy_server_ids ?? [])],
+        post_commands: [...(task.post_commands ?? [])],
     };
     isEditingTask.value = true;
 }
@@ -290,6 +295,18 @@ function removeCommand(index: number) {
   save();
 }
 
+function addTaskCommand() {
+  if (newTaskCommand.value.trim()) {
+    if (!taskForm.value.post_commands) taskForm.value.post_commands = [];
+    taskForm.value.post_commands.push(newTaskCommand.value.trim());
+    newTaskCommand.value = '';
+  }
+}
+
+function removeTaskCommand(index: number) {
+  taskForm.value.post_commands?.splice(index, 1);
+}
+
 function addTimeRange() {
     const rangeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]-([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
     if (newTimeRange.value && rangeRegex.test(newTimeRange.value) && !config.value.time_ranges.includes(newTimeRange.value)) {
@@ -372,6 +389,8 @@ async function save() {
 
   try {
     await saveConfig(config.value);
+    // Sync max_log_lines to the runtime store
+    if (config.value.max_log_lines > 0) appStore.maxLogLines = config.value.max_log_lines;
     statusMsg.value = t('settings.saved');
     addSystemEvent('CONFIG_CHANGE', t('settings.saved'));
     setTimeout(() => statusMsg.value = '', 3000);
@@ -434,6 +453,17 @@ onMounted(load);
           <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
         </div>
       </label>
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <div class="text-sm font-medium text-slate-700">{{ t('settings.maxLogLines') }}</div>
+          <p class="text-xs text-slate-400 mt-1">{{ t('settings.maxLogLinesDesc') }}</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <input type="number" v-model.number="config.max_log_lines" @change="save" min="50" max="5000" step="50"
+                 class="w-24 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-right focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
+          <span class="text-xs text-slate-500">{{ t('settings.lines') }}</span>
+        </div>
+      </div>
       </div>
     </div>
 
@@ -587,9 +617,9 @@ onMounted(load);
 
     <!-- Task Edit Modal -->
     <div v-if="isEditingTask" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-        <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all">
-            <h3 class="text-lg font-bold mb-6 text-slate-800">{{ editingTaskIndex > -1 ? t('settings.editTask') : t('settings.addTask') }}</h3>
-            <div class="space-y-4">
+        <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all max-h-[90vh] flex flex-col">
+            <h3 class="text-lg font-bold mb-4 text-slate-800 shrink-0">{{ editingTaskIndex > -1 ? t('settings.editTask') : t('settings.addTask') }}</h3>
+            <div class="space-y-4 overflow-y-auto flex-1 pr-1">
                 <div>
                     <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskName') }}</label>
                     <input v-model="taskForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" :placeholder="t('settings.taskNamePlaceholder')" />
@@ -646,6 +676,36 @@ onMounted(load);
                         </div>
                     </div>
                     <p class="text-xs text-slate-400 mt-2 italic">{{ t('settings.taskDeployServersHint') }}</p>
+                </div>
+
+                <!-- Task-specific post commands -->
+                <div v-if="config.deploy_enabled && (taskForm.deploy_server_ids?.length > 0 || (taskForm.post_commands?.length ?? 0) > 0)" class="pt-3 border-t border-slate-100">
+                    <label class="block text-sm font-medium mb-1 text-slate-700 flex items-center gap-1.5">
+                        <Terminal class="w-4 h-4 text-sky-500" />
+                        {{ t('settings.taskPostCommands') }}
+                        <span class="text-xs font-normal text-slate-400">{{ t('settings.taskPostCommandsOverride') }}</span>
+                    </label>
+                    <p class="text-xs text-slate-400 mb-2">{{ t('settings.taskPostCommandsDesc') }}</p>
+                    <div class="flex gap-2 mb-2">
+                        <input
+                            v-model="newTaskCommand"
+                            @keyup.enter="addTaskCommand"
+                            :placeholder="t('settings.taskCommandPlaceholder')"
+                            class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-sky-500 outline-none font-mono text-sm"
+                        />
+                        <button @click="addTaskCommand" type="button" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600">
+                            <Plus class="w-5 h-5" />
+                        </button>
+                    </div>
+                    <ul class="space-y-1.5 bg-slate-900 rounded-lg p-3 max-h-36 overflow-y-auto">
+                        <li v-for="(cmd, i) in taskForm.post_commands" :key="i" class="flex justify-between items-center text-sky-300 font-mono text-xs">
+                            <span class="truncate mr-2">$ {{ cmd }}</span>
+                            <button @click="removeTaskCommand(i)" type="button" class="text-slate-500 hover:text-red-400 p-1 shrink-0">
+                                <Trash2 class="w-3 h-3" />
+                            </button>
+                        </li>
+                        <li v-if="!taskForm.post_commands?.length" class="text-slate-600 text-xs italic text-center">{{ t('settings.noTaskCommands') }}</li>
+                    </ul>
                 </div>
             </div>
             <div class="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-100">
@@ -1058,6 +1118,7 @@ onMounted(load);
                 </li>
                 <li v-if="config.post_commands.length === 0" class="text-slate-600 text-sm italic text-center">{{ t('settings.noCommands') }}</li>
               </ul>
+              <p class="mt-2 text-xs text-slate-400 leading-relaxed">{{ t('settings.postCommandsHint') }}</p>
           </div>
 
           <!-- Manual Deploy Tool -->

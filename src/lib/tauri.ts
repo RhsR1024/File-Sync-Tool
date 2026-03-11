@@ -23,8 +23,10 @@ export interface ScanTask {
   remote_path: string;
   local_path: string | null;
   rule: MatchRule;
-  /** Server IDs this task deploys to. Empty = all enabled servers. */
+  /** Server IDs this task deploys to. Empty = do not deploy. */
   deploy_server_ids: string[];
+  /** Task-specific post commands. If empty, global post_commands are used. */
+  post_commands: string[];
 }
 
 export interface AppConfig {
@@ -52,11 +54,20 @@ export interface AppConfig {
   
   post_commands: string[];
 
-  /** Seconds to wait before copying to verify files are fully written. 0 = disabled. Default: 30. */
+  /** Seconds to wait before copying to verify files are fully written. Minimum: 1. Default: 30. */
   stability_check_secs: number;
+
+  /** If a file was modified within the last N minutes, it must pass the stability wait. Minimum: 3. */
+  recent_file_guard_mins: number;
 
   /** One switch: launch on startup + auto start scheduler scan after app launch */
   launch_and_auto_scan: boolean;
+
+  /** When enabled, clicking the window close button hides to tray instead of exiting. */
+  close_to_tray: boolean;
+
+  /** Maximum number of log lines to display in the console. Default: 200. */
+  max_log_lines: number;
 }
 
 export interface ScanResult {
@@ -125,6 +136,10 @@ export async function testSshConnection(server: DeployServer): Promise<string> {
 
 export async function manualDeploy(server: DeployServer, postCommands: string[], localPath: string, remotePath: string): Promise<void> {
   await invoke('manual_deploy', { server, postCommands, localPath, remotePath });
+}
+
+export async function temporaryCopy(sourcePath: string, targetRootPath: string): Promise<void> {
+  await invoke('temporary_copy', { sourcePath, targetRootPath });
 }
 
 export async function getAppPaths(): Promise<[string, string]> {

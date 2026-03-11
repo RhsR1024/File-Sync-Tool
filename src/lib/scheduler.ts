@@ -11,12 +11,7 @@ const t = (key: string, args?: any) => {
 let timer: ReturnType<typeof setInterval> | null = null;
 
 export async function executeScan() {
-    if (appStore.isManualDeploying) {
-        addLog(t('console.scanFailed', { error: 'Manual deploy in progress' }), 'error');
-        return;
-    }
-
-    addLog(t('console.running'), 'info'); 
+    addLog(t('console.running'), 'info');
     try {
         const result: ScanResult = await scanNow();
         addLog(t('console.scanComplete', { scanned: result.scanned_paths, found: result.found_folders.length, copied: result.copied_folders.length }), 'success');

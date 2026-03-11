@@ -3,7 +3,7 @@
 export interface LogEntry {
     time: string;
     msg: string;
-    type: 'info' | 'error' | 'success';
+    type: 'info' | 'error' | 'success' | 'command';
 }
 
 export interface ProgressState {
@@ -64,6 +64,7 @@ export const appStore = reactive({
     nextRunTime: '-',
     isManualDeploying: false,
     manualDeployMsg: '',
+    maxLogLines: 200,
 });
 
 function normalizePath(path: string | undefined): string {
@@ -230,10 +231,12 @@ function finalizeTask(record: TaskRecord) {
     touchTaskRecord(record);
 }
 
-export function addLog(msg: string, type: 'info' | 'error' | 'success' = 'info') {
+export function addLog(msg: string, type: 'info' | 'error' | 'success' | 'command' = 'info') {
     const time = new Date().toLocaleTimeString();
-    appStore.logs.unshift({ time, msg, type });
-    if (appStore.logs.length > 1000) appStore.logs.pop();
+    appStore.logs.push({ time, msg, type });
+    while (appStore.logs.length > appStore.maxLogLines) {
+        appStore.logs.shift();
+    }
 }
 
 export function upsertTaskRecord(payload: {
@@ -389,7 +392,10 @@ function completeFromServerSuccess(target: TaskRecord, lowerMsg: string) {
         }
     }
 
-    if (target.remoteServers.length > 0 && target.remoteServers.every(s => s.completed)) {
+    if (target.remoteServers.length === 0) {
+        // Manual deploy or single-server deploy without server tracking — mark complete directly
+        target.deployCompleted = true;
+    } else if (target.remoteServers.every(s => s.completed)) {
         target.deployCompleted = true;
     }
 
@@ -443,6 +449,9 @@ export function syncTaskRecordByLog(msg: string, level: string) {
 
     if (lower.includes('deployment successful')) {
         completeFromServerSuccess(target, lower);
+        if (target.deployCompleted) {
+            finalizeTask(target);
+        }
         return;
     }
 

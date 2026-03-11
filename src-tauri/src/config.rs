@@ -3,6 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
 
+pub const MIN_SCAN_INTERVAL_MINS: u64 = 5;
+pub const MIN_STABILITY_CHECK_SECS: u64 = 60;
+pub const MIN_RECENT_FILE_GUARD_MINS: u64 = 3;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeployServer {
     pub id: String,
@@ -34,9 +38,12 @@ pub struct ScanTask {
     pub remote_path: String,
     pub local_path: Option<String>, // Optional override
     pub rule: MatchRule,
-    /// Server IDs to deploy to after copying. Empty = all enabled servers.
+    /// Server IDs to deploy to after copying. Empty = do not deploy.
     #[serde(default)]
     pub deploy_server_ids: Vec<String>,
+    /// Task-specific post commands. If non-empty, overrides global post_commands for this task.
+    #[serde(default)]
+    pub post_commands: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -77,18 +84,34 @@ pub struct AppConfig {
     pub post_commands: Vec<String>,
 
     /// Seconds to wait after discovering files before copying, to verify they are fully written.
-    /// Set to 0 to disable. Default: 30.
+    /// Default: 30.
     #[serde(default = "default_stability_secs")]
     pub stability_check_secs: u64,
+
+    /// If a file was modified within the last N minutes, it must pass the stability wait.
+    /// Older files are copied immediately. Minimum: 3 minutes.
+    #[serde(default = "default_recent_file_guard_mins")]
+    pub recent_file_guard_mins: u64,
 
     /// One switch for:
     /// 1) launch app on OS startup
     /// 2) auto start scheduler scan when app starts
     #[serde(default)]
     pub launch_and_auto_scan: bool,
+
+    /// When enabled, clicking the window close button hides the app to the tray
+    /// instead of exiting the process.
+    #[serde(default)]
+    pub close_to_tray: bool,
+
+    /// Maximum number of log lines to display in the console. Default: 200.
+    #[serde(default = "default_max_log_lines")]
+    pub max_log_lines: u32,
 }
 
 fn default_stability_secs() -> u64 { 30 }
+fn default_recent_file_guard_mins() -> u64 { MIN_RECENT_FILE_GUARD_MINS }
+fn default_max_log_lines() -> u32 { 200 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -109,10 +132,39 @@ impl Default for AppConfig {
             ssh_password: "".to_string(),
             remote_linux_path: "/tmp/upload".to_string(),
             post_commands: vec![],
-            stability_check_secs: 30,
+            stability_check_secs: 120,
+            recent_file_guard_mins: MIN_RECENT_FILE_GUARD_MINS,
             launch_and_auto_scan: false,
+            close_to_tray: false,
+            max_log_lines: 200,
         }
     }
+}
+
+pub fn normalize_config(mut config: AppConfig) -> AppConfig {
+    if config.interval_minutes < MIN_SCAN_INTERVAL_MINS {
+        config.interval_minutes = MIN_SCAN_INTERVAL_MINS;
+    }
+    if config.stability_check_secs < MIN_STABILITY_CHECK_SECS {
+        config.stability_check_secs = MIN_STABILITY_CHECK_SECS;
+    }
+    if config.recent_file_guard_mins < MIN_RECENT_FILE_GUARD_MINS {
+        config.recent_file_guard_mins = MIN_RECENT_FILE_GUARD_MINS;
+    }
+    config
+}
+
+pub fn validate_config(config: &AppConfig) -> Result<(), String> {
+    if config.interval_minutes < MIN_SCAN_INTERVAL_MINS {
+        return Err(format!("Scan interval must be at least {} minutes", MIN_SCAN_INTERVAL_MINS));
+    }
+    if config.stability_check_secs < MIN_STABILITY_CHECK_SECS {
+        return Err(format!("File stability wait must be at least {} second", MIN_STABILITY_CHECK_SECS));
+    }
+    if config.recent_file_guard_mins < MIN_RECENT_FILE_GUARD_MINS {
+        return Err(format!("Recent file threshold must be at least {} minutes", MIN_RECENT_FILE_GUARD_MINS));
+    }
+    Ok(())
 }
 
 pub fn load_config(app_handle: &tauri::AppHandle) -> AppConfig {
@@ -147,12 +199,13 @@ pub fn load_config(app_handle: &tauri::AppHandle) -> AppConfig {
                                 local_path: None,
                                 rule: MatchRule::VersionMatch(version),
                                 deploy_server_ids: vec![],
+                                post_commands: vec![],
                             });
                         }
                     }
                 }
                 
-                return config;
+                return normalize_config(config);
             }
         }
     }

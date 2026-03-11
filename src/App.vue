@@ -13,9 +13,10 @@ let unlistenProgress: (() => void) | null = null;
 onMounted(async () => {
     unlistenLog = await listen('log-message', (event: any) => {
         const payload = event.payload as { msg: string, level: string };
-        let type: 'info' | 'error' | 'success' = 'info';
+        let type: 'info' | 'error' | 'success' | 'command' = 'info';
         if (payload.level === 'error') type = 'error';
         if (payload.level === 'success') type = 'success';
+        if (payload.level === 'command') type = 'command';
         addLog(payload.msg, type);
         syncTaskRecordByLog(payload.msg, payload.level);
     });
@@ -47,6 +48,7 @@ onMounted(async () => {
 
     try {
         const cfg = await getConfig();
+        if (cfg.max_log_lines > 0) appStore.maxLogLines = cfg.max_log_lines;
         if (cfg.launch_and_auto_scan && !appStore.isRunning) {
             await startScheduler();
         }

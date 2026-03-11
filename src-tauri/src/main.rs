@@ -12,23 +12,94 @@ use std::sync::{Mutex, Arc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 use std::process::Command;
+use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-use tauri::{State, Manager, Emitter};
+use tauri::{State, Manager, Emitter, WindowEvent, WebviewWindow, WebviewWindowBuilder};
+
+const TRAY_SHOW_ID: &str = "tray_show_main";
+const TRAY_QUIT_ID: &str = "tray_quit";
 
 struct AppState {
     config: Arc<Mutex<AppConfig>>,
     is_scanning: Arc<AtomicBool>,
+    is_manually_deploying: Arc<AtomicBool>,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    is_quitting: Arc<AtomicBool>,
+}
+
+fn restore_main_window(window: &WebviewWindow) {
+    let should_center = window.current_monitor().ok().flatten().is_none();
+
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_skip_taskbar(false);
+    let _ = window.set_focusable(true);
+
+    if should_center {
+        let _ = window.center();
+    }
+
+    #[cfg(target_os = "windows")]
+    let _ = window.set_always_on_top(true);
+
+    let _ = window.set_focus();
+
+    #[cfg(target_os = "windows")]
+    let _ = window.set_always_on_top(false);
+}
+
+fn recreate_main_window(app: &tauri::AppHandle) {
+    let Some(window_config) = app.config().app.windows.first().cloned() else {
+        log::error!("Cannot recreate main window: missing window config");
+        return;
+    };
+
+    let app_handle = app.clone();
+
+    std::thread::spawn(move || {
+        let app_for_ui = app_handle.clone();
+        let _ = app_handle.run_on_main_thread(move || {
+            if let Some(window) = app_for_ui.get_webview_window("main") {
+                restore_main_window(&window);
+                return;
+            }
+
+            match WebviewWindowBuilder::from_config(&app_for_ui, &window_config)
+                .and_then(|builder| builder.build())
+            {
+                Ok(window) => {
+                    log::warn!("Main window was missing and has been recreated");
+                    restore_main_window(&window);
+                }
+                Err(err) => {
+                    log::error!("Failed to recreate main window: {err}");
+                }
+            }
+        });
+    });
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+        restore_main_window(&window);
+    } else {
+        recreate_main_window(app);
     }
+}
+
+fn hide_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+fn should_close_to_tray(app: &tauri::AppHandle) -> bool {
+    app
+        .try_state::<AppState>()
+        .map(|state| state.config.lock().unwrap().close_to_tray)
+        .unwrap_or(false)
 }
 
 fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
@@ -70,6 +141,8 @@ fn get_config(state: State<AppState>) -> AppConfig {
 
 #[tauri::command]
 fn save_config_cmd(app_handle: tauri::AppHandle, state: State<AppState>, config: AppConfig) -> Result<(), String> {
+    config::validate_config(&config)?;
+    let config = config::normalize_config(config);
     sync_launch_on_startup(config.launch_and_auto_scan)?;
     *state.config.lock().unwrap() = config.clone();
     config::save_config(&app_handle, &config)
@@ -117,24 +190,54 @@ async fn test_ssh_connection(server: DeployServer) -> Result<String, String> {
 
 #[tauri::command]
 async fn manual_deploy(app_handle: tauri::AppHandle, state: State<'_, AppState>, server: DeployServer, postCommands: Vec<String>, localPath: String, remotePath: String) -> Result<(), String> {
-    if state.is_scanning.load(Ordering::SeqCst) {
-        return Err("Operation already in progress".to_string());
+    if state.is_manually_deploying.load(Ordering::SeqCst) {
+        return Err("Manual deploy already in progress".to_string());
     }
-    
-    state.is_scanning.store(true, Ordering::SeqCst);
+
+    state.is_manually_deploying.store(true, Ordering::SeqCst);
     state.should_cancel.store(false, Ordering::SeqCst);
     state.is_paused.store(false, Ordering::SeqCst);
 
     let should_cancel = state.should_cancel.clone();
     let is_paused = state.is_paused.clone();
-    let is_scanning = state.is_scanning.clone();
+    let is_manually_deploying = state.is_manually_deploying.clone();
 
     // This runs in async context, but deploy_manual uses blocking SSH.
     // We should spawn blocking.
     let result = tauri::async_runtime::spawn_blocking(move || {
         deploy::deploy_manual(&app_handle, &server, &postCommands, &localPath, &remotePath, should_cancel, is_paused)
     }).await.map_err(|e| e.to_string())?;
-    
+
+    is_manually_deploying.store(false, Ordering::SeqCst);
+    result
+}
+
+#[tauri::command]
+async fn temporary_copy(app_handle: tauri::AppHandle, state: State<'_, AppState>, sourcePath: String, targetRootPath: String) -> Result<(), String> {
+    if state.is_scanning.load(Ordering::SeqCst) {
+        return Err("Operation already in progress".to_string());
+    }
+
+    state.is_scanning.store(true, Ordering::SeqCst);
+    state.should_cancel.store(false, Ordering::SeqCst);
+    state.is_paused.store(false, Ordering::SeqCst);
+
+    let config = state.config.lock().unwrap().clone();
+    let live_config = state.config.clone();
+    let should_cancel = state.should_cancel.clone();
+    let is_paused = state.is_paused.clone();
+    let is_scanning = state.is_scanning.clone();
+
+    let result = scanner::temporary_copy(
+        &app_handle,
+        &config,
+        live_config,
+        sourcePath,
+        targetRootPath,
+        should_cancel,
+        is_paused,
+    ).await;
+
     is_scanning.store(false, Ordering::SeqCst);
     result
 }
@@ -196,10 +299,46 @@ fn main() {
         }))
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let is_quitting = window
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .map(|state| state.is_quitting.load(Ordering::SeqCst))
+                    .unwrap_or(false);
+
+                if !is_quitting && should_close_to_tray(&window.app_handle()) {
+                    api.prevent_close();
+                    hide_main_window(&window.app_handle());
+                }
+            }
+        })
         .setup(|app| {
+            let tray_menu = MenuBuilder::new(app)
+                .text(TRAY_SHOW_ID, "显示主窗口")
+                .separator()
+                .text(TRAY_QUIT_ID, "退出")
+                .build()?;
+
             let app_handle = app.handle().clone();
-            let _ = TrayIconBuilder::new()
+            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
                 .tooltip("File Sync Tool")
+                .on_menu_event(move |app, event| match event.id().as_ref() {
+                    TRAY_SHOW_ID => show_main_window(app),
+                    TRAY_QUIT_ID => {
+                        if let Some(state) = app.try_state::<AppState>() {
+                            state.is_quitting.store(true, Ordering::SeqCst);
+                        }
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
                 .on_tray_icon_event(move |_tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -209,16 +348,23 @@ fn main() {
                     {
                         show_main_window(&app_handle);
                     }
-                })
-                .build(app)?;
+                });
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+
+            let _ = tray_builder.build(app)?;
 
             let config = config::load_config(app.handle());
             let _ = sync_launch_on_startup(config.launch_and_auto_scan);
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
                 is_scanning: Arc::new(AtomicBool::new(false)),
+                is_manually_deploying: Arc::new(AtomicBool::new(false)),
                 should_cancel: Arc::new(AtomicBool::new(false)),
                 is_paused: Arc::new(AtomicBool::new(false)),
+                is_quitting: Arc::new(AtomicBool::new(false)),
             });
             Ok(())
         })
@@ -234,6 +380,7 @@ fn main() {
             history::add_system_event,
             test_ssh_connection,
             manual_deploy,
+            temporary_copy,
             get_app_paths,
             open_path_parent
         ])
