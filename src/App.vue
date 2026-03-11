@@ -22,7 +22,7 @@ onMounted(async () => {
     });
 
     unlistenProgress = await listen('copy-progress', (event: any) => {
-        const p = event.payload as { folder: string, total_bytes: number, copied_bytes: number, percentage: number, speed: number, eta_seconds: number, elapsed_seconds: number, local_path: string, remote_path: string };
+        const p = event.payload as { folder: string, total_bytes: number, copied_bytes: number, percentage: number, speed: number, eta_seconds: number, elapsed_seconds: number, local_path: string, remote_path: string, source?: string };
         appStore.progress = {
             folder: p.folder,
             percentage: p.percentage,
@@ -32,7 +32,8 @@ onMounted(async () => {
             eta: p.eta_seconds,
             elapsed: p.elapsed_seconds || 0,
             localPath: p.local_path,
-            remotePath: p.remote_path
+            remotePath: p.remote_path,
+            source: p.source === 'manual' ? 'manual' : 'scheduled',
         };
         // Reset live progress when done (100%)
         if (p.percentage >= 100) {
@@ -43,7 +44,7 @@ onMounted(async () => {
             }, 2000);
         }
         // Update persistent task records in console
-        upsertTaskRecord(p);
+        upsertTaskRecord({ ...p, source: p.source });
     });
 
     try {

@@ -1,5 +1,16 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export interface CommandGroup {
+  id: string;
+  name: string;
+  commands: string[];
+}
+
+export interface TaskServerBinding {
+  server_id: string;
+  command_group_ids: string[];
+}
+
 export interface DeployServer {
   id: string;
   enabled: boolean;
@@ -23,38 +34,26 @@ export interface ScanTask {
   remote_path: string;
   local_path: string | null;
   rule: MatchRule;
-  /** Server IDs this task deploys to. Empty = do not deploy. */
-  deploy_server_ids: string[];
-  /** Task-specific post commands. If empty, global post_commands are used. */
-  post_commands: string[];
+  /** Per-server deployment bindings with command groups. */
+  server_bindings: TaskServerBinding[];
 }
 
 export interface AppConfig {
   tasks: ScanTask[];
-  
-  // Legacy (kept for type compatibility if needed, but UI should focus on tasks)
-  remote_paths: string[];
-  target_versions: string[];
-  
+
   local_path: string;
   interval_minutes: number;
   time_ranges: string[]; // Format "HH:mm-HH:mm" e.g. "05:00-09:00"
   file_extensions: string[];
   filename_includes: string[];
-  
+
   deploy_enabled: boolean;
   servers: DeployServer[];
-  
-  // Legacy
-  ssh_host: string;
-  ssh_port: number;
-  ssh_user: string;
-  ssh_password: string;
-  remote_linux_path: string;
-  
-  post_commands: string[];
 
-  /** Seconds to wait before copying to verify files are fully written. Minimum: 1. Default: 30. */
+  /** Named command groups. */
+  command_groups: CommandGroup[];
+
+  /** Seconds to wait before copying to verify files are fully written. Minimum: 60. */
   stability_check_secs: number;
 
   /** If a file was modified within the last N minutes, it must pass the stability wait. Minimum: 3. */

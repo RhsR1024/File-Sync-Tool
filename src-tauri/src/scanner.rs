@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, MatchRule};
+use crate::config::{AppConfig, MatchRule, TaskServerBinding};
 use crate::history::{add_history_entry, HistoryEntry};
 use crate::deploy::deploy_to_remote;
 use chrono::{Local, NaiveDateTime, Duration, NaiveTime, Timelike};
@@ -39,6 +39,7 @@ struct ProgressEvent {
     elapsed_seconds: u64,
     local_path: String,
     remote_path: String,
+    source: String, // "manual" or "scheduled"
 }
 
 #[derive(Debug)]
@@ -128,22 +129,23 @@ fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, le
 }
 
 fn emit_progress<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>, 
-    folder: &str, 
-    copied: u64, 
+    app_handle: &tauri::AppHandle<R>,
+    folder: &str,
+    copied: u64,
     total: u64,
     speed: u64,
     eta_seconds: u64,
     elapsed_seconds: u64,
     local_path: &str,
-    remote_path: &str
+    remote_path: &str,
+    source: &str,
 ) {
     let percentage = if total > 0 {
         (copied as f64 / total as f64) * 100.0
     } else {
         0.0
     };
-    
+
     let _ = app_handle.emit("copy-progress", ProgressEvent {
         folder: folder.to_string(),
         total_bytes: total,
@@ -154,6 +156,7 @@ fn emit_progress<R: tauri::Runtime>(
         elapsed_seconds,
         local_path: local_path.to_string(),
         remote_path: remote_path.to_string(),
+        source: source.to_string(),
     });
 }
 
@@ -209,9 +212,9 @@ async fn perform_copy<R: tauri::Runtime>(
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     result: &mut ScanResult,
-    deploy_server_ids: Vec<String>,
+    server_bindings: Vec<TaskServerBinding>,
     allow_deploy: bool,
-    task_post_commands: Vec<String>,
+    source: &str,
 ) {
     let target_full_path = target_parent_path.join(&folder_name);
     
@@ -245,8 +248,8 @@ async fn perform_copy<R: tauri::Runtime>(
     let should_cancel_clone = should_cancel.clone();
     let is_paused_clone = is_paused.clone();
     let live_config_clone = live_config.clone();
-    let deploy_server_ids_clone = deploy_server_ids.clone();
-    let task_post_commands_clone = task_post_commands.clone();
+    let server_bindings_clone = server_bindings.clone();
+    let source_clone = source.to_string();
 
     let copy_task = tauri::async_runtime::spawn_blocking(move || {
         let handle = app_handle_clone;
@@ -455,7 +458,8 @@ async fn perform_copy<R: tauri::Runtime>(
                     copied, total, speed, eta,
                     elapsed as u64,
                     &local_path_display,
-                    &remote_path_display
+                    &remote_path_display,
+                    &source_clone,
                 );
                 last_emit_time = now;
             }
@@ -558,32 +562,20 @@ async fn perform_copy<R: tauri::Runtime>(
          // start is detected without needing to restart the scheduler.
          let current_config = live_config_clone.lock().unwrap().clone();
          if allow_deploy && current_config.deploy_enabled {
-              // If no deploy servers are selected for this task, skip deployment entirely.
-              if deploy_server_ids_clone.is_empty() {
+              if server_bindings_clone.is_empty() {
                   emit_log(&handle, format!("No deploy servers selected for task '{}', skipping deployment.", folder_name_clone), "info");
-                  return Ok(copied_bytes_total);
-              }
-
-              // Filter servers to only those explicitly selected by the task.
-              let mut deploy_config = current_config.clone();
-              deploy_config.servers = deploy_config.servers
-                  .into_iter()
-                  .filter(|s| deploy_server_ids_clone.contains(&s.id))
-                  .collect();
-
-              if deploy_config.servers.is_empty() {
-                  emit_log(&handle, format!("Selected deploy servers for task '{}' are unavailable or disabled, skipping deployment.", folder_name_clone), "warn");
                   return Ok(copied_bytes_total);
               }
 
               if let Err(e) = deploy_to_remote(
                   &handle,
-                  &deploy_config,
+                  &server_bindings_clone,
+                  &current_config.servers,
+                  &current_config.command_groups,
                   &target_full_path_clone,
                   &folder_name_clone,
                   should_cancel_clone,
                   is_paused_clone,
-                  &task_post_commands_clone,
               ) {
                   emit_log(&handle, format!("Deployment failed: {}", e), "error");
               }
@@ -686,7 +678,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         &mut result,
         vec![],
         false,
-        vec![],
+        "manual",
     )
     .await;
 
@@ -850,9 +842,9 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             should_cancel.clone(),
                             is_paused.clone(),
                             &mut result,
-                            task.deploy_server_ids.clone(),
+                            task.server_bindings.clone(),
                             true,
-                            task.post_commands.clone(),
+                            "scheduled",
                         ).await;
                         
                     } else {
@@ -924,9 +916,9 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                 should_cancel.clone(),
                                 is_paused.clone(),
                                 &mut result,
-                                task.deploy_server_ids.clone(),
+                                task.server_bindings.clone(),
                                 true,
-                                task.post_commands.clone(),
+                                "scheduled",
                             ).await;
                         }
                     }

@@ -11,6 +11,7 @@
     "lint": "eslint . --ext .ts,.vue",
     "lint:fix": "eslint . --ext .ts,.vue --fix",
     "tauri": "tauri",
+    "tauri:build:versioned-exe": "pnpm tauri build && node scripts/rename-tauri-exe.mjs",
     "check-env": "cargo --version"
   },
   "dependencies": {

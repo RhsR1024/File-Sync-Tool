@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, DeployServer};
+use crate::config::{CommandGroup, DeployServer, TaskServerBinding};
 use std::net::TcpStream;
 use std::path::Path;
 use ssh2::Session;
@@ -22,11 +22,12 @@ struct ProgressEvent {
     total_bytes: u64,
     copied_bytes: u64,
     percentage: f64,
-    speed: u64, // bytes per second
+    speed: u64,
     eta_seconds: u64,
     elapsed_seconds: u64,
     local_path: String,
     remote_path: String,
+    source: String,
 }
 
 fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
@@ -34,27 +35,27 @@ fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, le
         msg: msg.clone(),
         level: level.to_string(),
     });
-    // Also write to the persistent log file (shared mutex in scanner module)
     crate::scanner::write_log_to_file(app_handle, &msg, level);
 }
 
 fn emit_progress<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>, 
-    folder: &str, 
-    copied: u64, 
+    app_handle: &tauri::AppHandle<R>,
+    folder: &str,
+    copied: u64,
     total: u64,
     speed: u64,
     eta_seconds: u64,
     elapsed_seconds: u64,
     local_path: &str,
-    remote_path: &str
+    remote_path: &str,
+    source: &str,
 ) {
     let percentage = if total > 0 {
         (copied as f64 / total as f64) * 100.0
     } else {
         0.0
     };
-    
+
     let _ = app_handle.emit("copy-progress", ProgressEvent {
         folder: folder.to_string(),
         total_bytes: total,
@@ -65,85 +66,90 @@ fn emit_progress<R: tauri::Runtime>(
         elapsed_seconds,
         local_path: local_path.to_string(),
         remote_path: remote_path.to_string(),
+        source: source.to_string(),
     });
 }
 
 pub fn check_connection(server: &DeployServer) -> Result<String, String> {
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))
         .map_err(|e| format!("TCP Connect failed to {}: {}", server.host, e))?;
-    
+
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| format!("SSH Handshake failed: {}", e))?;
-    
+
     sess.userauth_password(&server.user, &server.password)
         .map_err(|e| format!("Authentication failed: {}", e))?;
-    
+
     Ok(format!("Connected to {}", server.name))
+}
+
+/// Resolve ordered commands from a list of command group IDs.
+fn resolve_commands(command_group_ids: &[String], all_groups: &[CommandGroup]) -> Vec<String> {
+    let mut commands = Vec::new();
+    for gid in command_group_ids {
+        if let Some(group) = all_groups.iter().find(|g| &g.id == gid) {
+            commands.extend(group.commands.iter().cloned());
+        }
+    }
+    commands
 }
 
 pub fn deploy_to_remote<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    config: &AppConfig,
+    server_bindings: &[TaskServerBinding],
+    all_servers: &[DeployServer],
+    command_groups: &[CommandGroup],
     local_folder_path: &Path,
     folder_name: &str,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
-    task_post_commands: &[String],
 ) -> Result<(), String> {
-    if !config.deploy_enabled {
+    if server_bindings.is_empty() {
         return Ok(());
     }
 
-    if config.servers.is_empty() {
-        emit_log(app_handle, "Deployment enabled but no servers configured.".to_string(), "warn");
-        return Ok(());
-    }
+    emit_log(app_handle, format!("Starting deployment for {} server(s)...", server_bindings.len()), "info");
 
-    emit_log(app_handle, format!("Starting deployment for {} servers...", config.servers.len()), "info");
+    let total_size = calculate_size(local_folder_path);
 
-    let servers = config.servers.clone();
-    let local_path_buf = local_folder_path.to_path_buf();
-    let folder_name_owned = folder_name.to_string();
-    let app_handle = app_handle.clone();
-    // Task-specific post commands take precedence; fall back to global config
-    let post_commands = if task_post_commands.is_empty() {
-        config.post_commands.clone()
-    } else {
-        task_post_commands.to_vec()
-    };
-
-    // Calculate total size once for progress reporting
-    let total_size = calculate_size(&local_path_buf);
-
-    // Deploy sequentially to avoid UI progress conflicts and ensure stability
-    let server_count = servers.len();
-    for (idx, server) in servers.into_iter().enumerate() {
-        if !server.enabled {
-            continue;
-        }
-        
-        let handle = app_handle.clone();
-        let local = local_path_buf.clone();
-        let name = folder_name_owned.clone();
-        let commands = post_commands.clone();
-        let cancel = should_cancel.clone();
-        let pause = is_paused.clone();
-        
-        // Check cancel before starting next server
-        if cancel.load(Ordering::SeqCst) {
-            emit_log(&app_handle, "Remaining deployments cancelled.".to_string(), "warn");
+    for (idx, binding) in server_bindings.iter().enumerate() {
+        if should_cancel.load(Ordering::SeqCst) {
+            emit_log(app_handle, "Remaining deployments cancelled.".to_string(), "warn");
             break;
         }
 
-        emit_log(&app_handle, format!("Deploying to server {}/{} [{}]", idx + 1, server_count, server.name), "info");
+        let server = match all_servers.iter().find(|s| s.id == binding.server_id) {
+            Some(s) => s,
+            None => {
+                emit_log(app_handle, format!("Server ID '{}' not found, skipping.", binding.server_id), "warn");
+                continue;
+            }
+        };
 
-        // Run synchronously in the current thread (which is already a background task)
-        if let Err(e) = deploy_single_server(&handle, &server, &local, &name, &commands, total_size, cancel, pause) {
-             emit_log(&handle, format!("[{}] Deployment failed: {}", server.name, e), "error");
-             // Continue to next server even if one fails
+        if !server.enabled {
+            emit_log(app_handle, format!("[{}] Server is disabled, skipping.", server.name), "info");
+            continue;
+        }
+
+        let commands = resolve_commands(&binding.command_group_ids, command_groups);
+
+        emit_log(app_handle, format!("Deploying to server {}/{} [{}]", idx + 1, server_bindings.len(), server.name), "info");
+
+        if let Err(e) = deploy_single_server(
+            app_handle,
+            server,
+            local_folder_path,
+            folder_name,
+            &commands,
+            total_size,
+            should_cancel.clone(),
+            is_paused.clone(),
+            "scheduled",
+        ) {
+            emit_log(app_handle, format!("[{}] Deployment failed: {}", server.name, e), "error");
         } else {
-             emit_log(&handle, format!("[{}] Deployment successful", server.name), "success");
+            emit_log(app_handle, format!("[{}] Deployment successful", server.name), "success");
         }
     }
 
@@ -153,13 +159,9 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
 fn substitute_variables(cmd: &str, folder_name: &str, local_path: &Path, remote_target: &str) -> String {
     let mut result = cmd.to_string();
 
-    // ${folder_name} — the deployed folder name (e.g. "C1773193540956024166")
     result = result.replace("${folder_name}", folder_name);
-
-    // ${remote_target} — full remote upload path (e.g. "/root/C1773193540956024166")
     result = result.replace("${remote_target}", remote_target);
 
-    // Resolve ${filename} dynamically by scanning for .tar.gz files
     if result.contains("${filename}") {
         let replacement = if let Ok(entries) = fs::read_dir(local_path) {
             let mut found_name = folder_name.to_string();
@@ -186,6 +188,7 @@ fn substitute_variables(cmd: &str, folder_name: &str, local_path: &Path, remote_
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn deploy_single_server<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     server: &DeployServer,
@@ -194,11 +197,11 @@ fn deploy_single_server<R: tauri::Runtime>(
     post_commands: &[String],
     total_size: u64,
     should_cancel: Arc<AtomicBool>,
-    is_paused: Arc<AtomicBool>
+    is_paused: Arc<AtomicBool>,
+    source: &str,
 ) -> Result<(), String> {
     emit_log(app_handle, format!("[{}] Connecting to {}:{}", server.name, server.host, server.remote_path), "info");
 
-    // 1. Connect
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))
         .map_err(|e| e.to_string())?;
     let mut sess = Session::new().unwrap();
@@ -208,90 +211,77 @@ fn deploy_single_server<R: tauri::Runtime>(
 
     emit_log(app_handle, format!("[{}] Connected", server.name), "info");
 
-    // 2. Create remote directory
     let remote_target = format!("{}/{}", server.remote_path.trim_end_matches('/'), folder_name);
-    
+
     let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
-    
-    // Check if exists logic...
-    // Always force upload or check logic? The original code checked existence.
-    // For auto-deploy, we usually want to overwrite or ensure it's there.
-    
-    // Check if exists
-    let should_upload = match sftp.stat(Path::new(&remote_target)) {
+
+    match sftp.stat(Path::new(&remote_target)) {
         Ok(_) => {
-             emit_log(app_handle, format!("[{}] Remote directory {} already exists. Continuing upload/overwrite.", server.name, remote_target), "info");
-             true
-        },
+            emit_log(app_handle, format!("[{}] Remote directory {} already exists. Continuing upload/overwrite.", server.name, remote_target), "info");
+        }
         Err(_) => {
-             emit_log(app_handle, format!("[{}] Uploading to {}", server.name, remote_target), "info");
-             
-             let mut channel = sess.channel_session().unwrap();
-             channel.exec(&format!("mkdir -p {}", remote_target)).unwrap();
-             channel.send_eof().unwrap();
-             let mut s = String::new();
-             channel.read_to_string(&mut s).unwrap();
-             channel.wait_close().unwrap();
-             true
+            emit_log(app_handle, format!("[{}] Uploading to {}", server.name, remote_target), "info");
+            let mut channel = sess.channel_session().unwrap();
+            channel.exec(&format!("mkdir -p {}", remote_target)).unwrap();
+            channel.send_eof().unwrap();
+            let mut s = String::new();
+            channel.read_to_string(&mut s).unwrap();
+            channel.wait_close().unwrap();
         }
     };
 
-    if should_upload {
-         let mut copied_bytes = 0;
-         let start_time = Instant::now();
-         let mut last_emit_time = Instant::now();
-         let local_path_str = local_folder_path.to_string_lossy();
-         let server_display = format!("[{}] {}:{}", server.name, server.host, remote_target);
+    let mut copied_bytes = 0u64;
+    let start_time = Instant::now();
+    let mut last_emit_time = Instant::now();
+    let local_path_str = local_folder_path.to_string_lossy().to_string();
+    let server_display = format!("[{}] {}:{}", server.name, server.host, remote_target);
 
-         upload_with_progress(
-            app_handle, 
-            &sftp, 
-            local_folder_path, 
-            Path::new(&remote_target),
-            total_size,
-            &mut copied_bytes,
-            start_time,
-            &mut last_emit_time,
-            folder_name,
-            &local_path_str,
-            &server_display,
-            &should_cancel,
-            &is_paused
-         )?;
+    upload_with_progress(
+        app_handle,
+        &sftp,
+        local_folder_path,
+        Path::new(&remote_target),
+        total_size,
+        &mut copied_bytes,
+        start_time,
+        &mut last_emit_time,
+        folder_name,
+        &local_path_str,
+        &server_display,
+        &should_cancel,
+        &is_paused,
+        source,
+    )?;
 
-         // Ensure final 100% event is always emitted for this server.
-         emit_progress(
-            app_handle,
-            folder_name,
-            total_size,
-            total_size,
-            0,
-            0,
-            start_time.elapsed().as_secs(),
-            &local_path_str,
-            &server_display
-         );
-    }
+    emit_progress(
+        app_handle,
+        folder_name,
+        total_size,
+        total_size,
+        0,
+        0,
+        start_time.elapsed().as_secs(),
+        &local_path_str,
+        &server_display,
+        source,
+    );
 
-    // 3. Exec commands
     if !post_commands.is_empty() {
         emit_log(app_handle, format!("[{}] Executing post commands...", server.name), "info");
 
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
-                 return Err("Cancelled".to_string());
+                return Err("Cancelled".to_string());
             }
 
             let final_cmd = substitute_variables(cmd, folder_name, local_folder_path, &remote_target);
             emit_log(app_handle, format!("[{}] $ {}", server.name, final_cmd), "command");
 
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-            // Merge stderr into stdout so we get all output in one stream
             channel.handle_extended_data(ssh2::ExtendedData::Merge).map_err(|e| e.to_string())?;
             channel.exec(&final_cmd).map_err(|e| e.to_string())?;
             channel.send_eof().map_err(|e| e.to_string())?;
 
-            // Stream output line by line for real-time log display
             let mut output_buf = String::new();
             let mut buf = [0u8; 4096];
             loop {
@@ -314,13 +304,11 @@ fn deploy_single_server<R: tauri::Runtime>(
                     }
                 }
             }
-            // Emit any remaining partial line
             if !output_buf.trim().is_empty() {
                 emit_log(app_handle, format!("[{}] > {}", server.name, output_buf.trim()), "info");
             }
 
             channel.wait_close().unwrap();
-
             let exit_code = channel.exit_status().unwrap_or(-1);
             if exit_code != 0 {
                 emit_log(app_handle, format!("[{}] Command exited with code {}", server.name, exit_code), "error");
@@ -352,7 +340,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
     local_path: &str,
     remote_path: &str,
     should_cancel: Arc<AtomicBool>,
-    is_paused: Arc<AtomicBool>
+    is_paused: Arc<AtomicBool>,
 ) -> Result<(), String> {
     emit_log(app_handle, format!("Starting manual deployment: {} -> [{}] {}:{}", local_path, server.name, server.host, remote_path), "info");
 
@@ -361,12 +349,10 @@ pub fn deploy_manual<R: tauri::Runtime>(
         return Err(format!("Local path does not exist: {}", local_path));
     }
 
-    // Calculate total size for progress
     emit_log(app_handle, "Calculating size...".to_string(), "info");
     let total_size = calculate_size(local_p);
     emit_log(app_handle, format!("Total size: {} bytes", total_size), "info");
 
-    // 1. Connect
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))
         .map_err(|e| e.to_string())?;
     let mut sess = Session::new().unwrap();
@@ -378,21 +364,18 @@ pub fn deploy_manual<R: tauri::Runtime>(
 
     let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
 
-    // Determine target remote path logic
     let mut target_path_str = remote_path.to_string();
     if target_path_str.ends_with('/') || target_path_str.ends_with('\\') {
-         let name = local_p.file_name().unwrap().to_string_lossy();
-         target_path_str = format!("{}{}", target_path_str.trim_end_matches(&['/', '\\'][..]), if target_path_str.contains('\\') { "\\" } else { "/" });
-         target_path_str = format!("{}/{}", target_path_str.trim_end_matches('/'), name);
+        let name = local_p.file_name().unwrap().to_string_lossy();
+        target_path_str = format!("{}/{}", target_path_str.trim_end_matches(&['/', '\\'][..]), name);
     }
-    
-    let target_path_str = target_path_str.replace("\\", "/");
+    let target_path_str = target_path_str.replace('\\', "/");
     let target_p = Path::new(&target_path_str);
 
     emit_log(app_handle, format!("Uploading to {}", target_path_str), "info");
 
     if let Some(parent) = target_p.parent() {
-        let parent_str = parent.to_string_lossy().replace("\\", "/");
+        let parent_str = parent.to_string_lossy().replace('\\', "/");
         if !parent_str.is_empty() {
             let mut channel = sess.channel_session().unwrap();
             channel.exec(&format!("mkdir -p {}", parent_str)).unwrap();
@@ -403,46 +386,43 @@ pub fn deploy_manual<R: tauri::Runtime>(
         }
     }
 
-    // Upload with progress
-    let mut copied_bytes = 0;
+    let mut copied_bytes = 0u64;
     let start_time = Instant::now();
     let mut last_emit_time = Instant::now();
-    
-    // Initial emit
     let server_display = format!("{}:{}", server.host, target_path_str);
-    emit_progress(app_handle, &local_p.file_name().unwrap_or_default().to_string_lossy(), 0, total_size, 0, 0, 0, local_path, &server_display);
+    let folder_display = local_p.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+    emit_progress(app_handle, &folder_display, 0, total_size, 0, 0, 0, local_path, &server_display, "manual");
 
     upload_with_progress(
-        app_handle, 
-        &sftp, 
-        local_p, 
-        target_p, 
-        total_size, 
-        &mut copied_bytes, 
-        start_time, 
+        app_handle,
+        &sftp,
+        local_p,
+        target_p,
+        total_size,
+        &mut copied_bytes,
+        start_time,
         &mut last_emit_time,
-        &local_p.file_name().unwrap_or_default().to_string_lossy(),
+        &folder_display,
         local_path,
         &server_display,
         &should_cancel,
-        &is_paused
+        &is_paused,
+        "manual",
     )?;
-    
-    emit_log(app_handle, "Upload complete".to_string(), "success");
-    // Emit 100%
-    emit_progress(app_handle, &local_p.file_name().unwrap_or_default().to_string_lossy(), total_size, total_size, 0, 0, start_time.elapsed().as_secs(), local_path, &server_display);
 
-    // Exec commands
+    emit_log(app_handle, "Upload complete".to_string(), "success");
+    emit_progress(app_handle, &folder_display, total_size, total_size, 0, 0, start_time.elapsed().as_secs(), local_path, &server_display, "manual");
+
     if !post_commands.is_empty() {
         emit_log(app_handle, "Executing post-deployment commands...".to_string(), "info");
-        let folder_name = local_p.file_name().unwrap_or_default().to_string_lossy();
 
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
                 return Err("Deployment cancelled".to_string());
             }
 
-            let final_cmd = substitute_variables(cmd, &folder_name, local_p, &target_path_str);
+            let final_cmd = substitute_variables(cmd, &folder_display, local_p, &target_path_str);
             emit_log(app_handle, format!("$ {}", final_cmd), "command");
 
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
@@ -450,7 +430,6 @@ pub fn deploy_manual<R: tauri::Runtime>(
             channel.exec(&final_cmd).map_err(|e| e.to_string())?;
             channel.send_eof().map_err(|e| e.to_string())?;
 
-            // Stream output line by line
             let mut output_buf = String::new();
             let mut buf = [0u8; 4096];
             loop {
@@ -489,33 +468,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
     Ok(())
 }
 
-fn upload_recursive<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    sftp: &ssh2::Sftp,
-    local_path: &Path,
-    remote_path: &Path
-) -> Result<(), String> {
-    // Legacy simple upload
-    if local_path.is_dir() {
-        let _ = sftp.mkdir(remote_path, 0o755);
-        for entry in fs::read_dir(local_path).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            let name = entry.file_name();
-            let remote_parent_str = remote_path.to_string_lossy().to_string().replace("\\", "/");
-            let child_name_str = name.to_string_lossy();
-            let remote_child_str = format!("{}/{}", remote_parent_str.trim_end_matches('/'), child_name_str);
-            let remote_child_path = Path::new(&remote_child_str);
-            upload_recursive(app_handle, sftp, &path, remote_child_path)?;
-        }
-    } else {
-        let mut local_file = fs::File::open(local_path).map_err(|e| e.to_string())?;
-        let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
-        std::io::copy(&mut local_file, &mut remote_file).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
+#[allow(clippy::too_many_arguments)]
 fn upload_with_progress<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     sftp: &ssh2::Sftp,
@@ -529,7 +482,8 @@ fn upload_with_progress<R: tauri::Runtime>(
     local_path_str: &str,
     remote_path_display: &str,
     should_cancel: &Arc<AtomicBool>,
-    is_paused: &Arc<AtomicBool>
+    is_paused: &Arc<AtomicBool>,
+    source: &str,
 ) -> Result<(), String> {
     if should_cancel.load(Ordering::SeqCst) {
         return Err("Deployment cancelled".to_string());
@@ -541,39 +495,26 @@ fn upload_with_progress<R: tauri::Runtime>(
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
             let name = entry.file_name();
-            let remote_parent_str = remote_path.to_string_lossy().to_string().replace("\\", "/");
+            let remote_parent_str = remote_path.to_string_lossy().replace('\\', "/");
             let child_name_str = name.to_string_lossy();
             let remote_child_str = format!("{}/{}", remote_parent_str.trim_end_matches('/'), child_name_str);
             let remote_child_path = Path::new(&remote_child_str);
-            
             upload_with_progress(
-                app_handle,
-                sftp,
-                &path,
-                remote_child_path,
-                total_size,
-                copied_bytes,
-                start_time,
-                last_emit_time,
-                folder_display,
-                local_path_str,
-                remote_path_display,
-                should_cancel,
-                is_paused
+                app_handle, sftp, &path, remote_child_path, total_size,
+                copied_bytes, start_time, last_emit_time,
+                folder_display, local_path_str, remote_path_display,
+                should_cancel, is_paused, source,
             )?;
         }
     } else {
         let mut local_file = fs::File::open(local_path).map_err(|e| e.to_string())?;
         let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
-        
-        let mut buffer = [0u8; 64 * 1024]; // 64KB buffer
+
+        let mut buffer = [0u8; 64 * 1024];
         loop {
-            // Check cancel
             if should_cancel.load(Ordering::SeqCst) {
                 return Err("Deployment cancelled".to_string());
             }
-            
-            // Check pause
             while is_paused.load(Ordering::SeqCst) {
                 if should_cancel.load(Ordering::SeqCst) {
                     return Err("Deployment cancelled".to_string());
@@ -584,34 +525,14 @@ fn upload_with_progress<R: tauri::Runtime>(
             let n = local_file.read(&mut buffer).map_err(|e| e.to_string())?;
             if n == 0 { break; }
             remote_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
-            
             *copied_bytes += n as u64;
-            
+
             let now = Instant::now();
             if now.duration_since(*last_emit_time).as_millis() > 200 {
                 let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 {
-                    (*copied_bytes as f64 / elapsed) as u64
-                } else {
-                    0
-                };
-                let eta = if speed > 0 && total_size > *copied_bytes {
-                    (total_size - *copied_bytes) / speed
-                } else {
-                    0
-                };
-                
-                emit_progress(
-                    app_handle, 
-                    folder_display,
-                    *copied_bytes, 
-                    total_size, 
-                    speed, 
-                    eta,
-                    elapsed as u64,
-                    local_path_str,
-                    remote_path_display
-                );
+                let speed = if elapsed > 0.0 { (*copied_bytes as f64 / elapsed) as u64 } else { 0 };
+                let eta = if speed > 0 && total_size > *copied_bytes { (total_size - *copied_bytes) / speed } else { 0 };
+                emit_progress(app_handle, folder_display, *copied_bytes, total_size, speed, eta, elapsed as u64, local_path_str, remote_path_display, source);
                 *last_emit_time = now;
             }
         }

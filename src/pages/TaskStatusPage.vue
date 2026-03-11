@@ -317,10 +317,14 @@ watch(activeActionRecord, (val) => {
               :class="['grid gap-3 p-4 items-center text-sm', taskTableCols]"
             >
               <div class="flex items-center gap-2 truncate font-medium text-slate-800" :title="rec.folder">
-                <div class="w-8 h-8 bg-blue-100 text-blue-600 rounded flex items-center justify-center shrink-0">
+                <div class="w-8 h-8 rounded flex items-center justify-center shrink-0"
+                  :class="rec.source === 'manual' ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'">
                   <Activity class="w-4 h-4" />
                 </div>
-                <span class="truncate">{{ rec.folder }}</span>
+                <div class="flex flex-col min-w-0">
+                  <span class="truncate">{{ rec.folder }}</span>
+                  <span v-if="rec.source === 'manual'" class="text-[10px] font-semibold text-purple-600 leading-none mt-0.5">{{ t('settings.sourceManual') }}</span>
+                </div>
               </div>
 
               <div class="font-bold truncate" :class="statusClass(rec.phase)">

@@ -16,6 +16,7 @@ export interface ProgressState {
     elapsed: number;
     localPath?: string;
     remotePath?: string;
+    source?: 'manual' | 'scheduled';
 }
 
 export type TaskRecordPhase =
@@ -54,6 +55,7 @@ export interface TaskRecord {
     copied: number;
     total: number;
     phase: TaskRecordPhase;
+    source: 'manual' | 'scheduled';
 }
 
 export const appStore = reactive({
@@ -132,6 +134,7 @@ function createTaskRecord(payload: {
     speed: number;
     local_path: string;
     phase: TaskRecordPhase;
+    source: 'manual' | 'scheduled';
 }): TaskRecord {
     const now = Date.now();
     return {
@@ -153,6 +156,7 @@ function createTaskRecord(payload: {
         copied: payload.copied_bytes,
         total: payload.total_bytes,
         phase: payload.phase,
+        source: payload.source,
     };
 }
 
@@ -247,6 +251,7 @@ export function upsertTaskRecord(payload: {
     speed: number;
     local_path: string;
     remote_path: string;
+    source?: string;
 }) {
     const isRemoteDeploy = payload.remote_path.startsWith('[');
 
@@ -281,6 +286,7 @@ export function upsertTaskRecord(payload: {
             speed: payload.speed,
             local_path: payload.local_path,
             phase: 'copying',
+            source: (payload.source === 'manual' ? 'manual' : 'scheduled'),
         });
 
         appStore.taskRecords.unshift(record);
@@ -304,6 +310,7 @@ export function upsertTaskRecord(payload: {
             speed: payload.speed,
             local_path: payload.local_path,
             phase: 'remote_pushing',
+            source: (payload.source === 'manual' ? 'manual' : 'scheduled'),
         });
         target.copyCompleted = true;
         target.copyPercentage = 100;
