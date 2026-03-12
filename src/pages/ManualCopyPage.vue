@@ -5,6 +5,7 @@ import ManualCopyModal from '@/components/ManualCopyModal.vue';
 import { getConfig, type AppConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
+import { addLog } from '@/lib/store';
 
 defineOptions({ name: 'ManualCopyPage' });
 
@@ -13,6 +14,8 @@ const router = useRouter();
 
 const isModalOpen = ref(false);
 const config = ref<AppConfig | null>(null);
+const isLoadingConfig = ref(false);
+const configError = ref('');
 
 const filterSummary = computed(() => {
   if (!config.value) return t('manualCopy.readingRules');
@@ -40,11 +43,18 @@ const stabilitySummary = computed(() => {
 });
 
 async function loadConfig(): Promise<void> {
+  isLoadingConfig.value = true;
+  configError.value = '';
   try {
     const cfg = await getConfig();
     config.value = cfg;
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    configError.value = t('manualCopy.loadConfigFailed', { error: errorMsg });
+    addLog(`Failed to load config: ${errorMsg}`, 'error');
     console.error('Failed to load config:', error);
+  } finally {
+    isLoadingConfig.value = false;
   }
 }
 
@@ -110,6 +120,17 @@ onMounted(loadConfig);
 
       <!-- Right Sidebar -->
       <div class="space-y-4">
+        <!-- Error Alert -->
+        <div v-if="configError" class="bg-red-50 rounded-2xl border border-red-200 shadow-sm p-5">
+          <div class="flex items-start gap-3">
+            <AlertCircle class="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <div class="font-semibold text-red-800">{{ t('common.error') }}</div>
+              <p class="text-sm text-red-700 mt-1">{{ configError }}</p>
+            </div>
+          </div>
+        </div>
+
         <!-- Rules Card -->
         <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
           <div class="flex items-center gap-2 text-slate-800 font-semibold">
