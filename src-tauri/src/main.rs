@@ -16,6 +16,7 @@ use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use tauri::{State, Manager, Emitter, WindowEvent, WebviewWindow, WebviewWindowBuilder};
+use serde_json::json;
 
 const TRAY_SHOW_ID: &str = "tray_show_main";
 const TRAY_QUIT_ID: &str = "tray_quit";
@@ -302,6 +303,182 @@ fn open_directory() -> Result<Option<String>, String> {
     Ok(selected_dir.map(|path| path.to_string_lossy().to_string()))
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PasswordChangeResult {
+    pub ip: String,
+    pub success: bool,
+    pub message: String,
+    pub failedAt: Option<String>,
+}
+
+// Helper function to validate IP address format
+fn validate_ip(ip: &str) -> bool {
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    parts.iter().all(|part| {
+        part.parse::<u8>().is_ok()
+    })
+}
+
+#[tauri::command]
+async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChangeResult>, String> {
+    const OLD_PASSWORD_HASH: &str = "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92";
+    const NEW_PASSWORD_HASH: &str = "4d5c5f61bb3d2c299d3211c2992a28a7849b6ce933919c399ce24903c1715d45";
+
+    let mut results = Vec::new();
+    let client = reqwest::Client::new();
+
+    for ip in ips.iter() {
+        let ip = ip.trim();
+        if ip.is_empty() {
+            continue;
+        }
+
+        // Validate IP format (basic check)
+        if !validate_ip(ip) {
+            results.push(PasswordChangeResult {
+                ip: ip.to_string(),
+                success: false,
+                message: format!("Invalid IP address: {}", ip),
+                failedAt: Some("login".to_string()),
+            });
+            continue;
+        }
+
+        // Step 1: Login
+        let login_url = format!("http://{}:21900/openAPI/userMgr/v1/login", ip);
+        let login_body = json!({
+            "userName": "admin",
+            "userPasswd": OLD_PASSWORD_HASH,
+            "isUnlockLogin": false
+        });
+
+        let token = match client
+            .post(&login_url)
+            .header("Authorization", "ab94186a-165b-4a18-9337-a9e33809d592")
+            .header("content-type", "application/json")
+            .json(&login_body)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(json) => {
+                        // Validate response structure
+                        if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
+                            if let Some(token) = json.get("data").and_then(|d| d.get("token")).and_then(|t| t.as_str()) {
+                                token.to_string()
+                            } else {
+                                results.push(PasswordChangeResult {
+                                    ip: ip.to_string(),
+                                    success: false,
+                                    message: "Login response missing token".to_string(),
+                                    failedAt: Some("login".to_string()),
+                                });
+                                continue;
+                            }
+                        } else {
+                            let msg = json
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Unknown error");
+                            results.push(PasswordChangeResult {
+                                ip: ip.to_string(),
+                                success: false,
+                                message: format!("Login failed: {}", msg),
+                                failedAt: Some("login".to_string()),
+                            });
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        results.push(PasswordChangeResult {
+                            ip: ip.to_string(),
+                            success: false,
+                            message: format!("Login response parse error: {}", e),
+                            failedAt: Some("login".to_string()),
+                        });
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                results.push(PasswordChangeResult {
+                    ip: ip.to_string(),
+                    success: false,
+                    message: format!("Login request failed: {}", e),
+                    failedAt: Some("login".to_string()),
+                });
+                continue;
+            }
+        };
+
+        // Step 2: Change Password
+        let change_passwd_url = format!("http://{}:21900/openAPI/userMgr/v1/changePasswd", ip);
+        let change_passwd_body = json!({
+            "userName": "admin",
+            "oldUserPasswd": OLD_PASSWORD_HASH,
+            "newUserPasswd": NEW_PASSWORD_HASH
+        });
+
+        match client
+            .post(&change_passwd_url)
+            .header("Authorization", &token)
+            .header("content-type", "application/json")
+            .json(&change_passwd_body)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(json) => {
+                        // Validate response structure
+                        if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
+                            results.push(PasswordChangeResult {
+                                ip: ip.to_string(),
+                                success: true,
+                                message: "Success".to_string(),
+                                failedAt: None,
+                            });
+                        } else {
+                            let msg = json
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Unknown error");
+                            results.push(PasswordChangeResult {
+                                ip: ip.to_string(),
+                                success: false,
+                                message: format!("Change password failed: {}", msg),
+                                failedAt: Some("changePasswd".to_string()),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        results.push(PasswordChangeResult {
+                            ip: ip.to_string(),
+                            success: false,
+                            message: format!("Change password response parse error: {}", e),
+                            failedAt: Some("changePasswd".to_string()),
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                results.push(PasswordChangeResult {
+                    ip: ip.to_string(),
+                    success: false,
+                    message: format!("Change password request failed: {}", e),
+                    failedAt: Some("changePasswd".to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -394,7 +571,8 @@ fn main() {
             temporary_copy,
             get_app_paths,
             open_path_parent,
-            open_directory
+            open_directory,
+            change_framework_password
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
