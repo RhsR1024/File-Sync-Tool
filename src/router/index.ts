@@ -29,6 +29,10 @@ const routes: RouteRecordRaw[] = [
     name: 'settings',
     component: SettingsPage,
   },
+  {
+    path: '/tools/framework-password',
+    component: () => import('../pages/FrameworkPasswordPage.vue'),
+  },
 ]
 
 const router = createRouter({
