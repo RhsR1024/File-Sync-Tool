@@ -2,11 +2,11 @@ export const messages = {
   en: {
     sidebar: {
       title: 'File Sync Tool',
-      console: 'Execution Logs',
+      console: 'Console',
       manualCopy: 'Manual Copy',
       history: 'History',
       settings: 'Settings',
-      tasks: 'Console',
+      tasks: 'Progress',
       version: 'v1.0.0 · 2026.03.10',
     },
     console: {
@@ -198,6 +198,8 @@ export const messages = {
       maxLogLines: 'Max Console Log Lines',
       maxLogLinesDesc: 'Maximum number of log lines displayed in the execution log console. Default: 200.',
       lines: 'lines',
+      copyBufferSize: 'Copy Buffer Size',
+      copyBufferSizeDesc: 'Read/write chunk size when copying files from network shares. Larger values improve speed for big files but increase memory usage. Default: 4 MB.',
       postCommandsHint: 'Available variables: ${filename} (tar.gz file stem), ${folder_name} (deployed folder), ${remote_target} (full remote path). Use && to chain commands. Use echo "yes" | to answer interactive prompts.',
       // Command Groups
       commandGroups: 'Command Groups',
@@ -279,11 +281,11 @@ export const messages = {
   zh: {
     sidebar: {
       title: '文件同步工具',
-      console: '执行日志',
+      console: '控制台',
       manualCopy: '指定复制',
       history: '历史记录',
       settings: '设置',
-      tasks: '控制台',
+      tasks: '进度',
       version: 'v1.0.0 · 2026.03.10',
     },
     console: {
@@ -475,6 +477,8 @@ export const messages = {
       maxLogLines: '控制台最大日志行数',
       maxLogLinesDesc: '执行日志控制台中显示的最大行数。默认：200。',
       lines: '行',
+      copyBufferSize: '复制缓冲区大小',
+      copyBufferSizeDesc: '从网络共享目录复制文件时的读写块大小。较大的值可提升大文件复制速度，但会占用更多内存。默认：4 MB。',
       postCommandsHint: '可用变量：${filename}（tar.gz 文件名去后缀）、${folder_name}（部署文件夹名）、${remote_target}（远程完整路径）。用 && 连接多条命令。用 echo "yes" | 自动回答交互式确认。',
       // 命令组
       commandGroups: '命令组管理',
