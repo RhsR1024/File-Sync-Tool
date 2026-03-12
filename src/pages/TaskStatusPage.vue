@@ -1,8 +1,8 @@
 ﻿<script setup lang="ts">
 import { ref, onMounted, onActivated, watch, computed } from 'vue';
-import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2 } from 'lucide-vue-next';
+import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2, ChevronDown, ChevronUp } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
-import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, type AppConfig } from '@/lib/tauri';
+import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, temporaryCopy, type AppConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { appStore, addLog, markTaskRecordCancelled, setTaskRecordPaused, type TaskRecord } from '@/lib/store';
 import { startScheduler, stopScheduler, executeScan } from '@/lib/scheduler';
@@ -16,6 +16,14 @@ const config = ref<AppConfig | null>(null);
 const isCancelling = ref(false);
 const taskTableCols = 'grid-cols-[2.8fr_1fr_1.3fr_1.4fr_2.4fr_2.4fr_1fr_1.1fr_1fr]';
 
+// Manual copy state
+const showManualCopy = ref(false);
+const sourcePath = ref('');
+const targetRootPath = ref('');
+const manualCopyStatus = ref('');
+const manualCopyTone = ref<'info' | 'success' | 'error'>('info');
+const isSubmittingManualCopy = ref(false);
+
 const orderedRecords = computed(() =>
   [...appStore.taskRecords].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
 );
@@ -25,6 +33,30 @@ const activeActionRecord = computed(() =>
 );
 
 const isPaused = computed(() => activeActionRecord.value?.phase === 'paused');
+
+const canSubmitManualCopy = computed(() => sourcePath.value.trim().length > 0 && targetRootPath.value.trim().length > 0 && !isSubmittingManualCopy.value);
+
+const filterSummary = computed(() => {
+  if (!config.value) return t('manualCopy.readingRules');
+  const exts = config.value.file_extensions.filter(Boolean);
+  const keywords = config.value.filename_includes.filter(Boolean);
+  const parts: string[] = [];
+  if (exts.length > 0) {
+    parts.push(t('manualCopy.extFilter', { value: exts.join(', ') }));
+  }
+  if (keywords.length > 0) {
+    parts.push(t('manualCopy.keywordFilter', { value: keywords.join(', ') }));
+  }
+  return parts.length > 0 ? parts.join(' | ') : t('manualCopy.noFilters');
+});
+
+const stabilitySummary = computed(() => {
+  if (!config.value) return t('manualCopy.readingRules');
+  return t('manualCopy.stabilityEnabled', {
+    mins: config.value.recent_file_guard_mins,
+    secs: config.value.stability_check_secs,
+  });
+});
 
 function liveProgress(rec: TaskRecord) {
   if (!appStore.progress) return null;
@@ -209,6 +241,37 @@ async function handleScanClick() {
   await executeScan();
 }
 
+async function submitManualCopy() {
+  if (!canSubmitManualCopy.value) {
+    manualCopyTone.value = 'error';
+    manualCopyStatus.value = t('manualCopy.fillRequired');
+    return;
+  }
+
+  isSubmittingManualCopy.value = true;
+  manualCopyStatus.value = '';
+  manualCopyTone.value = 'info';
+
+  try {
+    await temporaryCopy(sourcePath.value.trim(), targetRootPath.value.trim());
+    manualCopyTone.value = 'success';
+    manualCopyStatus.value = t('manualCopy.success');
+    addLog(t('manualCopy.addedToQueue'), 'success');
+    await addSystemEvent('MANUAL_COPY', t('manualCopy.addedToQueue'));
+    // Clear inputs after success
+    setTimeout(() => {
+      sourcePath.value = '';
+      targetRootPath.value = '';
+      manualCopyStatus.value = '';
+    }, 1500);
+  } catch (error) {
+    manualCopyTone.value = 'error';
+    manualCopyStatus.value = t('manualCopy.failed', { error: String(error) });
+  } finally {
+    isSubmittingManualCopy.value = false;
+  }
+}
+
 onActivated(() => {
   loadConfig();
 });
@@ -248,6 +311,75 @@ watch(activeActionRecord, (val) => {
         <div class="text-slate-500 text-sm font-medium uppercase tracking-wider mb-2">{{ t('console.nextRun') }}</div>
         <div class="flex items-center gap-2 font-bold text-2xl text-slate-800 font-mono">
           {{ appStore.nextRunTime }}
+        </div>
+      </div>
+    </div>
+
+    <!-- Manual Copy Card -->
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
+      <button
+        @click="showManualCopy = !showManualCopy"
+        class="w-full flex items-center justify-between cursor-pointer hover:opacity-80 transition-opacity"
+      >
+        <h3 class="text-lg font-semibold text-slate-700">{{ t('sidebar.manualCopy') }}</h3>
+        <component :is="showManualCopy ? ChevronUp : ChevronDown" class="w-5 h-5 text-slate-500" />
+      </button>
+
+      <div v-if="showManualCopy" class="mt-4 space-y-4 pt-4 border-t border-slate-100">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <!-- Input Form -->
+          <div class="lg:col-span-2 space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-2">{{ t('manualCopy.sourcePath') }}</label>
+              <input
+                v-model="sourcePath"
+                type="text"
+                class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
+                :placeholder="t('manualCopy.sourcePlaceholder')"
+                :disabled="isSubmittingManualCopy"
+              />
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-2">{{ t('manualCopy.targetRootPath') }}</label>
+              <input
+                v-model="targetRootPath"
+                type="text"
+                class="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
+                :placeholder="t('manualCopy.targetPlaceholder')"
+                :disabled="isSubmittingManualCopy"
+              />
+              <p class="text-xs text-slate-400 mt-1">{{ t('manualCopy.targetHint') }}</p>
+            </div>
+
+            <button
+              @click="submitManualCopy"
+              :disabled="!canSubmitManualCopy"
+              class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-white font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 text-sm"
+            >
+              <Play class="w-4 h-4" />
+              {{ isSubmittingManualCopy ? t('manualCopy.copying') : t('manualCopy.startCopy') }}
+            </button>
+
+            <!-- Status message -->
+            <div v-if="manualCopyStatus" class="rounded-lg px-4 py-3 text-sm border" :class="manualCopyTone === 'error' ? 'bg-red-50 text-red-600 border-red-100' : manualCopyTone === 'success' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-slate-50 text-slate-600 border-slate-200'">
+              {{ manualCopyStatus }}
+            </div>
+          </div>
+
+          <!-- Rules Card -->
+          <div class="space-y-3">
+            <div class="bg-slate-50 rounded-lg border border-slate-200 p-4 space-y-3 text-sm">
+              <div>
+                <div class="font-medium text-slate-700 mb-1">{{ t('manualCopy.filterTitle') }}</div>
+                <div class="text-slate-600">{{ filterSummary }}</div>
+              </div>
+              <div class="border-t border-slate-200 pt-3">
+                <div class="font-medium text-slate-700 mb-1">{{ t('manualCopy.stabilityTitle') }}</div>
+                <div class="text-slate-600">{{ stabilitySummary }}</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

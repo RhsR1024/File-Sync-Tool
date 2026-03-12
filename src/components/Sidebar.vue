@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Settings, Activity, Server, ShieldCheck, History, ListChecks, Copy } from 'lucide-vue-next';
+import { Settings, Activity, Server, ShieldCheck, History, ListChecks } from 'lucide-vue-next';
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { computed } from 'vue';
@@ -10,7 +10,6 @@ const { t } = useI18n();
 const menuItems = computed(() => [
   { name: t('sidebar.tasks'), path: '/tasks', icon: ListChecks },
   { name: t('sidebar.console'), path: '/', icon: Activity },
-  { name: t('sidebar.manualCopy'), path: '/manual-copy', icon: Copy },
   { name: t('sidebar.history'), path: '/history', icon: History },
   { name: t('sidebar.settings'), path: '/settings', icon: Settings },
 ]);

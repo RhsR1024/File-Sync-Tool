@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import MainConsole from '@/pages/MainConsole.vue'
-import ManualCopyPage from '@/pages/ManualCopyPage.vue'
 import TaskStatusPage from '@/pages/TaskStatusPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import HistoryPage from '@/pages/HistoryPage.vue'
@@ -18,8 +17,7 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/manual-copy',
-    name: 'manual-copy',
-    component: ManualCopyPage,
+    redirect: '/tasks',
   },
   {
     path: '/history',
