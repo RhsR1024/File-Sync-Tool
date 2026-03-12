@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { AlertCircle, ArrowRight, Copy, Play, Settings, ShieldCheck } from 'lucide-vue-next';
-import { addLog } from '@/lib/store';
-import { addSystemEvent, getConfig, temporaryCopy, type AppConfig } from '@/lib/tauri';
+import { ArrowRight, Copy, Settings, ShieldCheck, AlertCircle } from 'lucide-vue-next';
+import ManualCopyModal from '@/components/ManualCopyModal.vue';
+import { getConfig, type AppConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 
@@ -11,14 +11,8 @@ defineOptions({ name: 'ManualCopyPage' });
 const { t } = useI18n();
 const router = useRouter();
 
-const sourcePath = ref('');
-const targetRootPath = ref('');
-const statusMsg = ref('');
-const statusTone = ref<'info' | 'success' | 'error'>('info');
-const isSubmitting = ref(false);
+const isModalOpen = ref(false);
 const config = ref<AppConfig | null>(null);
-
-const canSubmit = computed(() => sourcePath.value.trim().length > 0 && targetRootPath.value.trim().length > 0 && !isSubmitting.value);
 
 const filterSummary = computed(() => {
   if (!config.value) return t('manualCopy.readingRules');
@@ -45,42 +39,26 @@ const stabilitySummary = computed(() => {
   });
 });
 
-async function loadConfig() {
+async function loadConfig(): Promise<void> {
   try {
     const cfg = await getConfig();
     config.value = cfg;
-    if (!targetRootPath.value) {
-      targetRootPath.value = cfg.local_path || '';
-    }
   } catch (error) {
-    statusTone.value = 'error';
-    statusMsg.value = t('manualCopy.loadConfigFailed', { error: String(error) });
+    console.error('Failed to load config:', error);
   }
 }
 
-async function submitCopy() {
-  if (!canSubmit.value) {
-    statusTone.value = 'error';
-    statusMsg.value = t('manualCopy.fillRequired');
-    return;
-  }
+function openManualCopyModal(): void {
+  isModalOpen.value = true;
+}
 
-  isSubmitting.value = true;
-  statusMsg.value = '';
-  statusTone.value = 'info';
+function closeManualCopyModal(): void {
+  isModalOpen.value = false;
+}
 
-  try {
-    await temporaryCopy(sourcePath.value.trim(), targetRootPath.value.trim());
-    statusTone.value = 'success';
-    statusMsg.value = t('manualCopy.success');
-    addLog(t('manualCopy.addedToQueue'), 'success');
-    await addSystemEvent('MANUAL_COPY', t('manualCopy.addedToQueue'));
-  } catch (error) {
-    statusTone.value = 'error';
-    statusMsg.value = t('manualCopy.failed', { error: String(error) });
-  } finally {
-    isSubmitting.value = false;
-  }
+function handleCopySuccess(): void {
+  // Optional: Any additional logic after successful copy
+  // e.g., show a toast, refresh data, etc.
 }
 
 onMounted(loadConfig);
@@ -88,6 +66,7 @@ onMounted(loadConfig);
 
 <template>
   <div class="p-6 bg-slate-50 min-h-full space-y-6">
+    <!-- Page Header -->
     <div class="flex items-start justify-between gap-4 flex-wrap">
       <div>
         <h2 class="text-2xl font-bold text-slate-800 flex items-center gap-3">
@@ -110,61 +89,28 @@ onMounted(loadConfig);
       </router-link>
     </div>
 
+    <!-- Main Content Area -->
     <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)] gap-6">
-      <!-- Input Form -->
-      <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
-        <div class="grid grid-cols-1 gap-5">
-          <div>
-            <label class="block text-sm font-medium text-slate-700 mb-2">{{ t('manualCopy.sourcePath') }}</label>
-            <input
-              v-model="sourcePath"
-              type="text"
-              class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
-              :placeholder="t('manualCopy.sourcePlaceholder')"
-            />
-          </div>
-
-          <div>
-            <label class="block text-sm font-medium text-slate-700 mb-2">{{ t('manualCopy.targetRootPath') }}</label>
-            <input
-              v-model="targetRootPath"
-              type="text"
-              class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
-              :placeholder="t('manualCopy.targetPlaceholder')"
-            />
-            <p class="text-xs text-slate-400 mt-2">{{ t('manualCopy.targetHint') }}</p>
-          </div>
-        </div>
-
-        <div class="flex flex-wrap gap-3 pt-2">
+      <!-- Start Copy Section -->
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-8 space-y-6 flex flex-col items-start justify-center min-h-80">
+        <div>
+          <p class="text-slate-600 mb-4">{{ t('manualCopy.subtitle') }}</p>
           <button
-            @click="submitCopy"
-            :disabled="!canSubmit"
-            class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-white font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700"
+            @click="openManualCopyModal"
+            class="inline-flex items-center gap-3 px-8 py-4 rounded-xl text-white font-semibold text-lg transition-all bg-blue-600 hover:bg-blue-700 active:scale-95 shadow-md hover:shadow-lg"
           >
-            <Play class="w-4 h-4" />
-            {{ isSubmitting ? t('manualCopy.copying') : t('manualCopy.startCopy') }}
+            <Copy class="w-6 h-6" />
+            {{ t('manualCopy.startCopy') }}
           </button>
         </div>
-
-        <!-- Status message -->
-        <div v-if="statusMsg" class="rounded-xl px-4 py-3 text-sm border" :class="statusTone === 'error' ? 'bg-red-50 text-red-600 border-red-100' : statusTone === 'success' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-slate-50 text-slate-600 border-slate-200'">
-          <div class="flex items-center justify-between gap-3">
-            <span>{{ statusMsg }}</span>
-            <button
-              v-if="statusTone === 'success'"
-              @click="router.push('/')"
-              class="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:text-emerald-900 shrink-0"
-            >
-              {{ t('manualCopy.viewInConsole') }}
-              <ArrowRight class="w-3 h-3" />
-            </button>
-          </div>
+        <div class="text-sm text-slate-500 mt-4">
+          {{ t('manualCopy.modalDesc') }}
         </div>
       </div>
 
-      <!-- Rules Card -->
+      <!-- Right Sidebar -->
       <div class="space-y-4">
+        <!-- Rules Card -->
         <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
           <div class="flex items-center gap-2 text-slate-800 font-semibold">
             <ShieldCheck class="w-4 h-4 text-blue-600" />
@@ -187,7 +133,7 @@ onMounted(loadConfig);
           </div>
         </div>
 
-        <!-- Hint card -->
+        <!-- Progress Tracking Card -->
         <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
           <div class="flex items-center gap-2 text-slate-800 font-semibold">
             <AlertCircle class="w-4 h-4 text-amber-500" />
@@ -204,5 +150,12 @@ onMounted(loadConfig);
         </div>
       </div>
     </div>
+
+    <!-- Manual Copy Modal -->
+    <ManualCopyModal
+      :is-open="isModalOpen"
+      @close="closeManualCopyModal"
+      @success="handleCopySuccess"
+    />
   </div>
 </template>
