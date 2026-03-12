@@ -151,3 +151,7 @@ export async function getAppPaths(): Promise<[string, string]> {
 export async function openPathParent(path: string): Promise<void> {
   await invoke('open_path_parent', { path });
 }
+
+export async function openDirectory(): Promise<string | null> {
+  return await invoke('open_directory');
+}
