@@ -291,6 +291,17 @@ fn open_path_parent(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn open_directory() -> Result<Option<String>, String> {
+    // Open system directory selection dialog
+    // Returns Ok(Some(path)) when user selects a directory
+    // Returns Ok(None) when user cancels
+    let selected_dir = rfd::FileDialog::new()
+        .pick_folder();
+
+    Ok(selected_dir.map(|path| path.to_string_lossy().to_string()))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -369,8 +380,8 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_config, 
-            save_config_cmd, 
+            get_config,
+            save_config_cmd,
             scan_now,
             cancel_scan,
             pause_scan,
@@ -382,7 +393,8 @@ fn main() {
             manual_deploy,
             temporary_copy,
             get_app_paths,
-            open_path_parent
+            open_path_parent,
+            open_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
