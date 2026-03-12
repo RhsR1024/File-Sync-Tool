@@ -155,3 +155,35 @@ export async function openPathParent(path: string): Promise<void> {
 export async function openDirectory(): Promise<string | null> {
   return await invoke('open_directory');
 }
+
+// Framework password management types
+export interface FrameworkPasswordResult {
+  ip: string;
+  success: boolean;
+  message: string;
+  stage: 'login' | 'changePasswd'; // 失败在哪一步
+}
+
+export interface ChangeFrameworkPasswordResponse {
+  results: FrameworkPasswordResult[];
+}
+
+// Internal: Login API response
+export interface LoginResponse {
+  code: number;
+  message: string;
+  data?: {
+    firstLogin: boolean;
+    token: string;
+  };
+}
+
+// Internal: ChangePasswd API response
+export interface ChangePasswdResponse {
+  code: number;
+  message: string;
+}
+
+export async function changeFrameworkPassword(ips: string[]): Promise<FrameworkPasswordResult[]> {
+  return invoke<FrameworkPasswordResult[]>('change_framework_password', { ips });
+}
