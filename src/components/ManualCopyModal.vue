@@ -91,7 +91,7 @@ async function selectTargetDirectory() {
     }
   } catch (error) {
     statusTone.value = 'error';
-    statusMsg.value = t('manualCopy.failed', { error: String(error) });
+    statusMsg.value = t('manualCopy.selectDirFailed', { error: String(error) });
   } finally {
     isSelectingTarget.value = false;
   }
@@ -214,10 +214,11 @@ onBeforeUnmount(() => {
                 <button
                   @click="selectTargetDirectory"
                   :disabled="isSelectingTarget"
+                  :title="t('manualCopy.browseFolder')"
                   class="px-4 py-3 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2 text-slate-600 font-medium"
                 >
                   <FolderOpen class="w-4 h-4" />
-                  {{ t('settings.openFolder') }}
+                  <span class="hidden sm:inline">{{ t('manualCopy.browse') }}</span>
                 </button>
               </div>
               <p class="text-xs text-slate-400 mt-2">{{ t('manualCopy.targetHint') }}</p>
