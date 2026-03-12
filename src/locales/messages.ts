@@ -2,11 +2,11 @@ export const messages = {
   en: {
     sidebar: {
       title: 'File Sync Tool',
-      console: 'Console',
+      console: 'Execution Logs',
       manualCopy: 'Manual Copy',
       history: 'History',
       settings: 'Settings',
-      tasks: 'Progress',
+      tasks: 'Console',
       version: 'v1.0.0 · 2026.03.10',
     },
     console: {
@@ -281,11 +281,11 @@ export const messages = {
   zh: {
     sidebar: {
       title: '文件同步工具',
-      console: '控制台',
+      console: '执行日志',
       manualCopy: '指定复制',
       history: '历史记录',
       settings: '设置',
-      tasks: '进度',
+      tasks: '控制台',
       version: 'v1.0.0 · 2026.03.10',
     },
     console: {
