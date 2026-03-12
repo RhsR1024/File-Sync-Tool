@@ -161,15 +161,12 @@ export interface FrameworkPasswordResult {
   ip: string;
   success: boolean;
   message: string;
-  stage: 'login' | 'changePasswd'; // 失败在哪一步
+  /** If success is false, indicates where the failure occurred. */
+  failedAt?: 'login' | 'changePasswd';
 }
 
-export interface ChangeFrameworkPasswordResponse {
-  results: FrameworkPasswordResult[];
-}
-
-// Internal: Login API response
-export interface LoginResponse {
+// Internal: Login API response (used by backend)
+interface LoginResponse {
   code: number;
   message: string;
   data?: {
@@ -178,12 +175,17 @@ export interface LoginResponse {
   };
 }
 
-// Internal: ChangePasswd API response
-export interface ChangePasswdResponse {
+// Internal: ChangePasswd API response (used by backend)
+interface ChangePasswdResponse {
   code: number;
   message: string;
 }
 
+/**
+ * Change framework password for specified IPs.
+ * @param ips - Array of IP addresses to change password for
+ * @returns Array of results indicating success/failure for each IP
+ */
 export async function changeFrameworkPassword(ips: string[]): Promise<FrameworkPasswordResult[]> {
-  return invoke<FrameworkPasswordResult[]>('change_framework_password', { ips });
+  return await invoke<FrameworkPasswordResult[]>('change_framework_password', { ips });
 }
