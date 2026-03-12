@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { X, Play, FolderOpen, ShieldCheck } from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
 import { addLog, updateManualCopyForm, getManualCopyForm } from '@/lib/store';
@@ -17,7 +17,6 @@ interface Emits {
 }
 
 defineProps<Props>();
-defineEmits<Emits>();
 
 const emit = defineEmits<Emits>();
 
@@ -30,6 +29,7 @@ const statusTone = ref<'info' | 'success' | 'error'>('info');
 const isSubmitting = ref(false);
 const config = ref<AppConfig | null>(null);
 const isSelectingTarget = ref(false);
+let closeTimerId: ReturnType<typeof setTimeout> | null = null;
 
 const canSubmit = computed(
   () => sourcePath.value.trim().length > 0 && targetRootPath.value.trim().length > 0 && !isSubmitting.value
@@ -83,6 +83,11 @@ async function selectTargetDirectory() {
     if (selected) {
       targetRootPath.value = selected;
       updateManualCopyForm({ targetRootPath: selected });
+      statusMsg.value = '';
+    } else {
+      // User cancelled directory selection
+      statusTone.value = 'info';
+      statusMsg.value = t('manualCopy.directorySelectionCancelled');
     }
   } catch (error) {
     statusTone.value = 'error';
@@ -117,7 +122,7 @@ async function submitCopy() {
 
     // Emit success event and close after delay
     emit('success');
-    setTimeout(() => {
+    closeTimerId = setTimeout(() => {
       emit('close');
     }, 2000);
   } catch (error) {
@@ -143,6 +148,14 @@ watch([sourcePath, targetRootPath], () => {
 onMounted(() => {
   loadConfig();
   restoreFormData();
+});
+
+onBeforeUnmount(() => {
+  // Clean up timer to prevent emit on unmounted component
+  if (closeTimerId !== null) {
+    clearTimeout(closeTimerId);
+    closeTimerId = null;
+  }
 });
 </script>
 
