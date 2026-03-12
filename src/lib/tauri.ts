@@ -67,6 +67,9 @@ export interface AppConfig {
 
   /** Maximum number of log lines to display in the console. Default: 200. */
   max_log_lines: number;
+
+  /** Copy buffer size in KB. Controls read/write chunk size when copying files. Default: 4096 (4 MB). */
+  copy_buffer_size_kb: number;
 }
 
 export interface ScanResult {

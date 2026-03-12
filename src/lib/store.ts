@@ -1,5 +1,10 @@
 ﻿import { reactive } from 'vue';
 
+export interface ManualCopyFormState {
+    sourcePath: string;
+    targetRootPath: string;
+}
+
 export interface LogEntry {
     time: string;
     msg: string;
@@ -465,4 +470,41 @@ export function syncTaskRecordByLog(msg: string, level: string) {
     if (level === 'error' && lower.includes('deployment failed')) {
         touchTaskRecord(target);
     }
+}
+
+const MANUAL_COPY_STORAGE_KEY = 'manualCopy_form_state';
+
+function loadManualCopyFormFromStorage(): ManualCopyFormState {
+    try {
+        const stored = localStorage.getItem(MANUAL_COPY_STORAGE_KEY);
+        if (stored) {
+            return JSON.parse(stored);
+        }
+    } catch {
+        // Ignore parse errors and use default state
+    }
+    return {
+        sourcePath: '',
+        targetRootPath: '',
+    };
+}
+
+export const manualCopyFormState = reactive<ManualCopyFormState>(loadManualCopyFormFromStorage());
+
+export function updateManualCopyForm(state: Partial<ManualCopyFormState>): void {
+    Object.assign(manualCopyFormState, state);
+    localStorage.setItem(MANUAL_COPY_STORAGE_KEY, JSON.stringify(manualCopyFormState));
+}
+
+export function getManualCopyForm(): ManualCopyFormState {
+    return {
+        sourcePath: manualCopyFormState.sourcePath,
+        targetRootPath: manualCopyFormState.targetRootPath,
+    };
+}
+
+export function clearManualCopyForm(): void {
+    manualCopyFormState.sourcePath = '';
+    manualCopyFormState.targetRootPath = '';
+    localStorage.removeItem(MANUAL_COPY_STORAGE_KEY);
 }

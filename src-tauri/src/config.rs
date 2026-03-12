@@ -94,11 +94,17 @@ pub struct AppConfig {
 
     #[serde(default = "default_max_log_lines")]
     pub max_log_lines: u32,
+
+    /// Copy buffer size in KB. Controls the read/write chunk size when copying files.
+    /// Larger values improve throughput on fast network shares. Default: 4096 (4 MB).
+    #[serde(default = "default_copy_buffer_size_kb")]
+    pub copy_buffer_size_kb: u32,
 }
 
 fn default_stability_secs() -> u64 { 30 }
 fn default_recent_file_guard_mins() -> u64 { MIN_RECENT_FILE_GUARD_MINS }
 fn default_max_log_lines() -> u32 { 200 }
+fn default_copy_buffer_size_kb() -> u32 { 4096 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -117,6 +123,7 @@ impl Default for AppConfig {
             launch_and_auto_scan: false,
             close_to_tray: false,
             max_log_lines: 200,
+            copy_buffer_size_kb: 4096,
         }
     }
 }

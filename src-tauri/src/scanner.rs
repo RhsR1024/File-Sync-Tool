@@ -162,16 +162,17 @@ fn emit_progress<R: tauri::Runtime>(
 
 // Helper function to copy file with chunking and interruption support
 fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
-    from: P, 
-    to: Q, 
+    from: P,
+    to: Q,
     should_cancel: &Arc<AtomicBool>,
     is_paused: &Arc<AtomicBool>,
+    buffer_size: usize,
     on_progress: &mut dyn FnMut(u64) // bytes copied delta
 ) -> Result<u64, String> {
     let mut file_in = std::fs::File::open(from).map_err(|e| e.to_string())?;
     let mut file_out = std::fs::File::create(to).map_err(|e| e.to_string())?;
-    
-    let mut buffer = [0u8; 64 * 1024]; // 64KB buffer
+
+    let mut buffer = vec![0u8; buffer_size];
     let mut total_copied = 0;
     
     loop {
@@ -212,7 +213,7 @@ async fn perform_copy<R: tauri::Runtime>(
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     result: &mut ScanResult,
-    server_bindings: Vec<TaskServerBinding>,
+    task_id: Option<String>,
     allow_deploy: bool,
     source: &str,
 ) {
@@ -245,10 +246,11 @@ async fn perform_copy<R: tauri::Runtime>(
     let includes = config.filename_includes.clone();
     let stability_check_secs = config.stability_check_secs;
     let recent_file_guard_mins = config.recent_file_guard_mins;
+    let copy_buffer_size = (config.copy_buffer_size_kb as usize).max(64) * 1024;
     let should_cancel_clone = should_cancel.clone();
     let is_paused_clone = is_paused.clone();
     let live_config_clone = live_config.clone();
-    let server_bindings_clone = server_bindings.clone();
+    let task_id_clone = task_id.clone();
     let source_clone = source.to_string();
 
     let copy_task = tauri::async_runtime::spawn_blocking(move || {
@@ -505,10 +507,11 @@ async fn perform_copy<R: tauri::Runtime>(
 
              // Copy with chunking
              let copy_res = copy_file_chunked(
-                 &src, 
-                 &dst, 
-                 &should_cancel_clone, 
+                 &src,
+                 &dst,
+                 &should_cancel_clone,
                  &is_paused_clone,
+                 copy_buffer_size,
                  &mut |delta| {
                      copied_bytes_total += delta;
                      update_stats(copied_bytes_total, total_filtered_bytes);
@@ -560,16 +563,28 @@ async fn perform_copy<R: tauri::Runtime>(
          
          // Deploy: Re-read the latest config so that enabling deploy after scheduler
          // start is detected without needing to restart the scheduler.
+         // server_bindings are also read from live_config here so that edits made
+         // during a long copy are picked up at deploy time.
          let current_config = live_config_clone.lock().unwrap().clone();
          if allow_deploy && current_config.deploy_enabled {
-              if server_bindings_clone.is_empty() {
+              let live_server_bindings: Vec<TaskServerBinding> =
+                  if let Some(ref tid) = task_id_clone {
+                      current_config.tasks.iter()
+                          .find(|t| &t.id == tid)
+                          .map(|t| t.server_bindings.clone())
+                          .unwrap_or_default()
+                  } else {
+                      vec![]
+                  };
+
+              if live_server_bindings.is_empty() {
                   emit_log(&handle, format!("No deploy servers selected for task '{}', skipping deployment.", folder_name_clone), "info");
                   return Ok(copied_bytes_total);
               }
 
               if let Err(e) = deploy_to_remote(
                   &handle,
-                  &server_bindings_clone,
+                  &live_server_bindings,
                   &current_config.servers,
                   &current_config.command_groups,
                   &target_full_path_clone,
@@ -676,7 +691,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         should_cancel,
         is_paused,
         &mut result,
-        vec![],
+        None,
         false,
         "manual",
     )
@@ -842,11 +857,11 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             should_cancel.clone(),
                             is_paused.clone(),
                             &mut result,
-                            task.server_bindings.clone(),
+                            Some(task.id.clone()),
                             true,
                             "scheduled",
                         ).await;
-                        
+
                     } else {
                         emit_log(app_handle, format!("Ignored {} because date {} is not Today ({}) or Yesterday ({})", latest.name, folder_date, today, yesterday), "info");
                     }
@@ -916,7 +931,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                 should_cancel.clone(),
                                 is_paused.clone(),
                                 &mut result,
-                                task.server_bindings.clone(),
+                                Some(task.id.clone()),
                                 true,
                                 "scheduled",
                             ).await;

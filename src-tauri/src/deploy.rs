@@ -74,7 +74,7 @@ pub fn check_connection(server: &DeployServer) -> Result<String, String> {
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))
         .map_err(|e| format!("TCP Connect failed to {}: {}", server.host, e))?;
 
-    let mut sess = Session::new().unwrap();
+    let mut sess = Session::new().map_err(|e| format!("SSH Session init failed: {}", e))?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| format!("SSH Handshake failed: {}", e))?;
 
@@ -204,7 +204,7 @@ fn deploy_single_server<R: tauri::Runtime>(
 
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))
         .map_err(|e| e.to_string())?;
-    let mut sess = Session::new().unwrap();
+    let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
     sess.userauth_password(&server.user, &server.password).map_err(|e| e.to_string())?;
@@ -221,12 +221,12 @@ fn deploy_single_server<R: tauri::Runtime>(
         }
         Err(_) => {
             emit_log(app_handle, format!("[{}] Uploading to {}", server.name, remote_target), "info");
-            let mut channel = sess.channel_session().unwrap();
-            channel.exec(&format!("mkdir -p {}", remote_target)).unwrap();
-            channel.send_eof().unwrap();
+            let mut channel = sess.channel_session().map_err(|e| format!("channel_session failed: {}", e))?;
+            channel.exec(&format!("mkdir -p {}", remote_target)).map_err(|e| format!("mkdir failed: {}", e))?;
+            channel.send_eof().map_err(|e| format!("send_eof failed: {}", e))?;
             let mut s = String::new();
-            channel.read_to_string(&mut s).unwrap();
-            channel.wait_close().unwrap();
+            channel.read_to_string(&mut s).map_err(|e| format!("read failed: {}", e))?;
+            channel.wait_close().map_err(|e| format!("wait_close failed: {}", e))?;
         }
     };
 
@@ -308,7 +308,7 @@ fn deploy_single_server<R: tauri::Runtime>(
                 emit_log(app_handle, format!("[{}] > {}", server.name, output_buf.trim()), "info");
             }
 
-            channel.wait_close().unwrap();
+            channel.wait_close().map_err(|e| format!("wait_close failed: {}", e))?;
             let exit_code = channel.exit_status().unwrap_or(-1);
             if exit_code != 0 {
                 emit_log(app_handle, format!("[{}] Command exited with code {}", server.name, exit_code), "error");
@@ -355,7 +355,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
 
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))
         .map_err(|e| e.to_string())?;
-    let mut sess = Session::new().unwrap();
+    let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
     sess.userauth_password(&server.user, &server.password).map_err(|e| e.to_string())?;
@@ -366,7 +366,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
 
     let mut target_path_str = remote_path.to_string();
     if target_path_str.ends_with('/') || target_path_str.ends_with('\\') {
-        let name = local_p.file_name().unwrap().to_string_lossy();
+        let name = local_p.file_name().ok_or("Invalid local path: no file name")?.to_string_lossy();
         target_path_str = format!("{}/{}", target_path_str.trim_end_matches(&['/', '\\'][..]), name);
     }
     let target_path_str = target_path_str.replace('\\', "/");
@@ -377,12 +377,12 @@ pub fn deploy_manual<R: tauri::Runtime>(
     if let Some(parent) = target_p.parent() {
         let parent_str = parent.to_string_lossy().replace('\\', "/");
         if !parent_str.is_empty() {
-            let mut channel = sess.channel_session().unwrap();
-            channel.exec(&format!("mkdir -p {}", parent_str)).unwrap();
-            channel.send_eof().unwrap();
+            let mut channel = sess.channel_session().map_err(|e| format!("channel_session failed: {}", e))?;
+            channel.exec(&format!("mkdir -p {}", parent_str)).map_err(|e| format!("mkdir failed: {}", e))?;
+            channel.send_eof().map_err(|e| format!("send_eof failed: {}", e))?;
             let mut s = String::new();
-            channel.read_to_string(&mut s).unwrap();
-            channel.wait_close().unwrap();
+            channel.read_to_string(&mut s).map_err(|e| format!("read failed: {}", e))?;
+            channel.wait_close().map_err(|e| format!("wait_close failed: {}", e))?;
         }
     }
 
@@ -456,7 +456,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
                 emit_log(app_handle, format!("> {}", output_buf.trim()), "info");
             }
 
-            channel.wait_close().unwrap();
+            channel.wait_close().map_err(|e| format!("wait_close failed: {}", e))?;
             let exit_code = channel.exit_status().unwrap_or(-1);
             if exit_code != 0 {
                 emit_log(app_handle, format!("Command exited with code {}", exit_code), "error");

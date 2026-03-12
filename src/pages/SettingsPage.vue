@@ -24,7 +24,8 @@ const config = ref<AppConfig>({
   recent_file_guard_mins: 3,
   launch_and_auto_scan: false,
   close_to_tray: false,
-  max_log_lines: 200
+  max_log_lines: 200,
+  copy_buffer_size_kb: 4096
 });
 
 const newExt = ref('');
@@ -778,6 +779,22 @@ onMounted(load);
             <p class="text-xs leading-5 text-slate-400">{{ t('settings.stabilityCheckHint') }}</p>
           </div>
         </div>
+      </div>
+
+      <div class="pt-5 border-t border-slate-100 space-y-3">
+        <div>
+          <label class="block text-base font-medium text-slate-700">{{ t('settings.copyBufferSize') }}</label>
+          <p class="text-sm leading-6 text-slate-500 mt-1">{{ t('settings.copyBufferSizeDesc') }}</p>
+        </div>
+        <select v-model.number="config.copy_buffer_size_kb"
+                class="w-44 h-10 px-3 border border-slate-300 rounded-lg text-slate-700 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white">
+          <option :value="64">64 KB</option>
+          <option :value="256">256 KB</option>
+          <option :value="1024">1 MB</option>
+          <option :value="4096">4 MB（推荐）</option>
+          <option :value="8192">8 MB</option>
+          <option :value="16384">16 MB</option>
+        </select>
       </div>
 
       <div class="pt-5 border-t border-slate-100 space-y-4">
