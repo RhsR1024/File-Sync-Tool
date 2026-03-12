@@ -262,6 +262,11 @@ export const messages = {
       goToConsole: 'Go to Console',
       queueHintTitle: 'Track Progress',
       queueHintDesc: 'After submitting, the copy runs in the background. Go to the Console tab to see real-time progress, pause, or cancel.',
+      browse: 'Browse',
+      browseFolder: 'Select folder using file picker',
+      selectDirFailed: 'Failed to select directory: {error}',
+      directorySelectionCancelled: 'Directory selection cancelled',
+      modalTip: 'Click the button above to open the copy dialog',
     },
     history: {
       title: 'Operation History',
@@ -541,6 +546,11 @@ export const messages = {
       goToConsole: '前往控制台',
       queueHintTitle: '进度跟踪',
       queueHintDesc: '提交后复制任务在后台执行，请前往控制台页面查看实时进度、暂停或取消。',
+      browse: '浏览',
+      browseFolder: '通过文件浏览器选择文件夹',
+      selectDirFailed: '选择目录失败: {error}',
+      directorySelectionCancelled: '取消了目录选择',
+      modalTip: '点击上方按钮打开复制对话框',
     },
     history: {
       title: '历史记录',
