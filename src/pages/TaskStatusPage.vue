@@ -228,16 +228,7 @@ watch(activeActionRecord, (val) => {
 
 <template>
   <div class="p-6 h-full flex flex-col gap-6 bg-slate-50">
-    <div class="flex items-center justify-between">
-      <h2 class="text-2xl font-bold text-slate-800">{{ t('sidebar.tasks') }}</h2>
-      <button
-        @click="isManualCopyModalOpen = true"
-        class="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-white font-medium transition-all bg-blue-600 hover:bg-blue-700 shadow-sm active:scale-95"
-      >
-        <Copy class="w-4 h-4" />
-        {{ t('manualCopy.title') }}
-      </button>
-    </div>
+    <h2 class="text-2xl font-bold text-slate-800">{{ t('sidebar.tasks') }}</h2>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
       <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm relative overflow-hidden group hover:shadow-md transition-shadow">
@@ -288,6 +279,14 @@ watch(activeActionRecord, (val) => {
           >
             <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': appStore.isRunning }" />
             {{ t('console.scanNow') }}
+          </button>
+
+          <button
+            @click="isManualCopyModalOpen = true"
+            class="px-4 py-2 rounded-lg font-bold bg-white text-purple-600 border border-purple-200 hover:bg-purple-50 hover:border-purple-300 transition-all flex items-center gap-2 shadow-sm active:scale-95"
+          >
+            <Copy class="w-4 h-4" />
+            {{ t('manualCopy.title') }}
           </button>
         </div>
       </div>

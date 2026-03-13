@@ -64,6 +64,10 @@ async function loadConfig() {
   try {
     const cfg = await getConfig();
     config.value = cfg;
+    // If target root is still empty after restoring saved form, default to config local_path
+    if (!targetRootPath.value.trim() && cfg.local_path) {
+      targetRootPath.value = cfg.local_path;
+    }
   } catch (error) {
     statusTone.value = 'error';
     statusMsg.value = t('manualCopy.loadConfigFailed', { error: String(error) });
