@@ -1,33 +1,51 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { AlertCircle, CheckCircle2, Loader } from 'lucide-vue-next';
-import { changeFrameworkPassword } from '../lib/tauri';
-import type { FrameworkPasswordResult } from '../lib/tauri';
+import { AlertCircle, CheckCircle2, Loader, Plus, Trash2 } from 'lucide-vue-next';
+import { changeFrameworkPassword, getConfig, type AppConfig, type FrameworkPasswordResult } from '../lib/tauri';
 
 const { t } = useI18n();
 
-const ipInput = ref<string>('');
+const config = ref<AppConfig | null>(null);
+const selectedIps = ref<string[]>([]);
+const manualIp = ref<string>('');
 const isLoading = ref<boolean>(false);
 const results = ref<FrameworkPasswordResult[]>([]);
 const currentProgress = ref<{ current: number; total: number } | null>(null);
 
-const OLD_PASSWORD_HASH = '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92';
-const NEW_PASSWORD_HASH = '4d5c5f61bb3d2c299d3211c2992a28a7849b6ce933919c399ce24903c1715d45';
+const serverOptions = computed(() => {
+  if (!config.value) return [];
+  return config.value.servers
+    .filter(server => server.enabled)
+    .map(server => ({
+      id: server.id,
+      host: server.host,
+      name: server.name || server.host,
+    }));
+});
 
-const ips = computed(() => {
-  return ipInput.value
-    .split(/[\n,]/)
-    .map(ip => ip.trim())
-    .filter(ip => ip.length > 0);
+const allSelectedIps = computed(() => {
+  const ips = new Set<string>([...selectedIps.value]);
+  if (manualIp.value.trim()) {
+    ips.add(manualIp.value.trim());
+  }
+  return Array.from(ips);
 });
 
 const isFormValid = computed(() => {
-  return ips.value.length > 0 && !isLoading.value;
+  return allSelectedIps.value.length > 0 && !isLoading.value;
+});
+
+onMounted(async () => {
+  try {
+    config.value = await getConfig();
+  } catch (e) {
+    console.error('Failed to load config:', e);
+  }
 });
 
 const handleExecute = async () => {
-  if (ips.value.length === 0) {
+  if (allSelectedIps.value.length === 0) {
     alert(t('tools.frameworkPassword.noIps'));
     return;
   }
@@ -36,7 +54,7 @@ const handleExecute = async () => {
   results.value = [];
 
   try {
-    const ipList = ips.value;
+    const ipList = allSelectedIps.value;
     currentProgress.value = { current: 0, total: ipList.length };
 
     const response = await changeFrameworkPassword(ipList);
@@ -44,7 +62,7 @@ const handleExecute = async () => {
     currentProgress.value = { current: ipList.length, total: ipList.length };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    results.value = ips.value.map(ip => ({
+    results.value = allSelectedIps.value.map(ip => ({
       ip,
       success: false,
       message: `Error: ${errorMessage}`,
@@ -56,54 +74,89 @@ const handleExecute = async () => {
   }
 };
 
+const toggleServerIp = (ip: string) => {
+  const idx = selectedIps.value.indexOf(ip);
+  if (idx > -1) {
+    selectedIps.value.splice(idx, 1);
+  } else {
+    selectedIps.value.push(ip);
+  }
+};
+
+const isServerSelected = (ip: string) => selectedIps.value.includes(ip);
+
 const successCount = computed(() => results.value.filter(r => r.success).length);
 const failureCount = computed(() => results.value.filter(r => !r.success).length);
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-8">
-    <!-- Header -->
+  <div class="flex-1 flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 p-8">
+    <!-- Header Section -->
     <div class="mb-8">
-      <h1 class="text-3xl font-bold text-white mb-2">{{ t('tools.frameworkPassword.title') }}</h1>
-      <p class="text-slate-400">{{ t('tools.frameworkPassword.description', 'Modify the default password of the framework') }}</p>
+      <h1 class="text-4xl font-bold text-slate-900 mb-2">{{ t('tools.frameworkPassword.title') }}</h1>
+      <p class="text-slate-600 text-lg">{{ t('tools.frameworkPassword.description') }}</p>
     </div>
 
-    <!-- Main Content -->
+    <!-- Info Banner -->
+    <div class="mb-8 bg-blue-50 border-l-4 border-blue-500 p-4 rounded-lg">
+      <p class="text-blue-900 text-sm leading-relaxed">
+        <span class="font-semibold">{{ t('tools.frameworkPassword.info') }}</span><br>
+        {{ t('tools.frameworkPassword.infoDetail') }}
+      </p>
+    </div>
+
+    <!-- Main Form -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
       <!-- Input Section -->
       <div class="lg:col-span-2 space-y-6">
-        <!-- IP Input Card -->
-        <div class="bg-slate-800/50 border border-slate-700 rounded-lg p-6 backdrop-blur-sm hover:border-slate-600 transition-colors">
-          <label class="block text-sm font-semibold text-white mb-3">
-            {{ t('tools.frameworkPassword.ipLabel') }}
-          </label>
-          <textarea
-            v-model="ipInput"
-            :placeholder="t('tools.frameworkPassword.ipPlaceholder')"
-            :disabled="isLoading"
-            class="w-full h-32 bg-slate-900/50 border border-slate-600 rounded px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed font-mono"
-          />
-          <div class="mt-2 text-xs text-slate-400">
-            {{ ips.length }} IP {{ ips.length === 1 ? 'address' : 'addresses' }}
+
+        <!-- Server Selection Card -->
+        <div class="bg-white border border-slate-200 rounded-lg p-6 shadow-sm">
+          <div class="flex items-center gap-2 mb-4">
+            <h3 class="text-lg font-semibold text-slate-900">{{ t('tools.frameworkPassword.selectServer') }}</h3>
+            <span class="text-sm text-slate-500">({{ t('tools.frameworkPassword.optional') }})</span>
+          </div>
+
+          <div v-if="serverOptions.length > 0" class="space-y-2">
+            <div v-for="server in serverOptions" :key="server.id" class="flex items-center gap-3">
+              <input
+                type="checkbox"
+                :id="`server-${server.id}`"
+                :checked="isServerSelected(server.host)"
+                @change="toggleServerIp(server.host)"
+                :disabled="isLoading"
+                class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              />
+              <label :for="`server-${server.id}`" class="flex-1 text-sm text-slate-700 cursor-pointer">
+                <span class="font-medium">{{ server.name }}</span>
+                <span class="text-slate-500 ml-2">({{ server.host }})</span>
+              </label>
+            </div>
+          </div>
+          <div v-else class="text-sm text-slate-500">{{ t('tools.frameworkPassword.noServers') }}</div>
+        </div>
+
+        <!-- Manual IP Input Card -->
+        <div class="bg-white border border-slate-200 rounded-lg p-6 shadow-sm">
+          <label class="block text-lg font-semibold text-slate-900 mb-4">{{ t('tools.frameworkPassword.manualIp') }}</label>
+          <div class="space-y-2">
+            <input
+              v-model="manualIp"
+              type="text"
+              :placeholder="t('tools.frameworkPassword.manualIpPlaceholder')"
+              :disabled="isLoading"
+              class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400"
+            />
+            <p class="text-xs text-slate-500">{{ t('tools.frameworkPassword.manualIpHint') }}</p>
           </div>
         </div>
 
-        <!-- Password Info Cards -->
-        <div class="grid grid-cols-2 gap-4">
-          <div class="bg-slate-800/50 border border-slate-700 rounded-lg p-4 backdrop-blur-sm">
-            <label class="block text-xs font-semibold text-white mb-2">
-              {{ t('tools.frameworkPassword.oldPasswordLabel') }}
-            </label>
-            <div class="bg-slate-900/50 border border-slate-600 rounded px-3 py-2 font-mono text-xs text-slate-300 break-all">
-              {{ OLD_PASSWORD_HASH }}
-            </div>
-          </div>
-          <div class="bg-slate-800/50 border border-slate-700 rounded-lg p-4 backdrop-blur-sm">
-            <label class="block text-xs font-semibold text-white mb-2">
-              {{ t('tools.frameworkPassword.newPasswordLabel') }}
-            </label>
-            <div class="bg-slate-900/50 border border-slate-600 rounded px-3 py-2 font-mono text-xs text-slate-300 break-all">
-              {{ NEW_PASSWORD_HASH }}
+        <!-- Selected IPs Display -->
+        <div v-if="allSelectedIps.length > 0" class="bg-slate-50 border border-slate-200 rounded-lg p-4">
+          <p class="text-sm font-medium text-slate-700 mb-3">{{ t('tools.frameworkPassword.selectedIps', { count: allSelectedIps.length }) }}</p>
+          <div class="flex flex-wrap gap-2">
+            <div v-for="ip in allSelectedIps" :key="ip" class="inline-flex items-center gap-2 bg-blue-100 text-blue-900 px-3 py-1 rounded-full text-sm">
+              <span class="font-mono">{{ ip }}</span>
             </div>
           </div>
         </div>
@@ -112,38 +165,38 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
         <button
           @click="handleExecute"
           :disabled="!isFormValid"
-          class="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-cyan-600 text-white font-semibold rounded-lg hover:from-blue-700 hover:to-cyan-700 focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center justify-center gap-2"
+          class="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-semibold rounded-lg hover:from-blue-700 hover:to-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center justify-center gap-2 text-lg"
         >
           <Loader v-if="isLoading" class="w-5 h-5 animate-spin" />
-          <span>{{ isLoading ? 'Processing...' : t('tools.frameworkPassword.executeButton') }}</span>
+          <span>{{ isLoading ? t('tools.frameworkPassword.processing') : t('tools.frameworkPassword.executeButton') }}</span>
         </button>
       </div>
 
       <!-- Stats Card -->
-      <div class="bg-slate-800/50 border border-slate-700 rounded-lg p-6 backdrop-blur-sm h-fit sticky top-8">
-        <h3 class="text-sm font-semibold text-white mb-4">{{ t('tools.frameworkPassword.results') }}</h3>
+      <div class="bg-white border border-slate-200 rounded-lg p-6 shadow-sm h-fit sticky top-8">
+        <h3 class="text-lg font-semibold text-slate-900 mb-4">{{ t('tools.frameworkPassword.results') }}</h3>
 
-        <div class="space-y-3">
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-slate-400">Total:</span>
-            <span class="text-white font-semibold">{{ results.length }}</span>
+        <div class="space-y-4">
+          <div class="flex items-center justify-between">
+            <span class="text-slate-600">{{ t('tools.frameworkPassword.totalLabel') }}:</span>
+            <span class="text-2xl font-bold text-slate-900">{{ results.length }}</span>
           </div>
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-slate-400">Success:</span>
-            <span class="text-green-400 font-semibold">{{ successCount }}</span>
+          <div class="flex items-center justify-between">
+            <span class="text-slate-600">{{ t('tools.frameworkPassword.successLabel') }}:</span>
+            <span class="text-2xl font-bold text-green-600">{{ successCount }}</span>
           </div>
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-slate-400">Failed:</span>
-            <span class="text-red-400 font-semibold">{{ failureCount }}</span>
+          <div class="flex items-center justify-between">
+            <span class="text-slate-600">{{ t('tools.frameworkPassword.failedLabel') }}:</span>
+            <span class="text-2xl font-bold text-red-600">{{ failureCount }}</span>
           </div>
 
-          <div v-if="currentProgress" class="mt-6 pt-4 border-t border-slate-700">
-            <div class="text-xs text-slate-400 mb-2">
-              {{ t('tools.frameworkPassword.progress', `Processing: ${currentProgress.current}/${currentProgress.total}`) }}
+          <div v-if="currentProgress" class="mt-6 pt-4 border-t border-slate-200">
+            <div class="text-xs text-slate-500 mb-2">
+              {{ t('tools.frameworkPassword.progress', { current: currentProgress.current, total: currentProgress.total }) }}
             </div>
-            <div class="w-full bg-slate-900/50 rounded-full h-2">
+            <div class="w-full bg-slate-200 rounded-full h-2">
               <div
-                class="bg-gradient-to-r from-blue-500 to-cyan-500 h-2 rounded-full transition-all duration-300"
+                class="bg-gradient-to-r from-blue-500 to-blue-600 h-2 rounded-full transition-all duration-300"
                 :style="{ width: `${(currentProgress.current / currentProgress.total) * 100}%` }"
               ></div>
             </div>
@@ -154,32 +207,32 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
 
     <!-- Results Table -->
     <div v-if="results.length > 0" class="mt-8">
-      <div class="bg-slate-800/50 border border-slate-700 rounded-lg overflow-hidden backdrop-blur-sm">
+      <div class="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
         <div class="overflow-x-auto">
           <table class="w-full">
             <thead>
-              <tr class="border-b border-slate-700 bg-slate-900/50">
-                <th class="px-6 py-3 text-left text-xs font-semibold text-slate-300">IP</th>
-                <th class="px-6 py-3 text-left text-xs font-semibold text-slate-300">{{ t('tools.frameworkPassword.status') }}</th>
-                <th class="px-6 py-3 text-left text-xs font-semibold text-slate-300">{{ t('tools.frameworkPassword.message') }}</th>
+              <tr class="border-b border-slate-200 bg-slate-50">
+                <th class="px-6 py-3 text-left text-sm font-semibold text-slate-700">IP {{ t('tools.frameworkPassword.address') }}</th>
+                <th class="px-6 py-3 text-left text-sm font-semibold text-slate-700">{{ t('tools.frameworkPassword.status') }}</th>
+                <th class="px-6 py-3 text-left text-sm font-semibold text-slate-700">{{ t('tools.frameworkPassword.message') }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="result in results" :key="result.ip" class="border-b border-slate-700 hover:bg-slate-700/20 transition-colors">
-                <td class="px-6 py-3 text-sm font-mono text-white">{{ result.ip }}</td>
+              <tr v-for="result in results" :key="result.ip" class="border-b border-slate-200 hover:bg-slate-50 transition-colors">
+                <td class="px-6 py-3 text-sm font-mono text-slate-900">{{ result.ip }}</td>
                 <td class="px-6 py-3">
                   <div class="flex items-center gap-2">
                     <component
                       :is="result.success ? CheckCircle2 : AlertCircle"
-                      :class="result.success ? 'text-green-400' : 'text-red-400'"
-                      class="w-4 h-4"
+                      :class="result.success ? 'text-green-500' : 'text-red-500'"
+                      class="w-5 h-5"
                     />
-                    <span :class="result.success ? 'text-green-400' : 'text-red-400'" class="text-sm font-semibold">
+                    <span :class="result.success ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold'" class="text-sm">
                       {{ result.success ? t('tools.frameworkPassword.success') : t('tools.frameworkPassword.failed') }}
                     </span>
                   </div>
                 </td>
-                <td class="px-6 py-3 text-sm text-slate-300">{{ result.message }}</td>
+                <td class="px-6 py-3 text-sm text-slate-600">{{ result.message }}</td>
               </tr>
             </tbody>
           </table>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, computed, watch } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers } from 'lucide-vue-next';
 import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, openPathParent, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
@@ -154,10 +154,14 @@ function editTask(index: number) {
 }
 
 function saveTask() {
+    // Trim rule value to remove any leading/trailing whitespace
+    const trimmedTask = JSON.parse(JSON.stringify(taskForm.value));
+    trimmedTask.rule.value = trimmedTask.rule.value.trim();
+
     if (editingTaskIndex.value > -1) {
-        config.value.tasks[editingTaskIndex.value] = JSON.parse(JSON.stringify(taskForm.value));
+        config.value.tasks[editingTaskIndex.value] = trimmedTask;
     } else {
-        config.value.tasks.push(JSON.parse(JSON.stringify(taskForm.value)));
+        config.value.tasks.push(trimmedTask);
     }
     save();
     isEditingTask.value = false;
@@ -423,6 +427,13 @@ async function save() {
         statusMsg.value = t('settings.saveError', { error: e });
     }
 }
+
+// Watch for rule type changes and auto-fill default value for DateMatch
+watch(() => taskForm.value.rule.type, (newType) => {
+    if (newType === 'DateMatch' && !taskForm.value.rule.value) {
+        taskForm.value.rule.value = '%y%m%d';
+    }
+});
 
 onMounted(load);
 </script>

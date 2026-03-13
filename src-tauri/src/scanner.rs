@@ -868,7 +868,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                 }
             },
             MatchRule::DateMatch(format_str) => {
-                let fmt = if format_str.is_empty() { "%y%m%d" } else { format_str };
+                let fmt = if format_str.trim().is_empty() { "%y%m%d" } else { format_str.trim() };
                 let today_name    = now_local.format(fmt).to_string();
                 let yesterday_name = (now_local - Duration::days(1)).format(fmt).to_string();
 
