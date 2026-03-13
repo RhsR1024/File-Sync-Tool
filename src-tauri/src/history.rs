@@ -1,14 +1,14 @@
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
-use chrono::Local;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HistoryEntry {
     pub id: String,
     pub timestamp: String,
-    
+
     // New fields for generic events
     #[serde(default)]
     pub action_type: String, // "COPY", "PAUSE", "RESUME", "START_TASK", "STOP_TASK", "CONFIG", "CANCEL"
@@ -21,7 +21,7 @@ pub struct HistoryEntry {
     pub target_path: String,
     pub copied_files_count: usize,
     pub total_size: u64,
-    pub files: Vec<String>, 
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -72,7 +72,11 @@ pub fn clear_history(app_handle: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn get_history_path<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> PathBuf {
-    app_handle.path().app_data_dir().unwrap().join("history.json")
+    app_handle
+        .path()
+        .app_data_dir()
+        .unwrap()
+        .join("history.json")
 }
 
 pub fn load_history<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> HistoryStore {
@@ -92,5 +96,8 @@ pub fn save_history<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, store: 
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(path, serde_json::to_string_pretty(store).unwrap_or_default());
+    let _ = fs::write(
+        path,
+        serde_json::to_string_pretty(store).unwrap_or_default(),
+    );
 }

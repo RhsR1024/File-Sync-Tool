@@ -2,21 +2,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
-mod scanner;
-mod history;
 mod deploy;
+mod history;
+mod scanner;
 
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
-use std::sync::{Mutex, Arc};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-use tauri::{State, Manager, Emitter, WindowEvent, WebviewWindow, WebviewWindowBuilder};
 use serde_json::json;
+use tauri::{Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
 const TRAY_SHOW_ID: &str = "tray_show_main";
 const TRAY_QUIT_ID: &str = "tray_quit";
@@ -97,8 +97,7 @@ fn hide_main_window(app: &tauri::AppHandle) {
 }
 
 fn should_close_to_tray(app: &tauri::AppHandle) -> bool {
-    app
-        .try_state::<AppState>()
+    app.try_state::<AppState>()
         .map(|state| state.config.lock().unwrap().close_to_tray)
         .unwrap_or(false)
 }
@@ -113,7 +112,17 @@ fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let exe_quoted = format!("\"{}\"", exe.to_string_lossy());
             let status = Command::new("reg")
-                .args(["add", RUN_KEY, "/v", VALUE_NAME, "/t", "REG_SZ", "/d", &exe_quoted, "/f"])
+                .args([
+                    "add",
+                    RUN_KEY,
+                    "/v",
+                    VALUE_NAME,
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &exe_quoted,
+                    "/f",
+                ])
                 .status()
                 .map_err(|e| e.to_string())?;
             if !status.success() {
@@ -141,7 +150,11 @@ fn get_config(state: State<AppState>) -> AppConfig {
 }
 
 #[tauri::command]
-fn save_config_cmd(app_handle: tauri::AppHandle, state: State<AppState>, config: AppConfig) -> Result<(), String> {
+fn save_config_cmd(
+    app_handle: tauri::AppHandle,
+    state: State<AppState>,
+    config: AppConfig,
+) -> Result<(), String> {
     config::validate_config(&config)?;
     let config = config::normalize_config(config);
     sync_launch_on_startup(config.launch_and_auto_scan)?;
@@ -150,7 +163,10 @@ fn save_config_cmd(app_handle: tauri::AppHandle, state: State<AppState>, config:
 }
 
 #[tauri::command]
-async fn scan_now(app_handle: tauri::AppHandle, state: State<'_, AppState>) -> Result<ScanResult, String> {
+async fn scan_now(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ScanResult, String> {
     if state.is_scanning.load(Ordering::SeqCst) {
         return Err("Scan already in progress".to_string());
     }
@@ -161,7 +177,14 @@ async fn scan_now(app_handle: tauri::AppHandle, state: State<'_, AppState>) -> R
 
     let config = state.config.lock().unwrap().clone();
     let live_config = state.config.clone();
-    let result = scanner::scan_and_copy(&app_handle, &config, live_config, state.should_cancel.clone(), state.is_paused.clone()).await;
+    let result = scanner::scan_and_copy(
+        &app_handle,
+        &config,
+        live_config,
+        state.should_cancel.clone(),
+        state.is_paused.clone(),
+    )
+    .await;
 
     state.is_scanning.store(false, Ordering::SeqCst);
     Ok(result)
@@ -190,7 +213,14 @@ async fn test_ssh_connection(server: DeployServer) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn manual_deploy(app_handle: tauri::AppHandle, state: State<'_, AppState>, server: DeployServer, postCommands: Vec<String>, localPath: String, remotePath: String) -> Result<(), String> {
+async fn manual_deploy(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    server: DeployServer,
+    postCommands: Vec<String>,
+    localPath: String,
+    remotePath: String,
+) -> Result<(), String> {
     if state.is_manually_deploying.load(Ordering::SeqCst) {
         return Err("Manual deploy already in progress".to_string());
     }
@@ -206,15 +236,30 @@ async fn manual_deploy(app_handle: tauri::AppHandle, state: State<'_, AppState>,
     // This runs in async context, but deploy_manual uses blocking SSH.
     // We should spawn blocking.
     let result = tauri::async_runtime::spawn_blocking(move || {
-        deploy::deploy_manual(&app_handle, &server, &postCommands, &localPath, &remotePath, should_cancel, is_paused)
-    }).await.map_err(|e| e.to_string())?;
+        deploy::deploy_manual(
+            &app_handle,
+            &server,
+            &postCommands,
+            &localPath,
+            &remotePath,
+            should_cancel,
+            is_paused,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
     is_manually_deploying.store(false, Ordering::SeqCst);
     result
 }
 
 #[tauri::command]
-async fn temporary_copy(app_handle: tauri::AppHandle, state: State<'_, AppState>, sourcePath: String, targetRootPath: String) -> Result<(), String> {
+async fn temporary_copy(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    sourcePath: String,
+    targetRootPath: String,
+) -> Result<(), String> {
     if state.is_scanning.load(Ordering::SeqCst) {
         return Err("Operation already in progress".to_string());
     }
@@ -237,7 +282,8 @@ async fn temporary_copy(app_handle: tauri::AppHandle, state: State<'_, AppState>
         targetRootPath,
         should_cancel,
         is_paused,
-    ).await;
+    )
+    .await;
 
     is_scanning.store(false, Ordering::SeqCst);
     result
@@ -245,8 +291,12 @@ async fn temporary_copy(app_handle: tauri::AppHandle, state: State<'_, AppState>
 
 #[tauri::command]
 fn get_app_paths(app_handle: tauri::AppHandle) -> (String, String) {
-    let config = config::get_config_path(&app_handle).to_string_lossy().to_string();
-    let log = config::get_log_path(&app_handle).to_string_lossy().to_string();
+    let config = config::get_config_path(&app_handle)
+        .to_string_lossy()
+        .to_string();
+    let log = config::get_log_path(&app_handle)
+        .to_string_lossy()
+        .to_string();
     (config, log)
 }
 
@@ -262,7 +312,10 @@ fn open_path_parent(path: String) -> Result<(), String> {
     };
 
     if !target_dir.exists() {
-        return Err(format!("Directory does not exist: {}", target_dir.display()));
+        return Err(format!(
+            "Directory does not exist: {}",
+            target_dir.display()
+        ));
     }
 
     #[cfg(target_os = "windows")]
@@ -297,8 +350,7 @@ fn open_directory() -> Result<Option<String>, String> {
     // Open system directory selection dialog
     // Returns Ok(Some(path)) when user selects a directory
     // Returns Ok(None) when user cancels
-    let selected_dir = rfd::FileDialog::new()
-        .pick_folder();
+    let selected_dir = rfd::FileDialog::new().pick_folder();
 
     Ok(selected_dir.map(|path| path.to_string_lossy().to_string()))
 }
@@ -317,15 +369,15 @@ fn validate_ip(ip: &str) -> bool {
     if parts.len() != 4 {
         return false;
     }
-    parts.iter().all(|part| {
-        part.parse::<u8>().is_ok()
-    })
+    parts.iter().all(|part| part.parse::<u8>().is_ok())
 }
 
 #[tauri::command]
 async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChangeResult>, String> {
-    const OLD_PASSWORD_HASH: &str = "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92";
-    const NEW_PASSWORD_HASH: &str = "4d5c5f61bb3d2c299d3211c2992a28a7849b6ce933919c399ce24903c1715d45";
+    const OLD_PASSWORD_HASH: &str =
+        "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92";
+    const NEW_PASSWORD_HASH: &str =
+        "4d5c5f61bb3d2c299d3211c2992a28a7849b6ce933919c399ce24903c1715d45";
 
     let mut results = Vec::new();
     let client = reqwest::Client::new();
@@ -368,7 +420,11 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
                     Ok(json) => {
                         // Validate response structure
                         if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
-                            if let Some(token) = json.get("data").and_then(|d| d.get("token")).and_then(|t| t.as_str()) {
+                            if let Some(token) = json
+                                .get("data")
+                                .and_then(|d| d.get("token"))
+                                .and_then(|t| t.as_str())
+                            {
                                 token.to_string()
                             } else {
                                 results.push(PasswordChangeResult {

@@ -1,11 +1,11 @@
 use crate::config::{CommandGroup, DeployServer, TaskServerBinding};
+use ssh2::Session;
+use std::fs;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use ssh2::Session;
-use std::io::{Read, Write};
-use std::fs;
-use tauri::Emitter;
 use std::time::Instant;
+use tauri::Emitter;
 
 #[derive(Debug, serde::Serialize, Clone)]
 struct LogEvent {
@@ -13,8 +13,8 @@ struct LogEvent {
     level: String,
 }
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, serde::Serialize, Clone)]
 struct ProgressEvent {
@@ -31,10 +31,13 @@ struct ProgressEvent {
 }
 
 fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
-    let _ = app_handle.emit("log-message", LogEvent {
-        msg: msg.clone(),
-        level: level.to_string(),
-    });
+    let _ = app_handle.emit(
+        "log-message",
+        LogEvent {
+            msg: msg.clone(),
+            level: level.to_string(),
+        },
+    );
     crate::scanner::write_log_to_file(app_handle, &msg, level);
 }
 
@@ -56,18 +59,21 @@ fn emit_progress<R: tauri::Runtime>(
         0.0
     };
 
-    let _ = app_handle.emit("copy-progress", ProgressEvent {
-        folder: folder.to_string(),
-        total_bytes: total,
-        copied_bytes: copied,
-        percentage,
-        speed,
-        eta_seconds,
-        elapsed_seconds,
-        local_path: local_path.to_string(),
-        remote_path: remote_path.to_string(),
-        source: source.to_string(),
-    });
+    let _ = app_handle.emit(
+        "copy-progress",
+        ProgressEvent {
+            folder: folder.to_string(),
+            total_bytes: total,
+            copied_bytes: copied,
+            percentage,
+            speed,
+            eta_seconds,
+            elapsed_seconds,
+            local_path: local_path.to_string(),
+            remote_path: remote_path.to_string(),
+            source: source.to_string(),
+        },
+    );
 }
 
 pub fn check_connection(server: &DeployServer) -> Result<String, String> {
@@ -76,7 +82,8 @@ pub fn check_connection(server: &DeployServer) -> Result<String, String> {
 
     let mut sess = Session::new().map_err(|e| format!("SSH Session init failed: {}", e))?;
     sess.set_tcp_stream(tcp);
-    sess.handshake().map_err(|e| format!("SSH Handshake failed: {}", e))?;
+    sess.handshake()
+        .map_err(|e| format!("SSH Handshake failed: {}", e))?;
 
     sess.userauth_password(&server.user, &server.password)
         .map_err(|e| format!("Authentication failed: {}", e))?;
@@ -109,32 +116,60 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
         return Ok(());
     }
 
-    emit_log(app_handle, format!("Starting deployment for {} server(s)...", server_bindings.len()), "info");
+    emit_log(
+        app_handle,
+        format!(
+            "Starting deployment for {} server(s)...",
+            server_bindings.len()
+        ),
+        "info",
+    );
 
     let total_size = calculate_size(local_folder_path);
 
     for (idx, binding) in server_bindings.iter().enumerate() {
         if should_cancel.load(Ordering::SeqCst) {
-            emit_log(app_handle, "Remaining deployments cancelled.".to_string(), "warn");
+            emit_log(
+                app_handle,
+                "Remaining deployments cancelled.".to_string(),
+                "warn",
+            );
             break;
         }
 
         let server = match all_servers.iter().find(|s| s.id == binding.server_id) {
             Some(s) => s,
             None => {
-                emit_log(app_handle, format!("Server ID '{}' not found, skipping.", binding.server_id), "warn");
+                emit_log(
+                    app_handle,
+                    format!("Server ID '{}' not found, skipping.", binding.server_id),
+                    "warn",
+                );
                 continue;
             }
         };
 
         if !server.enabled {
-            emit_log(app_handle, format!("[{}] Server is disabled, skipping.", server.name), "info");
+            emit_log(
+                app_handle,
+                format!("[{}] Server is disabled, skipping.", server.name),
+                "info",
+            );
             continue;
         }
 
         let commands = resolve_commands(&binding.command_group_ids, command_groups);
 
-        emit_log(app_handle, format!("Deploying to server {}/{} [{}]", idx + 1, server_bindings.len(), server.name), "info");
+        emit_log(
+            app_handle,
+            format!(
+                "Deploying to server {}/{} [{}]",
+                idx + 1,
+                server_bindings.len(),
+                server.name
+            ),
+            "info",
+        );
 
         if let Err(e) = deploy_single_server(
             app_handle,
@@ -147,16 +182,29 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
             is_paused.clone(),
             "scheduled",
         ) {
-            emit_log(app_handle, format!("[{}] Deployment failed: {}", server.name, e), "error");
+            emit_log(
+                app_handle,
+                format!("[{}] Deployment failed: {}", server.name, e),
+                "error",
+            );
         } else {
-            emit_log(app_handle, format!("[{}] Deployment successful", server.name), "success");
+            emit_log(
+                app_handle,
+                format!("[{}] Deployment successful", server.name),
+                "success",
+            );
         }
     }
 
     Ok(())
 }
 
-fn substitute_variables(cmd: &str, folder_name: &str, local_path: &Path, remote_target: &str) -> String {
+fn substitute_variables(
+    cmd: &str,
+    folder_name: &str,
+    local_path: &Path,
+    remote_target: &str,
+) -> String {
     let mut result = cmd.to_string();
 
     result = result.replace("${folder_name}", folder_name);
@@ -200,33 +248,68 @@ fn deploy_single_server<R: tauri::Runtime>(
     is_paused: Arc<AtomicBool>,
     source: &str,
 ) -> Result<(), String> {
-    emit_log(app_handle, format!("[{}] Connecting to {}:{}", server.name, server.host, server.remote_path), "info");
+    emit_log(
+        app_handle,
+        format!(
+            "[{}] Connecting to {}:{}",
+            server.name, server.host, server.remote_path
+        ),
+        "info",
+    );
 
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))
         .map_err(|e| e.to_string())?;
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
-    sess.userauth_password(&server.user, &server.password).map_err(|e| e.to_string())?;
+    sess.userauth_password(&server.user, &server.password)
+        .map_err(|e| e.to_string())?;
 
     emit_log(app_handle, format!("[{}] Connected", server.name), "info");
 
-    let remote_target = format!("{}/{}", server.remote_path.trim_end_matches('/'), folder_name);
+    let remote_target = format!(
+        "{}/{}",
+        server.remote_path.trim_end_matches('/'),
+        folder_name
+    );
 
-    let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
+    let sftp = sess
+        .sftp()
+        .map_err(|e| format!("SFTP init failed: {}", e))?;
 
     match sftp.stat(Path::new(&remote_target)) {
         Ok(_) => {
-            emit_log(app_handle, format!("[{}] Remote directory {} already exists. Continuing upload/overwrite.", server.name, remote_target), "info");
+            emit_log(
+                app_handle,
+                format!(
+                    "[{}] Remote directory {} already exists. Continuing upload/overwrite.",
+                    server.name, remote_target
+                ),
+                "info",
+            );
         }
         Err(_) => {
-            emit_log(app_handle, format!("[{}] Uploading to {}", server.name, remote_target), "info");
-            let mut channel = sess.channel_session().map_err(|e| format!("channel_session failed: {}", e))?;
-            channel.exec(&format!("mkdir -p {}", remote_target)).map_err(|e| format!("mkdir failed: {}", e))?;
-            channel.send_eof().map_err(|e| format!("send_eof failed: {}", e))?;
+            emit_log(
+                app_handle,
+                format!("[{}] Uploading to {}", server.name, remote_target),
+                "info",
+            );
+            let mut channel = sess
+                .channel_session()
+                .map_err(|e| format!("channel_session failed: {}", e))?;
+            channel
+                .exec(&format!("mkdir -p {}", remote_target))
+                .map_err(|e| format!("mkdir failed: {}", e))?;
+            channel
+                .send_eof()
+                .map_err(|e| format!("send_eof failed: {}", e))?;
             let mut s = String::new();
-            channel.read_to_string(&mut s).map_err(|e| format!("read failed: {}", e))?;
-            channel.wait_close().map_err(|e| format!("wait_close failed: {}", e))?;
+            channel
+                .read_to_string(&mut s)
+                .map_err(|e| format!("read failed: {}", e))?;
+            channel
+                .wait_close()
+                .map_err(|e| format!("wait_close failed: {}", e))?;
         }
     };
 
@@ -267,18 +350,29 @@ fn deploy_single_server<R: tauri::Runtime>(
     );
 
     if !post_commands.is_empty() {
-        emit_log(app_handle, format!("[{}] Executing post commands...", server.name), "info");
+        emit_log(
+            app_handle,
+            format!("[{}] Executing post commands...", server.name),
+            "info",
+        );
 
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
                 return Err("Cancelled".to_string());
             }
 
-            let final_cmd = substitute_variables(cmd, folder_name, local_folder_path, &remote_target);
-            emit_log(app_handle, format!("[{}] $ {}", server.name, final_cmd), "command");
+            let final_cmd =
+                substitute_variables(cmd, folder_name, local_folder_path, &remote_target);
+            emit_log(
+                app_handle,
+                format!("[{}] $ {}", server.name, final_cmd),
+                "command",
+            );
 
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-            channel.handle_extended_data(ssh2::ExtendedData::Merge).map_err(|e| e.to_string())?;
+            channel
+                .handle_extended_data(ssh2::ExtendedData::Merge)
+                .map_err(|e| e.to_string())?;
             channel.exec(&final_cmd).map_err(|e| e.to_string())?;
             channel.send_eof().map_err(|e| e.to_string())?;
 
@@ -293,25 +387,43 @@ fn deploy_single_server<R: tauri::Runtime>(
                         while let Some(pos) = output_buf.find('\n') {
                             let line = output_buf[..pos].trim_end_matches('\r').to_string();
                             if !line.is_empty() {
-                                emit_log(app_handle, format!("[{}] > {}", server.name, line), "info");
+                                emit_log(
+                                    app_handle,
+                                    format!("[{}] > {}", server.name, line),
+                                    "info",
+                                );
                             }
                             output_buf = output_buf[pos + 1..].to_string();
                         }
                     }
                     Err(e) => {
-                        emit_log(app_handle, format!("[{}] Read error: {}", server.name, e), "warn");
+                        emit_log(
+                            app_handle,
+                            format!("[{}] Read error: {}", server.name, e),
+                            "warn",
+                        );
                         break;
                     }
                 }
             }
             if !output_buf.trim().is_empty() {
-                emit_log(app_handle, format!("[{}] > {}", server.name, output_buf.trim()), "info");
+                emit_log(
+                    app_handle,
+                    format!("[{}] > {}", server.name, output_buf.trim()),
+                    "info",
+                );
             }
 
-            channel.wait_close().map_err(|e| format!("wait_close failed: {}", e))?;
+            channel
+                .wait_close()
+                .map_err(|e| format!("wait_close failed: {}", e))?;
             let exit_code = channel.exit_status().unwrap_or(-1);
             if exit_code != 0 {
-                emit_log(app_handle, format!("[{}] Command exited with code {}", server.name, exit_code), "error");
+                emit_log(
+                    app_handle,
+                    format!("[{}] Command exited with code {}", server.name, exit_code),
+                    "error",
+                );
             }
         }
     }
@@ -342,7 +454,14 @@ pub fn deploy_manual<R: tauri::Runtime>(
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    emit_log(app_handle, format!("Starting manual deployment: {} -> [{}] {}:{}", local_path, server.name, server.host, remote_path), "info");
+    emit_log(
+        app_handle,
+        format!(
+            "Starting manual deployment: {} -> [{}] {}:{}",
+            local_path, server.name, server.host, remote_path
+        ),
+        "info",
+    );
 
     let local_p = Path::new(local_path);
     if !local_p.exists() {
@@ -351,38 +470,70 @@ pub fn deploy_manual<R: tauri::Runtime>(
 
     emit_log(app_handle, "Calculating size...".to_string(), "info");
     let total_size = calculate_size(local_p);
-    emit_log(app_handle, format!("Total size: {} bytes", total_size), "info");
+    emit_log(
+        app_handle,
+        format!("Total size: {} bytes", total_size),
+        "info",
+    );
 
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))
         .map_err(|e| e.to_string())?;
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
-    sess.userauth_password(&server.user, &server.password).map_err(|e| e.to_string())?;
+    sess.userauth_password(&server.user, &server.password)
+        .map_err(|e| e.to_string())?;
 
-    emit_log(app_handle, "SSH Connected & Authenticated".to_string(), "success");
+    emit_log(
+        app_handle,
+        "SSH Connected & Authenticated".to_string(),
+        "success",
+    );
 
-    let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
+    let sftp = sess
+        .sftp()
+        .map_err(|e| format!("SFTP init failed: {}", e))?;
 
     let mut target_path_str = remote_path.to_string();
     if target_path_str.ends_with('/') || target_path_str.ends_with('\\') {
-        let name = local_p.file_name().ok_or("Invalid local path: no file name")?.to_string_lossy();
-        target_path_str = format!("{}/{}", target_path_str.trim_end_matches(&['/', '\\'][..]), name);
+        let name = local_p
+            .file_name()
+            .ok_or("Invalid local path: no file name")?
+            .to_string_lossy();
+        target_path_str = format!(
+            "{}/{}",
+            target_path_str.trim_end_matches(&['/', '\\'][..]),
+            name
+        );
     }
     let target_path_str = target_path_str.replace('\\', "/");
     let target_p = Path::new(&target_path_str);
 
-    emit_log(app_handle, format!("Uploading to {}", target_path_str), "info");
+    emit_log(
+        app_handle,
+        format!("Uploading to {}", target_path_str),
+        "info",
+    );
 
     if let Some(parent) = target_p.parent() {
         let parent_str = parent.to_string_lossy().replace('\\', "/");
         if !parent_str.is_empty() {
-            let mut channel = sess.channel_session().map_err(|e| format!("channel_session failed: {}", e))?;
-            channel.exec(&format!("mkdir -p {}", parent_str)).map_err(|e| format!("mkdir failed: {}", e))?;
-            channel.send_eof().map_err(|e| format!("send_eof failed: {}", e))?;
+            let mut channel = sess
+                .channel_session()
+                .map_err(|e| format!("channel_session failed: {}", e))?;
+            channel
+                .exec(&format!("mkdir -p {}", parent_str))
+                .map_err(|e| format!("mkdir failed: {}", e))?;
+            channel
+                .send_eof()
+                .map_err(|e| format!("send_eof failed: {}", e))?;
             let mut s = String::new();
-            channel.read_to_string(&mut s).map_err(|e| format!("read failed: {}", e))?;
-            channel.wait_close().map_err(|e| format!("wait_close failed: {}", e))?;
+            channel
+                .read_to_string(&mut s)
+                .map_err(|e| format!("read failed: {}", e))?;
+            channel
+                .wait_close()
+                .map_err(|e| format!("wait_close failed: {}", e))?;
         }
     }
 
@@ -390,9 +541,24 @@ pub fn deploy_manual<R: tauri::Runtime>(
     let start_time = Instant::now();
     let mut last_emit_time = Instant::now();
     let server_display = format!("{}:{}", server.host, target_path_str);
-    let folder_display = local_p.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let folder_display = local_p
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
-    emit_progress(app_handle, &folder_display, 0, total_size, 0, 0, 0, local_path, &server_display, "manual");
+    emit_progress(
+        app_handle,
+        &folder_display,
+        0,
+        total_size,
+        0,
+        0,
+        0,
+        local_path,
+        &server_display,
+        "manual",
+    );
 
     upload_with_progress(
         app_handle,
@@ -412,10 +578,25 @@ pub fn deploy_manual<R: tauri::Runtime>(
     )?;
 
     emit_log(app_handle, "Upload complete".to_string(), "success");
-    emit_progress(app_handle, &folder_display, total_size, total_size, 0, 0, start_time.elapsed().as_secs(), local_path, &server_display, "manual");
+    emit_progress(
+        app_handle,
+        &folder_display,
+        total_size,
+        total_size,
+        0,
+        0,
+        start_time.elapsed().as_secs(),
+        local_path,
+        &server_display,
+        "manual",
+    );
 
     if !post_commands.is_empty() {
-        emit_log(app_handle, "Executing post-deployment commands...".to_string(), "info");
+        emit_log(
+            app_handle,
+            "Executing post-deployment commands...".to_string(),
+            "info",
+        );
 
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
@@ -426,7 +607,9 @@ pub fn deploy_manual<R: tauri::Runtime>(
             emit_log(app_handle, format!("$ {}", final_cmd), "command");
 
             let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-            channel.handle_extended_data(ssh2::ExtendedData::Merge).map_err(|e| e.to_string())?;
+            channel
+                .handle_extended_data(ssh2::ExtendedData::Merge)
+                .map_err(|e| e.to_string())?;
             channel.exec(&final_cmd).map_err(|e| e.to_string())?;
             channel.send_eof().map_err(|e| e.to_string())?;
 
@@ -456,15 +639,25 @@ pub fn deploy_manual<R: tauri::Runtime>(
                 emit_log(app_handle, format!("> {}", output_buf.trim()), "info");
             }
 
-            channel.wait_close().map_err(|e| format!("wait_close failed: {}", e))?;
+            channel
+                .wait_close()
+                .map_err(|e| format!("wait_close failed: {}", e))?;
             let exit_code = channel.exit_status().unwrap_or(-1);
             if exit_code != 0 {
-                emit_log(app_handle, format!("Command exited with code {}", exit_code), "error");
+                emit_log(
+                    app_handle,
+                    format!("Command exited with code {}", exit_code),
+                    "error",
+                );
             }
         }
     }
 
-    emit_log(app_handle, format!("[{}] Deployment successful", server.name), "success");
+    emit_log(
+        app_handle,
+        format!("[{}] Deployment successful", server.name),
+        "success",
+    );
     Ok(())
 }
 
@@ -497,13 +690,27 @@ fn upload_with_progress<R: tauri::Runtime>(
             let name = entry.file_name();
             let remote_parent_str = remote_path.to_string_lossy().replace('\\', "/");
             let child_name_str = name.to_string_lossy();
-            let remote_child_str = format!("{}/{}", remote_parent_str.trim_end_matches('/'), child_name_str);
+            let remote_child_str = format!(
+                "{}/{}",
+                remote_parent_str.trim_end_matches('/'),
+                child_name_str
+            );
             let remote_child_path = Path::new(&remote_child_str);
             upload_with_progress(
-                app_handle, sftp, &path, remote_child_path, total_size,
-                copied_bytes, start_time, last_emit_time,
-                folder_display, local_path_str, remote_path_display,
-                should_cancel, is_paused, source,
+                app_handle,
+                sftp,
+                &path,
+                remote_child_path,
+                total_size,
+                copied_bytes,
+                start_time,
+                last_emit_time,
+                folder_display,
+                local_path_str,
+                remote_path_display,
+                should_cancel,
+                is_paused,
+                source,
             )?;
         }
     } else {
@@ -523,16 +730,39 @@ fn upload_with_progress<R: tauri::Runtime>(
             }
 
             let n = local_file.read(&mut buffer).map_err(|e| e.to_string())?;
-            if n == 0 { break; }
-            remote_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            remote_file
+                .write_all(&buffer[..n])
+                .map_err(|e| e.to_string())?;
             *copied_bytes += n as u64;
 
             let now = Instant::now();
             if now.duration_since(*last_emit_time).as_millis() > 200 {
                 let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 { (*copied_bytes as f64 / elapsed) as u64 } else { 0 };
-                let eta = if speed > 0 && total_size > *copied_bytes { (total_size - *copied_bytes) / speed } else { 0 };
-                emit_progress(app_handle, folder_display, *copied_bytes, total_size, speed, eta, elapsed as u64, local_path_str, remote_path_display, source);
+                let speed = if elapsed > 0.0 {
+                    (*copied_bytes as f64 / elapsed) as u64
+                } else {
+                    0
+                };
+                let eta = if speed > 0 && total_size > *copied_bytes {
+                    (total_size - *copied_bytes) / speed
+                } else {
+                    0
+                };
+                emit_progress(
+                    app_handle,
+                    folder_display,
+                    *copied_bytes,
+                    total_size,
+                    speed,
+                    eta,
+                    elapsed as u64,
+                    local_path_str,
+                    remote_path_display,
+                    source,
+                );
                 *last_emit_time = now;
             }
         }

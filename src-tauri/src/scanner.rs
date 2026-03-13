@@ -1,18 +1,18 @@
 use crate::config::{AppConfig, MatchRule, TaskServerBinding};
-use crate::history::{add_history_entry, HistoryEntry};
 use crate::deploy::deploy_to_remote;
-use chrono::{Local, NaiveDateTime, Duration, NaiveTime, Timelike};
+use crate::history::{add_history_entry, HistoryEntry};
+use chrono::{Duration, Local, NaiveDateTime, NaiveTime, Timelike};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use regex::Regex;
-use std::path::{Path, PathBuf};
-use tokio::fs;
-use tauri::{Emitter, Manager};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration as StdDuration, Instant, SystemTime};
-use std::io::{Read, Write};
 use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration as StdDuration, Instant, SystemTime};
+use tauri::{Emitter, Manager};
+use tokio::fs;
 
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct ScanResult {
@@ -81,7 +81,11 @@ fn rotate_log_if_needed(log_path: &Path) {
         Some(d) => d,
         None => return,
     };
-    let base = log_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let base = log_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
     // Delete oldest rotated file if it exists
     let oldest = dir.join(format!("{}.{}.gz", base, MAX_ROTATED));
@@ -90,7 +94,7 @@ fn rotate_log_if_needed(log_path: &Path) {
     // Shift: app.log.4.gz -> app.log.5.gz, ..., app.log.1.gz -> app.log.2.gz
     for n in (1..MAX_ROTATED).rev() {
         let from = dir.join(format!("{}.{}.gz", base, n));
-        let to   = dir.join(format!("{}.{}.gz", base, n + 1));
+        let to = dir.join(format!("{}.{}.gz", base, n + 1));
         if from.exists() {
             let _ = std::fs::rename(&from, &to);
         }
@@ -105,7 +109,11 @@ fn rotate_log_if_needed(log_path: &Path) {
 }
 
 /// Write a log entry to the app log file. Thread-safe. Used by both scanner and deploy modules.
-pub fn write_log_to_file<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: &str, level: &str) {
+pub fn write_log_to_file<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    msg: &str,
+    level: &str,
+) {
     if let Ok(app_dir) = app_handle.path().app_data_dir() {
         if std::fs::create_dir_all(&app_dir).is_ok() {
             let log_path = app_dir.join("app.log");
@@ -121,10 +129,13 @@ pub fn write_log_to_file<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, ms
 
 // Helper to emit logs to frontend in real-time
 fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
-    let _ = app_handle.emit("log-message", LogEvent {
-        msg: msg.clone(),
-        level: level.to_string(),
-    });
+    let _ = app_handle.emit(
+        "log-message",
+        LogEvent {
+            msg: msg.clone(),
+            level: level.to_string(),
+        },
+    );
     write_log_to_file(app_handle, &msg, level);
 }
 
@@ -146,18 +157,21 @@ fn emit_progress<R: tauri::Runtime>(
         0.0
     };
 
-    let _ = app_handle.emit("copy-progress", ProgressEvent {
-        folder: folder.to_string(),
-        total_bytes: total,
-        copied_bytes: copied,
-        percentage,
-        speed,
-        eta_seconds,
-        elapsed_seconds,
-        local_path: local_path.to_string(),
-        remote_path: remote_path.to_string(),
-        source: source.to_string(),
-    });
+    let _ = app_handle.emit(
+        "copy-progress",
+        ProgressEvent {
+            folder: folder.to_string(),
+            total_bytes: total,
+            copied_bytes: copied,
+            percentage,
+            speed,
+            eta_seconds,
+            elapsed_seconds,
+            local_path: local_path.to_string(),
+            remote_path: remote_path.to_string(),
+            source: source.to_string(),
+        },
+    );
 }
 
 // Helper function to copy file with chunking and interruption support
@@ -167,20 +181,20 @@ fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
     should_cancel: &Arc<AtomicBool>,
     is_paused: &Arc<AtomicBool>,
     buffer_size: usize,
-    on_progress: &mut dyn FnMut(u64) // bytes copied delta
+    on_progress: &mut dyn FnMut(u64), // bytes copied delta
 ) -> Result<u64, String> {
     let mut file_in = std::fs::File::open(from).map_err(|e| e.to_string())?;
     let mut file_out = std::fs::File::create(to).map_err(|e| e.to_string())?;
 
     let mut buffer = vec![0u8; buffer_size];
     let mut total_copied = 0;
-    
+
     loop {
         // Check cancel
         if should_cancel.load(Ordering::SeqCst) {
             return Err("Cancelled by user".to_string());
         }
-        
+
         // Check pause
         while is_paused.load(Ordering::SeqCst) {
             if should_cancel.load(Ordering::SeqCst) {
@@ -188,17 +202,19 @@ fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        
+
         let n = file_in.read(&mut buffer).map_err(|e| e.to_string())?;
         if n == 0 {
             break; // EOF
         }
-        
-        file_out.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+
+        file_out
+            .write_all(&buffer[..n])
+            .map_err(|e| e.to_string())?;
         total_copied += n as u64;
         on_progress(n as u64);
     }
-    
+
     Ok(total_copied)
 }
 
@@ -218,19 +234,42 @@ async fn perform_copy<R: tauri::Runtime>(
     source: &str,
 ) {
     let target_full_path = target_parent_path.join(&folder_name);
-    
-    emit_log(app_handle, format!("Target local directory: {}", target_full_path.display()), "info");
+
+    emit_log(
+        app_handle,
+        format!("Target local directory: {}", target_full_path.display()),
+        "info",
+    );
 
     // Check if target directory exists, but don't skip entire copy - check for new files
     if target_full_path.exists() {
-         emit_log(app_handle, format!("Target directory {} exists. Checking for new files...", target_full_path.display()), "info");
+        emit_log(
+            app_handle,
+            format!(
+                "Target directory {} exists. Checking for new files...",
+                target_full_path.display()
+            ),
+            "info",
+        );
     } else {
-         emit_log(app_handle, format!("Starting copy: {} -> {}", source_path.display(), target_parent_path.display()), "info");
+        emit_log(
+            app_handle,
+            format!(
+                "Starting copy: {} -> {}",
+                source_path.display(),
+                target_parent_path.display()
+            ),
+            "info",
+        );
     }
-    
+
     // Ensure parent dir exists
     if let Err(e) = fs::create_dir_all(target_parent_path).await {
-        let err_msg = format!("Failed to create local directory {}: {}", target_parent_path.display(), e);
+        let err_msg = format!(
+            "Failed to create local directory {}: {}",
+            target_parent_path.display(),
+            e
+        );
         emit_log(app_handle, err_msg.clone(), "error");
         result.errors.push(err_msg);
         return;
@@ -262,86 +301,104 @@ async fn perform_copy<R: tauri::Runtime>(
 
         // Just test access to source dir
         if let Err(e) = std::fs::read_dir(&source_path_clone) {
-             let e = e.to_string(); 
-             emit_log(&handle, format!("Failed to access source dir: {}", e), "error");
-             return Err(fs_extra::error::Error::new(fs_extra::error::ErrorKind::Other, &e));
+            let e = e.to_string();
+            emit_log(
+                &handle,
+                format!("Failed to access source dir: {}", e),
+                "error",
+            );
+            return Err(fs_extra::error::Error::new(
+                fs_extra::error::ErrorKind::Other,
+                &e,
+            ));
         }
-        
+
         // Collect files with filtering (Iterative)
         let mut filtered_files: Vec<(PathBuf, u64, bool)> = Vec::new();
         let recent_file_guard_secs = recent_file_guard_mins * 60;
         let now_system = SystemTime::now();
-        
+
         let mut dirs_to_visit = vec![source_path_clone.clone()];
         while let Some(current_dir) = dirs_to_visit.pop() {
-             if let Ok(entries) = std::fs::read_dir(&current_dir) {
-                 for entry in entries.flatten() {
-                     let path = entry.path();
-                     if path.is_dir() {
-                         dirs_to_visit.push(path);
-                     } else {
-                         // File Check
-                         let file_name = entry.file_name().to_string_lossy().to_string();
-                         let mut ext_match = true;
-                         if !extensions.is_empty() {
-                             let name_lower = file_name.to_lowercase();
-                             let mut any_match = false;
-                             for configured_ext in &extensions {
-                                 let conf_lower = configured_ext.to_lowercase();
-                                 let suffix = if conf_lower.starts_with('.') {
-                                     conf_lower.clone()
-                                 } else {
-                                     format!(".{}", conf_lower)
-                                 };
-                                 
-                                 if name_lower.ends_with(&suffix) {
-                                     any_match = true;
-                                     break;
-                                 }
-                             }
-                             
-                             if !any_match {
-                                 ext_match = false;
-                             }
-                         }
-                         
-                         let mut inc_match = true;
-                         if !includes.is_empty() {
-                             inc_match = false;
-                             for inc in &includes {
-                                 if file_name.contains(inc) {
-                                     inc_match = true;
-                                     break;
-                                 }
-                             }
-                         }
-                         
-                         if ext_match && inc_match {
+            if let Ok(entries) = std::fs::read_dir(&current_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        dirs_to_visit.push(path);
+                    } else {
+                        // File Check
+                        let file_name = entry.file_name().to_string_lossy().to_string();
+                        let mut ext_match = true;
+                        if !extensions.is_empty() {
+                            let name_lower = file_name.to_lowercase();
+                            let mut any_match = false;
+                            for configured_ext in &extensions {
+                                let conf_lower = configured_ext.to_lowercase();
+                                let suffix = if conf_lower.starts_with('.') {
+                                    conf_lower.clone()
+                                } else {
+                                    format!(".{}", conf_lower)
+                                };
+
+                                if name_lower.ends_with(&suffix) {
+                                    any_match = true;
+                                    break;
+                                }
+                            }
+
+                            if !any_match {
+                                ext_match = false;
+                            }
+                        }
+
+                        let mut inc_match = true;
+                        if !includes.is_empty() {
+                            inc_match = false;
+                            for inc in &includes {
+                                if file_name.contains(inc) {
+                                    inc_match = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if ext_match && inc_match {
                             // Check if file already exists locally
                             let rel_path = path.strip_prefix(&source_path_clone).unwrap_or(&path);
                             let dst = target_full_path_clone.join(rel_path);
-                            
+
                             if !dst.exists() {
                                 if let Ok(meta) = entry.metadata() {
                                     let file_size = meta.len();
                                     let is_recent = meta
                                         .modified()
                                         .ok()
-                                        .and_then(|modified| now_system.duration_since(modified).ok())
-                                        .map(|age| age < StdDuration::from_secs(recent_file_guard_secs))
+                                        .and_then(|modified| {
+                                            now_system.duration_since(modified).ok()
+                                        })
+                                        .map(|age| {
+                                            age < StdDuration::from_secs(recent_file_guard_secs)
+                                        })
                                         .unwrap_or(true);
 
                                     filtered_files.push((path, file_size, is_recent));
                                 }
                             }
                         }
-                     }
-                 }
-             }
+                    }
+                }
+            }
         }
-        
+
         if filtered_files.is_empty() {
-            emit_log(&handle, format!("'{}' is up to date — no new files to copy.", folder_name_clone), "info");
+            emit_log(
+                &handle,
+                format!(
+                    "'{}' is up to date — no new files to copy.",
+                    folder_name_clone
+                ),
+                "info",
+            );
             return Ok(0u64);
         }
 
@@ -424,25 +481,40 @@ async fn perform_copy<R: tauri::Runtime>(
         let total_filtered_bytes: u64 = filtered_files.iter().map(|(_, s)| *s).sum();
 
         if filtered_files.is_empty() {
-            emit_log(&handle, "All recent candidate files are still being written. Will retry next scan.".to_string(), "warn");
+            emit_log(
+                &handle,
+                "All recent candidate files are still being written. Will retry next scan."
+                    .to_string(),
+                "warn",
+            );
             return Ok(0u64);
         }
-        emit_log(&handle, format!("{} file(s) confirmed ready, proceeding with copy.", filtered_files.len()), "info");
+        emit_log(
+            &handle,
+            format!(
+                "{} file(s) confirmed ready, proceeding with copy.",
+                filtered_files.len()
+            ),
+            "info",
+        );
 
         // ---- Confirmed: we have files to copy ----
         // Record COPY_STARTED only now, so history is clean when nothing needs copying.
-        add_history_entry(&handle, HistoryEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Local::now().to_rfc3339(),
-            action_type: "COPY_STARTED".to_string(),
-            description: format!("Started copying {}", folder_name_clone),
-            folder_name: folder_name_clone.clone(),
-            source_path: source_path_clone.to_string_lossy().to_string(),
-            target_path: target_full_path_clone.to_string_lossy().to_string(),
-            copied_files_count: 0,
-            total_size: 0,
-            files: vec![],
-        });
+        add_history_entry(
+            &handle,
+            HistoryEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                timestamp: Local::now().to_rfc3339(),
+                action_type: "COPY_STARTED".to_string(),
+                description: format!("Started copying {}", folder_name_clone),
+                folder_name: folder_name_clone.clone(),
+                source_path: source_path_clone.to_string_lossy().to_string(),
+                target_path: target_full_path_clone.to_string_lossy().to_string(),
+                copied_files_count: 0,
+                total_size: 0,
+                files: vec![],
+            },
+        );
 
         let start_time = Instant::now();
         let mut last_emit_time = Instant::now();
@@ -452,12 +524,23 @@ async fn perform_copy<R: tauri::Runtime>(
             let now = Instant::now();
             if now.duration_since(last_emit_time).as_millis() > 500 || copied == total {
                 let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 { (copied as f64 / elapsed) as u64 } else { 0 };
-                let eta   = if speed > 0 && total > copied { (total - copied) / speed } else { 0 };
+                let speed = if elapsed > 0.0 {
+                    (copied as f64 / elapsed) as u64
+                } else {
+                    0
+                };
+                let eta = if speed > 0 && total > copied {
+                    (total - copied) / speed
+                } else {
+                    0
+                };
                 emit_progress(
                     &handle,
                     &folder_name_clone,
-                    copied, total, speed, eta,
+                    copied,
+                    total,
+                    speed,
+                    eta,
                     elapsed as u64,
                     &local_path_display,
                     &remote_path_display,
@@ -467,146 +550,193 @@ async fn perform_copy<R: tauri::Runtime>(
             }
         };
 
-        emit_log(&handle, format!("Copying {} new file(s) ({} bytes) from '{}'...", filtered_files.len(), total_filtered_bytes, folder_name_clone), "info");
-        
+        emit_log(
+            &handle,
+            format!(
+                "Copying {} new file(s) ({} bytes) from '{}'...",
+                filtered_files.len(),
+                total_filtered_bytes,
+                folder_name_clone
+            ),
+            "info",
+        );
+
         // Create target directory structure and Copy
         let mut copied_bytes_total = 0;
         let mut copied_files_list = Vec::new();
-        
+
         for (src, _size) in filtered_files {
             // Check cancel before starting file
-             if should_cancel_clone.load(Ordering::SeqCst) {
-                 // Log partial
-                 if !copied_files_list.is_empty() {
-                     add_history_entry(&handle, HistoryEntry {
-                         id: uuid::Uuid::new_v4().to_string(),
-                         timestamp: Local::now().to_rfc3339(),
-                         action_type: "COPY_CANCELLED".to_string(),
-                         description: format!("Cancelled copying {}", folder_name_clone),
-                         folder_name: format!("{} (Cancelled)", folder_name_clone),
-                         source_path: source_path_clone.to_string_lossy().to_string(),
-                         target_path: target_full_path_clone.to_string_lossy().to_string(),
-                         copied_files_count: copied_files_list.len(),
-                         total_size: copied_bytes_total,
-                         files: copied_files_list.clone(),
-                     });
-                 }
-                 return Err(fs_extra::error::Error::new(fs_extra::error::ErrorKind::Interrupted, "Cancelled by user"));
-             }
-            
-             // Calculate relative path
-             let rel_path = src.strip_prefix(&source_path_clone).unwrap_or(&src);
-             let dst = target_full_path_clone.join(rel_path);
-             
-             // Create parent dir
-             if let Some(parent) = dst.parent() {
-                 let _ = std::fs::create_dir_all(parent);
-             }
-             
-             let file_name_display = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if should_cancel_clone.load(Ordering::SeqCst) {
+                // Log partial
+                if !copied_files_list.is_empty() {
+                    add_history_entry(
+                        &handle,
+                        HistoryEntry {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            timestamp: Local::now().to_rfc3339(),
+                            action_type: "COPY_CANCELLED".to_string(),
+                            description: format!("Cancelled copying {}", folder_name_clone),
+                            folder_name: format!("{} (Cancelled)", folder_name_clone),
+                            source_path: source_path_clone.to_string_lossy().to_string(),
+                            target_path: target_full_path_clone.to_string_lossy().to_string(),
+                            copied_files_count: copied_files_list.len(),
+                            total_size: copied_bytes_total,
+                            files: copied_files_list.clone(),
+                        },
+                    );
+                }
+                return Err(fs_extra::error::Error::new(
+                    fs_extra::error::ErrorKind::Interrupted,
+                    "Cancelled by user",
+                ));
+            }
 
-             // Copy with chunking
-             let copy_res = copy_file_chunked(
-                 &src,
-                 &dst,
-                 &should_cancel_clone,
-                 &is_paused_clone,
-                 copy_buffer_size,
-                 &mut |delta| {
-                     copied_bytes_total += delta;
-                     update_stats(copied_bytes_total, total_filtered_bytes);
-                 }
-             );
-             
-             match copy_res {
-                 Ok(_) => {
-                     copied_files_list.push(file_name_display);
-                 },
-                 Err(e) => {
-                     if e.contains("Cancelled") {
-                         // Save partial
-                         if !copied_files_list.is_empty() {
-                             add_history_entry(&handle, HistoryEntry {
-                                 id: uuid::Uuid::new_v4().to_string(),
-                                 timestamp: Local::now().to_rfc3339(),
-                                 action_type: "COPY_CANCELLED".to_string(),
-                                 description: format!("Cancelled copying {}", folder_name_clone),
-                                 folder_name: format!("{} (Cancelled)", folder_name_clone),
-                                 source_path: source_path_clone.to_string_lossy().to_string(),
-                                 target_path: target_full_path_clone.to_string_lossy().to_string(),
-                                 copied_files_count: copied_files_list.len(),
-                                 total_size: copied_bytes_total,
-                                 files: copied_files_list,
-                             });
-                         }
-                         return Err(fs_extra::error::Error::new(fs_extra::error::ErrorKind::Interrupted, "Cancelled by user"));
-                     } else {
-                         emit_log(&handle, format!("Failed to copy {}: {}", file_name_display, e), "error");
-                     }
-                 }
-             }
+            // Calculate relative path
+            let rel_path = src.strip_prefix(&source_path_clone).unwrap_or(&src);
+            let dst = target_full_path_clone.join(rel_path);
+
+            // Create parent dir
+            if let Some(parent) = dst.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            let file_name_display = src
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            // Copy with chunking
+            let copy_res = copy_file_chunked(
+                &src,
+                &dst,
+                &should_cancel_clone,
+                &is_paused_clone,
+                copy_buffer_size,
+                &mut |delta| {
+                    copied_bytes_total += delta;
+                    update_stats(copied_bytes_total, total_filtered_bytes);
+                },
+            );
+
+            match copy_res {
+                Ok(_) => {
+                    copied_files_list.push(file_name_display);
+                }
+                Err(e) => {
+                    if e.contains("Cancelled") {
+                        // Save partial
+                        if !copied_files_list.is_empty() {
+                            add_history_entry(
+                                &handle,
+                                HistoryEntry {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    timestamp: Local::now().to_rfc3339(),
+                                    action_type: "COPY_CANCELLED".to_string(),
+                                    description: format!("Cancelled copying {}", folder_name_clone),
+                                    folder_name: format!("{} (Cancelled)", folder_name_clone),
+                                    source_path: source_path_clone.to_string_lossy().to_string(),
+                                    target_path: target_full_path_clone
+                                        .to_string_lossy()
+                                        .to_string(),
+                                    copied_files_count: copied_files_list.len(),
+                                    total_size: copied_bytes_total,
+                                    files: copied_files_list,
+                                },
+                            );
+                        }
+                        return Err(fs_extra::error::Error::new(
+                            fs_extra::error::ErrorKind::Interrupted,
+                            "Cancelled by user",
+                        ));
+                    } else {
+                        emit_log(
+                            &handle,
+                            format!("Failed to copy {}: {}", file_name_display, e),
+                            "error",
+                        );
+                    }
+                }
+            }
         }
 
         // Done
-         add_history_entry(&handle, HistoryEntry {
-             id: uuid::Uuid::new_v4().to_string(),
-             timestamp: Local::now().to_rfc3339(),
-             action_type: "COPY_COMPLETED".to_string(),
-             description: format!("Successfully copied {}", folder_name_clone),
-             folder_name: folder_name_clone.clone(),
-             source_path: source_path_clone.to_string_lossy().to_string(),
-             target_path: target_full_path_clone.to_string_lossy().to_string(),
-             copied_files_count: copied_files_list.len(),
-             total_size: copied_bytes_total,
-             files: copied_files_list.clone(),
-         });
-         
-         // Deploy: Re-read the latest config so that enabling deploy after scheduler
-         // start is detected without needing to restart the scheduler.
-         // server_bindings are also read from live_config here so that edits made
-         // during a long copy are picked up at deploy time.
-         let current_config = live_config_clone.lock().unwrap().clone();
-         if allow_deploy && current_config.deploy_enabled {
-              let live_server_bindings: Vec<TaskServerBinding> =
-                  if let Some(ref tid) = task_id_clone {
-                      current_config.tasks.iter()
-                          .find(|t| &t.id == tid)
-                          .map(|t| t.server_bindings.clone())
-                          .unwrap_or_default()
-                  } else {
-                      vec![]
-                  };
+        add_history_entry(
+            &handle,
+            HistoryEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                timestamp: Local::now().to_rfc3339(),
+                action_type: "COPY_COMPLETED".to_string(),
+                description: format!("Successfully copied {}", folder_name_clone),
+                folder_name: folder_name_clone.clone(),
+                source_path: source_path_clone.to_string_lossy().to_string(),
+                target_path: target_full_path_clone.to_string_lossy().to_string(),
+                copied_files_count: copied_files_list.len(),
+                total_size: copied_bytes_total,
+                files: copied_files_list.clone(),
+            },
+        );
 
-              if live_server_bindings.is_empty() {
-                  emit_log(&handle, format!("No deploy servers selected for task '{}', skipping deployment.", folder_name_clone), "info");
-                  return Ok(copied_bytes_total);
-              }
+        // Deploy: Re-read the latest config so that enabling deploy after scheduler
+        // start is detected without needing to restart the scheduler.
+        // server_bindings are also read from live_config here so that edits made
+        // during a long copy are picked up at deploy time.
+        let current_config = live_config_clone.lock().unwrap().clone();
+        if allow_deploy && current_config.deploy_enabled {
+            let live_server_bindings: Vec<TaskServerBinding> = if let Some(ref tid) = task_id_clone
+            {
+                current_config
+                    .tasks
+                    .iter()
+                    .find(|t| &t.id == tid)
+                    .map(|t| t.server_bindings.clone())
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
 
-              if let Err(e) = deploy_to_remote(
-                  &handle,
-                  &live_server_bindings,
-                  &current_config.servers,
-                  &current_config.command_groups,
-                  &target_full_path_clone,
-                  &folder_name_clone,
-                  should_cancel_clone,
-                  is_paused_clone,
-              ) {
-                  emit_log(&handle, format!("Deployment failed: {}", e), "error");
-              }
-         }
-        
+            if live_server_bindings.is_empty() {
+                emit_log(
+                    &handle,
+                    format!(
+                        "No deploy servers selected for task '{}', skipping deployment.",
+                        folder_name_clone
+                    ),
+                    "info",
+                );
+                return Ok(copied_bytes_total);
+            }
+
+            if let Err(e) = deploy_to_remote(
+                &handle,
+                &live_server_bindings,
+                &current_config.servers,
+                &current_config.command_groups,
+                &target_full_path_clone,
+                &folder_name_clone,
+                should_cancel_clone,
+                is_paused_clone,
+            ) {
+                emit_log(&handle, format!("Deployment failed: {}", e), "error");
+            }
+        }
+
         Ok(copied_bytes_total)
     });
 
     match copy_task.await {
         Ok(Ok(0)) => {
             // Nothing was copied (all files already up to date) — do not count as "copied"
-        },
+        }
         Ok(Ok(_)) => {
-            emit_log(app_handle, format!("Successfully copied: {}", folder_name), "success");
+            emit_log(
+                app_handle,
+                format!("Successfully copied: {}", folder_name),
+                "success",
+            );
             result.copied_folders.push(folder_name);
-        },
+        }
         Ok(Err(e)) => {
             if let fs_extra::error::ErrorKind::Interrupted = e.kind {
                 let msg = format!("Copy cancelled: {}", folder_name);
@@ -616,7 +746,7 @@ async fn perform_copy<R: tauri::Runtime>(
                 emit_log(app_handle, err_msg.clone(), "error");
                 result.errors.push(err_msg);
             }
-        },
+        }
         Err(e) => {
             let err_msg = format!("Copy task panic: {}", e);
             emit_log(app_handle, err_msg.clone(), "error");
@@ -644,12 +774,26 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         return Err("Target root path is required".to_string());
     }
     if !source_path.exists() {
-        return Err(format!("Source path does not exist: {}", source_path.display()));
-    }
-    if !source_path.is_dir() {
-        return Err(format!("Source path must be a directory: {}", source_path.display()));
+        return Err(format!(
+            "Source path does not exist: {}",
+            source_path.display()
+        ));
     }
 
+    // Handle single file copy
+    if source_path.is_file() {
+        return temporary_copy_file(
+            app_handle,
+            config,
+            source_path,
+            target_root_path,
+            should_cancel,
+            is_paused,
+        )
+        .await;
+    }
+
+    // Directory copy (original logic)
     let folder_name = source_path
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -704,12 +848,215 @@ pub async fn temporary_copy<R: tauri::Runtime>(
     }
 }
 
+/// Copy a single file to the target directory.
+async fn temporary_copy_file<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    config: &AppConfig,
+    source_path: PathBuf,
+    target_root_path: PathBuf,
+    should_cancel: Arc<AtomicBool>,
+    is_paused: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let file_name = source_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or_else(|| "Cannot extract file name from source path".to_string())?;
+
+    let target_file = target_root_path.join(&file_name);
+
+    emit_log(
+        app_handle,
+        format!(
+            "Starting single-file copy: {} -> {}",
+            source_path.display(),
+            target_root_path.display()
+        ),
+        "info",
+    );
+
+    // Ensure target directory exists
+    if let Err(e) = fs::create_dir_all(&target_root_path).await {
+        return Err(format!(
+            "Failed to create target directory {}: {}",
+            target_root_path.display(),
+            e
+        ));
+    }
+
+    // Check if target file already exists
+    if target_file.exists() {
+        emit_log(
+            app_handle,
+            format!(
+                "File already exists at target, skipping: {}",
+                target_file.display()
+            ),
+            "info",
+        );
+        return Ok(());
+    }
+
+    // Get file metadata
+    let meta =
+        std::fs::metadata(&source_path).map_err(|e| format!("Cannot read file metadata: {}", e))?;
+    let file_size = meta.len();
+
+    // Stability check for recently modified files
+    let recent_file_guard_secs = config.recent_file_guard_mins * 60;
+    let is_recent = meta
+        .modified()
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .map(|age| age < StdDuration::from_secs(recent_file_guard_secs))
+        .unwrap_or(true);
+
+    if is_recent && config.stability_check_secs > 0 {
+        emit_log(
+            app_handle,
+            format!(
+                "File was recently modified, waiting {}s for stability check...",
+                config.stability_check_secs
+            ),
+            "info",
+        );
+        let intervals = config.stability_check_secs * 5;
+        for _ in 0..intervals {
+            if should_cancel.load(Ordering::SeqCst) {
+                return Err("Cancelled by user".to_string());
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+
+        // Re-check file size
+        let new_meta = std::fs::metadata(&source_path)
+            .map_err(|e| format!("Cannot re-check file metadata: {}", e))?;
+        if new_meta.len() != file_size {
+            return Err(format!(
+                "File size changed during stability check ({} -> {} bytes), aborting",
+                file_size,
+                new_meta.len()
+            ));
+        }
+    }
+
+    // Record history: COPY_STARTED
+    add_history_entry(
+        app_handle,
+        HistoryEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Local::now().to_rfc3339(),
+            action_type: "COPY_STARTED".to_string(),
+            description: format!("Started copying file {}", file_name),
+            folder_name: file_name.clone(),
+            source_path: source_path.to_string_lossy().to_string(),
+            target_path: target_root_path.to_string_lossy().to_string(),
+            copied_files_count: 0,
+            total_size: 0,
+            files: vec![],
+        },
+    );
+
+    // Copy with progress
+    let app_handle_clone = app_handle.clone();
+    let file_name_clone = file_name.clone();
+    let source_clone = source_path.clone();
+    let target_file_clone = target_file.clone();
+    let target_root_display = target_root_path.to_string_lossy().to_string();
+    let source_display = source_path.to_string_lossy().to_string();
+    let copy_buffer_size = (config.copy_buffer_size_kb as usize).max(64) * 1024;
+
+    let copy_result = tauri::async_runtime::spawn_blocking(move || {
+        let start_time = Instant::now();
+        let mut last_emit_time = Instant::now();
+        let mut copied_so_far: u64 = 0;
+
+        let mut on_progress = |delta: u64| {
+            copied_so_far += delta;
+            let now = Instant::now();
+            if now.duration_since(last_emit_time).as_millis() > 500 || copied_so_far == file_size {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let speed = if elapsed > 0.0 {
+                    (copied_so_far as f64 / elapsed) as u64
+                } else {
+                    0
+                };
+                let eta = if speed > 0 && file_size > copied_so_far {
+                    (file_size - copied_so_far) / speed
+                } else {
+                    0
+                };
+                emit_progress(
+                    &app_handle_clone,
+                    &file_name_clone,
+                    copied_so_far,
+                    file_size,
+                    speed,
+                    eta,
+                    elapsed as u64,
+                    &target_root_display,
+                    &source_display,
+                    "manual",
+                );
+                last_emit_time = now;
+            }
+        };
+
+        copy_file_chunked(
+            &source_clone,
+            &target_file_clone,
+            &should_cancel,
+            &is_paused,
+            copy_buffer_size,
+            &mut on_progress,
+        )
+    })
+    .await
+    .map_err(|e| format!("Copy task panic: {}", e))?;
+
+    match copy_result {
+        Ok(bytes_copied) => {
+            emit_log(
+                app_handle,
+                format!(
+                    "File copied successfully: {} ({} bytes)",
+                    file_name, bytes_copied
+                ),
+                "success",
+            );
+
+            // Record history: COPY_COMPLETED
+            add_history_entry(
+                app_handle,
+                HistoryEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    timestamp: Local::now().to_rfc3339(),
+                    action_type: "COPY_COMPLETED".to_string(),
+                    description: format!("Completed copying file {}", file_name),
+                    folder_name: file_name.clone(),
+                    source_path: source_path.to_string_lossy().to_string(),
+                    target_path: target_root_path.to_string_lossy().to_string(),
+                    copied_files_count: 1,
+                    total_size: bytes_copied,
+                    files: vec![file_name],
+                },
+            );
+
+            Ok(())
+        }
+        Err(e) => {
+            // Clean up partial file on failure
+            let _ = std::fs::remove_file(&target_file);
+            Err(format!("Failed to copy file: {}", e))
+        }
+    }
+}
+
 pub async fn scan_and_copy<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     config: &AppConfig,
     live_config: Arc<Mutex<AppConfig>>,
     should_cancel: Arc<AtomicBool>,
-    is_paused: Arc<AtomicBool>
+    is_paused: Arc<AtomicBool>,
 ) -> ScanResult {
     let mut result = ScanResult {
         scanned_paths: 0,
@@ -723,7 +1070,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
     let now = now_local.naive_local();
     let today = now.date();
     let yesterday = today - Duration::days(1);
-    
+
     // Check Time Ranges
     if !config.time_ranges.is_empty() {
         let current_time = now_local.time();
@@ -733,34 +1080,47 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
             if parts.len() == 2 {
                 if let (Ok(start), Ok(end)) = (
                     NaiveTime::parse_from_str(parts[0], "%H:%M"),
-                    NaiveTime::parse_from_str(parts[1], "%H:%M")
+                    NaiveTime::parse_from_str(parts[1], "%H:%M"),
                 ) {
                     if current_time >= start && current_time <= end {
                         in_range = true;
                         break;
-    }
-}
-
+                    }
+                }
             }
         }
-        
+
         if !in_range {
-             emit_log(app_handle, format!("Current time {} is outside of configured time ranges {:?}. Skipping scan.", current_time.format("%H:%M"), config.time_ranges), "info");
-             return result;
+            emit_log(
+                app_handle,
+                format!(
+                    "Current time {} is outside of configured time ranges {:?}. Skipping scan.",
+                    current_time.format("%H:%M"),
+                    config.time_ranges
+                ),
+                "info",
+            );
+            return result;
         }
     }
 
     for task in &config.tasks {
-        if !task.enabled { continue; }
-        
+        if !task.enabled {
+            continue;
+        }
+
         if should_cancel.load(Ordering::SeqCst) {
             emit_log(app_handle, "Scan cancelled by user".to_string(), "info");
             return result;
         }
 
         result.scanned_paths += 1;
-        emit_log(app_handle, format!("Task [{}]: Scanning {}", task.name, task.remote_path), "info");
-        
+        emit_log(
+            app_handle,
+            format!("Task [{}]: Scanning {}", task.name, task.remote_path),
+            "info",
+        );
+
         let path = Path::new(&task.remote_path);
         let local_parent = if let Some(custom_local) = &task.local_path {
             Path::new(custom_local)
@@ -770,7 +1130,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
 
         match &task.rule {
             MatchRule::VersionMatch(target_version) => {
-                 let mut entries = match fs::read_dir(path).await {
+                let mut entries = match fs::read_dir(path).await {
                     Ok(entries) => entries,
                     Err(e) => {
                         let err_msg = format!("Failed to read {}: {}", task.remote_path, e);
@@ -789,60 +1149,80 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         emit_log(app_handle, "Scan cancelled by user".to_string(), "info");
                         return result;
                     }
-                    
+
                     let file_name = entry.file_name();
                     let name_str = file_name.to_string_lossy().to_string();
-                    
+
                     let mut dt = NaiveDateTime::MIN;
                     if let Some(caps) = re_version.captures(&name_str) {
-                         if let Some(date_part) = caps.get(1) {
-                             if let Ok(parsed) = NaiveDateTime::parse_from_str(date_part.as_str(), "%Y_%m_%d_%H_%M") {
-                                 dt = parsed;
-                             }
-                         }
+                        if let Some(date_part) = caps.get(1) {
+                            if let Ok(parsed) =
+                                NaiveDateTime::parse_from_str(date_part.as_str(), "%Y_%m_%d_%H_%M")
+                            {
+                                dt = parsed;
+                            }
+                        }
                     }
-                    
+
                     candidates.push(Candidate {
                         path: entry.path(),
                         name: name_str.clone(),
                         version: if let Some(caps) = re_version.captures(&name_str) {
-                            caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default()
+                            caps.get(2)
+                                .map(|m| m.as_str().to_string())
+                                .unwrap_or_default()
                         } else {
                             String::new()
                         },
                         datetime: dt,
                     });
                 }
-                
+
                 // Sort
                 candidates.sort_by(|a, b| b.datetime.cmp(&a.datetime));
-                
+
                 // Tree view
                 for cand in candidates.iter().take(20) {
-                     tree_view.push(format!("├─ {}", cand.name));
+                    tree_view.push(format!("├─ {}", cand.name));
                 }
                 if candidates.len() > 20 {
-                     tree_view.push(format!("└─ ... ({} more files)", candidates.len() - 20));
+                    tree_view.push(format!("└─ ... ({} more files)", candidates.len() - 20));
                 }
                 if !tree_view.is_empty() {
-                     emit_log(app_handle, format!("Directory structure (partial):\n{}", tree_view.join("\n")), "info");
+                    emit_log(
+                        app_handle,
+                        format!("Directory structure (partial):\n{}", tree_view.join("\n")),
+                        "info",
+                    );
                 }
-                
+
                 // Filter by version
-                let mut version_matches: Vec<&Candidate> = candidates.iter()
+                let mut version_matches: Vec<&Candidate> = candidates
+                    .iter()
                     .filter(|c| c.version == *target_version)
                     .collect();
-                
+
                 if version_matches.is_empty() {
-                    emit_log(app_handle, format!("No candidates found for version {}", target_version), "info");
+                    emit_log(
+                        app_handle,
+                        format!("No candidates found for version {}", target_version),
+                        "info",
+                    );
                     continue;
                 }
-                
+
                 version_matches.sort_by(|a, b| b.datetime.cmp(&a.datetime));
-                
+
                 if let Some(latest) = version_matches.first() {
                     let folder_date = latest.datetime.date();
-                    emit_log(app_handle, format!("Latest candidate for {}: {} ({})", target_version, latest.name, folder_date), "info");
+                    emit_log(
+                        app_handle,
+                        format!(
+                            "Latest candidate for {}: {} ({})",
+                            target_version, latest.name, folder_date
+                        ),
+                        "info",
+                    );
 
                     if folder_date == today || folder_date == yesterday {
                         result.found_folders.push(latest.name.clone());
@@ -860,16 +1240,27 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             Some(task.id.clone()),
                             true,
                             "scheduled",
-                        ).await;
-
+                        )
+                        .await;
                     } else {
-                        emit_log(app_handle, format!("Ignored {} because date {} is not Today ({}) or Yesterday ({})", latest.name, folder_date, today, yesterday), "info");
+                        emit_log(
+                            app_handle,
+                            format!(
+                                "Ignored {} because date {} is not Today ({}) or Yesterday ({})",
+                                latest.name, folder_date, today, yesterday
+                            ),
+                            "info",
+                        );
                     }
                 }
-            },
+            }
             MatchRule::DateMatch(format_str) => {
-                let fmt = if format_str.trim().is_empty() { "%y%m%d" } else { format_str.trim() };
-                let today_name    = now_local.format(fmt).to_string();
+                let fmt = if format_str.trim().is_empty() {
+                    "%y%m%d"
+                } else {
+                    format_str.trim()
+                };
+                let today_name = now_local.format(fmt).to_string();
                 let yesterday_name = (now_local - Duration::days(1)).format(fmt).to_string();
 
                 // Only check yesterday during the first hour of a new day (00:00–01:00),
@@ -883,7 +1274,14 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                     vec![today_name.clone()]
                 };
 
-                emit_log(app_handle, format!("Checking date-based folder(s): {}", dirs_to_check.join(", ")), "info");
+                emit_log(
+                    app_handle,
+                    format!(
+                        "Checking date-based folder(s): {}",
+                        dirs_to_check.join(", ")
+                    ),
+                    "info",
+                );
 
                 for target_name in dirs_to_check {
                     if should_cancel.load(Ordering::SeqCst) {
@@ -894,18 +1292,33 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                     let target_path = path.join(&target_name);
 
                     if !target_path.exists() || !target_path.is_dir() {
-                        emit_log(app_handle, format!("Folder {} does not exist in {}", target_name, task.remote_path), "info");
+                        emit_log(
+                            app_handle,
+                            format!(
+                                "Folder {} does not exist in {}",
+                                target_name, task.remote_path
+                            ),
+                            "info",
+                        );
                         continue;
                     }
 
-                    emit_log(app_handle, format!("Found candidate folder: {}", target_name), "success");
+                    emit_log(
+                        app_handle,
+                        format!("Found candidate folder: {}", target_name),
+                        "success",
+                    );
 
                     let local_target_base = local_parent.join(&target_name);
 
                     let mut sub_entries = match fs::read_dir(&target_path).await {
                         Ok(e) => e,
                         Err(e) => {
-                            let err = format!("Failed to list contents of {}: {}", target_path.display(), e);
+                            let err = format!(
+                                "Failed to list contents of {}: {}",
+                                target_path.display(),
+                                e
+                            );
                             emit_log(app_handle, err.clone(), "error");
                             result.errors.push(err);
                             continue;
@@ -919,7 +1332,9 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         if sub_path.is_dir() {
                             let sub_name = entry.file_name().to_string_lossy().to_string();
                             found_any = true;
-                            result.found_folders.push(format!("{}/{}", target_name, sub_name));
+                            result
+                                .found_folders
+                                .push(format!("{}/{}", target_name, sub_name));
 
                             perform_copy(
                                 app_handle,
@@ -934,12 +1349,17 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                 Some(task.id.clone()),
                                 true,
                                 "scheduled",
-                            ).await;
+                            )
+                            .await;
                         }
                     }
 
                     if !found_any {
-                        emit_log(app_handle, format!("No build directories found in {}", target_name), "info");
+                        emit_log(
+                            app_handle,
+                            format!("No build directories found in {}", target_name),
+                            "info",
+                        );
                     }
                 }
             }

@@ -67,7 +67,7 @@ pub struct AppConfig {
     pub interval_minutes: u64,
     pub time_ranges: Vec<String>, // "HH:mm-HH:mm"
 
-    pub file_extensions: Vec<String>, // e.g. ["exe", "tar.gz"]
+    pub file_extensions: Vec<String>,   // e.g. ["exe", "tar.gz"]
     pub filename_includes: Vec<String>, // e.g. ["UMS", "VMS"] - OR logic
 
     pub deploy_enabled: bool,
@@ -101,10 +101,18 @@ pub struct AppConfig {
     pub copy_buffer_size_kb: u32,
 }
 
-fn default_stability_secs() -> u64 { 30 }
-fn default_recent_file_guard_mins() -> u64 { MIN_RECENT_FILE_GUARD_MINS }
-fn default_max_log_lines() -> u32 { 200 }
-fn default_copy_buffer_size_kb() -> u32 { 4096 }
+fn default_stability_secs() -> u64 {
+    30
+}
+fn default_recent_file_guard_mins() -> u64 {
+    MIN_RECENT_FILE_GUARD_MINS
+}
+fn default_max_log_lines() -> u32 {
+    200
+}
+fn default_copy_buffer_size_kb() -> u32 {
+    4096
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -143,13 +151,22 @@ pub fn normalize_config(mut config: AppConfig) -> AppConfig {
 
 pub fn validate_config(config: &AppConfig) -> Result<(), String> {
     if config.interval_minutes < MIN_SCAN_INTERVAL_MINS {
-        return Err(format!("Scan interval must be at least {} minutes", MIN_SCAN_INTERVAL_MINS));
+        return Err(format!(
+            "Scan interval must be at least {} minutes",
+            MIN_SCAN_INTERVAL_MINS
+        ));
     }
     if config.stability_check_secs < MIN_STABILITY_CHECK_SECS {
-        return Err(format!("File stability wait must be at least {} second", MIN_STABILITY_CHECK_SECS));
+        return Err(format!(
+            "File stability wait must be at least {} second",
+            MIN_STABILITY_CHECK_SECS
+        ));
     }
     if config.recent_file_guard_mins < MIN_RECENT_FILE_GUARD_MINS {
-        return Err(format!("Recent file threshold must be at least {} minutes", MIN_RECENT_FILE_GUARD_MINS));
+        return Err(format!(
+            "Recent file threshold must be at least {} minutes",
+            MIN_RECENT_FILE_GUARD_MINS
+        ));
     }
     Ok(())
 }
@@ -181,5 +198,9 @@ pub fn get_log_path(app_handle: &tauri::AppHandle) -> PathBuf {
 }
 
 pub fn get_config_path(app_handle: &tauri::AppHandle) -> PathBuf {
-    app_handle.path().app_config_dir().unwrap().join("config.json")
+    app_handle
+        .path()
+        .app_config_dir()
+        .unwrap()
+        .join("config.json")
 }
