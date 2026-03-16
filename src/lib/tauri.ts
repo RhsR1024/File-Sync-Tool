@@ -156,6 +156,20 @@ export async function openDirectory(): Promise<string | null> {
   return await invoke('open_directory');
 }
 
+export async function saveTextFile(
+  content: string,
+  defaultFileName: string,
+  filterName: string,
+  extensions: string[],
+): Promise<string | null> {
+  return await invoke('save_text_file', {
+    content,
+    defaultFileName,
+    filterName,
+    extensions,
+  });
+}
+
 // Framework password management types
 export interface FrameworkPasswordResult {
   ip: string;
@@ -179,6 +193,66 @@ interface LoginResponse {
 interface ChangePasswdResponse {
   code: number;
   message: string;
+}
+
+// ─── Code Count (code statistics) ─────────────────────────────
+
+export interface CodeCountFileStats {
+  filePath: string;
+  codeAdded: number;
+  codeDeleted: number;
+  codeModified: number;
+  commentAdded: number;
+  commentDeleted: number;
+  commentModified: number;
+}
+
+export interface CodeCountSummary {
+  codeAdded: number;
+  codeDeleted: number;
+  codeModified: number;
+  commentAdded: number;
+  commentDeleted: number;
+  commentModified: number;
+}
+
+export interface CodeCountOperationSummary {
+  addedTotal: number;
+  deletedTotal: number;
+  modifiedTotal: number;
+}
+
+export interface CodeCountResult {
+  files: CodeCountFileStats[];
+  summary: CodeCountSummary;
+  operationSummary: CodeCountOperationSummary;
+  fileTypeSummary: Record<string, CodeCountSummary>;
+}
+
+export interface CodeCountProgress {
+  phase: string;
+  currentFile: string;
+  processedFiles: number;
+  totalFiles: number;
+  percent: number;
+}
+
+export interface CodeCountScopeOption {
+  key: string;
+  label: string;
+  kind: 'directory' | 'root';
+}
+
+export async function codeCountAnalyze(
+  oldPath: string,
+  newPath: string,
+  includedRoots?: string[],
+): Promise<CodeCountResult> {
+  return await invoke<CodeCountResult>('code_count_analyze', { oldPath, newPath, includedRoots });
+}
+
+export async function codeCountListScopeOptions(path: string): Promise<CodeCountScopeOption[]> {
+  return await invoke<CodeCountScopeOption[]>('code_count_list_scope_options', { path });
 }
 
 /**

@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod code_count;
 mod config;
 mod deploy;
 mod history;
@@ -355,6 +356,35 @@ fn open_directory() -> Result<Option<String>, String> {
     Ok(selected_dir.map(|path| path.to_string_lossy().to_string()))
 }
 
+#[tauri::command]
+fn save_text_file(
+    content: String,
+    default_file_name: String,
+    filter_name: String,
+    extensions: Vec<String>,
+) -> Result<Option<String>, String> {
+    let extension_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let mut dialog = rfd::FileDialog::new().set_file_name(&default_file_name);
+
+    if !extension_refs.is_empty() {
+        dialog = dialog.add_filter(&filter_name, &extension_refs);
+    }
+
+    let Some(mut target_path) = dialog.save_file() else {
+        return Ok(None);
+    };
+
+    if target_path.extension().is_none() {
+        if let Some(default_extension) = extensions.first() {
+            target_path.set_extension(default_extension);
+        }
+    }
+
+    std::fs::write(&target_path, content).map_err(|e| e.to_string())?;
+
+    Ok(Some(target_path.to_string_lossy().to_string()))
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct PasswordChangeResult {
     pub ip: String,
@@ -628,7 +658,10 @@ fn main() {
             get_app_paths,
             open_path_parent,
             open_directory,
-            change_framework_password
+            save_text_file,
+            change_framework_password,
+            code_count::code_count_analyze,
+            code_count::code_count_list_scope_options
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

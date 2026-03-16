@@ -439,18 +439,9 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="p-6 max-w-4xl mx-auto space-y-8 pb-20">
+  <div class="p-6 max-w-4xl mx-auto space-y-8 pb-28">
     <div class="flex justify-between items-center">
       <h2 class="text-2xl font-bold text-slate-800">{{ t('settings.title') }}</h2>
-      <button
-        @click="save"
-        :disabled="hasConfigErrors"
-        class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium flex items-center gap-2 transition-colors shadow-sm"
-        :class="hasConfigErrors ? 'opacity-50 cursor-not-allowed hover:bg-blue-600' : ''"
-      >
-        <Save class="w-4 h-4" />
-        {{ t('settings.save') }}
-      </button>
     </div>
 
     <div v-if="statusMsg" class="bg-green-50 text-green-700 p-3 rounded-lg text-sm font-medium border border-green-200 flex items-center gap-2">
@@ -1208,5 +1199,15 @@ onMounted(load);
         </div>
       </div>
     </div>
+
+    <button
+      @click="save"
+      :disabled="hasConfigErrors"
+      class="fixed right-6 bottom-6 z-40 bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-full font-medium flex items-center gap-2 transition-all shadow-lg shadow-blue-200/70"
+      :class="hasConfigErrors ? 'opacity-50 cursor-not-allowed hover:bg-blue-600 shadow-none' : 'hover:-translate-y-0.5'"
+    >
+      <Save class="w-4 h-4" />
+      {{ t('settings.save') }}
+    </button>
   </div>
 </template>
