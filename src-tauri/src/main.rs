@@ -9,7 +9,8 @@ mod scanner;
 
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
-use std::path::PathBuf;
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,9 +27,277 @@ struct AppState {
     config: Arc<Mutex<AppConfig>>,
     is_scanning: Arc<AtomicBool>,
     is_manually_deploying: Arc<AtomicBool>,
+    manual_copy_queue: Arc<Mutex<VecDeque<ManualCopyQueueItem>>>,
+    manual_copy_keys: Arc<Mutex<HashSet<String>>>,
+    manual_copy_worker_running: Arc<AtomicBool>,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     is_quitting: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Debug)]
+struct ManualCopyQueueItem {
+    key: String,
+    folder_name: String,
+    source_path: String,
+    local_path: String,
+    target_root_path: String,
+    overwrite_existing: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ManualCopyQueueAck {
+    folder_name: String,
+    source_path: String,
+    local_path: String,
+    queued_ahead: usize,
+}
+
+#[derive(serde::Serialize)]
+struct ManualCopyPreview {
+    folder_name: String,
+    source_path: String,
+    local_path: String,
+    resolved_target_path: String,
+    source_kind: String,
+    target_exists: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct ManualCopyTaskStateEvent {
+    folder: String,
+    source_path: String,
+    local_path: String,
+    state: String,
+}
+
+fn emit_runtime_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
+    let _ = app_handle.emit(
+        "log-message",
+        json!({
+            "msg": msg,
+            "level": level,
+        }),
+    );
+    scanner::write_log_to_file(app_handle, &msg, level);
+}
+
+fn normalize_existing_path(path: &Path) -> Result<String, String> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| format!("Cannot access path {}: {}", path.display(), e))?;
+    let mut normalized = canonical.to_string_lossy().replace('/', "\\");
+
+    while normalized.len() > 3 && normalized.ends_with('\\') {
+        normalized.pop();
+    }
+
+    Ok(normalized.to_lowercase())
+}
+
+fn manual_copy_queue_key(source_path: &Path, target_root_path: &Path) -> Result<String, String> {
+    Ok(format!(
+        "{}=>{}",
+        normalize_existing_path(source_path)?,
+        normalize_existing_path(target_root_path)?
+    ))
+}
+
+fn manual_copy_folder_name(source_path: &Path) -> String {
+    source_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "temporary-copy".to_string())
+}
+
+fn resolve_manual_copy_target_path(
+    source_path: &Path,
+    target_root_path: &Path,
+) -> Result<PathBuf, String> {
+    if source_path.is_file() {
+        let Some(file_name) = source_path.file_name() else {
+            return Err("Cannot extract file name from source path".to_string());
+        };
+        return Ok(target_root_path.join(file_name));
+    }
+
+    Ok(target_root_path.join(manual_copy_folder_name(source_path)))
+}
+
+fn validate_manual_copy_request(
+    source_path: &Path,
+    target_root_path: &Path,
+) -> Result<(String, String, PathBuf, String), String> {
+    if source_path.as_os_str().is_empty() {
+        return Err("SOURCE_PATH_REQUIRED".to_string());
+    }
+    if target_root_path.as_os_str().is_empty() {
+        return Err("TARGET_ROOT_REQUIRED".to_string());
+    }
+    if !source_path.exists() {
+        return Err(format!("SOURCE_NOT_FOUND::{}", source_path.display()));
+    }
+    if !source_path.is_dir() && !source_path.is_file() {
+        return Err(format!("INVALID_SOURCE_TYPE::{}", source_path.display()));
+    }
+    if !target_root_path.exists() {
+        return Err(format!(
+            "TARGET_ROOT_NOT_FOUND::{}",
+            target_root_path.display()
+        ));
+    }
+    if !target_root_path.is_dir() {
+        return Err(format!(
+            "TARGET_ROOT_NOT_DIRECTORY::{}",
+            target_root_path.display()
+        ));
+    }
+
+    let folder_name = manual_copy_folder_name(source_path);
+    let resolved_target_path = resolve_manual_copy_target_path(source_path, target_root_path)?;
+
+    if source_path.is_file() && resolved_target_path == source_path {
+        return Err(format!(
+            "TARGET_SAME_AS_SOURCE::{}",
+            resolved_target_path.display()
+        ));
+    }
+    if source_path.is_file()
+        && resolved_target_path.exists()
+        && !resolved_target_path.is_file()
+    {
+        return Err(format!(
+            "TARGET_FILE_CONFLICTS_WITH_DIRECTORY::{}",
+            resolved_target_path.display()
+        ));
+    }
+    if source_path.is_dir()
+        && resolved_target_path.exists()
+        && !resolved_target_path.is_dir()
+    {
+        return Err(format!(
+            "TARGET_DIRECTORY_CONFLICTS_WITH_FILE::{}",
+            resolved_target_path.display()
+        ));
+    }
+    if source_path.is_dir()
+        && (resolved_target_path == source_path || resolved_target_path.starts_with(source_path))
+    {
+        return Err(format!(
+            "TARGET_INSIDE_SOURCE::{}",
+            resolved_target_path.display()
+        ));
+    }
+
+    Ok((
+        folder_name,
+        resolved_target_path.to_string_lossy().to_string(),
+        resolved_target_path,
+        if source_path.is_file() {
+            "file".to_string()
+        } else {
+            "directory".to_string()
+        },
+    ))
+}
+
+fn emit_manual_copy_task_state<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    task: &ManualCopyQueueItem,
+    state: &str,
+) {
+    let _ = app_handle.emit(
+        "manual-copy-task-state",
+        ManualCopyTaskStateEvent {
+            folder: task.folder_name.clone(),
+            source_path: task.source_path.clone(),
+            local_path: task.local_path.clone(),
+            state: state.to_string(),
+        },
+    );
+}
+
+fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
+    let config = state.config.clone();
+    let manual_copy_queue = state.manual_copy_queue.clone();
+    let manual_copy_keys = state.manual_copy_keys.clone();
+    let manual_copy_worker_running = state.manual_copy_worker_running.clone();
+    let is_scanning = state.is_scanning.clone();
+    let should_cancel = state.should_cancel.clone();
+    let is_paused = state.is_paused.clone();
+
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if is_scanning
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+                let queue_empty = manual_copy_queue.lock().unwrap().is_empty();
+                if queue_empty {
+                    manual_copy_worker_running.store(false, Ordering::SeqCst);
+                    let queue_still_empty = manual_copy_queue.lock().unwrap().is_empty();
+                    if queue_still_empty
+                        || manual_copy_worker_running.swap(true, Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            loop {
+                let next_task = { manual_copy_queue.lock().unwrap().pop_front() };
+                let Some(task) = next_task else {
+                    break;
+                };
+
+                should_cancel.store(false, Ordering::SeqCst);
+                is_paused.store(false, Ordering::SeqCst);
+                emit_manual_copy_task_state(&app_handle, &task, "started");
+
+                let config_snapshot = config.lock().unwrap().clone();
+                let result = scanner::temporary_copy(
+                    &app_handle,
+                    &config_snapshot,
+                    config.clone(),
+                    task.source_path.clone(),
+                    task.target_root_path.clone(),
+                    task.overwrite_existing,
+                    should_cancel.clone(),
+                    is_paused.clone(),
+                )
+                .await;
+
+                manual_copy_keys.lock().unwrap().remove(&task.key);
+
+                if let Err(error) = result {
+                    let state = if error.to_lowercase().contains("cancelled") {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    };
+                    emit_manual_copy_task_state(&app_handle, &task, state);
+                    emit_runtime_log(
+                        &app_handle,
+                        format!("Manual copy task failed: {}", error),
+                        "error",
+                    );
+                } else {
+                    emit_manual_copy_task_state(&app_handle, &task, "completed");
+                }
+            }
+
+            is_scanning.store(false, Ordering::SeqCst);
+
+            manual_copy_worker_running.store(false, Ordering::SeqCst);
+            let queue_has_items = !manual_copy_queue.lock().unwrap().is_empty();
+            if !queue_has_items || manual_copy_worker_running.swap(true, Ordering::SeqCst) {
+                break;
+            }
+        }
+    });
 }
 
 fn restore_main_window(window: &WebviewWindow) {
@@ -258,8 +527,9 @@ async fn manual_deploy(
 async fn temporary_copy(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
-    sourcePath: String,
-    targetRootPath: String,
+    source_path: String,
+    target_root_path: String,
+    overwrite_existing: bool,
 ) -> Result<(), String> {
     if state.is_scanning.load(Ordering::SeqCst) {
         return Err("Operation already in progress".to_string());
@@ -279,8 +549,9 @@ async fn temporary_copy(
         &app_handle,
         &config,
         live_config,
-        sourcePath,
-        targetRootPath,
+        source_path,
+        target_root_path,
+        overwrite_existing,
         should_cancel,
         is_paused,
     )
@@ -288,6 +559,95 @@ async fn temporary_copy(
 
     is_scanning.store(false, Ordering::SeqCst);
     result
+}
+
+#[tauri::command]
+async fn queue_temporary_copy(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    source_path: String,
+    target_root_path: String,
+    overwrite_existing: bool,
+) -> Result<ManualCopyQueueAck, String> {
+    let source_path = PathBuf::from(source_path.trim());
+    let target_root_path = PathBuf::from(target_root_path.trim());
+
+    let (folder_name, local_path, _, _) =
+        validate_manual_copy_request(&source_path, &target_root_path)?;
+
+    let task_key = manual_copy_queue_key(&source_path, &target_root_path)?;
+
+    {
+        let mut keys = state.manual_copy_keys.lock().unwrap();
+        if keys.contains(&task_key) {
+            return Err(format!(
+                "DUPLICATE_TASK::{} => {}",
+                source_path.display(),
+                target_root_path.display()
+            ));
+        }
+        keys.insert(task_key.clone());
+    }
+
+    let queued_ahead = state.manual_copy_queue.lock().unwrap().len()
+        + usize::from(state.manual_copy_worker_running.load(Ordering::SeqCst));
+
+    state
+        .manual_copy_queue
+        .lock()
+        .unwrap()
+        .push_back(ManualCopyQueueItem {
+            key: task_key,
+            folder_name: folder_name.clone(),
+            source_path: source_path.to_string_lossy().to_string(),
+            local_path: local_path.clone(),
+            target_root_path: target_root_path.to_string_lossy().to_string(),
+            overwrite_existing,
+        });
+
+    emit_runtime_log(
+        &app_handle,
+        format!(
+            "Manual copy task queued: {} -> {}",
+            source_path.display(),
+            target_root_path.display()
+        ),
+        "info",
+    );
+
+    if !state
+        .manual_copy_worker_running
+        .swap(true, Ordering::SeqCst)
+    {
+        start_manual_copy_worker(app_handle, state.inner());
+    }
+
+    Ok(ManualCopyQueueAck {
+        folder_name,
+        source_path: source_path.to_string_lossy().to_string(),
+        local_path,
+        queued_ahead,
+    })
+}
+
+#[tauri::command]
+async fn preview_temporary_copy(
+    source_path: String,
+    target_root_path: String,
+) -> Result<ManualCopyPreview, String> {
+    let source_path = PathBuf::from(source_path.trim());
+    let target_root_path = PathBuf::from(target_root_path.trim());
+    let (folder_name, local_path, resolved_target_path, source_kind) =
+        validate_manual_copy_request(&source_path, &target_root_path)?;
+
+    Ok(ManualCopyPreview {
+        folder_name,
+        source_path: source_path.to_string_lossy().to_string(),
+        local_path,
+        resolved_target_path: resolved_target_path.to_string_lossy().to_string(),
+        source_kind,
+        target_exists: resolved_target_path.exists(),
+    })
 }
 
 #[tauri::command]
@@ -636,6 +996,9 @@ fn main() {
                 config: Arc::new(Mutex::new(config)),
                 is_scanning: Arc::new(AtomicBool::new(false)),
                 is_manually_deploying: Arc::new(AtomicBool::new(false)),
+                manual_copy_queue: Arc::new(Mutex::new(VecDeque::new())),
+                manual_copy_keys: Arc::new(Mutex::new(HashSet::new())),
+                manual_copy_worker_running: Arc::new(AtomicBool::new(false)),
                 should_cancel: Arc::new(AtomicBool::new(false)),
                 is_paused: Arc::new(AtomicBool::new(false)),
                 is_quitting: Arc::new(AtomicBool::new(false)),
@@ -655,13 +1018,15 @@ fn main() {
             test_ssh_connection,
             manual_deploy,
             temporary_copy,
+            queue_temporary_copy,
+            preview_temporary_copy,
             get_app_paths,
             open_path_parent,
             open_directory,
             save_text_file,
             change_framework_password,
             code_count::code_count_analyze,
-            code_count::code_count_list_scope_options
+            code_count::code_count_list_scope_tree
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

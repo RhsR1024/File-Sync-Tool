@@ -317,7 +317,7 @@ fn deploy_single_server<R: tauri::Runtime>(
     let start_time = Instant::now();
     let mut last_emit_time = Instant::now();
     let local_path_str = local_folder_path.to_string_lossy().to_string();
-    let server_display = format!("[{}] {}:{}", server.name, server.host, remote_target);
+    let server_display = format!("[{}] {}", server.name, remote_target);
 
     upload_with_progress(
         app_handle,
@@ -540,7 +540,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
     let mut copied_bytes = 0u64;
     let start_time = Instant::now();
     let mut last_emit_time = Instant::now();
-    let server_display = format!("{}:{}", server.host, target_path_str);
+    let server_display = format!("[{}] {}", server.name, target_path_str);
     let folder_display = local_p
         .file_name()
         .unwrap_or_default()

@@ -3,12 +3,13 @@ import Sidebar from '@/components/Sidebar.vue';
 import { RouterView } from 'vue-router';
 import { onMounted, onUnmounted } from 'vue';
 import { listen } from '@tauri-apps/api/event';
-import { appStore, addLog, upsertTaskRecord, syncTaskRecordByLog } from '@/lib/store';
+import { appStore, addLog, upsertTaskRecord, syncTaskRecordByLog, updateManualCopyTaskState } from '@/lib/store';
 import { getConfig } from '@/lib/tauri';
 import { startScheduler } from '@/lib/scheduler';
 
 let unlistenLog: (() => void) | null = null;
 let unlistenProgress: (() => void) | null = null;
+let unlistenManualCopyState: (() => void) | null = null;
 
 onMounted(async () => {
     unlistenLog = await listen('log-message', (event: any) => {
@@ -47,6 +48,21 @@ onMounted(async () => {
         upsertTaskRecord({ ...p, source: p.source });
     });
 
+    unlistenManualCopyState = await listen('manual-copy-task-state', (event: any) => {
+        const payload = event.payload as {
+            folder: string;
+            source_path: string;
+            local_path: string;
+            state: 'started' | 'completed' | 'failed' | 'cancelled';
+        };
+        updateManualCopyTaskState({
+            folder: payload.folder,
+            sourcePath: payload.source_path,
+            localPath: payload.local_path,
+            state: payload.state,
+        });
+    });
+
     try {
         const cfg = await getConfig();
         if (cfg.max_log_lines > 0) appStore.maxLogLines = cfg.max_log_lines;
@@ -61,6 +77,7 @@ onMounted(async () => {
 onUnmounted(() => {
     if (unlistenLog) unlistenLog();
     if (unlistenProgress) unlistenProgress();
+    if (unlistenManualCopyState) unlistenManualCopyState();
 });
 </script>
 

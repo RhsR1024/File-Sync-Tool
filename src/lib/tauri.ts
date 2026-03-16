@@ -140,8 +140,40 @@ export async function manualDeploy(server: DeployServer, postCommands: string[],
   await invoke('manual_deploy', { server, postCommands, localPath, remotePath });
 }
 
-export async function temporaryCopy(sourcePath: string, targetRootPath: string): Promise<void> {
-  await invoke('temporary_copy', { sourcePath, targetRootPath });
+export interface ManualCopyQueueAck {
+  folder_name: string;
+  source_path: string;
+  local_path: string;
+  queued_ahead: number;
+}
+
+export interface ManualCopyPreview {
+  folder_name: string;
+  source_path: string;
+  local_path: string;
+  resolved_target_path: string;
+  source_kind: 'file' | 'directory';
+  target_exists: boolean;
+}
+
+export async function temporaryCopy(
+  sourcePath: string,
+  targetRootPath: string,
+  overwriteExisting = false,
+): Promise<void> {
+  await invoke('temporary_copy', { sourcePath, targetRootPath, overwriteExisting });
+}
+
+export async function queueTemporaryCopy(
+  sourcePath: string,
+  targetRootPath: string,
+  overwriteExisting = false,
+): Promise<ManualCopyQueueAck> {
+  return await invoke('queue_temporary_copy', { sourcePath, targetRootPath, overwriteExisting });
+}
+
+export async function previewTemporaryCopy(sourcePath: string, targetRootPath: string): Promise<ManualCopyPreview> {
+  return await invoke('preview_temporary_copy', { sourcePath, targetRootPath });
 }
 
 export async function getAppPaths(): Promise<[string, string]> {
@@ -220,6 +252,7 @@ export interface CodeCountOperationSummary {
   addedTotal: number;
   deletedTotal: number;
   modifiedTotal: number;
+  changedTotal: number;
 }
 
 export interface CodeCountResult {
@@ -237,22 +270,41 @@ export interface CodeCountProgress {
   percent: number;
 }
 
-export interface CodeCountScopeOption {
+export interface CodeCountScopeTreeNode {
   key: string;
   label: string;
-  kind: 'directory' | 'root';
+  kind: 'directory' | 'file';
+  children: CodeCountScopeTreeNode[];
 }
 
 export async function codeCountAnalyze(
   oldPath: string,
   newPath: string,
-  includedRoots?: string[],
+  includedOldPaths?: string[],
+  includedNewPaths?: string[],
+  includeExtensions?: string[],
+  excludeExtensions?: string[],
 ): Promise<CodeCountResult> {
-  return await invoke<CodeCountResult>('code_count_analyze', { oldPath, newPath, includedRoots });
+  return await invoke<CodeCountResult>('code_count_analyze', {
+    oldPath,
+    newPath,
+    includedOldPaths,
+    includedNewPaths,
+    includeExtensions,
+    excludeExtensions,
+  });
 }
 
-export async function codeCountListScopeOptions(path: string): Promise<CodeCountScopeOption[]> {
-  return await invoke<CodeCountScopeOption[]>('code_count_list_scope_options', { path });
+export async function codeCountListScopeTree(
+  paths: string[],
+  includeExtensions?: string[],
+  excludeExtensions?: string[],
+): Promise<CodeCountScopeTreeNode[]> {
+  return await invoke<CodeCountScopeTreeNode[]>('code_count_list_scope_tree', {
+    paths,
+    includeExtensions,
+    excludeExtensions,
+  });
 }
 
 /**

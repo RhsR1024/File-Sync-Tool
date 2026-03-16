@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import {
   BarChart3,
@@ -12,15 +12,16 @@ import {
   Trash2,
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import CodeStatisticsScopeTreeNode from '@/components/CodeStatisticsScopeTreeNode.vue';
 import {
   codeCountAnalyze,
-  codeCountListScopeOptions,
+  codeCountListScopeTree,
   openDirectory,
   openPathParent,
   saveTextFile,
   type CodeCountProgress,
   type CodeCountResult,
-  type CodeCountScopeOption,
+  type CodeCountScopeTreeNode as ScopeTreeNode,
 } from '../lib/tauri';
 
 defineOptions({ name: 'CodeStatisticsPage' });
@@ -30,6 +31,7 @@ const { t } = useI18n();
 type AnalysisMode = 'incremental' | 'newProject';
 type ExportFormat = 'csv' | 'html';
 type ExportMessageType = 'success' | 'error' | 'info';
+type ScopePanelKey = 'old' | 'new' | 'project';
 
 interface ExportMessageState {
   type: ExportMessageType;
@@ -37,19 +39,43 @@ interface ExportMessageState {
   path?: string;
 }
 
+interface ScopePanelState {
+  tree: ScopeTreeNode[];
+  selectedFilePaths: string[];
+  expandedKeys: string[];
+  error: string;
+  isLoading: boolean;
+}
+
+interface ScopePanelView {
+  key: ScopePanelKey;
+  title: string;
+  path: string;
+  state: ScopePanelState;
+}
+
+const createScopePanelState = (): ScopePanelState => ({
+  tree: [],
+  selectedFilePaths: [],
+  expandedKeys: [],
+  error: '',
+  isLoading: false,
+});
+
 const mode = ref<AnalysisMode>('incremental');
 const oldPath = ref('');
 const newPath = ref('');
 const isAnalyzing = ref(false);
-const isLoadingScopes = ref(false);
 const isExporting = ref<ExportFormat | null>(null);
 const progress = ref<CodeCountProgress | null>(null);
 const result = ref<CodeCountResult | null>(null);
 const errorMsg = ref('');
-const scopeError = ref('');
-const scopeOptions = ref<CodeCountScopeOption[]>([]);
-const selectedScopes = ref<string[]>([]);
 const exportMessage = ref<ExportMessageState | null>(null);
+const includeExtensionsInput = ref('');
+const excludeExtensionsInput = ref('');
+const oldScopeState = reactive(createScopePanelState());
+const newScopeState = reactive(createScopePanelState());
+const projectScopeState = reactive(createScopePanelState());
 
 let unlistenProgress: UnlistenFn | null = null;
 
@@ -59,9 +85,166 @@ const shouldShowScopeSelector = computed(() =>
     : Boolean(newPath.value.trim()),
 );
 
-const activeScopeOptions = computed(() =>
-  scopeOptions.value.filter((option) => selectedScopes.value.includes(option.key)),
+const normalizeExtensionToken = (value: string) => {
+  const trimmed = value.trim().replace(/^\*+/, '').replace(/^\./, '');
+  if (!trimmed) return '';
+  return `.${trimmed.toLowerCase()}`;
+};
+
+const parseExtensionInput = (value: string) =>
+  Array.from(
+    new Set(
+      value
+        .split(/[\s,，;；]+/)
+        .map(normalizeExtensionToken)
+        .filter(Boolean),
+    ),
+  );
+
+const includedExtensions = computed(() => parseExtensionInput(includeExtensionsInput.value));
+const excludedExtensions = computed(() => parseExtensionInput(excludeExtensionsInput.value));
+
+const extensionFilterSummary = computed(() => {
+  if (includedExtensions.value.length === 0 && excludedExtensions.value.length === 0) {
+    return t('codeStatistics.extensionFilterAll');
+  }
+
+  const parts: string[] = [];
+
+  if (includedExtensions.value.length > 0) {
+    parts.push(
+      t('codeStatistics.includeExtensionsSummary', {
+        value: includedExtensions.value.join(', '),
+      }),
+    );
+  }
+
+  if (excludedExtensions.value.length > 0) {
+    parts.push(
+      t('codeStatistics.excludeExtensionsSummary', {
+        value: excludedExtensions.value.join(', '),
+      }),
+    );
+  }
+
+  return parts.join(' | ');
+});
+
+const collectLeafKeysFromNode = (node: ScopeTreeNode): string[] => {
+  if (node.kind === 'file') {
+    return [node.key];
+  }
+
+  return node.children.flatMap(collectLeafKeysFromNode);
+};
+
+const collectLeafKeysFromTree = (nodes: ScopeTreeNode[]) =>
+  nodes.flatMap(collectLeafKeysFromNode);
+
+const collectDirectoryKeysFromTree = (nodes: ScopeTreeNode[]): string[] => {
+  const keys: string[] = [];
+
+  for (const node of nodes) {
+    if (node.kind !== 'directory') {
+      continue;
+    }
+
+    keys.push(node.key);
+    keys.push(...collectDirectoryKeysFromTree(node.children));
+  }
+
+  return keys;
+};
+
+const defaultExpandedKeysFromTree = (nodes: ScopeTreeNode[]) =>
+  nodes.filter((node) => node.kind === 'directory').map((node) => node.key);
+
+const getScopeTotalSelectableFiles = (state: ScopePanelState) =>
+  collectLeafKeysFromTree(state.tree).length;
+
+const getScopeSelectedFileCount = (state: ScopePanelState) => state.selectedFilePaths.length;
+
+const getScopeSummaryText = (state: ScopePanelState) => {
+  const total = getScopeTotalSelectableFiles(state);
+  const selected = getScopeSelectedFileCount(state);
+  return t('codeStatistics.currentScopeSummary', {
+    selected,
+    total,
+  });
+};
+
+const scopePanels = computed<ScopePanelView[]>(() =>
+  mode.value === 'incremental'
+    ? [
+        {
+          key: 'old',
+          title: t('codeStatistics.oldScopeTitle'),
+          path: oldPath.value.trim(),
+          state: oldScopeState,
+        },
+        {
+          key: 'new',
+          title: t('codeStatistics.newScopeTitle'),
+          path: newPath.value.trim(),
+          state: newScopeState,
+        },
+      ]
+    : [
+        {
+          key: 'project',
+          title: t('codeStatistics.projectScopeTitle'),
+          path: newPath.value.trim(),
+          state: projectScopeState,
+        },
+      ],
 );
+
+const isLoadingScopes = computed(() =>
+  scopePanels.value.some((panel) => panel.state.isLoading),
+);
+
+const scopeSummaryText = computed(() => {
+  if (mode.value === 'incremental') {
+    return [oldScopeSummaryLine.value, newScopeSummaryLine.value].join(' | ');
+  }
+
+  return projectScopeSummaryLine.value;
+});
+
+const oldScopeSummaryText = computed(() => getScopeSummaryText(oldScopeState));
+const newScopeSummaryText = computed(() => getScopeSummaryText(newScopeState));
+const projectScopeSummaryText = computed(() => getScopeSummaryText(projectScopeState));
+const oldScopeSummaryLine = computed(() =>
+  t('codeStatistics.oldScopeSummaryLine', {
+    selected: getScopeSelectedFileCount(oldScopeState),
+    total: getScopeTotalSelectableFiles(oldScopeState),
+  }),
+);
+const newScopeSummaryLine = computed(() =>
+  t('codeStatistics.newScopeSummaryLine', {
+    selected: getScopeSelectedFileCount(newScopeState),
+    total: getScopeTotalSelectableFiles(newScopeState),
+  }),
+);
+const projectScopeSummaryLine = computed(() =>
+  t('codeStatistics.projectScopeSummaryLine', {
+    selected: getScopeSelectedFileCount(projectScopeState),
+    total: getScopeTotalSelectableFiles(projectScopeState),
+  }),
+);
+const resultScopeSummaryLines = computed(() =>
+  mode.value === 'incremental'
+    ? [oldScopeSummaryLine.value, newScopeSummaryLine.value]
+    : [projectScopeSummaryLine.value],
+);
+
+const getMissingScopePanelTitles = () =>
+  scopePanels.value
+    .filter((panel) => {
+      const total = getScopeTotalSelectableFiles(panel.state);
+      return total > 0 && panel.state.selectedFilePaths.length === 0;
+    })
+    .map((panel) => panel.title);
 
 const netCode = computed(() => {
   if (!result.value) return 0;
@@ -71,6 +254,11 @@ const netCode = computed(() => {
 const netComment = computed(() => {
   if (!result.value) return 0;
   return result.value.summary.commentAdded - result.value.summary.commentDeleted;
+});
+
+const totalChanged = computed(() => {
+  if (!result.value) return 0;
+  return result.value.operationSummary.changedTotal;
 });
 
 const fileTypeSummaryEntries = computed(() => {
@@ -189,70 +377,100 @@ const exportMessageClasses = computed(() => {
 const barHeight = (value: number) =>
   `${Math.round((value / barChartMaxValue.value) * 150)}px`;
 
-const sortScopeOptions = (options: CodeCountScopeOption[]) =>
-  [...options].sort((a, b) => {
-    if (a.kind !== b.kind) {
-      return a.kind === 'root' ? -1 : 1;
-    }
-    return a.label.localeCompare(b.label, 'zh-CN');
-  });
-
-const mergeScopeOptions = (groups: CodeCountScopeOption[][]) => {
-  const merged = new Map<string, CodeCountScopeOption>();
-  for (const group of groups) {
-    for (const option of group) {
-      merged.set(option.key, option);
-    }
-  }
-  return sortScopeOptions(Array.from(merged.values()));
+const resetScopeState = (state: ScopePanelState) => {
+  state.tree = [];
+  state.selectedFilePaths = [];
+  state.expandedKeys = [];
+  state.error = '';
+  state.isLoading = false;
 };
 
-const getScopeHint = (option: CodeCountScopeOption) =>
-  option.kind === 'root'
-    ? t('codeStatistics.rootFilesHint')
-    : t('codeStatistics.directoryScopeHint');
+const syncScopeState = (state: ScopePanelState, tree: ScopeTreeNode[]) => {
+  const allLeafKeys = collectLeafKeysFromTree(tree);
+  const allDirectoryKeys = collectDirectoryKeysFromTree(tree);
+  const preserveEmptySelection =
+    state.tree.length > 0 && state.selectedFilePaths.length === 0;
+  const preserveCollapsedState =
+    state.tree.length > 0 && state.expandedKeys.length === 0;
+  const previousSelection = new Set(state.selectedFilePaths);
+  const previousExpanded = new Set(state.expandedKeys);
+  const retainedSelection = allLeafKeys.filter((key) => previousSelection.has(key));
+  const retainedExpanded = allDirectoryKeys.filter((key) => previousExpanded.has(key));
 
-const getRequiredPaths = () =>
-  mode.value === 'incremental'
-    ? [oldPath.value.trim(), newPath.value.trim()].filter(Boolean)
-    : [newPath.value.trim()].filter(Boolean);
+  state.tree = tree;
+  state.selectedFilePaths = preserveEmptySelection
+    ? []
+    : retainedSelection.length > 0
+      ? retainedSelection
+      : allLeafKeys;
+  state.expandedKeys = preserveCollapsedState
+    ? []
+    : retainedExpanded.length > 0
+      ? retainedExpanded
+      : defaultExpandedKeysFromTree(tree);
+};
 
-const refreshScopeOptions = async () => {
-  if (!shouldShowScopeSelector.value) {
-    scopeOptions.value = [];
-    selectedScopes.value = [];
-    scopeError.value = '';
+const refreshScopePanel = async (state: ScopePanelState, path: string) => {
+  const trimmedPath = path.trim();
+  if (!trimmedPath) {
+    resetScopeState(state);
     return;
   }
 
-  isLoadingScopes.value = true;
-  scopeError.value = '';
+  state.isLoading = true;
+  state.error = '';
 
   try {
-    const uniquePaths = [...new Set(getRequiredPaths())];
-    const groups = await Promise.all(uniquePaths.map((path) => codeCountListScopeOptions(path)));
-    const merged = mergeScopeOptions(groups);
-    const previousSelection = new Set(selectedScopes.value);
-    const retainedSelection = merged
-      .filter((option) => previousSelection.has(option.key))
-      .map((option) => option.key);
-
-    scopeOptions.value = merged;
-    selectedScopes.value =
-      retainedSelection.length > 0 ? retainedSelection : merged.map((option) => option.key);
+    const tree = await codeCountListScopeTree(
+      [trimmedPath],
+      includedExtensions.value,
+      excludedExtensions.value,
+    );
+    syncScopeState(state, tree);
   } catch (error) {
-    scopeOptions.value = [];
-    selectedScopes.value = [];
-    scopeError.value = t('codeStatistics.scopeLoadFailed', {
+    state.tree = [];
+    state.selectedFilePaths = [];
+    state.expandedKeys = [];
+    state.error = t('codeStatistics.scopeLoadFailed', {
       error: error instanceof Error ? error.message : String(error),
     });
   } finally {
-    isLoadingScopes.value = false;
+    state.isLoading = false;
   }
 };
 
+const refreshScopeTree = async () => {
+  if (mode.value === 'incremental') {
+    if (!shouldShowScopeSelector.value) {
+      resetScopeState(oldScopeState);
+      resetScopeState(newScopeState);
+      return;
+    }
+
+    await Promise.all([
+      refreshScopePanel(oldScopeState, oldPath.value),
+      refreshScopePanel(newScopeState, newPath.value),
+    ]);
+    return;
+  }
+
+  resetScopeState(oldScopeState);
+  resetScopeState(newScopeState);
+
+  if (!shouldShowScopeSelector.value) {
+    resetScopeState(projectScopeState);
+    return;
+  }
+
+  await refreshScopePanel(projectScopeState, newPath.value);
+};
+
 const handlePathBlur = async () => {
-  await refreshScopeOptions();
+  await refreshScopeTree();
+};
+
+const handleFilterBlur = async () => {
+  await refreshScopeTree();
 };
 
 const browseOld = async () => {
@@ -260,7 +478,7 @@ const browseOld = async () => {
     const dir = await openDirectory();
     if (dir) {
       oldPath.value = dir;
-      await refreshScopeOptions();
+      await refreshScopeTree();
     }
   } catch (error) {
     console.error(error);
@@ -272,27 +490,54 @@ const browseNew = async () => {
     const dir = await openDirectory();
     if (dir) {
       newPath.value = dir;
-      await refreshScopeOptions();
+      await refreshScopeTree();
     }
   } catch (error) {
     console.error(error);
   }
 };
 
-const toggleScope = (scopeKey: string) => {
-  if (selectedScopes.value.includes(scopeKey)) {
-    selectedScopes.value = selectedScopes.value.filter((key) => key !== scopeKey);
+const toggleTreeSelection = (state: ScopePanelState, node: ScopeTreeNode) => {
+  const targetLeafKeys = collectLeafKeysFromNode(node);
+  const selected = new Set(state.selectedFilePaths);
+  const allSelected = targetLeafKeys.every((key) => selected.has(key));
+
+  if (allSelected) {
+    for (const key of targetLeafKeys) {
+      selected.delete(key);
+    }
   } else {
-    selectedScopes.value = [...selectedScopes.value, scopeKey];
+    for (const key of targetLeafKeys) {
+      selected.add(key);
+    }
   }
+
+  const orderedLeafKeys = collectLeafKeysFromTree(state.tree);
+  state.selectedFilePaths = orderedLeafKeys.filter((key) => selected.has(key));
 };
 
-const selectAllScopes = () => {
-  selectedScopes.value = scopeOptions.value.map((option) => option.key);
+const selectAllScopes = (state: ScopePanelState) => {
+  state.selectedFilePaths = collectLeafKeysFromTree(state.tree);
 };
 
-const clearScopeSelection = () => {
-  selectedScopes.value = [];
+const clearScopeSelection = (state: ScopePanelState) => {
+  state.selectedFilePaths = [];
+};
+
+const expandAllScopes = (state: ScopePanelState) => {
+  state.expandedKeys = collectDirectoryKeysFromTree(state.tree);
+};
+
+const collapseAllScopes = (state: ScopePanelState) => {
+  state.expandedKeys = [];
+};
+
+const toggleExpandedScope = (state: ScopePanelState, key: string) => {
+  if (state.expandedKeys.includes(key)) {
+    state.expandedKeys = state.expandedKeys.filter((item) => item !== key);
+  } else {
+    state.expandedKeys = [...state.expandedKeys, key];
+  }
 };
 
 const clearResults = () => {
@@ -374,13 +619,29 @@ const buildCsvContent = (data: CodeCountResult) => {
     ].join(','),
   );
 
+  lines.push('');
+  lines.push(['Operation Summary', 'Value'].join(','));
+  lines.push(['Added Total', data.operationSummary.addedTotal].join(','));
+  lines.push(['Deleted Total', data.operationSummary.deletedTotal].join(','));
+  lines.push(['Modified Total', data.operationSummary.modifiedTotal].join(','));
+  lines.push(['Changed Total', data.operationSummary.changedTotal].join(','));
+  lines.push('');
+  if (mode.value === 'incremental') {
+    lines.push(['Old Scope', toCsvCell(oldScopeSummaryText.value)].join(','));
+    lines.push(['New Scope', toCsvCell(newScopeSummaryText.value)].join(','));
+  } else {
+    lines.push(['Scope', toCsvCell(projectScopeSummaryText.value)].join(','));
+  }
+  lines.push(['Extension Filter', toCsvCell(extensionFilterSummary.value)].join(','));
+
   return `\uFEFF${lines.join('\n')}`;
 };
 
 const generateHtmlReport = (data: CodeCountResult) => {
-  const scopeText = activeScopeOptions.value.length
-    ? activeScopeOptions.value.map((option) => option.label).join('、')
-    : t('codeStatistics.scopeAll');
+  const oldScopeText = oldScopeSummaryText.value;
+  const newScopeText = newScopeSummaryText.value;
+  const projectScopeText = projectScopeSummaryText.value;
+  const extensionFilterText = extensionFilterSummary.value;
   const fileTypeRows = fileTypeSummaryEntries.value
     .map(
       (entry) => `
@@ -502,6 +763,7 @@ const generateHtmlReport = (data: CodeCountResult) => {
       .card-green { background: linear-gradient(135deg, #16a34a, #34d399); }
       .card-red { background: linear-gradient(135deg, #dc2626, #fb7185); }
       .card-amber { background: linear-gradient(135deg, #d97706, #fbbf24); }
+      .card-sky { background: linear-gradient(135deg, #0284c7, #38bdf8); }
       .stats {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -574,22 +836,39 @@ const generateHtmlReport = (data: CodeCountResult) => {
             mode.value === 'incremental'
               ? `
           <div class="meta-item">
-            <div class="meta-label">旧版本目录</div>
+            <div class="meta-label">旧版本代码路径</div>
             <div class="meta-value">${esc(oldPath.value.trim())}</div>
           </div>
           <div class="meta-item">
-            <div class="meta-label">新版本目录</div>
+            <div class="meta-label">新版本代码路径</div>
             <div class="meta-value">${esc(newPath.value.trim())}</div>
           </div>`
               : `
           <div class="meta-item">
-            <div class="meta-label">项目目录</div>
+            <div class="meta-label">项目代码路径</div>
             <div class="meta-value">${esc(newPath.value.trim())}</div>
           </div>`
           }
+          ${
+            mode.value === 'incremental'
+              ? `
           <div class="meta-item">
-            <div class="meta-label">统计范围</div>
-            <div class="meta-value">${esc(scopeText)}</div>
+            <div class="meta-label">旧版本代码范围</div>
+            <div class="meta-value">${esc(oldScopeText)}</div>
+          </div>
+          <div class="meta-item">
+            <div class="meta-label">新版本代码范围</div>
+            <div class="meta-value">${esc(newScopeText)}</div>
+          </div>`
+              : `
+          <div class="meta-item">
+            <div class="meta-label">项目代码范围</div>
+            <div class="meta-value">${esc(projectScopeText)}</div>
+          </div>`
+          }
+          <div class="meta-item">
+            <div class="meta-label">后缀过滤</div>
+            <div class="meta-value">${esc(extensionFilterText)}</div>
           </div>
         </div>
       </section>
@@ -608,6 +887,10 @@ const generateHtmlReport = (data: CodeCountResult) => {
           <div class="card card-amber">
             <small>修改总计</small>
             <strong>${data.operationSummary.modifiedTotal}</strong>
+          </div>
+          <div class="card card-sky">
+            <small>变更总计</small>
+            <strong>${data.operationSummary.changedTotal}</strong>
           </div>
         </div>
         <div class="stats">
@@ -745,16 +1028,18 @@ const startAnalysis = async () => {
     return;
   }
 
-  await refreshScopeOptions();
+  await refreshScopeTree();
 
-  if (scopeOptions.value.length > 0 && selectedScopes.value.length === 0) {
-    errorMsg.value = t('codeStatistics.selectAtLeastOneScope');
+  const missingScopePanels = getMissingScopePanelTitles();
+  if (missingScopePanels.length > 0) {
+    errorMsg.value = t('codeStatistics.selectAtLeastOneScopeFor', {
+      labels: missingScopePanels.join('、'),
+    });
     return;
   }
 
   isAnalyzing.value = true;
   errorMsg.value = '';
-  scopeError.value = '';
   exportMessage.value = null;
   result.value = null;
   progress.value = null;
@@ -764,7 +1049,20 @@ const startAnalysis = async () => {
     result.value = await codeCountAnalyze(
       oldPathArg,
       newPath.value.trim(),
-      scopeOptions.value.length ? selectedScopes.value : undefined,
+      mode.value === 'incremental'
+        ? getScopeTotalSelectableFiles(oldScopeState) > 0
+          ? oldScopeState.selectedFilePaths
+          : undefined
+        : undefined,
+      mode.value === 'incremental'
+        ? getScopeTotalSelectableFiles(newScopeState) > 0
+          ? newScopeState.selectedFilePaths
+          : undefined
+        : getScopeTotalSelectableFiles(projectScopeState) > 0
+          ? projectScopeState.selectedFilePaths
+          : undefined,
+      includedExtensions.value,
+      excludedExtensions.value,
     );
   } catch (error) {
     errorMsg.value = error instanceof Error ? error.message : String(error);
@@ -776,7 +1074,7 @@ const startAnalysis = async () => {
 watch(mode, () => {
   exportMessage.value = null;
   errorMsg.value = '';
-  void refreshScopeOptions();
+  void refreshScopeTree();
 });
 
 onMounted(async () => {
@@ -914,6 +1212,51 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <div class="mb-6 rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
+        <div class="mb-4">
+          <h3 class="text-base font-semibold text-slate-900">
+            {{ t('codeStatistics.extensionFilterTitle') }}
+          </h3>
+          <p class="mt-1 text-sm text-slate-500">
+            {{ t('codeStatistics.extensionFilterDescription') }}
+          </p>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-semibold text-slate-700 mb-2">
+              {{ t('codeStatistics.includeExtensionsLabel') }}
+            </label>
+            <input
+              v-model="includeExtensionsInput"
+              type="text"
+              :placeholder="t('codeStatistics.includeExtensionsPlaceholder')"
+              :disabled="isAnalyzing"
+              class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400"
+              @blur="handleFilterBlur"
+            />
+          </div>
+          <div>
+            <label class="block text-sm font-semibold text-slate-700 mb-2">
+              {{ t('codeStatistics.excludeExtensionsLabel') }}
+            </label>
+            <input
+              v-model="excludeExtensionsInput"
+              type="text"
+              :placeholder="t('codeStatistics.excludeExtensionsPlaceholder')"
+              :disabled="isAnalyzing"
+              class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400"
+              @blur="handleFilterBlur"
+            />
+          </div>
+        </div>
+        <p class="mt-3 text-xs text-slate-500">
+          {{ t('codeStatistics.extensionFilterHint') }}
+        </p>
+        <p class="mt-2 text-xs font-medium text-slate-600">
+          {{ extensionFilterSummary }}
+        </p>
+      </div>
+
       <div
         v-if="shouldShowScopeSelector"
         class="mb-6 rounded-2xl border border-slate-200 bg-slate-50/70 p-5"
@@ -929,98 +1272,112 @@ onUnmounted(() => {
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <button
-              @click="refreshScopeOptions"
+              @click="refreshScopeTree"
               type="button"
               class="px-3 py-1.5 text-sm border border-slate-300 text-slate-600 hover:bg-white rounded-lg transition-colors"
               :disabled="isAnalyzing || isLoadingScopes"
             >
               {{ t('codeStatistics.refreshScopes') }}
             </button>
-            <button
-              @click="selectAllScopes"
-              type="button"
-              class="px-3 py-1.5 text-sm border border-slate-300 text-slate-600 hover:bg-white rounded-lg transition-colors"
-              :disabled="isAnalyzing || isLoadingScopes || scopeOptions.length === 0"
-            >
-              {{ t('codeStatistics.selectAllScopes') }}
-            </button>
-            <button
-              @click="clearScopeSelection"
-              type="button"
-              class="px-3 py-1.5 text-sm border border-slate-300 text-slate-600 hover:bg-white rounded-lg transition-colors"
-              :disabled="isAnalyzing || isLoadingScopes || scopeOptions.length === 0"
-            >
-              {{ t('codeStatistics.clearScopeSelection') }}
-            </button>
           </div>
         </div>
 
         <div
-          v-if="isLoadingScopes"
-          class="flex items-center gap-2 rounded-xl border border-dashed border-slate-300 bg-white px-4 py-5 text-sm text-slate-600"
+          class="grid gap-4"
+          :class="mode === 'incremental' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'"
         >
-          <Loader class="w-4 h-4 animate-spin" />
-          {{ t('codeStatistics.loadingScopes') }}
-        </div>
-
-        <div
-          v-else-if="scopeError"
-          class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
-        >
-          {{ scopeError }}
-        </div>
-
-        <div
-          v-else-if="scopeOptions.length === 0"
-          class="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-5 text-sm text-slate-500"
-        >
-          {{ t('codeStatistics.noScopeOptions') }}
-        </div>
-
-        <div v-else>
-          <div class="flex flex-wrap items-center justify-between gap-2 mb-3 text-xs text-slate-500">
-            <span>
-              {{
-                t('codeStatistics.scopeSelectionSummary', {
-                  selected: selectedScopes.length,
-                  total: scopeOptions.length,
-                })
-              }}
-            </span>
-            <span>{{ t('codeStatistics.scopeHint') }}</span>
-          </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-            <label
-              v-for="option in scopeOptions"
-              :key="option.key"
-              class="flex items-start gap-3 rounded-xl border px-4 py-3 cursor-pointer transition-all"
-              :class="
-                selectedScopes.includes(option.key)
-                  ? 'border-blue-300 bg-blue-50 shadow-sm'
-                  : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
-              "
-            >
-              <input
-                type="checkbox"
-                class="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                :checked="selectedScopes.includes(option.key)"
-                @change="toggleScope(option.key)"
-              />
-              <div class="min-w-0">
-                <div class="flex items-center gap-2">
-                  <span class="font-medium text-slate-800 truncate">{{ option.label }}</span>
-                  <span
-                    v-if="option.kind === 'root'"
-                    class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600"
-                  >
-                    {{ t('codeStatistics.scopeRootTag') }}
-                  </span>
-                </div>
-                <p class="mt-1 text-xs text-slate-500 leading-relaxed">
-                  {{ getScopeHint(option) }}
-                </p>
+          <div
+            v-for="panel in scopePanels"
+            :key="panel.key"
+            class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+          >
+            <div class="mb-4">
+              <div class="min-w-0 min-h-[3.5rem]">
+                <h4 class="text-sm font-semibold text-slate-900">{{ panel.title }}</h4>
+                <p class="mt-1 text-xs font-mono text-slate-400 break-all">{{ panel.path }}</p>
               </div>
-            </label>
+              <div class="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  @click="expandAllScopes(panel.state)"
+                  type="button"
+                  class="px-3 py-1.5 text-sm border border-slate-300 text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+                  :disabled="isAnalyzing || panel.state.isLoading || panel.state.tree.length === 0"
+                >
+                  {{ t('codeStatistics.expandAllScopes') }}
+                </button>
+                <button
+                  @click="collapseAllScopes(panel.state)"
+                  type="button"
+                  class="px-3 py-1.5 text-sm border border-slate-300 text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+                  :disabled="isAnalyzing || panel.state.isLoading || panel.state.tree.length === 0"
+                >
+                  {{ t('codeStatistics.collapseAllScopes') }}
+                </button>
+                <button
+                  @click="selectAllScopes(panel.state)"
+                  type="button"
+                  class="px-3 py-1.5 text-sm border border-slate-300 text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+                  :disabled="isAnalyzing || panel.state.isLoading || panel.state.tree.length === 0"
+                >
+                  {{ t('codeStatistics.selectAllScopes') }}
+                </button>
+                <button
+                  @click="clearScopeSelection(panel.state)"
+                  type="button"
+                  class="px-3 py-1.5 text-sm border border-slate-300 text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+                  :disabled="isAnalyzing || panel.state.isLoading || panel.state.tree.length === 0"
+                >
+                  {{ t('codeStatistics.clearScopeSelection') }}
+                </button>
+              </div>
+            </div>
+
+            <div
+              v-if="panel.state.isLoading"
+              class="flex items-center gap-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm text-slate-600"
+            >
+              <Loader class="w-4 h-4 animate-spin" />
+              {{ t('codeStatistics.loadingScopes') }}
+            </div>
+
+            <div
+              v-else-if="panel.state.error"
+              class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+            >
+              {{ panel.state.error }}
+            </div>
+
+            <div
+              v-else-if="panel.state.tree.length === 0"
+              class="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm text-slate-500"
+            >
+              {{ t('codeStatistics.noScopeOptions') }}
+            </div>
+
+            <div v-else>
+              <div class="flex flex-wrap items-center justify-between gap-2 mb-3 text-xs text-slate-500">
+                <span>
+                  {{
+                    t('codeStatistics.scopeSelectionSummary', {
+                      selected: getScopeSelectedFileCount(panel.state),
+                      total: getScopeTotalSelectableFiles(panel.state),
+                    })
+                  }}
+                </span>
+                <span>{{ t('codeStatistics.scopeHint') }}</span>
+              </div>
+              <div class="rounded-2xl border border-slate-200 bg-slate-50/50 p-3 max-h-[420px] overflow-y-auto">
+                <CodeStatisticsScopeTreeNode
+                  v-for="node in panel.state.tree"
+                  :key="node.key"
+                  :node="node"
+                  :selected-leaf-keys="panel.state.selectedFilePaths"
+                  :expanded-keys="panel.state.expandedKeys"
+                  @toggle-selection="toggleTreeSelection(panel.state, $event)"
+                  @toggle-expand="toggleExpandedScope(panel.state, $event)"
+                />
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1054,45 +1411,69 @@ onUnmounted(() => {
       <p class="text-red-800 text-sm">{{ errorMsg }}</p>
     </div>
 
-    <div
-      v-if="exportMessage"
-      class="mb-6 rounded-xl border px-4 py-3"
-      :class="exportMessageClasses"
-    >
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="min-w-0">
-          <p class="text-sm font-medium">{{ exportMessage.text }}</p>
+    <template v-if="result">
+      <div class="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p class="text-sm font-medium text-slate-700">{{ t('codeStatistics.currentScopeLabel') }}</p>
+            <p
+              v-for="line in resultScopeSummaryLines"
+              :key="line"
+              class="mt-1 text-sm text-slate-500"
+            >
+              {{ line }}
+            </p>
+            <p class="mt-1 text-xs text-slate-400">{{ extensionFilterSummary }}</p>
+            <p class="mt-2 text-xs text-slate-400">{{ t('codeStatistics.exportActionsDesc') }}</p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button
+              @click="handleExport('csv')"
+              :disabled="isExporting !== null"
+              class="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Loader v-if="isExporting === 'csv'" class="w-4 h-4 animate-spin" />
+              <Download v-else class="w-4 h-4" />
+              {{ t('codeStatistics.exportCsv') }}
+            </button>
+            <button
+              @click="handleExport('html')"
+              :disabled="isExporting !== null"
+              class="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Loader v-if="isExporting === 'html'" class="w-4 h-4 animate-spin" />
+              <FileCode v-else class="w-4 h-4" />
+              {{ t('codeStatistics.exportHtml') }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="exportMessage"
+        class="mb-6 rounded-xl border px-4 py-3"
+        :class="exportMessageClasses"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="min-w-0">
+            <p class="text-sm font-medium">{{ exportMessage.text }}</p>
+            <button
+              v-if="exportMessage.path"
+              type="button"
+              class="mt-1 text-xs font-mono underline underline-offset-2 break-all text-left"
+              @click="openExportLocation"
+            >
+              {{ exportMessage.path }}
+            </button>
+          </div>
           <button
             v-if="exportMessage.path"
             type="button"
-            class="mt-1 text-xs font-mono underline underline-offset-2 break-all text-left"
+            class="px-3 py-1.5 text-xs rounded-lg border border-current/20 bg-white/60 hover:bg-white transition-colors"
             @click="openExportLocation"
           >
-            {{ exportMessage.path }}
+            {{ t('codeStatistics.openExportFolder') }}
           </button>
-        </div>
-        <button
-          v-if="exportMessage.path"
-          type="button"
-          class="px-3 py-1.5 text-xs rounded-lg border border-current/20 bg-white/60 hover:bg-white transition-colors"
-          @click="openExportLocation"
-        >
-          {{ t('codeStatistics.openExportFolder') }}
-        </button>
-      </div>
-    </div>
-
-    <template v-if="result">
-      <div v-if="activeScopeOptions.length > 0" class="bg-white border border-slate-200 rounded-lg p-4 shadow-sm mb-6">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="text-sm font-medium text-slate-700">{{ t('codeStatistics.currentScopeLabel') }}</span>
-          <span
-            v-for="option in activeScopeOptions"
-            :key="option.key"
-            class="text-xs px-2.5 py-1 rounded-full bg-blue-50 border border-blue-200 text-blue-700"
-          >
-            {{ option.label }}
-          </span>
         </div>
       </div>
 
@@ -1107,7 +1488,7 @@ onUnmounted(() => {
       </div>
 
       <template v-else>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
           <div class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-green-500 to-emerald-400 shadow-sm">
             <div class="text-sm font-medium mb-1 opacity-90">{{ t('codeStatistics.totalAdded') }}</div>
             <div class="text-4xl font-bold">{{ result.operationSummary.addedTotal }}</div>
@@ -1119,6 +1500,10 @@ onUnmounted(() => {
           <div class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-amber-500 to-yellow-400 shadow-sm">
             <div class="text-sm font-medium mb-1 opacity-90">{{ t('codeStatistics.totalModified') }}</div>
             <div class="text-4xl font-bold">{{ result.operationSummary.modifiedTotal }}</div>
+          </div>
+          <div class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-sky-500 to-cyan-400 shadow-sm">
+            <div class="text-sm font-medium mb-1 opacity-90">{{ t('codeStatistics.totalChanged') }}</div>
+            <div class="text-4xl font-bold">{{ totalChanged }}</div>
           </div>
         </div>
 
@@ -1328,26 +1713,6 @@ onUnmounted(() => {
             <h3 class="text-lg font-semibold text-slate-900">
               {{ t('codeStatistics.fileListTitle') }} ({{ result.files.length }})
             </h3>
-            <div class="flex flex-wrap gap-2">
-              <button
-                @click="handleExport('csv')"
-                :disabled="isExporting !== null"
-                class="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Loader v-if="isExporting === 'csv'" class="w-4 h-4 animate-spin" />
-                <Download v-else class="w-4 h-4" />
-                {{ t('codeStatistics.exportCsv') }}
-              </button>
-              <button
-                @click="handleExport('html')"
-                :disabled="isExporting !== null"
-                class="flex items-center gap-1.5 text-sm px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Loader v-if="isExporting === 'html'" class="w-4 h-4 animate-spin" />
-                <FileCode v-else class="w-4 h-4" />
-                {{ t('codeStatistics.exportHtml') }}
-              </button>
-            </div>
           </div>
           <div class="overflow-x-auto max-h-[400px] overflow-y-auto">
             <table class="w-full">

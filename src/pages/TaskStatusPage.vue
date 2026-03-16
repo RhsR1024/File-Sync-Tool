@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, onActivated, watch, computed } from 'vue';
-import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2, FolderOpen, HardDrive, Cloud, ChevronDown } from 'lucide-vue-next';
+import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2, FolderOpen, HardDrive, Cloud, Info, X } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
-import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, type AppConfig } from '@/lib/tauri';
+import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, type AppConfig, type DeployServer, type ScanTask } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { appStore, addLog, markTaskRecordCancelled, setTaskRecordPaused, type TaskRecord } from '@/lib/store';
 import { startScheduler, stopScheduler, executeScan } from '@/lib/scheduler';
@@ -15,8 +15,13 @@ defineOptions({
 const { t } = useI18n();
 const config = ref<AppConfig | null>(null);
 const isCancelling = ref(false);
-const expandedPathId = ref<string | null>(null);
-const taskTableCols = 'grid-cols-[100px_170px_76px_1fr_76px_64px_64px_36px]';
+const selectedPathRecord = ref<TaskRecord | null>(null);
+const copyToastMessage = ref('');
+let copyToastTimer: ReturnType<typeof setTimeout> | null = null;
+const taskTableStyle = {
+  gridTemplateColumns: '140px 1fr 100px 196px 100px 116px 92px 100px',
+  minWidth: '900px',
+};
 
 // Manual copy modal
 const isManualCopyModalOpen = ref(false);
@@ -32,16 +37,52 @@ const activeActionRecord = computed(() =>
 
 const isPaused = computed(() => activeActionRecord.value?.phase === 'paused');
 
-function togglePathExpand(id: string) {
-  expandedPathId.value = expandedPathId.value === id ? null : id;
+function normalizePath(path: string | undefined): string {
+  if (!path) return '';
+  return path.replace(/\//g, '\\').replace(/\\+$/g, '').toLowerCase();
+}
+
+function samePath(aRaw: string | undefined, bRaw: string | undefined): boolean {
+  const a = normalizePath(aRaw);
+  const b = normalizePath(bRaw);
+  return !!a && a === b;
+}
+
+function pathStartsWith(pathRaw: string | undefined, prefixRaw: string | undefined): boolean {
+  const path = normalizePath(pathRaw);
+  const prefix = normalizePath(prefixRaw);
+  if (!path || !prefix) return false;
+  return path === prefix || path.startsWith(`${prefix}\\`);
+}
+
+function truncateName(name: string, maxLength = 50): string {
+  if (name.length <= maxLength) return name;
+  return `${name.slice(0, maxLength)}...`;
+}
+
+function openPathInfo(record: TaskRecord) {
+  selectedPathRecord.value = record;
+}
+
+function closePathInfo() {
+  selectedPathRecord.value = null;
+}
+
+function showCopyToast(message: string) {
+  copyToastMessage.value = message;
+  if (copyToastTimer) {
+    clearTimeout(copyToastTimer);
+  }
+  copyToastTimer = setTimeout(() => {
+    copyToastMessage.value = '';
+    copyToastTimer = null;
+  }, 1800);
 }
 
 function liveProgress(rec: TaskRecord) {
   if (!appStore.progress) return null;
   if (appStore.progress.folder === rec.folder) return appStore.progress;
-  const recLocal = (rec.localPath || '').toLowerCase().replace(/\//g, '\\');
-  const pLocal = (appStore.progress.localPath || '').toLowerCase().replace(/\//g, '\\');
-  if (recLocal && pLocal && (pLocal.startsWith(recLocal) || recLocal.startsWith(pLocal))) return appStore.progress;
+  if (samePath(rec.localPath, appStore.progress.localPath)) return appStore.progress;
   return null;
 }
 
@@ -84,41 +125,48 @@ async function togglePause() {
 
 function clearRecords() {
   appStore.taskRecords.splice(0, appStore.taskRecords.length);
-  expandedPathId.value = null;
+  selectedPathRecord.value = null;
 }
 
 function formatStartTime(ms: number): string {
   const d = new Date(ms);
+  const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   const hour = String(d.getHours()).padStart(2, '0');
   const min = String(d.getMinutes()).padStart(2, '0');
   const sec = String(d.getSeconds()).padStart(2, '0');
-  return `${month}-${day} ${hour}:${min}:${sec}`;
+  return `${year}-${month}-${day} ${hour}:${min}:${sec}`;
 }
 
 function formatStatus(phase: TaskRecord['phase']) {
+  if (phase === 'queued') return t('console.phaseQueued');
   if (phase === 'paused') return t('console.phasePaused');
   if (phase === 'remote_pushing') return t('console.phaseRemotePushing');
   if (phase === 'remote_deploying') return t('console.phaseRemoteDeploying');
+  if (phase === 'failed') return t('console.phaseFailed');
   if (phase === 'cancelled') return t('console.phaseCancelled');
   if (phase === 'completed') return t('console.phaseCompleted');
   return t('console.phaseCopying');
 }
 
 function statusBadgeClass(phase: TaskRecord['phase']) {
+  if (phase === 'queued') return 'bg-slate-100 text-slate-600 ring-slate-200';
   if (phase === 'paused') return 'bg-amber-50 text-amber-700 ring-amber-200';
   if (phase === 'remote_pushing') return 'bg-purple-50 text-purple-700 ring-purple-200';
   if (phase === 'remote_deploying') return 'bg-fuchsia-50 text-fuchsia-700 ring-fuchsia-200';
+  if (phase === 'failed') return 'bg-rose-50 text-rose-600 ring-rose-200';
   if (phase === 'cancelled') return 'bg-red-50 text-red-600 ring-red-200';
   if (phase === 'completed') return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
   return 'bg-blue-50 text-blue-700 ring-blue-200';
 }
 
 function progressBarClass(phase: TaskRecord['phase']) {
+  if (phase === 'queued') return 'bg-gradient-to-r from-slate-300 to-slate-400';
   if (phase === 'paused') return 'bg-gradient-to-r from-amber-400 to-amber-500';
   if (phase === 'remote_pushing') return 'bg-gradient-to-r from-purple-400 to-purple-500';
   if (phase === 'remote_deploying') return 'bg-gradient-to-r from-fuchsia-400 to-fuchsia-500';
+  if (phase === 'failed') return 'bg-gradient-to-r from-rose-400 to-rose-500';
   if (phase === 'cancelled') return 'bg-gradient-to-r from-red-400 to-red-500';
   if (phase === 'completed') return 'bg-gradient-to-r from-emerald-400 to-emerald-500';
   return 'bg-gradient-to-r from-blue-400 to-blue-500';
@@ -127,8 +175,10 @@ function progressBarClass(phase: TaskRecord['phase']) {
 function progressPercentColor(rec: TaskRecord): string {
   const pv = progressValue(rec);
   if (rec.phase === 'completed' || pv >= 100) return 'text-emerald-600';
+  if (rec.phase === 'failed') return 'text-rose-600';
   if (rec.phase === 'cancelled') return 'text-red-500';
   if (rec.phase === 'paused') return 'text-amber-600';
+  if (rec.phase === 'queued') return 'text-slate-500';
   return 'text-slate-700';
 }
 
@@ -175,19 +225,21 @@ function displaySizeMerged(rec: TaskRecord): string {
 }
 
 function displaySpeed(rec: TaskRecord): string {
-  if (rec.phase === 'completed' || rec.phase === 'cancelled' || rec.phase === 'remote_deploying') return '-';
+  if (rec.phase === 'queued') return '-';
+  if (rec.phase === 'completed' || rec.phase === 'failed' || rec.phase === 'cancelled' || rec.phase === 'remote_deploying') return '-';
   if (rec.phase === 'paused') return '-';
   return formatSpeed(rec.speed);
 }
 
 function displayEta(rec: TaskRecord): string {
-  if (rec.phase === 'completed' || rec.phase === 'cancelled' || rec.phase === 'remote_deploying') return '-';
+  if (rec.phase === 'queued') return '-';
+  if (rec.phase === 'completed' || rec.phase === 'failed' || rec.phase === 'cancelled' || rec.phase === 'remote_deploying') return '-';
   if (rec.phase === 'paused') return '-';
   return formatDuration(liveProgress(rec)?.eta || 0);
 }
 
 function displayElapsed(rec: TaskRecord): string {
-  if (rec.phase === 'completed' || rec.phase === 'cancelled') {
+  if (rec.phase === 'completed' || rec.phase === 'failed' || rec.phase === 'cancelled') {
     const endMs = rec.finishedAtMs || rec.updatedAt;
     return formatDuration((endMs - rec.startedAtMs) / 1000);
   }
@@ -196,14 +248,42 @@ function displayElapsed(rec: TaskRecord): string {
   return formatDuration((Date.now() - rec.startedAtMs) / 1000);
 }
 
-function remotePathOf(rec: TaskRecord) {
+function displayRemoteTarget(server: DeployServer, folder: string): string {
+  const base = server.remote_path.replace(/[\\/]+$/g, '');
+  return `[${server.name}] ${base}/${folder}`;
+}
+
+function resolveScheduledTask(rec: TaskRecord): ScanTask | undefined {
+  if (!config.value || rec.source !== 'scheduled' || !rec.sourcePath || !rec.localPath) return undefined;
+
+  return config.value.tasks.find(task => {
+    if (!pathStartsWith(rec.sourcePath, task.remote_path)) return false;
+    const localBase = task.local_path || config.value?.local_path || '';
+    return !localBase || pathStartsWith(rec.localPath, localBase);
+  });
+}
+
+function remotePathOf(rec: TaskRecord): string[] {
   const byServers = rec.remoteServers.map(s => s.label).filter(Boolean);
   if (byServers.length > 0) {
     return Array.from(new Set(byServers));
   }
 
-  const live = liveProgress(rec)?.remotePath;
-  return live ? [live] : [];
+  if (!config.value?.deploy_enabled || rec.source !== 'scheduled') {
+    return [];
+  }
+
+  const task = resolveScheduledTask(rec);
+  if (!task || task.server_bindings.length === 0) {
+    return [];
+  }
+
+  const targets = task.server_bindings
+    .map(binding => config.value?.servers.find(server => server.id === binding.server_id && server.enabled))
+    .filter((server): server is DeployServer => Boolean(server))
+    .map(server => displayRemoteTarget(server, rec.folder));
+
+  return Array.from(new Set(targets));
 }
 
 async function copyToClipboard(text: string) {
@@ -211,6 +291,7 @@ async function copyToClipboard(text: string) {
   try {
     await navigator.clipboard.writeText(text);
     addLog(t('console.copied'), 'success');
+    showCopyToast(t('settings.pathCopied'));
   } catch (err) {
     addLog(`Failed to copy: ${err}`, 'error');
   }
@@ -230,25 +311,19 @@ async function handleScanClick() {
   await executeScan();
 }
 
-// Close expanded path when clicking outside
-function handleGlobalClick(e: MouseEvent) {
-  const target = e.target as HTMLElement;
-  if (expandedPathId.value && !target.closest('[data-path-region]')) {
-    expandedPathId.value = null;
-  }
-}
-
 onActivated(() => {
   loadConfig();
 });
 
 onMounted(() => {
   loadConfig();
-  document.addEventListener('click', handleGlobalClick);
 });
 
 onUnmounted(() => {
-  document.removeEventListener('click', handleGlobalClick);
+  if (copyToastTimer) {
+    clearTimeout(copyToastTimer);
+    copyToastTimer = null;
+  }
 });
 
 watch(activeActionRecord, (val) => {
@@ -340,16 +415,20 @@ watch(activeActionRecord, (val) => {
         />
 
         <div v-else class="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
+          <div class="overflow-x-auto">
           <!-- Table Header -->
-          <div :class="['grid gap-2 px-3 py-2.5 bg-slate-50 text-[11px] text-slate-500 font-semibold uppercase tracking-wider border-b border-slate-200 select-none', taskTableCols]">
+          <div
+            class="grid gap-4 px-4 py-3 bg-slate-50 text-xs text-slate-500 font-semibold border-b border-slate-200 select-none"
+            :style="taskTableStyle"
+          >
             <div>{{ t('console.startTime') }}</div>
             <div>{{ t('console.name') }}</div>
-            <div>{{ t('console.status') }}</div>
-            <div>{{ t('console.progress') }}</div>
-            <div>{{ t('console.speed') }}</div>
-            <div>{{ t('console.eta') }}</div>
-            <div>{{ t('console.elapsed') }}</div>
-            <div></div>
+            <div class="text-center">{{ t('console.status') }}</div>
+            <div class="text-center">{{ t('console.progress') }}</div>
+            <div class="text-center">{{ t('console.speed') }}</div>
+            <div class="text-center">{{ t('console.eta') }}</div>
+            <div class="text-center">{{ t('console.elapsed') }}</div>
+            <div class="text-center">{{ t('console.pathInfo') }}</div>
           </div>
 
           <!-- Table Body -->
@@ -357,15 +436,15 @@ watch(activeActionRecord, (val) => {
             <div
               v-for="rec in orderedRecords"
               :key="rec.id"
-              data-path-region
             >
+
               <!-- Main Row -->
               <div
-                :class="['grid gap-2 px-3 py-2.5 items-center text-[13px] transition-colors', taskTableCols,
-                  expandedPathId === rec.id ? 'bg-blue-50/40' : 'hover:bg-slate-50/60']"
+                class="grid gap-4 px-4 py-3 items-center text-sm transition-colors hover:bg-slate-50/60"
+                :style="taskTableStyle"
               >
                 <!-- Start Time -->
-                <div class="text-[11px] text-slate-400 font-mono tabular-nums leading-tight">
+                <div class="text-xs text-slate-500 font-mono tabular-nums leading-tight">
                   {{ formatStartTime(rec.startedAtMs) }}
                 </div>
 
@@ -375,13 +454,13 @@ watch(activeActionRecord, (val) => {
                     :class="rec.source === 'manual' ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'">
                     <Activity class="w-3 h-3" />
                   </div>
-                  <span class="truncate font-medium text-slate-800 text-[12px]">{{ rec.folder }}</span>
+                  <span class="block w-full max-w-[50ch] truncate font-medium text-slate-800 text-[13px]">{{ truncateName(rec.folder) }}</span>
                 </div>
 
                 <!-- Status Badge -->
-                <div>
+                <div class="flex justify-center">
                   <span
-                    class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ring-1 ring-inset leading-none whitespace-nowrap"
+                    class="inline-flex items-center px-2 py-1 rounded text-[11px] font-bold ring-1 ring-inset leading-none whitespace-nowrap"
                     :class="statusBadgeClass(rec.phase)"
                   >
                     {{ formatStatus(rec.phase) }}
@@ -389,129 +468,59 @@ watch(activeActionRecord, (val) => {
                 </div>
 
                 <!-- Progress (merged: bar + percentage + size) -->
-                <div class="flex flex-col gap-1 min-w-0">
-                  <div class="flex items-baseline justify-between gap-2">
-                    <span class="text-[12px] font-bold tabular-nums" :class="progressPercentColor(rec)">
-                      {{ progressValue(rec).toFixed(1) }}%
-                    </span>
-                    <span class="text-[10px] text-slate-400 font-mono tabular-nums truncate">
-                      {{ displaySizeMerged(rec) }}
-                    </span>
-                  </div>
-                  <div class="h-[5px] bg-slate-100 rounded-full overflow-hidden">
-                    <div
-                      class="h-full rounded-full transition-all duration-300 ease-out"
-                      :class="progressBarClass(rec.phase)"
-                      :style="{ width: `${Math.min(progressValue(rec), 100)}%` }"
-                    ></div>
+                <div class="flex justify-center">
+                  <div class="flex w-[188px] min-w-0 flex-col items-start gap-1.5">
+                    <div class="flex w-full items-baseline gap-3">
+                      <span class="w-12 shrink-0 text-right text-[13px] font-bold tabular-nums" :class="progressPercentColor(rec)">
+                        {{ progressValue(rec).toFixed(1) }}%
+                      </span>
+                      <span class="min-w-0 flex-1 truncate text-center text-[12px] text-slate-500 font-semibold font-mono tabular-nums">
+                        {{ displaySizeMerged(rec) }}
+                      </span>
+                    </div>
+                    <div class="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+                      <div
+                        class="h-full rounded-full transition-all duration-300 ease-out"
+                        :class="progressBarClass(rec.phase)"
+                        :style="{ width: `${Math.min(progressValue(rec), 100)}%` }"
+                      ></div>
+                    </div>
                   </div>
                 </div>
 
                 <!-- Speed -->
-                <div class="truncate font-mono text-[11px] tabular-nums text-right" :class="rec.speed > 0 && rec.phase !== 'paused' ? 'text-blue-600' : 'text-slate-400'">
+                <div
+                  class="w-full truncate text-center font-mono text-[13px] tabular-nums"
+                  :class="rec.speed > 0 && rec.phase !== 'paused' ? 'text-blue-600' : 'text-slate-400'"
+                >
                   {{ displaySpeed(rec) }}
                 </div>
 
                 <!-- ETA -->
-                <div class="truncate font-mono text-[11px] text-slate-500 tabular-nums text-right">
+                <div class="w-full truncate text-center font-mono text-[13px] text-slate-500 tabular-nums">
                   {{ displayEta(rec) }}
                 </div>
 
                 <!-- Elapsed -->
-                <div class="truncate font-mono text-[11px] text-slate-500 tabular-nums text-right">
+                <div class="w-full truncate text-center font-mono text-[13px] text-slate-500 tabular-nums">
                   {{ displayElapsed(rec) }}
                 </div>
 
-                <!-- Path Info Toggle -->
-                <button
-                  @click.stop="togglePathExpand(rec.id)"
-                  class="w-7 h-7 rounded-md flex items-center justify-center transition-all"
-                  :class="expandedPathId === rec.id
-                    ? 'bg-blue-100 text-blue-600 ring-1 ring-blue-200'
-                    : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'"
-                  :title="t('console.pathInfo')"
-                >
-                  <ChevronDown
-                    class="w-3.5 h-3.5 transition-transform duration-200"
-                    :class="expandedPathId === rec.id ? 'rotate-180' : ''"
-                  />
-                </button>
-              </div>
-
-              <!-- Expanded Path Details -->
-              <Transition
-                enter-active-class="transition-all duration-200 ease-out"
-                leave-active-class="transition-all duration-150 ease-in"
-                enter-from-class="opacity-0 max-h-0"
-                enter-to-class="opacity-100 max-h-48"
-                leave-from-class="opacity-100 max-h-48"
-                leave-to-class="opacity-0 max-h-0"
-              >
-                <div v-if="expandedPathId === rec.id" class="overflow-hidden">
-                  <div class="px-3 py-3 bg-gradient-to-b from-slate-50/80 to-white border-t border-slate-100">
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
-                      <!-- Source Remote Path -->
-                      <div class="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-white border border-slate-100 group/card">
-                        <FolderOpen class="w-3.5 h-3.5 text-orange-400 mt-0.5 shrink-0" />
-                        <div class="min-w-0 flex-1">
-                          <div class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider mb-1">{{ t('console.sourcePath') }}</div>
-                          <div class="text-[11px] text-slate-700 font-mono break-all leading-relaxed">{{ rec.sourcePath || '-' }}</div>
-                        </div>
-                        <button
-                          v-if="rec.sourcePath"
-                          @click.stop="copyToClipboard(rec.sourcePath)"
-                          class="opacity-0 group-hover/card:opacity-100 text-slate-300 hover:text-blue-500 transition-all shrink-0 mt-0.5"
-                        >
-                          <Copy class="w-3 h-3" />
-                        </button>
-                      </div>
-
-                      <!-- Local Copy Path -->
-                      <div class="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-white border border-slate-100 group/card">
-                        <HardDrive class="w-3.5 h-3.5 text-blue-400 mt-0.5 shrink-0" />
-                        <div class="min-w-0 flex-1">
-                          <div class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider mb-1">{{ t('console.localCopyPath') }}</div>
-                          <div class="text-[11px] text-slate-700 font-mono break-all leading-relaxed">{{ rec.localPath || '-' }}</div>
-                        </div>
-                        <button
-                          v-if="rec.localPath"
-                          @click.stop="copyToClipboard(rec.localPath)"
-                          class="opacity-0 group-hover/card:opacity-100 text-slate-300 hover:text-blue-500 transition-all shrink-0 mt-0.5"
-                        >
-                          <Copy class="w-3 h-3" />
-                        </button>
-                      </div>
-
-                      <!-- Remote Push Paths -->
-                      <div class="flex items-start gap-2 px-3 py-2.5 rounded-lg bg-white border border-slate-100 group/card">
-                        <Cloud class="w-3.5 h-3.5 text-purple-400 mt-0.5 shrink-0" />
-                        <div class="min-w-0 flex-1">
-                          <div class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider mb-1">{{ t('console.remotePushPath') }}</div>
-                          <template v-if="remotePathOf(rec).length > 0">
-                            <div
-                              v-for="(rp, idx) in remotePathOf(rec)"
-                              :key="`${rec.id}-rp-${idx}`"
-                              class="text-[11px] text-slate-700 font-mono break-all leading-relaxed"
-                            >
-                              {{ rp }}
-                            </div>
-                          </template>
-                          <div v-else class="text-[11px] text-slate-400 italic">{{ t('console.noRemotePush') }}</div>
-                        </div>
-                        <button
-                          v-if="remotePathOf(rec).length > 0"
-                          @click.stop="copyToClipboard(remotePathOf(rec).join('\n'))"
-                          class="opacity-0 group-hover/card:opacity-100 text-slate-300 hover:text-blue-500 transition-all shrink-0 mt-0.5"
-                        >
-                          <Copy class="w-3 h-3" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
+                <!-- Path Info Action -->
+                <div class="flex justify-center">
+                  <button
+                    @click="openPathInfo(rec)"
+                    class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[13px] font-medium text-slate-600 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
+                    :title="t('console.viewPathInfo')"
+                  >
+                    <Info class="w-3.5 h-3.5" />
+                    <span>{{ t('console.viewPathInfo') }}</span>
+                  </button>
                 </div>
-              </Transition>
+              </div>
             </div>
           </div>
+          </div><!-- /overflow-x-auto -->
 
           <!-- Action Bar -->
           <div v-if="activeActionRecord" class="p-3 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
@@ -543,5 +552,120 @@ watch(activeActionRecord, (val) => {
       @close="isManualCopyModalOpen = false"
       @success="() => {}"
     />
+
+    <Transition
+      enter-active-class="transition-all duration-200"
+      leave-active-class="transition-all duration-150"
+      enter-from-class="translate-y-1 opacity-0"
+      leave-to-class="translate-y-1 opacity-0"
+    >
+      <div
+        v-if="copyToastMessage"
+        class="pointer-events-none fixed right-6 top-6 z-[60] rounded-xl border border-emerald-200 bg-white/95 px-4 py-3 text-sm font-medium text-emerald-700 shadow-lg shadow-emerald-100 backdrop-blur"
+      >
+        {{ copyToastMessage }}
+      </div>
+    </Transition>
+
+    <Transition
+      enter-active-class="transition-opacity duration-200"
+      leave-active-class="transition-opacity duration-150"
+      enter-from-class="opacity-0"
+      leave-to-class="opacity-0"
+    >
+      <div
+        v-if="selectedPathRecord"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 px-4 backdrop-blur-sm"
+        @click="closePathInfo"
+      >
+        <div
+          class="w-full max-w-4xl rounded-2xl border border-slate-200 bg-white shadow-2xl"
+          @click.stop
+        >
+          <div class="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-5">
+            <div class="min-w-0">
+              <h3 class="text-lg font-bold text-slate-800">{{ t('console.pathInfo') }}</h3>
+              <p class="mt-1 truncate text-sm text-slate-500" :title="selectedPathRecord.folder">
+                {{ selectedPathRecord.folder }}
+              </p>
+            </div>
+            <button
+              @click="closePathInfo"
+              class="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+              :title="t('settings.close')"
+            >
+              <X class="h-5 w-5" />
+            </button>
+          </div>
+
+          <div class="grid gap-4 px-6 py-6 md:grid-cols-3">
+            <div class="flex min-h-[160px] flex-col rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div class="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700">
+                <FolderOpen class="h-4 w-4 text-orange-500" />
+                {{ t('console.sourcePath') }}
+              </div>
+              <div class="flex-1 break-all font-mono text-[12px] leading-6 text-slate-700">
+                {{ selectedPathRecord.sourcePath || '-' }}
+              </div>
+              <button
+                v-if="selectedPathRecord.sourcePath"
+                @click="copyToClipboard(selectedPathRecord.sourcePath)"
+                class="mt-4 inline-flex items-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
+              >
+                <Copy class="h-3.5 w-3.5" />
+                {{ t('settings.copyPath') }}
+              </button>
+            </div>
+
+            <div class="flex min-h-[160px] flex-col rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div class="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700">
+                <HardDrive class="h-4 w-4 text-blue-500" />
+                {{ t('console.localCopyPath') }}
+              </div>
+              <div class="flex-1 break-all font-mono text-[12px] leading-6 text-slate-700">
+                {{ selectedPathRecord.localPath || '-' }}
+              </div>
+              <button
+                v-if="selectedPathRecord.localPath"
+                @click="copyToClipboard(selectedPathRecord.localPath)"
+                class="mt-4 inline-flex items-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
+              >
+                <Copy class="h-3.5 w-3.5" />
+                {{ t('settings.copyPath') }}
+              </button>
+            </div>
+
+            <div class="flex min-h-[160px] flex-col rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div class="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700">
+                <Cloud class="h-4 w-4 text-purple-500" />
+                {{ t('console.remotePushPath') }}
+              </div>
+              <div class="flex-1">
+                <template v-if="remotePathOf(selectedPathRecord).length > 0">
+                  <div
+                    v-for="(remotePath, index) in remotePathOf(selectedPathRecord)"
+                    :key="`${selectedPathRecord.id}-modal-remote-${index}`"
+                    class="break-all font-mono text-[12px] leading-6 text-slate-700"
+                  >
+                    {{ remotePath }}
+                  </div>
+                </template>
+                <div v-else class="font-mono text-[12px] leading-6 text-slate-400">
+                  -
+                </div>
+              </div>
+              <button
+                v-if="remotePathOf(selectedPathRecord).length > 0"
+                @click="copyToClipboard(remotePathOf(selectedPathRecord).join('\n'))"
+                class="mt-4 inline-flex items-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
+              >
+                <Copy class="h-3.5 w-3.5" />
+                {{ t('settings.copyPath') }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>

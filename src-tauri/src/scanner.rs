@@ -218,6 +218,71 @@ fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
     Ok(total_copied)
 }
 
+fn build_temp_copy_path(target: &Path) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("copy-target");
+
+    target.with_file_name(format!(
+        ".{}.{}.part",
+        file_name,
+        uuid::Uuid::new_v4()
+    ))
+}
+
+fn copy_file_with_overwrite_mode<P: AsRef<Path>, Q: AsRef<Path>>(
+    from: P,
+    to: Q,
+    overwrite_existing: bool,
+    should_cancel: &Arc<AtomicBool>,
+    is_paused: &Arc<AtomicBool>,
+    buffer_size: usize,
+    on_progress: &mut dyn FnMut(u64),
+) -> Result<u64, String> {
+    let target = to.as_ref();
+
+    if overwrite_existing && target.exists() {
+        if !target.is_file() {
+            return Err(format!(
+                "Target path is not a file and cannot be overwritten: {}",
+                target.display()
+            ));
+        }
+
+        let temp_target = build_temp_copy_path(target);
+        let copy_result = copy_file_chunked(
+            from,
+            &temp_target,
+            should_cancel,
+            is_paused,
+            buffer_size,
+            on_progress,
+        );
+
+        match copy_result {
+            Ok(bytes_copied) => {
+                if let Err(error) = std::fs::remove_file(target) {
+                    let _ = std::fs::remove_file(&temp_target);
+                    return Err(error.to_string());
+                }
+                if let Err(error) = std::fs::rename(&temp_target, target) {
+                    let _ = std::fs::remove_file(&temp_target);
+                    return Err(error.to_string());
+                }
+                Ok(bytes_copied)
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp_target);
+                Err(error)
+            }
+        }
+    } else {
+        copy_file_chunked(from, target, should_cancel, is_paused, buffer_size, on_progress)
+    }
+}
+
 // Extracted copy logic to reuse across different matching rules
 async fn perform_copy<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
@@ -228,12 +293,23 @@ async fn perform_copy<R: tauri::Runtime>(
     live_config: Arc<Mutex<AppConfig>>,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    overwrite_existing: bool,
     result: &mut ScanResult,
     task_id: Option<String>,
     allow_deploy: bool,
     source: &str,
 ) {
     let target_full_path = target_parent_path.join(&folder_name);
+
+    if target_full_path.exists() && !target_full_path.is_dir() {
+        let err_msg = format!(
+            "Target local path already exists as a file and cannot be used as a directory: {}",
+            target_full_path.display()
+        );
+        emit_log(app_handle, err_msg.clone(), "error");
+        result.errors.push(err_msg);
+        return;
+    }
 
     emit_log(
         app_handle,
@@ -245,10 +321,17 @@ async fn perform_copy<R: tauri::Runtime>(
     if target_full_path.exists() {
         emit_log(
             app_handle,
-            format!(
-                "Target directory {} exists. Checking for new files...",
-                target_full_path.display()
-            ),
+            if overwrite_existing {
+                format!(
+                    "Target directory {} exists. Matching files may be overwritten and missing files will still be copied.",
+                    target_full_path.display()
+                )
+            } else {
+                format!(
+                    "Target directory {} exists. Checking for new files...",
+                    target_full_path.display()
+                )
+            },
             "info",
         );
     } else {
@@ -363,11 +446,23 @@ async fn perform_copy<R: tauri::Runtime>(
                         }
 
                         if ext_match && inc_match {
-                            // Check if file already exists locally
                             let rel_path = path.strip_prefix(&source_path_clone).unwrap_or(&path);
                             let dst = target_full_path_clone.join(rel_path);
 
-                            if !dst.exists() {
+                            if dst.exists() && !dst.is_file() {
+                                emit_log(
+                                    &handle,
+                                    format!(
+                                        "Skipping '{}' because target path exists as a directory: {}",
+                                        file_name,
+                                        dst.display()
+                                    ),
+                                    "warn",
+                                );
+                                continue;
+                            }
+
+                            if overwrite_existing || !dst.exists() {
                                 if let Ok(meta) = entry.metadata() {
                                     let file_size = meta.len();
                                     let is_recent = meta
@@ -553,7 +648,7 @@ async fn perform_copy<R: tauri::Runtime>(
         emit_log(
             &handle,
             format!(
-                "Copying {} new file(s) ({} bytes) from '{}'...",
+                "Copying {} file(s) ({} bytes) from '{}'...",
                 filtered_files.len(),
                 total_filtered_bytes,
                 folder_name_clone
@@ -608,9 +703,10 @@ async fn perform_copy<R: tauri::Runtime>(
                 .to_string();
 
             // Copy with chunking
-            let copy_res = copy_file_chunked(
+            let copy_res = copy_file_with_overwrite_mode(
                 &src,
                 &dst,
+                overwrite_existing,
                 &should_cancel_clone,
                 &is_paused_clone,
                 copy_buffer_size,
@@ -761,6 +857,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
     live_config: Arc<Mutex<AppConfig>>,
     source_path: String,
     target_root_path: String,
+    overwrite_existing: bool,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
 ) -> Result<(), String> {
@@ -779,6 +876,24 @@ pub async fn temporary_copy<R: tauri::Runtime>(
             source_path.display()
         ));
     }
+    if !source_path.is_dir() && !source_path.is_file() {
+        return Err(format!(
+            "Source path must be a file or directory: {}",
+            source_path.display()
+        ));
+    }
+    if !target_root_path.exists() {
+        return Err(format!(
+            "Target root directory does not exist: {}",
+            target_root_path.display()
+        ));
+    }
+    if !target_root_path.is_dir() {
+        return Err(format!(
+            "Target root path is not a directory: {}",
+            target_root_path.display()
+        ));
+    }
 
     // Handle single file copy
     if source_path.is_file() {
@@ -787,6 +902,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
             config,
             source_path,
             target_root_path,
+            overwrite_existing,
             should_cancel,
             is_paused,
         )
@@ -834,6 +950,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         live_config,
         should_cancel,
         is_paused,
+        overwrite_existing,
         &mut result,
         None,
         false,
@@ -854,6 +971,7 @@ async fn temporary_copy_file<R: tauri::Runtime>(
     config: &AppConfig,
     source_path: PathBuf,
     target_root_path: PathBuf,
+    overwrite_existing: bool,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
 ) -> Result<(), String> {
@@ -885,15 +1003,45 @@ async fn temporary_copy_file<R: tauri::Runtime>(
 
     // Check if target file already exists
     if target_file.exists() {
+        if !target_file.is_file() {
+            return Err(format!(
+                "Target path already exists as a directory and cannot be used as a file: {}",
+                target_file.display()
+            ));
+        }
+        if overwrite_existing {
+            emit_log(
+                app_handle,
+                format!(
+                    "File already exists at target and will be overwritten: {}",
+                    target_file.display()
+                ),
+                "warn",
+            );
+        } else {
+            emit_log(
+                app_handle,
+                format!(
+                    "File already exists at target, skipping because overwrite is disabled: {}",
+                    target_file.display()
+                ),
+                "info",
+            );
+            return Ok(());
+        }
+    }
+
+    let target_existed_before = target_file.exists();
+
+    if target_existed_before && overwrite_existing {
         emit_log(
             app_handle,
             format!(
-                "File already exists at target, skipping: {}",
+                "Preparing overwrite copy for existing target file: {}",
                 target_file.display()
             ),
-            "info",
+            "warn",
         );
-        return Ok(());
     }
 
     // Get file metadata
@@ -961,7 +1109,7 @@ async fn temporary_copy_file<R: tauri::Runtime>(
     let file_name_clone = file_name.clone();
     let source_clone = source_path.clone();
     let target_file_clone = target_file.clone();
-    let target_root_display = target_root_path.to_string_lossy().to_string();
+    let target_file_display = target_file.to_string_lossy().to_string();
     let source_display = source_path.to_string_lossy().to_string();
     let copy_buffer_size = (config.copy_buffer_size_kb as usize).max(64) * 1024;
 
@@ -993,7 +1141,7 @@ async fn temporary_copy_file<R: tauri::Runtime>(
                     speed,
                     eta,
                     elapsed as u64,
-                    &target_root_display,
+                    &target_file_display,
                     &source_display,
                     "manual",
                 );
@@ -1001,9 +1149,10 @@ async fn temporary_copy_file<R: tauri::Runtime>(
             }
         };
 
-        copy_file_chunked(
+        copy_file_with_overwrite_mode(
             &source_clone,
             &target_file_clone,
+            overwrite_existing,
             &should_cancel,
             &is_paused,
             copy_buffer_size,
@@ -1044,8 +1193,10 @@ async fn temporary_copy_file<R: tauri::Runtime>(
             Ok(())
         }
         Err(e) => {
-            // Clean up partial file on failure
-            let _ = std::fs::remove_file(&target_file);
+            // Clean up partial file on failure when this was a brand-new target.
+            if !target_existed_before {
+                let _ = std::fs::remove_file(&target_file);
+            }
             Err(format!("Failed to copy file: {}", e))
         }
     }
@@ -1236,6 +1387,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             live_config.clone(),
                             should_cancel.clone(),
                             is_paused.clone(),
+                            false,
                             &mut result,
                             Some(task.id.clone()),
                             true,
@@ -1345,6 +1497,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                 live_config.clone(),
                                 should_cancel.clone(),
                                 is_paused.clone(),
+                                false,
                                 &mut result,
                                 Some(task.id.clone()),
                                 true,

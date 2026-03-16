@@ -25,11 +25,13 @@ export interface ProgressState {
 }
 
 export type TaskRecordPhase =
+    | 'queued'
     | 'copying'
     | 'paused'
     | 'remote_pushing'
     | 'remote_deploying'
     | 'completed'
+    | 'failed'
     | 'cancelled';
 
 export interface RemoteServerRecord {
@@ -80,8 +82,14 @@ function normalizePath(path: string | undefined): string {
     return path.replace(/\//g, '\\').replace(/\\+$/g, '').toLowerCase();
 }
 
+function samePath(aRaw: string | undefined, bRaw: string | undefined): boolean {
+    const a = normalizePath(aRaw);
+    const b = normalizePath(bRaw);
+    return !!a && a === b;
+}
+
 function isTerminalPhase(phase: TaskRecordPhase): boolean {
-    return phase === 'completed' || phase === 'cancelled';
+    return phase === 'completed' || phase === 'failed' || phase === 'cancelled';
 }
 
 function pinTaskRecord(record: TaskRecord) {
@@ -98,32 +106,40 @@ function touchTaskRecord(record: TaskRecord) {
 }
 
 function findLatestActiveRecord(): TaskRecord | undefined {
-    return appStore.taskRecords.find(r => !isTerminalPhase(r.phase));
+    return appStore.taskRecords.find(r => !isTerminalPhase(r.phase) && r.phase !== 'queued')
+        || appStore.taskRecords.find(r => !isTerminalPhase(r.phase));
 }
 
 function findByFolder(folder: string, onlyActive = true): TaskRecord | undefined {
     return appStore.taskRecords.find(r => r.folder === folder && (!onlyActive || !isTerminalPhase(r.phase)));
 }
 
-function pathRelated(aRaw: string | undefined, bRaw: string | undefined): boolean {
-    const a = normalizePath(aRaw);
-    const b = normalizePath(bRaw);
-    if (!a || !b) return false;
-    return a === b || a.startsWith(`${b}\\`) || b.startsWith(`${a}\\`);
+function findByLocalPath(localPath: string, onlyActive = true): TaskRecord | undefined {
+    return appStore.taskRecords.find(r => samePath(r.localPath, localPath) && (!onlyActive || !isTerminalPhase(r.phase)));
 }
 
-function findByLocalPath(localPath: string, onlyActive = true): TaskRecord | undefined {
-    return appStore.taskRecords.find(r => pathRelated(r.localPath, localPath) && (!onlyActive || !isTerminalPhase(r.phase)));
+function findManualByPaths(sourcePath: string, localPath: string, onlyActive = true): TaskRecord | undefined {
+    return appStore.taskRecords.find(r =>
+        r.source === 'manual'
+        && samePath(r.sourcePath, sourcePath)
+        && samePath(r.localPath, localPath)
+        && (!onlyActive || !isTerminalPhase(r.phase))
+    );
 }
 
 function findTargetRecord(folder?: string, localPath?: string): TaskRecord | undefined {
+    if (localPath) {
+        return findByLocalPath(localPath, true)
+            || (folder ? findByFolder(folder, true) : undefined)
+            || findByLocalPath(localPath, false)
+            || (folder ? findByFolder(folder, false) : undefined);
+    }
+
     if (folder) {
         return findByFolder(folder, true)
-            || findByFolder(folder, false)
-            || (localPath ? findByLocalPath(localPath, true) : undefined)
-            || (localPath ? findByLocalPath(localPath, false) : undefined);
+            || findByFolder(folder, false);
     }
-    return (localPath ? findByLocalPath(localPath, true) : undefined) || findLatestActiveRecord();
+    return findLatestActiveRecord();
 }
 
 function isRecentlyCancelled(folder: string, localPath?: string): boolean {
@@ -194,12 +210,14 @@ function mergeIntoPrimary(primary: TaskRecord, duplicate: TaskRecord) {
     }
 
     const rank: Record<TaskRecordPhase, number> = {
+        queued: 0,
         copying: 1,
         paused: 2,
         remote_pushing: 3,
         remote_deploying: 4,
         completed: 5,
-        cancelled: 6,
+        failed: 6,
+        cancelled: 7,
     };
     const allowPromoteToTerminal = isTerminalPhase(primary.phase);
     const duplicateIsTerminal = isTerminalPhase(duplicate.phase);
@@ -215,7 +233,7 @@ function mergeIntoPrimary(primary: TaskRecord, duplicate: TaskRecord) {
 
 function mergeDuplicatesByLocalPath(primary: TaskRecord) {
     const duplicates = appStore.taskRecords.filter(
-        r => r.id !== primary.id && pathRelated(r.localPath, primary.localPath)
+        r => r.id !== primary.id && samePath(r.localPath, primary.localPath)
     );
     if (!duplicates.length) return;
 
@@ -282,6 +300,9 @@ export function upsertTaskRecord(payload: {
             if (payload.percentage >= 100) {
                 existing.copyCompleted = true;
                 existing.copyPercentage = 100;
+                if (existing.phase === 'queued') {
+                    existing.phase = 'copying';
+                }
             } else if (existing.phase !== 'paused') {
                 existing.phase = 'copying';
             }
@@ -367,6 +388,63 @@ export function upsertTaskRecord(payload: {
     }
 
     mergeDuplicatesByLocalPath(target);
+    touchTaskRecord(target);
+}
+
+export function enqueueManualCopyTaskRecord(payload: {
+    folder: string;
+    sourcePath: string;
+    localPath: string;
+}) {
+    const existing = findManualByPaths(payload.sourcePath, payload.localPath, true);
+    if (existing) {
+        if (existing.phase === 'completed' || existing.phase === 'cancelled') return;
+        touchTaskRecord(existing);
+        return;
+    }
+
+    const record = createTaskRecord({
+        folder: payload.folder,
+        total_bytes: 0,
+        copied_bytes: 0,
+        percentage: 0,
+        speed: 0,
+        local_path: payload.localPath,
+        source_path: payload.sourcePath,
+        phase: 'queued',
+        source: 'manual',
+    });
+
+    appStore.taskRecords.unshift(record);
+    if (appStore.taskRecords.length > 200) appStore.taskRecords.pop();
+}
+
+export function updateManualCopyTaskState(payload: {
+    folder: string;
+    sourcePath: string;
+    localPath: string;
+    state: 'started' | 'completed' | 'failed' | 'cancelled';
+}) {
+    const target = findManualByPaths(payload.sourcePath, payload.localPath, false)
+        || findTargetRecord(payload.folder, payload.localPath);
+    if (!target) return;
+
+    if (payload.state === 'started') {
+        if (!isTerminalPhase(target.phase)) {
+            target.phase = 'copying';
+            touchTaskRecord(target);
+        }
+        return;
+    }
+
+    if (payload.state === 'completed') {
+        finalizeTask(target);
+        return;
+    }
+
+    target.phase = payload.state === 'failed' ? 'failed' : 'cancelled';
+    target.speed = 0;
+    target.finishedAtMs = Date.now();
     touchTaskRecord(target);
 }
 
