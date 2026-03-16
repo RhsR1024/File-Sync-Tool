@@ -33,6 +33,10 @@ const routes: RouteRecordRaw[] = [
     path: '/tools/framework-password',
     component: () => import('../pages/FrameworkPasswordPage.vue'),
   },
+  {
+    path: '/tools/code-statistics',
+    component: () => import('../pages/CodeStatisticsPage.vue'),
+  },
 ]
 
 const router = createRouter({

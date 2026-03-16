@@ -47,6 +47,7 @@ export interface TaskRecord {
     finishedAtMs?: number;
     updatedAt: number;
     folder: string;
+    sourcePath: string;
     localPath: string;
     copyPercentage: number;
     copyCompleted: boolean;
@@ -138,6 +139,7 @@ function createTaskRecord(payload: {
     percentage: number;
     speed: number;
     local_path: string;
+    source_path: string;
     phase: TaskRecordPhase;
     source: 'manual' | 'scheduled';
 }): TaskRecord {
@@ -148,6 +150,7 @@ function createTaskRecord(payload: {
         startedAtMs: now,
         updatedAt: now,
         folder: payload.folder,
+        sourcePath: payload.source_path,
         localPath: payload.local_path,
         copyPercentage: payload.percentage,
         copyCompleted: payload.percentage >= 100,
@@ -177,6 +180,7 @@ function mergeIntoPrimary(primary: TaskRecord, duplicate: TaskRecord) {
     primary.hasRemote = primary.hasRemote || duplicate.hasRemote;
     primary.deployCompleted = primary.deployCompleted || duplicate.deployCompleted;
     if (!primary.localPath && duplicate.localPath) primary.localPath = duplicate.localPath;
+    if (!primary.sourcePath && duplicate.sourcePath) primary.sourcePath = duplicate.sourcePath;
 
     for (const srv of duplicate.remoteServers) {
         const existing = primary.remoteServers.find(s => s.key === srv.key);
@@ -266,6 +270,9 @@ export function upsertTaskRecord(payload: {
         const existing = findTargetRecord(payload.folder, payload.local_path);
         if (existing && !isTerminalPhase(existing.phase)) {
             existing.localPath = payload.local_path || existing.localPath;
+            if (payload.remote_path && !existing.sourcePath) {
+                existing.sourcePath = payload.remote_path;
+            }
             existing.copyPercentage = Math.max(existing.copyPercentage, payload.percentage);
             existing.copied = Math.max(existing.copied, payload.copied_bytes);
             existing.total = Math.max(existing.total, payload.total_bytes);
@@ -290,6 +297,7 @@ export function upsertTaskRecord(payload: {
             percentage: payload.percentage,
             speed: payload.speed,
             local_path: payload.local_path,
+            source_path: payload.remote_path || '',
             phase: 'copying',
             source: (payload.source === 'manual' ? 'manual' : 'scheduled'),
         });
@@ -314,6 +322,7 @@ export function upsertTaskRecord(payload: {
             percentage: 100,
             speed: payload.speed,
             local_path: payload.local_path,
+            source_path: '',
             phase: 'remote_pushing',
             source: (payload.source === 'manual' ? 'manual' : 'scheduled'),
         });

@@ -69,7 +69,7 @@ onUnmounted(() => {
     <Sidebar />
     <main class="flex-1 overflow-auto">
       <router-view v-slot="{ Component }">
-        <keep-alive include="MainConsole">
+        <keep-alive include="MainConsole,CodeStatisticsPage">
           <component :is="Component" />
         </keep-alive>
       </router-view>

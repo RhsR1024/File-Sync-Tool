@@ -19,8 +19,8 @@ pnpm dev
 # 完整桌面开发模式
 pnpm tauri dev
 
-# 生产构建（输出 file-sync-tool-1.0.0-YYYYMMDDHHmm.exe 格式的可执行文件）
-cmd /c pnpm tauri:build:versioned-exe
+# 生产构建
+pnpm tauri build
 
 # Rust 格式化与检查
 cargo fmt
