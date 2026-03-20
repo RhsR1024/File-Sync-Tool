@@ -327,37 +327,33 @@ fn recreate_main_window(app: &tauri::AppHandle) {
         return;
     };
 
-    let app_handle = app.clone();
+    // Called from main thread (via show_main_window → run_on_main_thread)
+    if let Some(window) = app.get_webview_window("main") {
+        restore_main_window(&window);
+        return;
+    }
 
-    std::thread::spawn(move || {
-        let app_for_ui = app_handle.clone();
-        let _ = app_handle.run_on_main_thread(move || {
-            if let Some(window) = app_for_ui.get_webview_window("main") {
-                restore_main_window(&window);
-                return;
-            }
-
-            match WebviewWindowBuilder::from_config(&app_for_ui, &window_config)
-                .and_then(|builder| builder.build())
-            {
-                Ok(window) => {
-                    log::warn!("Main window was missing and has been recreated");
-                    restore_main_window(&window);
-                }
-                Err(err) => {
-                    log::error!("Failed to recreate main window: {err}");
-                }
-            }
-        });
-    });
+    match WebviewWindowBuilder::from_config(app, &window_config).and_then(|builder| builder.build())
+    {
+        Ok(window) => {
+            log::warn!("Main window was missing and has been recreated");
+            restore_main_window(&window);
+        }
+        Err(err) => {
+            log::error!("Failed to recreate main window: {err}");
+        }
+    }
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        restore_main_window(&window);
-    } else {
-        recreate_main_window(app);
-    }
+    let app_clone = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = app_clone.get_webview_window("main") {
+            restore_main_window(&window);
+        } else {
+            recreate_main_window(&app_clone);
+        }
+    });
 }
 
 fn hide_main_window(app: &tauri::AppHandle) {
