@@ -749,6 +749,13 @@ pub struct PasswordChangeResult {
     pub failedAt: Option<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct ApplianceSshResult {
+    pub ip: String,
+    pub success: bool,
+    pub message: String,
+}
+
 // Helper function to validate IP address format
 fn validate_ip(ip: &str) -> bool {
     let parts: Vec<&str> = ip.split('.').collect();
@@ -921,6 +928,81 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
     Ok(results)
 }
 
+#[tauri::command]
+async fn enable_appliance_ssh(ips: Vec<String>) -> Result<Vec<ApplianceSshResult>, String> {
+    let mut results = Vec::new();
+    let client = reqwest::Client::new();
+
+    for ip in ips.iter() {
+        let ip = ip.trim();
+        if ip.is_empty() {
+            continue;
+        }
+
+        if !validate_ip(ip) {
+            results.push(ApplianceSshResult {
+                ip: ip.to_string(),
+                success: false,
+                message: format!("Invalid IP address: {}", ip),
+            });
+            continue;
+        }
+
+        let request_url = format!("http://{}:23006/openAPI/system/v1/network/SSH/set", ip);
+        let request_body = json!({
+            "ServiceSshdEnable": 1
+        });
+
+        match client
+            .post(&request_url)
+            .header("content-type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status();
+                let response_text = match response.text().await {
+                    Ok(text) => text,
+                    Err(e) => format!("Failed to read response body: {}", e),
+                };
+                let trimmed_text = response_text.trim();
+
+                if status.is_success() {
+                    results.push(ApplianceSshResult {
+                        ip: ip.to_string(),
+                        success: true,
+                        message: if trimmed_text.is_empty() {
+                            "SSH enabled successfully.".to_string()
+                        } else {
+                            trimmed_text.to_string()
+                        },
+                    });
+                } else {
+                    results.push(ApplianceSshResult {
+                        ip: ip.to_string(),
+                        success: false,
+                        message: if trimmed_text.is_empty() {
+                            format!("Request failed with HTTP {}", status.as_u16())
+                        } else {
+                            format!("HTTP {}: {}", status.as_u16(), trimmed_text)
+                        },
+                    });
+                }
+            }
+            Err(e) => {
+                results.push(ApplianceSshResult {
+                    ip: ip.to_string(),
+                    success: false,
+                    message: format!("SSH enable request failed: {}", e),
+                });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -1021,6 +1103,7 @@ fn main() {
             open_directory,
             save_text_file,
             change_framework_password,
+            enable_appliance_ssh,
             code_count::code_count_analyze,
             code_count::code_count_list_scope_tree
         ])

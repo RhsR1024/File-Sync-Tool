@@ -3,6 +3,7 @@ import MainConsole from '@/pages/MainConsole.vue'
 import TaskStatusPage from '@/pages/TaskStatusPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import HistoryPage from '@/pages/HistoryPage.vue'
+import EnableApplianceSshPage from '@/pages/EnableApplianceSshPage.vue'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -32,6 +33,10 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/tools/framework-password',
     component: () => import('../pages/FrameworkPasswordPage.vue'),
+  },
+  {
+    path: '/tools/appliance-ssh',
+    component: EnableApplianceSshPage,
   },
   {
     path: '/tools/code-statistics',

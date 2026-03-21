@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers } from 'lucide-vue-next';
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
+import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown } from 'lucide-vue-next';
 import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, openPathParent, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { restartSchedulerInterval } from '@/lib/scheduler';
@@ -32,7 +32,9 @@ const newExt = ref('');
 const newInclude = ref('');
 const newTimeRange = ref('');
 const statusMsg = ref('');
+const statusTone = ref<'success' | 'error' | 'info'>('success');
 const isServerManagerOpen = ref(false);
+let statusMsgTimer: ReturnType<typeof setTimeout> | null = null;
 
 const enabledServerCount = computed(() => config.value.servers.filter(server => server.enabled).length);
 const intervalError = computed(() => config.value.interval_minutes < 5 ? t('settings.minIntervalError', { min: 5 }) : '');
@@ -50,6 +52,30 @@ function openServerManager() {
 
 function closeServerManager() {
     isServerManagerOpen.value = false;
+}
+
+function clearStatusMsg() {
+    if (statusMsgTimer) {
+        clearTimeout(statusMsgTimer);
+        statusMsgTimer = null;
+    }
+    statusMsg.value = '';
+}
+
+function showStatusMsg(
+    message: string,
+    tone: 'success' | 'error' | 'info' = 'success',
+    duration = 3000,
+) {
+    clearStatusMsg();
+    statusMsg.value = message;
+    statusTone.value = tone;
+    if (duration > 0) {
+        statusMsgTimer = setTimeout(() => {
+            statusMsg.value = '';
+            statusMsgTimer = null;
+        }, duration);
+    }
 }
 
 // ── Command Group Management ──────────────────────────────────────────────────
@@ -192,6 +218,27 @@ function toggleBindingGroup(binding: TaskServerBinding, groupId: string) {
     }
 }
 
+function bindingGroupOrder(binding: TaskServerBinding, groupId: string) {
+    const idx = binding.command_group_ids.indexOf(groupId);
+    return idx > -1 ? idx + 1 : null;
+}
+
+function moveBindingGroup(binding: TaskServerBinding, index: number, direction: -1 | 1) {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= binding.command_group_ids.length) {
+        return;
+    }
+    const [groupId] = binding.command_group_ids.splice(index, 1);
+    binding.command_group_ids.splice(targetIndex, 0, groupId);
+}
+
+function removeBindingGroupById(binding: TaskServerBinding, groupId: string) {
+    const idx = binding.command_group_ids.indexOf(groupId);
+    if (idx > -1) {
+        binding.command_group_ids.splice(idx, 1);
+    }
+}
+
 // ── Server Management ─────────────────────────────────────────────────────────
 const isEditingServer = ref(false);
 const editingServerIndex = ref(-1);
@@ -269,13 +316,13 @@ async function testServerConnection(index: number) {
 }
 
 async function testAllServers() {
-    statusMsg.value = t('settings.testing');
+    showStatusMsg(t('settings.testing'), 'info', 0);
     for (let i = 0; i < config.value.servers.length; i++) {
         const server = config.value.servers[i];
         if (!server.enabled) continue;
         await testServerConnection(i);
     }
-    statusMsg.value = '';
+    clearStatusMsg();
 }
 
 // ── Manual Deploy ─────────────────────────────────────────────────────────────
@@ -387,8 +434,7 @@ function changeLanguage(lang: string) {
 async function copyToClipboard(text: string) {
     try {
         await writeText(text);
-        statusMsg.value = t('settings.pathCopied');
-        setTimeout(() => statusMsg.value = '', 2000);
+        showStatusMsg(t('settings.pathCopied'), 'success', 2000);
     } catch (e) {
         console.error('Failed to copy', e);
     }
@@ -419,12 +465,11 @@ async function save() {
     try {
         await saveConfig(config.value);
         if (config.value.max_log_lines > 0) appStore.maxLogLines = config.value.max_log_lines;
-        statusMsg.value = t('settings.saved');
+        showStatusMsg(t('settings.saved'));
         addSystemEvent('CONFIG_CHANGE', t('settings.saved'));
-        setTimeout(() => statusMsg.value = '', 3000);
         await restartSchedulerInterval();
     } catch (e) {
-        statusMsg.value = t('settings.saveError', { error: e });
+        showStatusMsg(t('settings.saveError', { error: e }), 'error', 5000);
     }
 }
 
@@ -436,6 +481,7 @@ watch(() => taskForm.value.rule.type, (newType) => {
 });
 
 onMounted(load);
+onUnmounted(clearStatusMsg);
 </script>
 
 <template>
@@ -444,9 +490,26 @@ onMounted(load);
       <h2 class="text-2xl font-bold text-slate-800">{{ t('settings.title') }}</h2>
     </div>
 
-    <div v-if="statusMsg" class="bg-green-50 text-green-700 p-3 rounded-lg text-sm font-medium border border-green-200 flex items-center gap-2">
-      <span class="w-2 h-2 rounded-full bg-green-500 shrink-0"></span>
-      {{ statusMsg }}
+    <div
+      v-if="statusMsg"
+      class="fixed left-1/2 top-6 z-[70] w-[min(calc(100vw-2rem),28rem)] -translate-x-1/2 rounded-2xl border px-4 py-3 text-sm font-medium shadow-2xl backdrop-blur"
+      :class="{
+        'border-emerald-200 bg-emerald-50/95 text-emerald-700 shadow-emerald-200/70': statusTone === 'success',
+        'border-rose-200 bg-rose-50/95 text-rose-700 shadow-rose-200/70': statusTone === 'error',
+        'border-sky-200 bg-sky-50/95 text-sky-700 shadow-sky-200/70': statusTone === 'info',
+      }"
+    >
+      <div class="flex items-start gap-2.5">
+        <span
+          class="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
+          :class="{
+            'bg-emerald-500': statusTone === 'success',
+            'bg-rose-500': statusTone === 'error',
+            'bg-sky-500': statusTone === 'info',
+          }"
+        ></span>
+        <span class="leading-5">{{ statusMsg }}</span>
+      </div>
     </div>
 
     <!-- Startup Behavior -->
@@ -715,10 +778,64 @@ onMounted(load);
                       :class="binding.command_group_ids.includes(group.id)
                         ? 'bg-sky-100 text-sky-700 border-sky-200'
                         : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-100'">
+                      <span v-if="bindingGroupOrder(binding, group.id)" class="mr-1 text-[10px] font-bold">
+                        #{{ bindingGroupOrder(binding, group.id) }}
+                      </span>
                       {{ group.name }}
                     </button>
                   </div>
                   <div v-if="binding.command_group_ids.length === 0" class="text-xs text-slate-400 italic mt-1">{{ t('settings.bindingNoGroups') }}</div>
+                  <div v-else class="mt-3 space-y-2">
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="text-xs text-slate-500">{{ t('settings.bindingExecutionOrder') }}</div>
+                      <div class="text-[11px] text-slate-400">{{ t('settings.bindingExecutionHint') }}</div>
+                    </div>
+                    <div
+                      v-for="(groupId, groupIndex) in binding.command_group_ids"
+                      :key="`${binding.server_id}-${groupId}-${groupIndex}`"
+                      class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2"
+                    >
+                      <div class="flex min-w-0 items-center gap-3">
+                        <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-sky-100 text-xs font-semibold text-sky-700">
+                          {{ groupIndex + 1 }}
+                        </span>
+                        <div class="min-w-0">
+                          <div class="truncate text-sm font-medium text-slate-700">{{ commandGroupName(groupId) }}</div>
+                          <div class="text-[11px] text-slate-400">{{ t('settings.bindingCommandGroups') }}</div>
+                        </div>
+                      </div>
+                      <div class="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          @click="moveBindingGroup(binding, groupIndex, -1)"
+                          :disabled="groupIndex === 0"
+                          class="rounded p-1.5 text-slate-400 transition-colors"
+                          :class="groupIndex === 0 ? 'cursor-not-allowed opacity-40' : 'hover:bg-slate-100 hover:text-slate-600'"
+                          :title="t('settings.moveUp')"
+                        >
+                          <ArrowUp class="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          @click="moveBindingGroup(binding, groupIndex, 1)"
+                          :disabled="groupIndex === binding.command_group_ids.length - 1"
+                          class="rounded p-1.5 text-slate-400 transition-colors"
+                          :class="groupIndex === binding.command_group_ids.length - 1 ? 'cursor-not-allowed opacity-40' : 'hover:bg-slate-100 hover:text-slate-600'"
+                          :title="t('settings.moveDown')"
+                        >
+                          <ArrowDown class="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          @click="removeBindingGroupById(binding, groupId)"
+                          class="rounded p-1.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
+                          :title="t('settings.deleteTitle')"
+                        >
+                          <Trash2 class="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 <div v-else class="text-xs text-slate-400 italic">{{ t('settings.noCommandGroups') }}</div>
               </div>

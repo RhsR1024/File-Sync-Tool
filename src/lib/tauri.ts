@@ -211,6 +211,12 @@ export interface FrameworkPasswordResult {
   failedAt?: 'login' | 'changePasswd';
 }
 
+export interface ApplianceSshResult {
+  ip: string;
+  success: boolean;
+  message: string;
+}
+
 // Internal: Login API response (used by backend)
 interface LoginResponse {
   code: number;
@@ -314,4 +320,8 @@ export async function codeCountListScopeTree(
  */
 export async function changeFrameworkPassword(ips: string[]): Promise<FrameworkPasswordResult[]> {
   return await invoke<FrameworkPasswordResult[]>('change_framework_password', { ips });
+}
+
+export async function enableApplianceSsh(ips: string[]): Promise<ApplianceSshResult[]> {
+  return await invoke<ApplianceSshResult[]>('enable_appliance_ssh', { ips });
 }
