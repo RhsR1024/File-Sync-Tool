@@ -381,7 +381,7 @@ export interface TcpConnectionStats {
   total: number;
   byState: { state: string; count: number }[];
   byRemoteIp: { ip: string; count: number }[];
-  byPort: { port: number; name: string; count: number }[];
+  byRemotePort: { port: number; name: string; count: number }[];
 }
 
 export interface PortTestRequest {
@@ -390,21 +390,27 @@ export interface PortTestRequest {
   timeoutMs: number;
 }
 
-export interface PortTestResult {
+export interface SinglePortResult {
   port: number;
-  service: string;
   open: boolean;
   latencyMs: number | null;
-  error: string | null;
+  name: string;
+}
+
+export interface PortTestResult {
+  host: string;
+  resolvedIp: string | null;
+  results: SinglePortResult[];
 }
 
 export interface WolRequest {
   mac: string;
-  broadcast: string;
-  port: number;
+  broadcastIp?: string;
+  port?: number;
 }
 
 export interface WolResult {
+  mac: string;
   success: boolean;
   message: string;
 }
@@ -433,7 +439,7 @@ export async function getTcpConnections(): Promise<TcpConnectionStats> {
   return await invoke('get_tcp_connections');
 }
 
-export async function testPorts(request: PortTestRequest): Promise<PortTestResult[]> {
+export async function testPorts(request: PortTestRequest): Promise<PortTestResult> {
   return await invoke('test_ports', { request });
 }
 
