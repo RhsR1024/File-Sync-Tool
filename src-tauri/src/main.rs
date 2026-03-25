@@ -5,15 +5,21 @@ mod code_count;
 mod config;
 mod deploy;
 mod history;
+mod network;
+mod persist;
 mod scanner;
 
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
+use ssh2::{ExtendedData, Session};
 use std::collections::{HashSet, VecDeque};
+use std::io::Read;
+use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -43,6 +49,8 @@ struct ManualCopyQueueItem {
     local_path: String,
     target_root_path: String,
     overwrite_existing: bool,
+    file_extensions: Vec<String>,
+    filename_includes: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -162,19 +170,13 @@ fn validate_manual_copy_request(
             resolved_target_path.display()
         ));
     }
-    if source_path.is_file()
-        && resolved_target_path.exists()
-        && !resolved_target_path.is_file()
-    {
+    if source_path.is_file() && resolved_target_path.exists() && !resolved_target_path.is_file() {
         return Err(format!(
             "TARGET_FILE_CONFLICTS_WITH_DIRECTORY::{}",
             resolved_target_path.display()
         ));
     }
-    if source_path.is_dir()
-        && resolved_target_path.exists()
-        && !resolved_target_path.is_dir()
-    {
+    if source_path.is_dir() && resolved_target_path.exists() && !resolved_target_path.is_dir() {
         return Err(format!(
             "TARGET_DIRECTORY_CONFLICTS_WITH_FILE::{}",
             resolved_target_path.display()
@@ -238,8 +240,7 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                 if queue_empty {
                     manual_copy_worker_running.store(false, Ordering::SeqCst);
                     let queue_still_empty = manual_copy_queue.lock().unwrap().is_empty();
-                    if queue_still_empty
-                        || manual_copy_worker_running.swap(true, Ordering::SeqCst)
+                    if queue_still_empty || manual_copy_worker_running.swap(true, Ordering::SeqCst)
                     {
                         break;
                     }
@@ -267,6 +268,8 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     task.overwrite_existing,
                     should_cancel.clone(),
                     is_paused.clone(),
+                    task.file_extensions.clone(),
+                    task.filename_includes.clone(),
                 )
                 .await;
 
@@ -416,6 +419,11 @@ fn get_config(state: State<AppState>) -> AppConfig {
 }
 
 #[tauri::command]
+fn confirm_quit(app_handle: tauri::AppHandle) {
+    app_handle.exit(0);
+}
+
+#[tauri::command]
 fn save_config_cmd(
     app_handle: tauri::AppHandle,
     state: State<AppState>,
@@ -526,6 +534,8 @@ async fn temporary_copy(
     source_path: String,
     target_root_path: String,
     overwrite_existing: bool,
+    file_extensions: Vec<String>,
+    filename_includes: Vec<String>,
 ) -> Result<(), String> {
     if state.is_scanning.load(Ordering::SeqCst) {
         return Err("Operation already in progress".to_string());
@@ -550,6 +560,8 @@ async fn temporary_copy(
         overwrite_existing,
         should_cancel,
         is_paused,
+        file_extensions,
+        filename_includes,
     )
     .await;
 
@@ -564,6 +576,8 @@ async fn queue_temporary_copy(
     source_path: String,
     target_root_path: String,
     overwrite_existing: bool,
+    file_extensions: Vec<String>,
+    filename_includes: Vec<String>,
 ) -> Result<ManualCopyQueueAck, String> {
     let source_path = PathBuf::from(source_path.trim());
     let target_root_path = PathBuf::from(target_root_path.trim());
@@ -599,6 +613,8 @@ async fn queue_temporary_copy(
             local_path: local_path.clone(),
             target_root_path: target_root_path.to_string_lossy().to_string(),
             overwrite_existing,
+            file_extensions,
+            filename_includes,
         });
 
     emit_runtime_log(
@@ -750,10 +766,41 @@ pub struct PasswordChangeResult {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplianceSshRequest {
+    pub ips: Vec<String>,
+    #[serde(default)]
+    pub ssh_username: String,
+    #[serde(default)]
+    pub ssh_password: String,
+    #[serde(default)]
+    pub add_whitelist_rule: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplianceSshResult {
     pub ip: String,
     pub success: bool,
     pub message: String,
+    pub previous_enable: Option<u8>,
+    pub current_enable: Option<u8>,
+    pub port: Option<u16>,
+    pub whitelist_source_ip: Option<String>,
+    pub whitelist_applied: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+struct ApplianceSshStatusData {
+    enable: Option<u8>,
+    port: Option<u16>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct ApplianceSshStatusResponse {
+    code: i64,
+    message: Option<String>,
+    data: Option<ApplianceSshStatusData>,
 }
 
 // Helper function to validate IP address format
@@ -763,6 +810,222 @@ fn validate_ip(ip: &str) -> bool {
         return false;
     }
     parts.iter().all(|part| part.parse::<u8>().is_ok())
+}
+
+async fn get_appliance_ssh_status(
+    client: &reqwest::Client,
+    ip: &str,
+) -> Result<ApplianceSshStatusData, String> {
+    let request_url = format!("http://{}:23006/openAPI/system/v1/network/SSH/get", ip);
+    let response = client
+        .post(&request_url)
+        .header("content-type", "application/json")
+        .json(&json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("POST request failed: {}", e))?;
+    let status = response.status();
+    let response_text = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+    let trimmed_text = response_text.trim();
+
+    if !status.is_success() {
+        return Err(if trimmed_text.is_empty() {
+            format!("HTTP {}", status.as_u16())
+        } else {
+            format!("HTTP {}: {}", status.as_u16(), trimmed_text)
+        });
+    }
+
+    let parsed = serde_json::from_str::<ApplianceSshStatusResponse>(trimmed_text)
+        .map_err(|e| format!("Response parse error: {}", e))?;
+
+    if parsed.code != 0 {
+        return Err(parsed
+            .message
+            .unwrap_or_else(|| format!("API returned code {}", parsed.code)));
+    }
+
+    parsed
+        .data
+        .ok_or_else(|| "Response missing data".to_string())
+}
+
+async fn enable_appliance_ssh_via_api(client: &reqwest::Client, ip: &str) -> Result<(), String> {
+    let request_url = format!("http://{}:23006/openAPI/system/v1/network/SSH/set", ip);
+    let request_body = json!({
+        "ServiceSshdEnable": 1
+    });
+
+    let response = client
+        .post(&request_url)
+        .header("content-type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("SET request failed: {}", e))?;
+    let status = response.status();
+    let response_text = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read SET response body: {}", e))?;
+    let trimmed_text = response_text.trim();
+
+    if !status.is_success() {
+        return Err(if trimmed_text.is_empty() {
+            format!("HTTP {}", status.as_u16())
+        } else {
+            format!("HTTP {}: {}", status.as_u16(), trimmed_text)
+        });
+    }
+
+    if !trimmed_text.is_empty() {
+        if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(trimmed_text) {
+            if parsed_json
+                .get("code")
+                .and_then(|value| value.as_i64())
+                .is_some_and(|code| code != 0)
+            {
+                let api_message = parsed_json
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(trimmed_text);
+                return Err(api_message.to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn wait_for_appliance_ssh_enabled(
+    client: &reqwest::Client,
+    ip: &str,
+    attempts: usize,
+    delay: Duration,
+) -> Result<ApplianceSshStatusData, String> {
+    let mut last_error: Option<String> = None;
+
+    for attempt in 0..attempts {
+        match get_appliance_ssh_status(client, ip).await {
+            Ok(status) => {
+                if status.enable == Some(1) {
+                    return Ok(status);
+                }
+
+                last_error = Some(format!(
+                    "current enable state is {}",
+                    status
+                        .enable
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ));
+            }
+            Err(e) => {
+                last_error = Some(e);
+            }
+        }
+
+        if attempt + 1 < attempts {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    Err(match last_error {
+        Some(error) => format!("SSH did not become enabled in time: {}", error),
+        None => "SSH did not become enabled in time".to_string(),
+    })
+}
+
+fn detect_local_source_ip(ip: &str, port: u16) -> Result<String, String> {
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("Failed to bind local UDP socket: {}", e))?;
+    socket
+        .connect(format!("{}:{}", ip, port))
+        .map_err(|e| format!("Failed to determine local route: {}", e))?;
+
+    match socket
+        .local_addr()
+        .map_err(|e| format!("Failed to read local socket address: {}", e))?
+        .ip()
+    {
+        std::net::IpAddr::V4(addr) => Ok(addr.to_string()),
+        std::net::IpAddr::V6(addr) => Err(format!(
+            "Resolved local source IP is IPv6 ({}), but the whitelist rule requires IPv4",
+            addr
+        )),
+    }
+}
+
+fn build_iptables_whitelist_command(source_ip: &str, port: u16) -> String {
+    format!(
+        "sh -lc 'iptables -C INPUT -p tcp -s {source_ip} --dport {port} -j ACCEPT || iptables -I INPUT 1 -p tcp -s {source_ip} --dport {port} -j ACCEPT'"
+    )
+}
+
+fn run_remote_command_over_ssh(
+    ip: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    command: &str,
+) -> Result<String, String> {
+    let socket_addr: SocketAddr = format!("{}:{}", ip, port)
+        .parse()
+        .map_err(|e| format!("Invalid SSH address: {}", e))?;
+    let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
+        .map_err(|e| format!("TCP connect failed: {}", e))?;
+    let _ = tcp.set_read_timeout(Some(Duration::from_secs(15)));
+    let _ = tcp.set_write_timeout(Some(Duration::from_secs(15)));
+
+    let mut sess = Session::new().map_err(|e| format!("SSH session init failed: {}", e))?;
+    sess.set_tcp_stream(tcp);
+    sess.handshake()
+        .map_err(|e| format!("SSH handshake failed: {}", e))?;
+    sess.userauth_password(username, password)
+        .map_err(|e| format!("SSH authentication failed: {}", e))?;
+
+    if !sess.authenticated() {
+        return Err("SSH authentication failed".to_string());
+    }
+
+    let mut channel = sess
+        .channel_session()
+        .map_err(|e| format!("SSH channel init failed: {}", e))?;
+    channel
+        .handle_extended_data(ExtendedData::Merge)
+        .map_err(|e| format!("SSH channel stderr merge failed: {}", e))?;
+    channel
+        .exec(command)
+        .map_err(|e| format!("Remote command execution failed: {}", e))?;
+    channel
+        .send_eof()
+        .map_err(|e| format!("Failed to close SSH stdin: {}", e))?;
+
+    let mut output = String::new();
+    channel
+        .read_to_string(&mut output)
+        .map_err(|e| format!("Failed to read remote command output: {}", e))?;
+    channel
+        .wait_close()
+        .map_err(|e| format!("Failed to close SSH channel: {}", e))?;
+
+    let exit_code = channel.exit_status().unwrap_or(-1);
+    if exit_code != 0 {
+        let trimmed_output = output.trim();
+        return Err(if trimmed_output.is_empty() {
+            format!("Remote command exited with code {}", exit_code)
+        } else {
+            format!(
+                "Remote command exited with code {}: {}",
+                exit_code, trimmed_output
+            )
+        });
+    }
+
+    Ok(output.trim().to_string())
 }
 
 #[tauri::command]
@@ -929,75 +1192,145 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
 }
 
 #[tauri::command]
-async fn enable_appliance_ssh(ips: Vec<String>) -> Result<Vec<ApplianceSshResult>, String> {
+async fn enable_appliance_ssh(
+    request: ApplianceSshRequest,
+) -> Result<Vec<ApplianceSshResult>, String> {
     let mut results = Vec::new();
     let client = reqwest::Client::new();
+    let ssh_username = request.ssh_username.trim().to_string();
+    let ssh_password = request.ssh_password.clone();
 
-    for ip in ips.iter() {
+    for ip in request.ips.iter() {
         let ip = ip.trim();
         if ip.is_empty() {
             continue;
         }
 
+        let mut result = ApplianceSshResult {
+            ip: ip.to_string(),
+            success: false,
+            message: String::new(),
+            previous_enable: None,
+            current_enable: None,
+            port: None,
+            whitelist_source_ip: None,
+            whitelist_applied: None,
+        };
+
         if !validate_ip(ip) {
-            results.push(ApplianceSshResult {
-                ip: ip.to_string(),
-                success: false,
-                message: format!("Invalid IP address: {}", ip),
-            });
+            result.message = format!("Invalid IP address: {}", ip);
+            results.push(result);
             continue;
         }
 
-        let request_url = format!("http://{}:23006/openAPI/system/v1/network/SSH/set", ip);
-        let request_body = json!({
-            "ServiceSshdEnable": 1
-        });
+        let initial_status = match get_appliance_ssh_status(&client, ip).await {
+            Ok(status) => status,
+            Err(e) => {
+                result.message = format!("Failed to get SSH status: {}", e);
+                results.push(result);
+                continue;
+            }
+        };
 
-        match client
-            .post(&request_url)
-            .header("content-type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                let status = response.status();
-                let response_text = match response.text().await {
-                    Ok(text) => text,
-                    Err(e) => format!("Failed to read response body: {}", e),
-                };
-                let trimmed_text = response_text.trim();
+        result.previous_enable = initial_status.enable;
+        result.port = initial_status.port;
 
-                if status.is_success() {
-                    results.push(ApplianceSshResult {
-                        ip: ip.to_string(),
-                        success: true,
-                        message: if trimmed_text.is_empty() {
-                            "SSH enabled successfully.".to_string()
-                        } else {
-                            trimmed_text.to_string()
-                        },
-                    });
-                } else {
-                    results.push(ApplianceSshResult {
-                        ip: ip.to_string(),
-                        success: false,
-                        message: if trimmed_text.is_empty() {
-                            format!("Request failed with HTTP {}", status.as_u16())
-                        } else {
-                            format!("HTTP {}: {}", status.as_u16(), trimmed_text)
-                        },
-                    });
+        let current_status = if initial_status.enable == Some(1) {
+            initial_status
+        } else {
+            if let Err(e) = enable_appliance_ssh_via_api(&client, ip).await {
+                result.message = format!("Failed to enable SSH: {}", e);
+                results.push(result);
+                continue;
+            }
+            match wait_for_appliance_ssh_enabled(&client, ip, 10, Duration::from_secs(1)).await {
+                Ok(status) => status,
+                Err(e) => {
+                    result.message = format!("SSH status verification failed: {}", e);
+                    results.push(result);
+                    continue;
                 }
             }
-            Err(e) => {
-                results.push(ApplianceSshResult {
-                    ip: ip.to_string(),
-                    success: false,
-                    message: format!("SSH enable request failed: {}", e),
-                });
+        };
+
+        result.current_enable = current_status.enable;
+        result.port = current_status.port.or(result.port).or(Some(23333));
+        let ssh_port = result.port.unwrap_or(23333);
+
+        if request.add_whitelist_rule {
+            if ssh_username.is_empty() || ssh_password.is_empty() {
+                result.whitelist_applied = Some(false);
+                result.message =
+                    "SSH username and password are required when adding an iptables whitelist rule"
+                        .to_string();
+                results.push(result);
+                continue;
             }
+
+            let source_ip = match detect_local_source_ip(ip, ssh_port) {
+                Ok(source_ip) => source_ip,
+                Err(e) => {
+                    result.whitelist_applied = Some(false);
+                    result.message = format!("Failed to determine local source IP: {}", e);
+                    results.push(result);
+                    continue;
+                }
+            };
+
+            result.whitelist_source_ip = Some(source_ip.clone());
+
+            let ip_owned = ip.to_string();
+            let user_owned = ssh_username.clone();
+            let password_owned = ssh_password.clone();
+            let command = build_iptables_whitelist_command(&source_ip, ssh_port);
+
+            let whitelist_result = match tauri::async_runtime::spawn_blocking(move || {
+                run_remote_command_over_ssh(
+                    &ip_owned,
+                    ssh_port,
+                    &user_owned,
+                    &password_owned,
+                    &command,
+                )
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    result.whitelist_applied = Some(false);
+                    result.message = format!("Failed to run the SSH whitelist task: {}", e);
+                    results.push(result);
+                    continue;
+                }
+            };
+
+            match whitelist_result {
+                Ok(_) => {
+                    result.success = true;
+                    result.whitelist_applied = Some(true);
+                    result.message = format!(
+                        "SSH is enabled. Added an iptables whitelist rule for {}:{}",
+                        source_ip, ssh_port
+                    );
+                }
+                Err(e) => {
+                    result.whitelist_applied = Some(false);
+                    result.message = format!(
+                        "SSH is enabled, but failed to add the iptables whitelist rule for {}:{}: {}",
+                        source_ip, ssh_port, e
+                    );
+                }
+            }
+        } else {
+            result.success = true;
+            result.message = if result.previous_enable == Some(1) {
+                format!("SSH is already enabled. Port: {}", ssh_port)
+            } else {
+                format!("SSH enabled successfully. Port: {}", ssh_port)
+            };
         }
+
+        results.push(result);
     }
 
     Ok(results)
@@ -1023,9 +1356,23 @@ fn main() {
                     .map(|state| state.is_quitting.load(Ordering::SeqCst))
                     .unwrap_or(false);
 
-                if !is_quitting && should_close_to_tray(&window.app_handle()) {
+                if is_quitting {
+                    // Already confirmed quit (via confirm_quit command) — allow close
+                } else if should_close_to_tray(&window.app_handle()) {
                     api.prevent_close();
                     hide_main_window(&window.app_handle());
+                } else {
+                    // close_to_tray=false, first X click: intercept to let frontend save
+                    api.prevent_close();
+                    if let Some(state) = window.app_handle().try_state::<AppState>() {
+                        state.is_quitting.store(true, Ordering::SeqCst);
+                    }
+                    let _ = window.app_handle().emit("before-quit", ());
+                    let app_clone = window.app_handle().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(2));
+                        app_clone.exit(0);
+                    });
                 }
             }
         })
@@ -1047,7 +1394,14 @@ fn main() {
                         if let Some(state) = app.try_state::<AppState>() {
                             state.is_quitting.store(true, Ordering::SeqCst);
                         }
-                        app.exit(0);
+                        // Notify frontend to save state before exiting
+                        let _ = app.emit("before-quit", ());
+                        // Fallback: force exit after 2 seconds if frontend doesn't respond
+                        let app_clone = app.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_secs(2));
+                            app_clone.exit(0);
+                        });
                     }
                     _ => {}
                 })
@@ -1070,6 +1424,7 @@ fn main() {
 
             let config = config::load_config(app.handle());
             let _ = sync_launch_on_startup(config.launch_and_auto_scan);
+            app.manage(network::NetworkState::default());
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
                 is_scanning: Arc::new(AtomicBool::new(false)),
@@ -1105,7 +1460,15 @@ fn main() {
             change_framework_password,
             enable_appliance_ssh,
             code_count::code_count_analyze,
-            code_count::code_count_list_scope_tree
+            code_count::code_count_list_scope_tree,
+            persist::save_ui_state,
+            persist::load_ui_state,
+            network::ping_scan,
+            network::cancel_ping_scan,
+            network::get_tcp_connections,
+            network::test_ports,
+            network::send_wol,
+            confirm_quit
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
