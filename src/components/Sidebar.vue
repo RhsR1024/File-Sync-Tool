@@ -29,6 +29,7 @@ const menuItems = computed<MenuItem[]>(() => [
       { name: t('sidebar.frameworkPassword'), path: '/tools/framework-password' },
       { name: t('sidebar.applianceSsh'), path: '/tools/appliance-ssh' },
       { name: t('sidebar.codeStatistics'), path: '/tools/code-statistics' },
+      { name: t('sidebar.networkTools'), path: '/tools/network' },
     ],
   },
 ]);

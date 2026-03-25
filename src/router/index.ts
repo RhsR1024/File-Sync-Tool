@@ -42,6 +42,10 @@ const routes: RouteRecordRaw[] = [
     path: '/tools/code-statistics',
     component: () => import('../pages/CodeStatisticsPage.vue'),
   },
+  {
+    path: '/tools/network',
+    component: () => import('../pages/NetworkToolsPage.vue'),
+  },
 ]
 
 const router = createRouter({
