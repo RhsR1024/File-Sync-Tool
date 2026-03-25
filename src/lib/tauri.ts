@@ -70,6 +70,9 @@ export interface AppConfig {
 
   /** Copy buffer size in KB. Controls read/write chunk size when copying files. Default: 4096 (4 MB). */
   copy_buffer_size_kb: number;
+
+  /** Maximum number of task records to persist and display. Default: 100. */
+  max_task_records: number;
 }
 
 export interface ScanResult {
@@ -160,16 +163,20 @@ export async function temporaryCopy(
   sourcePath: string,
   targetRootPath: string,
   overwriteExisting = false,
+  fileExtensions: string[] = [],
+  filenameIncludes: string[] = [],
 ): Promise<void> {
-  await invoke('temporary_copy', { sourcePath, targetRootPath, overwriteExisting });
+  await invoke('temporary_copy', { sourcePath, targetRootPath, overwriteExisting, fileExtensions, filenameIncludes });
 }
 
 export async function queueTemporaryCopy(
   sourcePath: string,
   targetRootPath: string,
   overwriteExisting = false,
+  fileExtensions: string[] = [],
+  filenameIncludes: string[] = [],
 ): Promise<ManualCopyQueueAck> {
-  return await invoke('queue_temporary_copy', { sourcePath, targetRootPath, overwriteExisting });
+  return await invoke('queue_temporary_copy', { sourcePath, targetRootPath, overwriteExisting, fileExtensions, filenameIncludes });
 }
 
 export async function previewTemporaryCopy(sourcePath: string, targetRootPath: string): Promise<ManualCopyPreview> {
@@ -215,6 +222,18 @@ export interface ApplianceSshResult {
   ip: string;
   success: boolean;
   message: string;
+  previousEnable?: number;
+  currentEnable?: number;
+  port?: number;
+  whitelistSourceIp?: string;
+  whitelistApplied?: boolean;
+}
+
+export interface EnableApplianceSshRequest {
+  ips: string[];
+  sshUsername?: string;
+  sshPassword?: string;
+  addWhitelistRule: boolean;
 }
 
 // Internal: Login API response (used by backend)
@@ -283,6 +302,23 @@ export interface CodeCountScopeTreeNode {
   children: CodeCountScopeTreeNode[];
 }
 
+export interface UiState {
+  logs: unknown[];
+  task_records: unknown[];
+}
+
+export async function saveUiState(logs: unknown[], taskRecords: unknown[]): Promise<void> {
+  await invoke('save_ui_state', { logs, taskRecords });
+}
+
+export async function loadUiState(): Promise<UiState> {
+  return await invoke('load_ui_state');
+}
+
+export async function confirmQuit(): Promise<void> {
+  await invoke('confirm_quit');
+}
+
 export async function codeCountAnalyze(
   oldPath: string,
   newPath: string,
@@ -322,6 +358,85 @@ export async function changeFrameworkPassword(ips: string[]): Promise<FrameworkP
   return await invoke<FrameworkPasswordResult[]>('change_framework_password', { ips });
 }
 
-export async function enableApplianceSsh(ips: string[]): Promise<ApplianceSshResult[]> {
-  return await invoke<ApplianceSshResult[]>('enable_appliance_ssh', { ips });
+export async function enableApplianceSsh(request: EnableApplianceSshRequest): Promise<ApplianceSshResult[]> {
+  return await invoke<ApplianceSshResult[]>('enable_appliance_ssh', { request });
+}
+
+// ─── Network Tools ─────────────────────────────────────
+
+export interface PingResult {
+  ip: string;
+  alive: boolean;
+  latencyMs: number | null;
+}
+
+export interface PingScanRequest {
+  prefix: string;
+  start: number;
+  end: number;
+  timeoutMs: number;
+}
+
+export interface TcpConnectionStats {
+  total: number;
+  byState: { state: string; count: number }[];
+  byRemoteIp: { ip: string; count: number }[];
+  byPort: { port: number; name: string; count: number }[];
+}
+
+export interface PortTestRequest {
+  host: string;
+  ports: number[];
+  timeoutMs: number;
+}
+
+export interface PortTestResult {
+  port: number;
+  service: string;
+  open: boolean;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+export interface WolRequest {
+  mac: string;
+  broadcast: string;
+  port: number;
+}
+
+export interface WolResult {
+  success: boolean;
+  message: string;
+}
+
+export interface PortPreset {
+  name: string;
+  ports: string;
+}
+
+export interface WolDevice {
+  name: string;
+  mac: string;
+  broadcast: string;
+  port: number;
+}
+
+export async function pingScan(request: PingScanRequest): Promise<void> {
+  await invoke('ping_scan', { request });
+}
+
+export async function cancelPingScan(): Promise<void> {
+  await invoke('cancel_ping_scan');
+}
+
+export async function getTcpConnections(): Promise<TcpConnectionStats> {
+  return await invoke('get_tcp_connections');
+}
+
+export async function testPorts(request: PortTestRequest): Promise<PortTestResult[]> {
+  return await invoke('test_ports', { request });
+}
+
+export async function sendWol(request: WolRequest): Promise<WolResult> {
+  return await invoke('send_wol', { request });
 }
