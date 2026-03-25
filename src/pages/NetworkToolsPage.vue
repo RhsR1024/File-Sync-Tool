@@ -64,7 +64,9 @@ const activeComponent = computed(() => tabs.find(tab => tab.id === activeTab.val
 
         <!-- Tab content -->
         <div class="p-5">
-          <component :is="activeComponent" />
+          <keep-alive>
+            <component :is="activeComponent" />
+          </keep-alive>
         </div>
       </div>
     </div>

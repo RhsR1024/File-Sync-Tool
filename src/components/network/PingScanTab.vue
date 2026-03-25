@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue';
+import { ref, computed, watch, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { pingScan, cancelPingScan, saveTextFile, type PingResult, type PingScanRequest } from '../../lib/tauri';
@@ -8,12 +8,37 @@ defineOptions({ name: 'PingScanTab' });
 
 const { t } = useI18n();
 
+// ── Persistence helpers ───────────────────────────────────────────────────
+
+const STORAGE_KEY = 'networkTools.pingScanConfig';
+
+function loadConfig() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore */ }
+  return null;
+}
+
+function saveConfig() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    prefix: prefix.value,
+    start: start.value,
+    end: end.value,
+    timeoutMs: timeoutMs.value,
+  }));
+}
+
 // ── State ──────────────────────────────────────────────────────────────────
 
-const prefix = ref('192.168.1');
-const start = ref(1);
-const end = ref(254);
-const timeoutMs = ref(1000);
+const saved = loadConfig();
+const prefix = ref(saved?.prefix ?? '192.168.1');
+const start = ref(saved?.start ?? 1);
+const end = ref(saved?.end ?? 254);
+const timeoutMs = ref(saved?.timeoutMs ?? 1000);
+
+// Persist on change
+watch([prefix, start, end, timeoutMs], saveConfig);
 const isScanning = ref(false);
 const results = ref(new Map<string, PingResult>());
 const viewMode = ref<'grid' | 'table'>('grid');
