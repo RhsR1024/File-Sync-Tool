@@ -90,15 +90,16 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 p-8">
+  <div class="flex-1 flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 overflow-y-auto">
+    <div class="max-w-6xl w-full mx-auto p-6 pb-10 space-y-5">
     <!-- Header Section -->
-    <div class="mb-8">
-      <h1 class="text-4xl font-bold text-slate-900 mb-2">{{ t('tools.frameworkPassword.title') }}</h1>
-      <p class="text-slate-600 text-lg">{{ t('tools.frameworkPassword.description') }}</p>
+    <div>
+      <h1 class="text-2xl font-bold text-slate-900 mb-1">{{ t('tools.frameworkPassword.title') }}</h1>
+      <p class="text-slate-500 text-sm">{{ t('tools.frameworkPassword.description') }}</p>
     </div>
 
     <!-- Info Banner -->
-    <div class="mb-8 bg-blue-50 border-l-4 border-blue-500 p-4 rounded-lg">
+    <div class="bg-blue-50/70 border border-blue-200/60 p-4 rounded-xl">
       <p class="text-blue-900 text-sm leading-relaxed">
         <span class="font-semibold">{{ t('tools.frameworkPassword.info') }}</span><br>
         {{ t('tools.frameworkPassword.infoDetail') }}
@@ -238,6 +239,7 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
           </table>
         </div>
       </div>
+    </div>
     </div>
   </div>
 </template>

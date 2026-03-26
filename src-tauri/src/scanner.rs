@@ -225,11 +225,7 @@ fn build_temp_copy_path(target: &Path) -> PathBuf {
         .filter(|name| !name.is_empty())
         .unwrap_or("copy-target");
 
-    target.with_file_name(format!(
-        ".{}.{}.part",
-        file_name,
-        uuid::Uuid::new_v4()
-    ))
+    target.with_file_name(format!(".{}.{}.part", file_name, uuid::Uuid::new_v4()))
 }
 
 fn copy_file_with_overwrite_mode<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -279,7 +275,14 @@ fn copy_file_with_overwrite_mode<P: AsRef<Path>, Q: AsRef<Path>>(
             }
         }
     } else {
-        copy_file_chunked(from, target, should_cancel, is_paused, buffer_size, on_progress)
+        copy_file_chunked(
+            from,
+            target,
+            should_cancel,
+            is_paused,
+            buffer_size,
+            on_progress,
+        )
     }
 }
 
@@ -298,6 +301,8 @@ async fn perform_copy<R: tauri::Runtime>(
     task_id: Option<String>,
     allow_deploy: bool,
     source: &str,
+    filter_extensions: &[String],
+    filter_includes: &[String],
 ) {
     let target_full_path = target_parent_path.join(&folder_name);
 
@@ -363,9 +368,9 @@ async fn perform_copy<R: tauri::Runtime>(
     let source_path_clone = source_path.clone();
     let target_full_path_clone = target_full_path.clone();
 
-    // Clone config for closure
-    let extensions = config.file_extensions.clone();
-    let includes = config.filename_includes.clone();
+    // Clone filter parameters for closure
+    let extensions = filter_extensions.to_vec();
+    let includes = filter_includes.to_vec();
     let stability_check_secs = config.stability_check_secs;
     let recent_file_guard_mins = config.recent_file_guard_mins;
     let copy_buffer_size = (config.copy_buffer_size_kb as usize).max(64) * 1024;
@@ -396,8 +401,36 @@ async fn perform_copy<R: tauri::Runtime>(
             ));
         }
 
+        // Log active filter rules
+        let has_ext_filter = !extensions.is_empty();
+        let has_inc_filter = !includes.is_empty();
+        if has_ext_filter || has_inc_filter {
+            let mut parts = Vec::new();
+            if has_ext_filter {
+                parts.push(format!("extensions=[{}]", extensions.join(", ")));
+            }
+            if has_inc_filter {
+                parts.push(format!("keywords=[{}]", includes.join(", ")));
+            }
+            emit_log(
+                &handle,
+                format!("Active filter rules for '{}': {}", folder_name_clone, parts.join("; ")),
+                "info",
+            );
+        } else {
+            emit_log(
+                &handle,
+                format!("No filter rules active for '{}' — all files will be considered.", folder_name_clone),
+                "info",
+            );
+        }
+
         // Collect files with filtering (Iterative)
         let mut filtered_files: Vec<(PathBuf, u64, bool)> = Vec::new();
+        let mut total_files_scanned: u64 = 0;
+        let mut skipped_by_ext: Vec<String> = Vec::new();
+        let mut skipped_by_keyword: Vec<String> = Vec::new();
+        let mut skipped_existing: u64 = 0;
         let recent_file_guard_secs = recent_file_guard_mins * 60;
         let now_system = SystemTime::now();
 
@@ -409,6 +442,7 @@ async fn perform_copy<R: tauri::Runtime>(
                     if path.is_dir() {
                         dirs_to_visit.push(path);
                     } else {
+                        total_files_scanned += 1;
                         // File Check
                         let file_name = entry.file_name().to_string_lossy().to_string();
                         let mut ext_match = true;
@@ -445,44 +479,84 @@ async fn perform_copy<R: tauri::Runtime>(
                             }
                         }
 
-                        if ext_match && inc_match {
-                            let rel_path = path.strip_prefix(&source_path_clone).unwrap_or(&path);
-                            let dst = target_full_path_clone.join(rel_path);
-
-                            if dst.exists() && !dst.is_file() {
-                                emit_log(
-                                    &handle,
-                                    format!(
-                                        "Skipping '{}' because target path exists as a directory: {}",
-                                        file_name,
-                                        dst.display()
-                                    ),
-                                    "warn",
-                                );
-                                continue;
+                        if !ext_match {
+                            if skipped_by_ext.len() < 20 {
+                                skipped_by_ext.push(file_name.clone());
                             }
-
-                            if overwrite_existing || !dst.exists() {
-                                if let Ok(meta) = entry.metadata() {
-                                    let file_size = meta.len();
-                                    let is_recent = meta
-                                        .modified()
-                                        .ok()
-                                        .and_then(|modified| {
-                                            now_system.duration_since(modified).ok()
-                                        })
-                                        .map(|age| {
-                                            age < StdDuration::from_secs(recent_file_guard_secs)
-                                        })
-                                        .unwrap_or(true);
-
-                                    filtered_files.push((path, file_size, is_recent));
-                                }
+                            continue;
+                        }
+                        if !inc_match {
+                            if skipped_by_keyword.len() < 20 {
+                                skipped_by_keyword.push(file_name.clone());
                             }
+                            continue;
+                        }
+
+                        let rel_path = path.strip_prefix(&source_path_clone).unwrap_or(&path);
+                        let dst = target_full_path_clone.join(rel_path);
+
+                        if dst.exists() && !dst.is_file() {
+                            emit_log(
+                                &handle,
+                                format!(
+                                    "Skipping '{}' because target path exists as a directory: {}",
+                                    file_name,
+                                    dst.display()
+                                ),
+                                "warn",
+                            );
+                            continue;
+                        }
+
+                        if overwrite_existing || !dst.exists() {
+                            if let Ok(meta) = entry.metadata() {
+                                let file_size = meta.len();
+                                let is_recent = meta
+                                    .modified()
+                                    .ok()
+                                    .and_then(|modified| {
+                                        now_system.duration_since(modified).ok()
+                                    })
+                                    .map(|age| {
+                                        age < StdDuration::from_secs(recent_file_guard_secs)
+                                    })
+                                    .unwrap_or(true);
+
+                                filtered_files.push((path, file_size, is_recent));
+                            }
+                        } else {
+                            skipped_existing += 1;
                         }
                     }
                 }
             }
+        }
+
+        // Log filtering summary
+        let matched_count = filtered_files.len() as u64;
+        let ext_skipped = skipped_by_ext.len() as u64;
+        let kw_skipped = skipped_by_keyword.len() as u64;
+        emit_log(
+            &handle,
+            format!(
+                "Scan summary for '{}': {} file(s) found, {} matched filters, {} skipped by extension, {} skipped by keyword, {} already exist locally.",
+                folder_name_clone, total_files_scanned, matched_count, ext_skipped, kw_skipped, skipped_existing
+            ),
+            "info",
+        );
+        if !skipped_by_ext.is_empty() {
+            emit_log(
+                &handle,
+                format!("Skipped by extension filter: {}", skipped_by_ext.join(", ")),
+                "info",
+            );
+        }
+        if !skipped_by_keyword.is_empty() {
+            emit_log(
+                &handle,
+                format!("Skipped by keyword filter: {}", skipped_by_keyword.join(", ")),
+                "info",
+            );
         }
 
         if filtered_files.is_empty() {
@@ -860,6 +934,8 @@ pub async fn temporary_copy<R: tauri::Runtime>(
     overwrite_existing: bool,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    file_extensions: Vec<String>,
+    filename_includes: Vec<String>,
 ) -> Result<(), String> {
     let source_path = PathBuf::from(source_path.trim());
     let target_root_path = PathBuf::from(target_root_path.trim());
@@ -955,6 +1031,8 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         None,
         false,
         "manual",
+        &file_extensions,
+        &filename_includes,
     )
     .await;
 
@@ -1392,6 +1470,8 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             Some(task.id.clone()),
                             true,
                             "scheduled",
+                            &config.file_extensions,
+                            &config.filename_includes,
                         )
                         .await;
                     } else {
@@ -1502,6 +1582,8 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                 Some(task.id.clone()),
                                 true,
                                 "scheduled",
+                                &config.file_extensions,
+                                &config.filename_includes,
                             )
                             .await;
                         }

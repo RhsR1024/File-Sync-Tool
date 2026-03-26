@@ -25,7 +25,8 @@ const config = ref<AppConfig>({
   launch_and_auto_scan: false,
   close_to_tray: false,
   max_log_lines: 200,
-  copy_buffer_size_kb: 4096
+  copy_buffer_size_kb: 4096,
+  max_task_records: 100
 });
 
 const newExt = ref('');
@@ -248,8 +249,8 @@ const serverForm = ref({
     name: '',
     host: '',
     port: 22,
-    user: '',
-    password: '',
+    user: 'root',
+    password: 'admin_123',
     remote_path: ''
 });
 
@@ -260,8 +261,8 @@ function resetServerForm() {
         name: '',
         host: '',
         port: 22,
-        user: '',
-        password: '',
+        user: 'root',
+        password: 'admin_123',
         remote_path: ''
     };
     isEditingServer.value = false;
@@ -328,26 +329,53 @@ async function testAllServers() {
 // ── Manual Deploy ─────────────────────────────────────────────────────────────
 const manualLocalPath = ref('');
 const manualRemotePath = ref('/tmp/upload');
-const selectedServerId = ref('');
-const selectedManualCommandGroupId = ref('');
+const manualServerBindings = ref<TaskServerBinding[]>([]);
 const manualDeployMsgType = ref<'success' | 'error' | ''>('');
 
-async function handleManualDeploy() {
-    if (!manualLocalPath.value || !manualRemotePath.value || !selectedServerId.value) return;
+function addManualBinding() {
+    manualServerBindings.value.push({ server_id: '', command_group_ids: [] });
+}
 
-    let targets: DeployServer[] = [];
-    if (selectedServerId.value === 'all') {
-        targets = config.value.servers.filter(s => s.enabled);
+function removeManualBinding(index: number) {
+    manualServerBindings.value.splice(index, 1);
+}
+
+function toggleManualBindingGroup(binding: TaskServerBinding, groupId: string) {
+    const idx = binding.command_group_ids.indexOf(groupId);
+    if (idx > -1) {
+        binding.command_group_ids.splice(idx, 1);
     } else {
-        const server = config.value.servers.find(s => s.id === selectedServerId.value);
-        if (server) targets.push(server);
+        binding.command_group_ids.push(groupId);
     }
-    if (targets.length === 0) return;
+}
 
-    // Resolve commands from selected command group
-    const postCommands: string[] = selectedManualCommandGroupId.value
-        ? (config.value.command_groups.find(g => g.id === selectedManualCommandGroupId.value)?.commands ?? [])
-        : [];
+function manualBindingGroupOrder(binding: TaskServerBinding, groupId: string) {
+    const idx = binding.command_group_ids.indexOf(groupId);
+    return idx > -1 ? idx + 1 : null;
+}
+
+function moveManualBindingGroup(binding: TaskServerBinding, index: number, direction: -1 | 1) {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= binding.command_group_ids.length) return;
+    const [groupId] = binding.command_group_ids.splice(index, 1);
+    binding.command_group_ids.splice(targetIndex, 0, groupId);
+}
+
+function removeManualBindingGroupById(binding: TaskServerBinding, groupId: string) {
+    const idx = binding.command_group_ids.indexOf(groupId);
+    if (idx > -1) binding.command_group_ids.splice(idx, 1);
+}
+
+const canManualDeploy = computed(() => {
+    return !appStore.isManualDeploying
+        && manualLocalPath.value.trim()
+        && manualRemotePath.value.trim()
+        && manualServerBindings.value.length > 0
+        && manualServerBindings.value.every(b => b.server_id);
+});
+
+async function handleManualDeploy() {
+    if (!canManualDeploy.value) return;
 
     appStore.isManualDeploying = true;
     appStore.manualDeployMsg = '';
@@ -358,7 +386,17 @@ async function handleManualDeploy() {
         let failCount = 0;
         let lastError = '';
 
-        for (const server of targets) {
+        for (const binding of manualServerBindings.value) {
+            const server = config.value.servers.find(s => s.id === binding.server_id);
+            if (!server) continue;
+
+            // Resolve commands from all bound command groups in order
+            const postCommands: string[] = [];
+            for (const gid of binding.command_group_ids) {
+                const group = config.value.command_groups.find(g => g.id === gid);
+                if (group) postCommands.push(...group.commands);
+            }
+
             try {
                 await manualDeploy(server, postCommands, manualLocalPath.value, manualRemotePath.value);
                 successCount++;
@@ -465,6 +503,7 @@ async function save() {
     try {
         await saveConfig(config.value);
         if (config.value.max_log_lines > 0) appStore.maxLogLines = config.value.max_log_lines;
+        if (config.value.max_task_records > 0) appStore.maxTaskRecords = config.value.max_task_records;
         showStatusMsg(t('settings.saved'));
         addSystemEvent('CONFIG_CHANGE', t('settings.saved'));
         await restartSchedulerInterval();
@@ -548,6 +587,17 @@ onUnmounted(clearStatusMsg);
         </div>
         <div class="flex items-center gap-2">
           <input type="number" v-model.number="config.max_log_lines" @change="save" min="50" max="5000" step="50"
+                 class="w-24 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-right focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
+          <span class="text-xs text-slate-500">{{ t('settings.lines') }}</span>
+        </div>
+      </div>
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <div class="text-sm font-medium text-slate-700">{{ t('settings.maxTaskRecords') }}</div>
+          <p class="text-xs text-slate-400 mt-1">{{ t('settings.maxTaskRecordsDesc') }}</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <input type="number" v-model.number="config.max_task_records" @change="save" min="10" max="500" step="10"
                  class="w-24 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-right focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
           <span class="text-xs text-slate-500">{{ t('settings.lines') }}</span>
         </div>
@@ -910,7 +960,7 @@ onUnmounted(clearStatusMsg);
           <option :value="64">64 KB</option>
           <option :value="256">256 KB</option>
           <option :value="1024">1 MB</option>
-          <option :value="4096">4 MB（推荐）</option>
+          <option :value="4096">4 MB{{ locale === 'zh' ? '（推荐）' : ' (recommended)' }}</option>
           <option :value="8192">8 MB</option>
           <option :value="16384">16 MB</option>
         </select>
@@ -1043,7 +1093,7 @@ onUnmounted(clearStatusMsg);
                 class="text-xs px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700">
                 {{ serverDisplayName(server) }}
               </span>
-              <span v-if="config.servers.length > 3" class="text-xs px-2.5 py-1 rounded-full bg-slate-200 text-slate-600">+{{ config.servers.length - 3 }} 台</span>
+              <span v-if="config.servers.length > 3" class="text-xs px-2.5 py-1 rounded-full bg-slate-200 text-slate-600">+{{ config.servers.length - 3 }}</span>
             </div>
           </div>
         </div>
@@ -1261,20 +1311,6 @@ onUnmounted(clearStatusMsg);
           </h4>
           <p class="text-xs text-slate-400">{{ t('settings.manualDeployDesc') }}</p>
 
-          <div>
-            <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.targetServer') }}</label>
-            <div class="relative">
-              <select v-model="selectedServerId" class="w-full p-2 pr-8 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white appearance-none">
-                <option value="" disabled>{{ t('settings.selectServer') }}</option>
-                <option value="all">{{ t('settings.deployAll') }}</option>
-                <option v-for="s in config.servers" :key="s.id" :value="s.id">{{ s.name || s.host }} ({{ s.host }})</option>
-              </select>
-              <div class="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none text-slate-500">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
-              </div>
-            </div>
-          </div>
-
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.localPath') }}</label>
@@ -1286,15 +1322,104 @@ onUnmounted(clearStatusMsg);
             </div>
           </div>
 
+          <!-- Server Bindings -->
           <div>
-            <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.manualDeployCommandGroup') }}</label>
-            <div class="relative">
-              <select v-model="selectedManualCommandGroupId" class="w-full p-2 pr-8 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white appearance-none">
-                <option value="">{{ t('settings.manualDeployCommandGroupNone') }}</option>
-                <option v-for="g in config.command_groups" :key="g.id" :value="g.id">{{ g.name }} ({{ g.commands.length }} cmds)</option>
-              </select>
-              <div class="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none text-slate-500">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+            <div class="flex items-center justify-between mb-2">
+              <label class="text-sm font-medium text-slate-600">{{ t('settings.manualDeployServerBindings') }}</label>
+              <button @click="addManualBinding" type="button"
+                class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium bg-blue-50 hover:bg-blue-100 px-2.5 py-1 rounded-lg transition-colors">
+                <Plus class="w-3 h-3" /> {{ t('settings.addServerBinding') }}
+              </button>
+            </div>
+
+            <div v-if="manualServerBindings.length === 0" class="text-xs text-slate-400 italic text-center py-3 bg-slate-50 rounded-lg border border-dashed border-slate-200">
+              {{ t('settings.manualDeployNoBindings') }}
+            </div>
+
+            <div v-else class="space-y-2">
+              <div v-for="(binding, bidx) in manualServerBindings" :key="bidx"
+                class="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
+                <div class="flex items-center gap-2">
+                  <select v-model="binding.server_id"
+                    class="flex-1 p-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+                    <option value="" disabled>{{ t('settings.selectServer') }}</option>
+                    <option v-for="s in config.servers" :key="s.id" :value="s.id">
+                      {{ serverDisplayName(s) }} ({{ s.host }})
+                    </option>
+                  </select>
+                  <button @click="removeManualBinding(bidx)" type="button"
+                    class="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors shrink-0">
+                    <Trash2 class="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <!-- Command group selection -->
+                <div v-if="config.command_groups.length > 0">
+                  <div class="text-xs text-slate-500 mb-1.5">{{ t('settings.bindingCommandGroups') }}:</div>
+                  <div class="flex flex-wrap gap-1.5">
+                    <button v-for="group in config.command_groups" :key="group.id"
+                      type="button"
+                      @click="toggleManualBindingGroup(binding, group.id)"
+                      class="text-xs px-2.5 py-1 rounded-full border font-medium transition-colors"
+                      :class="binding.command_group_ids.includes(group.id)
+                        ? 'bg-sky-100 text-sky-700 border-sky-200'
+                        : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-100'">
+                      <span v-if="manualBindingGroupOrder(binding, group.id)" class="mr-1 text-[10px] font-bold">
+                        #{{ manualBindingGroupOrder(binding, group.id) }}
+                      </span>
+                      {{ group.name }}
+                    </button>
+                  </div>
+                  <div v-if="binding.command_group_ids.length === 0" class="text-xs text-slate-400 italic mt-1">{{ t('settings.bindingNoGroups') }}</div>
+                  <div v-else class="mt-3 space-y-2">
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="text-xs text-slate-500">{{ t('settings.bindingExecutionOrder') }}</div>
+                      <div class="text-[11px] text-slate-400">{{ t('settings.bindingExecutionHint') }}</div>
+                    </div>
+                    <div
+                      v-for="(groupId, groupIndex) in binding.command_group_ids"
+                      :key="`manual-${binding.server_id}-${groupId}-${groupIndex}`"
+                      class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2"
+                    >
+                      <div class="flex min-w-0 items-center gap-3">
+                        <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-sky-100 text-xs font-semibold text-sky-700">
+                          {{ groupIndex + 1 }}
+                        </span>
+                        <div class="min-w-0">
+                          <div class="truncate text-sm font-medium text-slate-700">{{ commandGroupName(groupId) }}</div>
+                          <div class="text-[11px] text-slate-400">{{ t('settings.bindingCommandGroups') }}</div>
+                        </div>
+                      </div>
+                      <div class="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          @click="moveManualBindingGroup(binding, groupIndex, -1)"
+                          :disabled="groupIndex === 0"
+                          class="rounded p-1.5 text-slate-400 transition-colors"
+                          :class="groupIndex === 0 ? 'cursor-not-allowed opacity-40' : 'hover:bg-slate-100 hover:text-slate-600'"
+                        >
+                          <ArrowUp class="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          @click="moveManualBindingGroup(binding, groupIndex, 1)"
+                          :disabled="groupIndex === binding.command_group_ids.length - 1"
+                          class="rounded p-1.5 text-slate-400 transition-colors"
+                          :class="groupIndex === binding.command_group_ids.length - 1 ? 'cursor-not-allowed opacity-40' : 'hover:bg-slate-100 hover:text-slate-600'"
+                        >
+                          <ArrowDown class="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          @click="removeManualBindingGroupById(binding, groupId)"
+                          class="rounded p-1.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
+                        >
+                          <Trash2 class="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="text-xs text-slate-400 italic">{{ t('settings.noCommandGroups') }}</div>
               </div>
             </div>
           </div>
@@ -1302,7 +1427,7 @@ onUnmounted(clearStatusMsg);
           <div class="flex items-center gap-3">
             <button @click="handleManualDeploy"
               class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-              :disabled="appStore.isManualDeploying || !selectedServerId || !manualLocalPath || !manualRemotePath">
+              :disabled="!canManualDeploy">
               <UploadCloud class="w-4 h-4" />
               {{ appStore.isManualDeploying ? t('settings.deploying') : t('settings.deployNow') }}
             </button>

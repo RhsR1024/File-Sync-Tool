@@ -250,10 +250,9 @@ export const messages = {
       // Manual task label
       sourceManual: 'Manual',
       sourceScheduled: 'Scheduled',
-      // Manual deploy command group
-      manualDeployCommandGroup: 'Command Group',
-      manualDeployCommandGroupNone: 'No commands',
-      manualDeploySelectGroup: 'Select a command group...',
+      // Manual deploy server bindings
+      manualDeployServerBindings: 'Target Servers & Command Groups',
+      manualDeployNoBindings: 'Click "Add Server Binding" to add a deployment target',
     },
     tools: {
       frameworkPassword: {
@@ -861,9 +860,8 @@ export const messages = {
       sourceManual: '手动',
       sourceScheduled: '定时',
       // 手动部署命令组
-      manualDeployCommandGroup: '命令组',
-      manualDeployCommandGroupNone: '不执行命令',
-      manualDeploySelectGroup: '选择命令组...',
+      manualDeployServerBindings: '目标服务器与命令组',
+      manualDeployNoBindings: '点击「添加服务器绑定」添加部署目标',
     },
     tools: {
       frameworkPassword: {

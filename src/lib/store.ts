@@ -32,7 +32,8 @@ export type TaskRecordPhase =
     | 'remote_deploying'
     | 'completed'
     | 'failed'
-    | 'cancelled';
+    | 'cancelled'
+    | 'interrupted';
 
 export interface RemoteServerRecord {
     key: string;
@@ -64,6 +65,9 @@ export interface TaskRecord {
     total: number;
     phase: TaskRecordPhase;
     source: 'manual' | 'scheduled';
+    /** Filter rules applied to this task (for display in the task table). */
+    filterExtensions: string[];
+    filterKeywords: string[];
 }
 
 export const appStore = reactive({
@@ -75,6 +79,7 @@ export const appStore = reactive({
     isManualDeploying: false,
     manualDeployMsg: '',
     maxLogLines: 200,
+    maxTaskRecords: 100,
 });
 
 function normalizePath(path: string | undefined): string {
@@ -89,7 +94,7 @@ function samePath(aRaw: string | undefined, bRaw: string | undefined): boolean {
 }
 
 function isTerminalPhase(phase: TaskRecordPhase): boolean {
-    return phase === 'completed' || phase === 'failed' || phase === 'cancelled';
+    return phase === 'completed' || phase === 'failed' || phase === 'cancelled' || phase === 'interrupted';
 }
 
 function pinTaskRecord(record: TaskRecord) {
@@ -181,6 +186,8 @@ function createTaskRecord(payload: {
         total: payload.total_bytes,
         phase: payload.phase,
         source: payload.source,
+        filterExtensions: [],
+        filterKeywords: [],
     };
 }
 
@@ -218,6 +225,7 @@ function mergeIntoPrimary(primary: TaskRecord, duplicate: TaskRecord) {
         completed: 5,
         failed: 6,
         cancelled: 7,
+        interrupted: 8,
     };
     const allowPromoteToTerminal = isTerminalPhase(primary.phase);
     const duplicateIsTerminal = isTerminalPhase(duplicate.phase);
@@ -324,7 +332,7 @@ export function upsertTaskRecord(payload: {
         });
 
         appStore.taskRecords.unshift(record);
-        if (appStore.taskRecords.length > 200) appStore.taskRecords.pop();
+        if (appStore.taskRecords.length > appStore.maxTaskRecords) appStore.taskRecords.pop();
         return;
     }
 
@@ -395,6 +403,8 @@ export function enqueueManualCopyTaskRecord(payload: {
     folder: string;
     sourcePath: string;
     localPath: string;
+    filterExtensions?: string[];
+    filterKeywords?: string[];
 }) {
     const existing = findManualByPaths(payload.sourcePath, payload.localPath, true);
     if (existing) {
@@ -414,6 +424,8 @@ export function enqueueManualCopyTaskRecord(payload: {
         phase: 'queued',
         source: 'manual',
     });
+    record.filterExtensions = payload.filterExtensions ?? [];
+    record.filterKeywords = payload.filterKeywords ?? [];
 
     appStore.taskRecords.unshift(record);
     if (appStore.taskRecords.length > 200) appStore.taskRecords.pop();
@@ -556,6 +568,17 @@ export function syncTaskRecordByLog(msg: string, level: string) {
 
     if (level === 'error' && lower.includes('deployment failed')) {
         touchTaskRecord(target);
+    }
+}
+
+export function markStaleTasksInterrupted() {
+    for (const record of appStore.taskRecords) {
+        if (record.phase === 'copying' || record.phase === 'paused' || record.phase === 'queued'
+            || record.phase === 'remote_pushing' || record.phase === 'remote_deploying') {
+            record.phase = 'interrupted';
+            record.speed = 0;
+            record.finishedAtMs = record.updatedAt;
+        }
     }
 }
 

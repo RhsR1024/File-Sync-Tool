@@ -30,14 +30,15 @@ function formatRecordSpeed(bytesPerSec: number): string {
 }
 
 function statusText(phase: TaskRecordPhase): string {
-  if (phase === 'queued') return '排队中';
-  if (phase === 'paused') return '暂停中';
-  if (phase === 'remote_pushing') return '远程推送中';
-  if (phase === 'remote_deploying') return '远程部署中';
-  if (phase === 'failed') return '失败';
-  if (phase === 'cancelled') return '已取消';
-  if (phase === 'completed') return '完成';
-  return '复制中';
+  if (phase === 'queued') return t('console.phaseQueued');
+  if (phase === 'paused') return t('console.phasePaused');
+  if (phase === 'remote_pushing') return t('console.phaseRemotePushing');
+  if (phase === 'remote_deploying') return t('console.phaseRemoteDeploying');
+  if (phase === 'failed') return t('console.phaseFailed');
+  if (phase === 'cancelled') return t('console.phaseCancelled');
+  if (phase === 'completed') return t('console.phaseCompleted');
+  if (phase === 'interrupted') return t('console.phaseInterrupted');
+  return t('console.phaseCopying');
 }
 
 function statusClass(phase: TaskRecordPhase): string {
@@ -48,6 +49,7 @@ function statusClass(phase: TaskRecordPhase): string {
   if (phase === 'failed') return 'bg-rose-50 text-rose-700';
   if (phase === 'cancelled') return 'bg-red-50 text-red-700';
   if (phase === 'completed') return 'bg-emerald-50 text-emerald-700';
+  if (phase === 'interrupted') return 'bg-orange-50 text-orange-700';
   return 'bg-blue-50 text-blue-700';
 }
 
@@ -59,6 +61,7 @@ function progressBarClass(phase: TaskRecordPhase): string {
   if (phase === 'failed') return 'bg-rose-500';
   if (phase === 'cancelled') return 'bg-red-500';
   if (phase === 'completed') return 'bg-emerald-500';
+  if (phase === 'interrupted') return 'bg-orange-500';
   return 'bg-blue-500';
 }
 

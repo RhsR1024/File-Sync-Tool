@@ -99,6 +99,10 @@ pub struct AppConfig {
     /// Larger values improve throughput on fast network shares. Default: 4096 (4 MB).
     #[serde(default = "default_copy_buffer_size_kb")]
     pub copy_buffer_size_kb: u32,
+
+    /// Maximum number of task records to persist and display. Default: 100.
+    #[serde(default = "default_max_task_records")]
+    pub max_task_records: u32,
 }
 
 fn default_stability_secs() -> u64 {
@@ -112,6 +116,9 @@ fn default_max_log_lines() -> u32 {
 }
 fn default_copy_buffer_size_kb() -> u32 {
     4096
+}
+fn default_max_task_records() -> u32 {
+    100
 }
 
 impl Default for AppConfig {
@@ -132,6 +139,7 @@ impl Default for AppConfig {
             close_to_tray: false,
             max_log_lines: 200,
             copy_buffer_size_kb: 4096,
+            max_task_records: 100,
         }
     }
 }

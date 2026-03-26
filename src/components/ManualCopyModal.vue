@@ -40,6 +40,10 @@ const sourceInputRef = ref<HTMLInputElement | null>(null);
 const existingTargetPreview = ref<ManualCopyPreview | null>(null);
 const pendingSubmitRequest = ref<{ source: string; target: string } | null>(null);
 
+// Filter selections: user picks which global extensions/keywords to apply (default: none selected = copy all)
+const selectedExtensions = ref<string[]>([]);
+const selectedKeywords = ref<string[]>([]);
+
 const canSubmit = computed(
   () =>
     sourcePath.value.trim().length > 0
@@ -48,21 +52,31 @@ const canSubmit = computed(
     && !existingTargetPreview.value
 );
 
+const globalExtensions = computed(() => config.value?.file_extensions.filter(Boolean) ?? []);
+const globalKeywords = computed(() => config.value?.filename_includes.filter(Boolean) ?? []);
+const hasAnyGlobalFilter = computed(() => globalExtensions.value.length > 0 || globalKeywords.value.length > 0);
+
+function toggleExtension(ext: string) {
+  const idx = selectedExtensions.value.indexOf(ext);
+  if (idx >= 0) selectedExtensions.value.splice(idx, 1);
+  else selectedExtensions.value.push(ext);
+}
+
+function toggleKeyword(kw: string) {
+  const idx = selectedKeywords.value.indexOf(kw);
+  if (idx >= 0) selectedKeywords.value.splice(idx, 1);
+  else selectedKeywords.value.push(kw);
+}
+
 const filterSummary = computed(() => {
-  if (!config.value) return t('manualCopy.readingRules');
-
-  const exts = config.value.file_extensions.filter(Boolean);
-  const keywords = config.value.filename_includes.filter(Boolean);
   const parts: string[] = [];
-
-  if (exts.length > 0) {
-    parts.push(t('manualCopy.extFilter', { value: exts.join(', ') }));
+  if (selectedExtensions.value.length > 0) {
+    parts.push(t('manualCopy.extFilter', { value: selectedExtensions.value.join(', ') }));
   }
-  if (keywords.length > 0) {
-    parts.push(t('manualCopy.keywordFilter', { value: keywords.join(', ') }));
+  if (selectedKeywords.value.length > 0) {
+    parts.push(t('manualCopy.keywordFilter', { value: selectedKeywords.value.join(', ') }));
   }
-
-  return parts.length > 0 ? parts.join(' | ') : t('manualCopy.noFilters');
+  return parts.length > 0 ? parts.join(' | ') : t('manualCopy.noFiltersActive');
 });
 
 const stabilitySummary = computed(() => {
@@ -164,12 +178,16 @@ function skipActionHint(preview: ManualCopyPreview): string {
 }
 
 async function enqueueCopy(source: string, target: string, overwriteExisting: boolean) {
-  const ack = await queueTemporaryCopy(source, target, overwriteExisting);
+  const exts = [...selectedExtensions.value];
+  const kws = [...selectedKeywords.value];
+  const ack = await queueTemporaryCopy(source, target, overwriteExisting, exts, kws);
 
   enqueueManualCopyTaskRecord({
     folder: ack.folder_name,
     sourcePath: ack.source_path,
     localPath: ack.local_path,
+    filterExtensions: exts,
+    filterKeywords: kws,
   });
 
   statusTone.value = 'success';
@@ -381,18 +399,92 @@ watch(() => props.isOpen, (open) => {
             {{ statusMsg }}
           </div>
 
-          <!-- Rules Card -->
-          <div class="bg-slate-50 rounded-xl border border-slate-200 p-5 space-y-3">
+          <!-- Filter Rules Card -->
+          <div class="bg-slate-50 rounded-xl border border-slate-200 p-5 space-y-4">
             <div class="flex items-center gap-2 text-slate-800 font-semibold">
               <ShieldCheck class="w-4 h-4 text-blue-600" />
-              {{ t('manualCopy.ruleCard') }}
+              {{ t('manualCopy.filterTitle') }}
             </div>
 
-            <div class="space-y-3 text-sm text-slate-600">
-              <div>
-                <div class="font-medium text-slate-700 mb-1">{{ t('manualCopy.filterTitle') }}</div>
-                <div>{{ filterSummary }}</div>
+            <div v-if="hasAnyGlobalFilter" class="space-y-3 text-sm">
+              <p class="text-slate-500">{{ t('manualCopy.filterPickHint') }}</p>
+
+              <!-- Extension checkboxes -->
+              <div v-if="globalExtensions.length > 0">
+                <div class="font-medium text-slate-700 mb-2">{{ t('manualCopy.extFilterLabel') }}</div>
+                <div class="flex flex-wrap gap-2">
+                  <label
+                    v-for="ext in globalExtensions"
+                    :key="'ext-' + ext"
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border cursor-pointer transition-colors select-none text-sm"
+                    :class="selectedExtensions.includes(ext)
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'"
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="selectedExtensions.includes(ext)"
+                      class="sr-only"
+                      @change="toggleExtension(ext)"
+                    />
+                    <span
+                      class="w-4 h-4 rounded border flex items-center justify-center text-xs shrink-0"
+                      :class="selectedExtensions.includes(ext)
+                        ? 'bg-blue-600 border-blue-600 text-white'
+                        : 'border-slate-300 bg-white'"
+                    >
+                      <svg v-if="selectedExtensions.includes(ext)" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+                    </span>
+                    {{ ext }}
+                  </label>
+                </div>
               </div>
+
+              <!-- Keyword checkboxes -->
+              <div v-if="globalKeywords.length > 0">
+                <div class="font-medium text-slate-700 mb-2">{{ t('manualCopy.keywordFilterLabel') }}</div>
+                <div class="flex flex-wrap gap-2">
+                  <label
+                    v-for="kw in globalKeywords"
+                    :key="'kw-' + kw"
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border cursor-pointer transition-colors select-none text-sm"
+                    :class="selectedKeywords.includes(kw)
+                      ? 'bg-purple-50 border-purple-300 text-purple-700'
+                      : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'"
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="selectedKeywords.includes(kw)"
+                      class="sr-only"
+                      @change="toggleKeyword(kw)"
+                    />
+                    <span
+                      class="w-4 h-4 rounded border flex items-center justify-center text-xs shrink-0"
+                      :class="selectedKeywords.includes(kw)
+                        ? 'bg-purple-600 border-purple-600 text-white'
+                        : 'border-slate-300 bg-white'"
+                    >
+                      <svg v-if="selectedKeywords.includes(kw)" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+                    </span>
+                    {{ kw }}
+                  </label>
+                </div>
+              </div>
+
+              <!-- Active filter summary -->
+              <div class="rounded-lg bg-white border border-slate-200 px-3 py-2 text-xs text-slate-500">
+                {{ filterSummary }}
+              </div>
+            </div>
+
+            <div v-else class="text-sm text-slate-500">
+              {{ t('manualCopy.noGlobalFilters') }}
+            </div>
+          </div>
+
+          <!-- Other Rules Card -->
+          <div class="bg-slate-50 rounded-xl border border-slate-200 p-5 space-y-3">
+            <div class="space-y-3 text-sm text-slate-600">
               <div>
                 <div class="font-medium text-slate-700 mb-1">{{ t('manualCopy.stabilityTitle') }}</div>
                 <div>{{ stabilitySummary }}</div>

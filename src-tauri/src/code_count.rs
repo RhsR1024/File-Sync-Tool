@@ -175,7 +175,9 @@ fn normalize_extensions(extensions: Vec<String>) -> HashSet<String> {
         .into_iter()
         .flat_map(|value| {
             value
-                .split(|ch: char| ch == ',' || ch == '，' || ch == ';' || ch == '；' || ch.is_whitespace())
+                .split(|ch: char| {
+                    ch == ',' || ch == '，' || ch == ';' || ch == '；' || ch.is_whitespace()
+                })
                 .map(str::to_string)
                 .collect::<Vec<String>>()
         })
@@ -341,8 +343,12 @@ impl CodeCountFileFilter {
         include_extensions: Option<Vec<String>>,
         exclude_extensions: Option<Vec<String>>,
     ) -> Option<Self> {
-        let include_extensions = include_extensions.map(normalize_extensions).unwrap_or_default();
-        let exclude_extensions = exclude_extensions.map(normalize_extensions).unwrap_or_default();
+        let include_extensions = include_extensions
+            .map(normalize_extensions)
+            .unwrap_or_default();
+        let exclude_extensions = exclude_extensions
+            .map(normalize_extensions)
+            .unwrap_or_default();
 
         if include_extensions.is_empty() && exclude_extensions.is_empty() {
             return None;
@@ -396,7 +402,9 @@ fn should_count_file(filename: &str, filter: Option<&CodeCountFileFilter>) -> bo
         return false;
     }
 
-    filter.map_or(true, |current_filter| current_filter.matches_extension(&extension))
+    filter.map_or(true, |current_filter| {
+        current_filter.matches_extension(&extension)
+    })
 }
 
 fn classify_lines(lines: &[String], file_ext: &str) -> Vec<LineKind> {
@@ -423,7 +431,11 @@ fn classify_lines(lines: &[String], file_ext: &str) -> Vec<LineKind> {
                 return LineKind::Code;
             };
 
-            if rule.single_line.iter().any(|prefix| trimmed.starts_with(prefix)) {
+            if rule
+                .single_line
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix))
+            {
                 return LineKind::Comment;
             }
 
@@ -492,7 +504,8 @@ fn scan_files(
         selection: Option<&CodeCountSelection>,
         filter: Option<&CodeCountFileFilter>,
     ) -> Result<(), String> {
-        let entries = fs::read_dir(dir).map_err(|e| format!("Failed to read directory {}: {}", dir.display(), e))?;
+        let entries = fs::read_dir(dir)
+            .map_err(|e| format!("Failed to read directory {}: {}", dir.display(), e))?;
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
@@ -502,7 +515,11 @@ fn scan_files(
                     walk(&path, root, files, selection, filter)?;
                 }
             } else {
-                let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let filename = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if !should_count_file(&filename, filter) {
                     continue;
                 }
@@ -557,7 +574,11 @@ fn collect_scope_entries(
                 continue;
             }
 
-            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             if !should_count_file(&filename, filter) {
                 continue;
             }
@@ -745,19 +766,14 @@ fn diff_sequences(old_lines: &[ComparableLine], new_lines: &[ComparableLine]) ->
 
         for k in (-(d as isize)..=(d as isize)).step_by(2) {
             let idx = (k + offset) as usize;
-            let mut x = if k == -(d as isize)
-                || (k != d as isize && v[idx - 1] < v[idx + 1])
-            {
+            let mut x = if k == -(d as isize) || (k != d as isize && v[idx - 1] < v[idx + 1]) {
                 v[idx + 1]
             } else {
                 v[idx - 1] + 1
             };
             let mut y = x - k;
 
-            while x < old_len
-                && y < new_len
-                && old_lines[x as usize] == new_lines[y as usize]
-            {
+            while x < old_len && y < new_len && old_lines[x as usize] == new_lines[y as usize] {
                 x += 1;
                 y += 1;
             }
@@ -852,7 +868,11 @@ fn has_changes(stats: &FileStats) -> bool {
         || stats.comment_modified > 0
 }
 
-fn calculate_file_stats(file_path: &str, old_content: &[String], new_content: &[String]) -> FileStats {
+fn calculate_file_stats(
+    file_path: &str,
+    old_content: &[String],
+    new_content: &[String],
+) -> FileStats {
     let mut stats = FileStats {
         file_path: file_path.to_string(),
         ..Default::default()
@@ -922,37 +942,46 @@ fn compare_directories(
 
     // Scan old directory (or skip for new project mode when old_path is empty)
     let old_files = if old_path.is_empty() {
-        emit_progress(app_handle, &CodeCountProgress {
-            phase: "scan".to_string(),
-            current_file: "New project mode...".to_string(),
-            processed_files: 1,
-            total_files: 2,
-            percent: 25,
-        });
+        emit_progress(
+            app_handle,
+            &CodeCountProgress {
+                phase: "scan".to_string(),
+                current_file: "New project mode...".to_string(),
+                processed_files: 1,
+                total_files: 2,
+                percent: 25,
+            },
+        );
         HashMap::new()
     } else {
         let old_root = Path::new(old_path);
         if !old_root.is_dir() {
             return Err(format!("Old path does not exist: {}", old_path));
         }
-        emit_progress(app_handle, &CodeCountProgress {
-            phase: "scan".to_string(),
-            current_file: "Scanning old directory...".to_string(),
-            processed_files: 0,
-            total_files: 2,
-            percent: 0,
-        });
+        emit_progress(
+            app_handle,
+            &CodeCountProgress {
+                phase: "scan".to_string(),
+                current_file: "Scanning old directory...".to_string(),
+                processed_files: 0,
+                total_files: 2,
+                percent: 0,
+            },
+        );
         scan_files(old_root, old_selection, filter)?
     };
 
     // Phase: scan new directory
-    emit_progress(app_handle, &CodeCountProgress {
-        phase: "scan".to_string(),
-        current_file: "Scanning new directory...".to_string(),
-        processed_files: 1,
-        total_files: 2,
-        percent: 25,
-    });
+    emit_progress(
+        app_handle,
+        &CodeCountProgress {
+            phase: "scan".to_string(),
+            current_file: "Scanning new directory...".to_string(),
+            processed_files: 1,
+            total_files: 2,
+            percent: 25,
+        },
+    );
     let new_files = scan_files(new_root, new_selection, filter)?;
 
     // Build union of all file paths
@@ -972,17 +1001,30 @@ fn compare_directories(
     for (idx, file_path) in all_files.iter().enumerate() {
         let processed = idx as i32;
         if processed % 50 == 0 || processed == total_files - 1 {
-            emit_progress(app_handle, &CodeCountProgress {
-                phase: "diff".to_string(),
-                current_file: file_path.clone(),
-                processed_files: processed,
-                total_files,
-                percent: if total_files > 0 { 25 + (processed * 75) / total_files } else { 25 },
-            });
+            emit_progress(
+                app_handle,
+                &CodeCountProgress {
+                    phase: "diff".to_string(),
+                    current_file: file_path.clone(),
+                    processed_files: processed,
+                    total_files,
+                    percent: if total_files > 0 {
+                        25 + (processed * 75) / total_files
+                    } else {
+                        25
+                    },
+                },
+            );
         }
 
-        let old_content = old_files.get(file_path).map(|f| &f.content).unwrap_or(&empty_content);
-        let new_content = new_files.get(file_path).map(|f| &f.content).unwrap_or(&empty_content);
+        let old_content = old_files
+            .get(file_path)
+            .map(|f| &f.content)
+            .unwrap_or(&empty_content);
+        let new_content = new_files
+            .get(file_path)
+            .map(|f| &f.content)
+            .unwrap_or(&empty_content);
 
         let stats = calculate_file_stats(file_path, old_content, new_content);
 
@@ -1008,19 +1050,24 @@ fn compare_directories(
     }
 
     result.operation_summary.added_total = result.summary.code_added + result.summary.comment_added;
-    result.operation_summary.deleted_total = result.summary.code_deleted + result.summary.comment_deleted;
-    result.operation_summary.modified_total = result.summary.code_modified + result.summary.comment_modified;
+    result.operation_summary.deleted_total =
+        result.summary.code_deleted + result.summary.comment_deleted;
+    result.operation_summary.modified_total =
+        result.summary.code_modified + result.summary.comment_modified;
     result.operation_summary.changed_total = result.operation_summary.added_total
         + result.operation_summary.deleted_total
         + result.operation_summary.modified_total;
 
-    emit_progress(app_handle, &CodeCountProgress {
-        phase: "completed".to_string(),
-        current_file: "Analysis completed".to_string(),
-        processed_files: total_files,
-        total_files,
-        percent: 100,
-    });
+    emit_progress(
+        app_handle,
+        &CodeCountProgress {
+            phase: "completed".to_string(),
+            current_file: "Analysis completed".to_string(),
+            processed_files: total_files,
+            total_files,
+            percent: 100,
+        },
+    );
 
     Ok(result)
 }
@@ -1101,10 +1148,7 @@ mod tests {
 
     #[test]
     fn replaced_line_counts_as_modification() {
-        let old_content = vec![
-            "echo \"line1\"".to_string(),
-            "echo \"line2\"".to_string(),
-        ];
+        let old_content = vec!["echo \"line1\"".to_string(), "echo \"line2\"".to_string()];
         let new_content = vec![
             "echo \"line1\"".to_string(),
             "echo \"line2 changed\"".to_string(),

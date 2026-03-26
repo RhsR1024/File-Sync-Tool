@@ -1089,11 +1089,12 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 p-8 overflow-y-auto">
-    <div class="mb-6 flex items-start justify-between gap-4">
+  <div class="flex-1 flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 overflow-y-auto">
+    <div class="max-w-6xl w-full mx-auto p-6 pb-10 space-y-5">
+    <div class="flex items-start justify-between gap-4">
       <div>
-        <h1 class="text-4xl font-bold text-slate-900 mb-2">{{ t('codeStatistics.title') }}</h1>
-        <p class="text-slate-600 text-lg">
+        <h1 class="text-2xl font-bold text-slate-900 mb-1">{{ t('codeStatistics.title') }}</h1>
+        <p class="text-slate-500 text-sm">
           {{
             mode === 'incremental'
               ? t('codeStatistics.modeIncrementalDesc')
@@ -1743,5 +1744,6 @@ onUnmounted(() => {
         </div>
       </template>
     </template>
+    </div>
   </div>
 </template>

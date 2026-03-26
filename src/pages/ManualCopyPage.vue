@@ -22,16 +22,19 @@ const filterSummary = computed(() => {
 
   const exts = config.value.file_extensions.filter(Boolean);
   const keywords = config.value.filename_includes.filter(Boolean);
-  const parts: string[] = [];
 
+  if (exts.length === 0 && keywords.length === 0) {
+    return t('manualCopy.noGlobalFilters');
+  }
+
+  const parts: string[] = [];
   if (exts.length > 0) {
     parts.push(t('manualCopy.extFilter', { value: exts.join(', ') }));
   }
   if (keywords.length > 0) {
     parts.push(t('manualCopy.keywordFilter', { value: keywords.join(', ') }));
   }
-
-  return parts.length > 0 ? parts.join(' | ') : t('manualCopy.noFilters');
+  return parts.join(' | ');
 });
 
 const stabilitySummary = computed(() => {
@@ -114,7 +117,7 @@ onMounted(loadConfig);
           </button>
         </div>
         <div class="text-sm text-slate-500 mt-4">
-          {{ t('manualCopy.modalDesc') }}
+          {{ t('manualCopy.modalTip') }}
         </div>
       </div>
 

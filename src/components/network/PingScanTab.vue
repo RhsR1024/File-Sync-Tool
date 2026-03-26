@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import { pingScan, cancelPingScan, saveTextFile, type PingResult, type PingScanRequest } from '../../lib/tauri';
 
 defineOptions({ name: 'PingScanTab' });
@@ -10,32 +11,36 @@ const { t } = useI18n();
 
 // ── Persistence helpers ───────────────────────────────────────────────────
 
-const STORAGE_KEY = 'networkTools.pingScanConfig';
+const KV_KEY = 'networkTools.pingScanConfig';
 
-function loadConfig() {
+async function saveConfig() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    await invoke('save_kv', {
+      key: KV_KEY,
+      value: { prefix: prefix.value, start: start.value, end: end.value, timeoutMs: timeoutMs.value },
+    });
   } catch { /* ignore */ }
-  return null;
-}
-
-function saveConfig() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    prefix: prefix.value,
-    start: start.value,
-    end: end.value,
-    timeoutMs: timeoutMs.value,
-  }));
 }
 
 // ── State ──────────────────────────────────────────────────────────────────
 
-const saved = loadConfig();
-const prefix = ref(saved?.prefix ?? '192.168.1');
-const start = ref(saved?.start ?? 1);
-const end = ref(saved?.end ?? 254);
-const timeoutMs = ref(saved?.timeoutMs ?? 1000);
+const prefix = ref('192.168.1');
+const start = ref(1);
+const end = ref(254);
+const timeoutMs = ref(1000);
+
+// Load persisted config on mount
+onMounted(async () => {
+  try {
+    const saved = await invoke<{ prefix?: string; start?: number; end?: number; timeoutMs?: number } | null>('load_kv', { key: KV_KEY });
+    if (saved) {
+      if (saved.prefix !== undefined) prefix.value = saved.prefix;
+      if (saved.start !== undefined) start.value = saved.start;
+      if (saved.end !== undefined) end.value = saved.end;
+      if (saved.timeoutMs !== undefined) timeoutMs.value = saved.timeoutMs;
+    }
+  } catch { /* ignore */ }
+});
 
 // Persist on change
 watch([prefix, start, end, timeoutMs], saveConfig);

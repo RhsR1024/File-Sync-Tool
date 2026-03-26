@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted, onActivated, watch, computed } from 'vue';
 import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2, FolderOpen, HardDrive, Cloud, Info, X } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
-import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, type AppConfig, type DeployServer, type ScanTask } from '@/lib/tauri';
+import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, openPathParent, type AppConfig, type DeployServer, type ScanTask } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { appStore, addLog, markTaskRecordCancelled, setTaskRecordPaused, type TaskRecord } from '@/lib/store';
 import { startScheduler, stopScheduler, executeScan } from '@/lib/scheduler';
@@ -17,10 +17,11 @@ const config = ref<AppConfig | null>(null);
 const isCancelling = ref(false);
 const selectedPathRecord = ref<TaskRecord | null>(null);
 const copyToastMessage = ref('');
+const copyToastTone = ref<'success' | 'error'>('success');
 let copyToastTimer: ReturnType<typeof setTimeout> | null = null;
 const taskTableStyle = {
-  gridTemplateColumns: '140px 1fr 100px 196px 100px 116px 92px 100px',
-  minWidth: '900px',
+  gridTemplateColumns: '140px 1fr 100px 196px 100px 116px 92px 140px 100px 120px',
+  minWidth: '1180px',
 };
 
 // Manual copy modal
@@ -31,11 +32,9 @@ const orderedRecords = computed(() =>
   [...appStore.taskRecords].sort((a, b) => (b.startedAtMs || 0) - (a.startedAtMs || 0))
 );
 
-const activeActionRecord = computed(() =>
-  orderedRecords.value.find(r => r.phase === 'copying' || r.phase === 'paused')
-);
-
-const isPaused = computed(() => activeActionRecord.value?.phase === 'paused');
+function isActivePhase(phase: string): boolean {
+  return phase === 'copying' || phase === 'paused';
+}
 
 function normalizePath(path: string | undefined): string {
   if (!path) return '';
@@ -68,8 +67,9 @@ function closePathInfo() {
   selectedPathRecord.value = null;
 }
 
-function showCopyToast(message: string) {
+function showCopyToast(message: string, tone: 'success' | 'error' = 'success') {
   copyToastMessage.value = message;
+  copyToastTone.value = tone;
   if (copyToastTimer) {
     clearTimeout(copyToastTimer);
   }
@@ -86,9 +86,8 @@ function liveProgress(rec: TaskRecord) {
   return null;
 }
 
-async function handleCancel() {
-  const target = activeActionRecord.value;
-  if (!target || isCancelling.value) return;
+async function handleCancel(target: TaskRecord) {
+  if (isCancelling.value) return;
 
   isCancelling.value = true;
   const msg = `${t('console.cancelling')} (${target.folder})`;
@@ -104,11 +103,8 @@ async function handleCancel() {
   }
 }
 
-async function togglePause() {
-  const target = activeActionRecord.value;
-  if (!target) return;
-
-  if (isPaused.value) {
+async function togglePause(target: TaskRecord) {
+  if (target.phase === 'paused') {
     await resumeScan();
     setTaskRecordPaused(target.folder, false);
     const msg = `${t('console.resumed')} (${target.folder})`;
@@ -147,6 +143,7 @@ function formatStatus(phase: TaskRecord['phase']) {
   if (phase === 'failed') return t('console.phaseFailed');
   if (phase === 'cancelled') return t('console.phaseCancelled');
   if (phase === 'completed') return t('console.phaseCompleted');
+  if (phase === 'interrupted') return t('console.phaseInterrupted');
   return t('console.phaseCopying');
 }
 
@@ -158,6 +155,7 @@ function statusBadgeClass(phase: TaskRecord['phase']) {
   if (phase === 'failed') return 'bg-rose-50 text-rose-600 ring-rose-200';
   if (phase === 'cancelled') return 'bg-red-50 text-red-600 ring-red-200';
   if (phase === 'completed') return 'bg-emerald-50 text-emerald-700 ring-emerald-200';
+  if (phase === 'interrupted') return 'bg-orange-50 text-orange-600 ring-orange-200';
   return 'bg-blue-50 text-blue-700 ring-blue-200';
 }
 
@@ -169,6 +167,7 @@ function progressBarClass(phase: TaskRecord['phase']) {
   if (phase === 'failed') return 'bg-gradient-to-r from-rose-400 to-rose-500';
   if (phase === 'cancelled') return 'bg-gradient-to-r from-red-400 to-red-500';
   if (phase === 'completed') return 'bg-gradient-to-r from-emerald-400 to-emerald-500';
+  if (phase === 'interrupted') return 'bg-gradient-to-r from-orange-400 to-orange-500';
   return 'bg-gradient-to-r from-blue-400 to-blue-500';
 }
 
@@ -177,6 +176,7 @@ function progressPercentColor(rec: TaskRecord): string {
   if (rec.phase === 'completed' || pv >= 100) return 'text-emerald-600';
   if (rec.phase === 'failed') return 'text-rose-600';
   if (rec.phase === 'cancelled') return 'text-red-500';
+  if (rec.phase === 'interrupted') return 'text-orange-500';
   if (rec.phase === 'paused') return 'text-amber-600';
   if (rec.phase === 'queued') return 'text-slate-500';
   return 'text-slate-700';
@@ -225,27 +225,34 @@ function displaySizeMerged(rec: TaskRecord): string {
 }
 
 function displaySpeed(rec: TaskRecord): string {
-  if (rec.phase === 'queued') return '-';
+  if (rec.phase === 'queued' || rec.phase === 'interrupted') return '-';
   if (rec.phase === 'completed' || rec.phase === 'failed' || rec.phase === 'cancelled' || rec.phase === 'remote_deploying') return '-';
   if (rec.phase === 'paused') return '-';
   return formatSpeed(rec.speed);
 }
 
 function displayEta(rec: TaskRecord): string {
-  if (rec.phase === 'queued') return '-';
+  if (rec.phase === 'queued' || rec.phase === 'interrupted') return '-';
   if (rec.phase === 'completed' || rec.phase === 'failed' || rec.phase === 'cancelled' || rec.phase === 'remote_deploying') return '-';
   if (rec.phase === 'paused') return '-';
   return formatDuration(liveProgress(rec)?.eta || 0);
 }
 
 function displayElapsed(rec: TaskRecord): string {
-  if (rec.phase === 'completed' || rec.phase === 'failed' || rec.phase === 'cancelled') {
+  if (rec.phase === 'completed' || rec.phase === 'failed' || rec.phase === 'cancelled' || rec.phase === 'interrupted') {
     const endMs = rec.finishedAtMs || rec.updatedAt;
     return formatDuration((endMs - rec.startedAtMs) / 1000);
   }
   const elapsed = liveProgress(rec)?.elapsed || 0;
   if (elapsed > 0) return formatDuration(elapsed);
   return formatDuration((Date.now() - rec.startedAtMs) / 1000);
+}
+
+function formatFilterRules(rec: TaskRecord): string {
+  const parts: string[] = [];
+  if (rec.filterExtensions?.length) parts.push(rec.filterExtensions.join(', '));
+  if (rec.filterKeywords?.length) parts.push(rec.filterKeywords.join(', '));
+  return parts.join(' | ') || '-';
 }
 
 function displayRemoteTarget(server: DeployServer, folder: string): string {
@@ -294,6 +301,18 @@ async function copyToClipboard(text: string) {
     showCopyToast(t('settings.pathCopied'));
   } catch (err) {
     addLog(`Failed to copy: ${err}`, 'error');
+    showCopyToast(String(err), 'error');
+  }
+}
+
+async function openFolder(path: string) {
+  if (!path || path === '-') return;
+  try {
+    await openPathParent(path);
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    addLog(t('console.openFolderFailed', { error: errorMessage }), 'error');
+    showCopyToast(t('console.openFolderFailed', { error: errorMessage }), 'error');
   }
 }
 
@@ -326,9 +345,10 @@ onUnmounted(() => {
   }
 });
 
-watch(activeActionRecord, (val) => {
-  if (!val) isCancelling.value = false;
-});
+watch(
+  () => orderedRecords.value.some(r => isActivePhase(r.phase)),
+  (hasActive) => { if (!hasActive) isCancelling.value = false; },
+);
 </script>
 
 <template>
@@ -428,7 +448,9 @@ watch(activeActionRecord, (val) => {
             <div class="text-center">{{ t('console.speed') }}</div>
             <div class="text-center">{{ t('console.eta') }}</div>
             <div class="text-center">{{ t('console.elapsed') }}</div>
+            <div class="text-center">{{ t('console.filterRules') }}</div>
             <div class="text-center">{{ t('console.pathInfo') }}</div>
+            <div class="text-center">{{ t('console.actions') }}</div>
           </div>
 
           <!-- Table Body -->
@@ -506,6 +528,14 @@ watch(activeActionRecord, (val) => {
                   {{ displayElapsed(rec) }}
                 </div>
 
+                <!-- Filter Rules -->
+                <div class="flex justify-center">
+                  <div v-if="rec.filterExtensions?.length || rec.filterKeywords?.length" class="text-[11px] text-slate-500 text-center leading-relaxed max-w-[130px] truncate" :title="formatFilterRules(rec)">
+                    {{ formatFilterRules(rec) }}
+                  </div>
+                  <span v-else class="text-[11px] text-slate-400">{{ rec.source === 'manual' ? t('console.noFilter') : t('console.globalFilter') }}</span>
+                </div>
+
                 <!-- Path Info Action -->
                 <div class="flex justify-center">
                   <button
@@ -517,31 +547,35 @@ watch(activeActionRecord, (val) => {
                     <span>{{ t('console.viewPathInfo') }}</span>
                   </button>
                 </div>
+
+                <!-- Per-task Actions -->
+                <div class="flex justify-center gap-1.5">
+                  <template v-if="isActivePhase(rec.phase)">
+                    <button
+                      @click="togglePause(rec)"
+                      class="inline-flex items-center justify-center rounded-md border p-1.5 transition-colors active:scale-95"
+                      :class="rec.phase === 'paused'
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                        : 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'"
+                      :title="rec.phase === 'paused' ? t('console.resume') : t('console.pause')"
+                    >
+                      <component :is="rec.phase === 'paused' ? PlayCircle : Pause" class="w-4 h-4" />
+                    </button>
+                    <button
+                      @click="handleCancel(rec)"
+                      class="inline-flex items-center justify-center rounded-md border border-red-200 bg-white text-red-600 p-1.5 hover:bg-red-50 hover:border-red-300 transition-colors active:scale-95"
+                      :disabled="isCancelling"
+                      :title="t('console.cancel')"
+                    >
+                      <XCircle class="w-4 h-4" />
+                    </button>
+                  </template>
+                  <span v-else class="text-xs text-slate-400">-</span>
+                </div>
               </div>
             </div>
           </div>
           </div><!-- /overflow-x-auto -->
-
-          <!-- Action Bar -->
-          <div v-if="activeActionRecord" class="p-3 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
-            <button
-              @click="togglePause"
-              class="px-4 py-2 rounded-lg font-medium border flex items-center gap-2 transition-colors shadow-sm active:scale-95"
-              :class="isPaused ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'"
-            >
-              <component :is="isPaused ? PlayCircle : Pause" class="w-4 h-4" />
-              {{ isPaused ? t('console.resume') : t('console.pause') }}
-            </button>
-
-            <button
-              @click="handleCancel"
-              class="px-4 py-2 rounded-lg font-medium bg-white text-red-600 border border-red-200 hover:bg-red-50 hover:border-red-300 transition-colors shadow-sm active:scale-95 flex items-center gap-2"
-              :disabled="isCancelling"
-            >
-              <XCircle class="w-4 h-4" />
-              {{ isCancelling ? t('console.cancelling') : t('console.cancel') }}
-            </button>
-          </div>
         </div>
       </div>
     </div>
@@ -561,9 +595,18 @@ watch(activeActionRecord, (val) => {
     >
       <div
         v-if="copyToastMessage"
-        class="pointer-events-none fixed right-6 top-6 z-[60] rounded-xl border border-emerald-200 bg-white/95 px-4 py-3 text-sm font-medium text-emerald-700 shadow-lg shadow-emerald-100 backdrop-blur"
+        class="pointer-events-none fixed left-1/2 top-6 z-[60] w-[min(calc(100vw-2rem),32rem)] -translate-x-1/2 rounded-2xl border px-4 py-3 text-sm font-medium shadow-2xl backdrop-blur"
+        :class="copyToastTone === 'success'
+          ? 'border-emerald-200 bg-emerald-50/95 text-emerald-700 shadow-emerald-200/70'
+          : 'border-rose-200 bg-rose-50/95 text-rose-700 shadow-rose-200/70'"
       >
-        {{ copyToastMessage }}
+        <div class="flex items-start gap-2.5">
+          <span
+            class="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
+            :class="copyToastTone === 'success' ? 'bg-emerald-500' : 'bg-rose-500'"
+          ></span>
+          <span class="leading-5">{{ copyToastMessage }}</span>
+        </div>
       </div>
     </Transition>
 
@@ -607,14 +650,22 @@ watch(activeActionRecord, (val) => {
               <div class="flex-1 break-all font-mono text-[12px] leading-6 text-slate-700">
                 {{ selectedPathRecord.sourcePath || '-' }}
               </div>
-              <button
-                v-if="selectedPathRecord.sourcePath"
-                @click="copyToClipboard(selectedPathRecord.sourcePath)"
-                class="mt-4 inline-flex items-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
-              >
-                <Copy class="h-3.5 w-3.5" />
-                {{ t('settings.copyPath') }}
-              </button>
+              <div v-if="selectedPathRecord.sourcePath" class="mt-4 flex flex-wrap gap-2">
+                <button
+                  @click="copyToClipboard(selectedPathRecord.sourcePath)"
+                  class="inline-flex items-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
+                >
+                  <Copy class="h-3.5 w-3.5" />
+                  {{ t('settings.copyPath') }}
+                </button>
+                <button
+                  @click="openFolder(selectedPathRecord.sourcePath)"
+                  class="inline-flex items-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-orange-200 hover:bg-orange-50 hover:text-orange-600"
+                >
+                  <FolderOpen class="h-3.5 w-3.5" />
+                  {{ t('settings.openFolder') }}
+                </button>
+              </div>
             </div>
 
             <div class="flex min-h-[160px] flex-col rounded-xl border border-slate-200 bg-slate-50 p-4">
@@ -625,14 +676,22 @@ watch(activeActionRecord, (val) => {
               <div class="flex-1 break-all font-mono text-[12px] leading-6 text-slate-700">
                 {{ selectedPathRecord.localPath || '-' }}
               </div>
-              <button
-                v-if="selectedPathRecord.localPath"
-                @click="copyToClipboard(selectedPathRecord.localPath)"
-                class="mt-4 inline-flex items-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
-              >
-                <Copy class="h-3.5 w-3.5" />
-                {{ t('settings.copyPath') }}
-              </button>
+              <div v-if="selectedPathRecord.localPath" class="mt-4 flex flex-wrap gap-2">
+                <button
+                  @click="copyToClipboard(selectedPathRecord.localPath)"
+                  class="inline-flex items-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
+                >
+                  <Copy class="h-3.5 w-3.5" />
+                  {{ t('settings.copyPath') }}
+                </button>
+                <button
+                  @click="openFolder(selectedPathRecord.localPath)"
+                  class="inline-flex items-center gap-2 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600"
+                >
+                  <FolderOpen class="h-3.5 w-3.5" />
+                  {{ t('settings.openFolder') }}
+                </button>
+              </div>
             </div>
 
             <div class="flex min-h-[160px] flex-col rounded-xl border border-slate-200 bg-slate-50 p-4">

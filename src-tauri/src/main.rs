@@ -1463,6 +1463,8 @@ fn main() {
             code_count::code_count_list_scope_tree,
             persist::save_ui_state,
             persist::load_ui_state,
+            persist::save_kv,
+            persist::load_kv,
             network::ping_scan,
             network::cancel_ping_scan,
             network::get_tcp_connections,
