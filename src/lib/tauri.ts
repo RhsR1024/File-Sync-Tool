@@ -106,6 +106,14 @@ export async function resumeScan(): Promise<void> {
   await invoke('resume_scan');
 }
 
+export async function skipCurrentCopy(): Promise<void> {
+  await invoke('skip_current_copy');
+}
+
+export async function removeFromScanQueue(folder: string): Promise<void> {
+  await invoke('remove_from_scan_queue', { folder });
+}
+
 export async function addSystemEvent(action: string, desc: string): Promise<void> {
   await invoke('add_system_event', { action, desc });
 }

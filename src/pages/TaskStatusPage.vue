@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, onActivated, watch, computed } from 'vue';
-import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2, FolderOpen, HardDrive, Cloud, Info, X } from 'lucide-vue-next';
+import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2, FolderOpen, HardDrive, Cloud, Info, X, SkipForward } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
-import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, openPathParent, type AppConfig, type DeployServer, type ScanTask } from '@/lib/tauri';
+import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, openPathParent, skipCurrentCopy, removeFromScanQueue, type AppConfig, type DeployServer, type ScanTask } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
-import { appStore, addLog, markTaskRecordCancelled, setTaskRecordPaused, type TaskRecord } from '@/lib/store';
+import { appStore, addLog, markTaskRecordCancelled, setTaskRecordPaused, markTaskRecordSkipped, removeQueuedTaskRecord, type TaskRecord } from '@/lib/store';
 import { startScheduler, stopScheduler, executeScan } from '@/lib/scheduler';
 
 defineOptions({
@@ -33,7 +33,7 @@ const orderedRecords = computed(() =>
 );
 
 function isActivePhase(phase: string): boolean {
-  return phase === 'copying' || phase === 'paused';
+  return phase === 'copying' || phase === 'paused' || phase === 'queued';
 }
 
 function normalizePath(path: string | undefined): string {
@@ -100,6 +100,32 @@ async function handleCancel(target: TaskRecord) {
     addLog(`Cancel failed: ${e}`, 'error');
   } finally {
     isCancelling.value = false;
+  }
+}
+
+async function handleSkip(target: TaskRecord) {
+  if (isCancelling.value) return;
+  isCancelling.value = true;
+  const msg = `${t('console.skipping')} (${target.folder})`;
+  addLog(msg, 'info');
+  markTaskRecordSkipped(target.folder);
+
+  try {
+    await skipCurrentCopy();
+  } catch (e) {
+    addLog(`Skip failed: ${e}`, 'error');
+  } finally {
+    isCancelling.value = false;
+  }
+}
+
+async function handleRemoveFromQueue(target: TaskRecord) {
+  try {
+    await removeFromScanQueue(target.folder);
+    removeQueuedTaskRecord(target.folder);
+    addLog(`${t('console.removedFromQueue')} (${target.folder})`, 'info');
+  } catch (e) {
+    addLog(`Remove failed: ${e}`, 'error');
   }
 }
 
@@ -550,7 +576,16 @@ watch(
 
                 <!-- Per-task Actions -->
                 <div class="flex justify-center gap-1.5">
-                  <template v-if="isActivePhase(rec.phase)">
+                  <template v-if="rec.phase === 'queued'">
+                    <button
+                      @click="handleRemoveFromQueue(rec)"
+                      class="inline-flex items-center justify-center rounded-md border border-red-200 bg-white text-red-600 p-1.5 hover:bg-red-50 hover:border-red-300 transition-colors active:scale-95"
+                      :title="t('console.removeFromQueue')"
+                    >
+                      <XCircle class="w-4 h-4" />
+                    </button>
+                  </template>
+                  <template v-else-if="rec.phase === 'copying' || rec.phase === 'paused'">
                     <button
                       @click="togglePause(rec)"
                       class="inline-flex items-center justify-center rounded-md border p-1.5 transition-colors active:scale-95"
@@ -560,6 +595,14 @@ watch(
                       :title="rec.phase === 'paused' ? t('console.resume') : t('console.pause')"
                     >
                       <component :is="rec.phase === 'paused' ? PlayCircle : Pause" class="w-4 h-4" />
+                    </button>
+                    <button
+                      @click="handleSkip(rec)"
+                      class="inline-flex items-center justify-center rounded-md border border-orange-200 bg-white text-orange-600 p-1.5 hover:bg-orange-50 hover:border-orange-300 transition-colors active:scale-95"
+                      :disabled="isCancelling"
+                      :title="t('console.skipCurrent')"
+                    >
+                      <SkipForward class="w-4 h-4" />
                     </button>
                     <button
                       @click="handleCancel(rec)"

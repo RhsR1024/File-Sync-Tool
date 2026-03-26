@@ -484,6 +484,24 @@ export function markTaskRecordCancelled(folder?: string) {
     touchTaskRecord(target);
 }
 
+export function markTaskRecordSkipped(folder?: string) {
+    const target = findTargetRecord(folder, appStore.progress?.localPath);
+    if (!target) return;
+    target.phase = 'cancelled';
+    target.speed = 0;
+    target.finishedAtMs = Date.now();
+    touchTaskRecord(target);
+}
+
+export function removeQueuedTaskRecord(folder: string) {
+    const idx = appStore.taskRecords.findIndex(
+        r => r.folder === folder && r.phase === 'queued'
+    );
+    if (idx >= 0) {
+        appStore.taskRecords.splice(idx, 1);
+    }
+}
+
 function extractFolderByPrefix(msg: string, prefix: string): string | undefined {
     if (!msg.startsWith(prefix)) return undefined;
     const folder = msg.slice(prefix.length).trim();
@@ -524,6 +542,12 @@ export function syncTaskRecordByLog(msg: string, level: string) {
         || cancelledFolder
     ) {
         markTaskRecordCancelled(cancelledFolder);
+        return;
+    }
+
+    const skippedFolder = extractFolderByPrefix(msg, 'Copy skipped:');
+    if (skippedFolder) {
+        markTaskRecordSkipped(skippedFolder);
         return;
     }
 

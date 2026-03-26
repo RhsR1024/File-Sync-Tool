@@ -3,13 +3,14 @@ import Sidebar from '@/components/Sidebar.vue';
 import { RouterView } from 'vue-router';
 import { onMounted, onUnmounted, watch } from 'vue';
 import { listen } from '@tauri-apps/api/event';
-import { appStore, addLog, upsertTaskRecord, syncTaskRecordByLog, updateManualCopyTaskState, markStaleTasksInterrupted } from '@/lib/store';
+import { appStore, addLog, upsertTaskRecord, syncTaskRecordByLog, updateManualCopyTaskState, markStaleTasksInterrupted, type TaskRecord } from '@/lib/store';
 import { getConfig, saveUiState, loadUiState, confirmQuit } from '@/lib/tauri';
 import { startScheduler } from '@/lib/scheduler';
 
 let unlistenLog: (() => void) | null = null;
 let unlistenProgress: (() => void) | null = null;
 let unlistenManualCopyState: (() => void) | null = null;
+let unlistenScanQueued: (() => void) | null = null;
 let unlistenBeforeQuit: (() => void) | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -108,6 +109,42 @@ onMounted(async () => {
         });
     });
 
+    unlistenScanQueued = await listen('scan-queued', (event: { payload: { folder: string; local_path: string; remote_path: string } }) => {
+        const p = event.payload;
+        const existing = appStore.taskRecords.find(
+            r => r.folder === p.folder && (r.phase === 'queued' || r.phase === 'copying' || r.phase === 'paused')
+        );
+        if (existing) return;
+
+        const now = Date.now();
+        const record: TaskRecord = {
+            id: `${p.folder}-${now}`,
+            startTime: new Date(now).toLocaleString(),
+            startedAtMs: now,
+            updatedAt: now,
+            folder: p.folder,
+            sourcePath: p.remote_path,
+            localPath: p.local_path,
+            copyPercentage: 0,
+            copyCompleted: false,
+            copyTotal: 0,
+            hasRemote: false,
+            remoteServers: [],
+            remoteExpanded: false,
+            deployPercentage: 0,
+            deployCompleted: false,
+            speed: 0,
+            copied: 0,
+            total: 0,
+            phase: 'queued' as const,
+            source: 'scheduled' as const,
+            filterExtensions: [],
+            filterKeywords: [],
+        };
+        appStore.taskRecords.unshift(record);
+        if (appStore.taskRecords.length > appStore.maxTaskRecords) appStore.taskRecords.pop();
+    });
+
     // Save state before app quits, then confirm the exit
     unlistenBeforeQuit = await listen('before-quit', async () => {
         if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
@@ -132,6 +169,7 @@ onUnmounted(() => {
     if (unlistenLog) unlistenLog();
     if (unlistenProgress) unlistenProgress();
     if (unlistenManualCopyState) unlistenManualCopyState();
+    if (unlistenScanQueued) unlistenScanQueued();
     if (unlistenBeforeQuit) unlistenBeforeQuit();
 });
 </script>

@@ -77,6 +77,11 @@ export const messages = {
       phaseCancelled: 'Cancelled',
       phaseInterrupted: 'Interrupted',
       phaseCompleted: 'Completed',
+      skipCurrent: 'Skip',
+      skipping: 'Skipping...',
+      removeFromQueue: 'Remove from queue',
+      removedFromQueue: 'Removed from queue',
+      phaseSkipped: 'Skipped',
     },
     settings: {
       title: 'Settings',
@@ -686,6 +691,11 @@ export const messages = {
       phaseCancelled: '已取消',
       phaseInterrupted: '已中断',
       phaseCompleted: '已完成',
+      skipCurrent: '跳过',
+      skipping: '正在跳过...',
+      removeFromQueue: '移出队列',
+      removedFromQueue: '已移出队列',
+      phaseSkipped: '已跳过',
     },
     settings: {
       title: '设置',
