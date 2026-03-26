@@ -8,6 +8,7 @@ use regex::Regex;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant, SystemTime};
@@ -40,6 +41,29 @@ struct ProgressEvent {
     local_path: String,
     remote_path: String,
     source: String, // "manual" or "scheduled"
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+struct ScanQueuedEvent {
+    folder: String,
+    local_path: String,
+    remote_path: String,
+}
+
+fn emit_scan_queued<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    folder: &str,
+    local_path: &str,
+    remote_path: &str,
+) {
+    let _ = app_handle.emit(
+        "scan-queued",
+        ScanQueuedEvent {
+            folder: folder.to_string(),
+            local_path: local_path.to_string(),
+            remote_path: remote_path.to_string(),
+        },
+    );
 }
 
 #[derive(Debug)]
@@ -179,6 +203,7 @@ fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
     from: P,
     to: Q,
     should_cancel: &Arc<AtomicBool>,
+    should_skip: &Arc<AtomicBool>,
     is_paused: &Arc<AtomicBool>,
     buffer_size: usize,
     on_progress: &mut dyn FnMut(u64), // bytes copied delta
@@ -190,6 +215,11 @@ fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
     let mut total_copied = 0;
 
     loop {
+        // Check skip
+        if should_skip.load(Ordering::SeqCst) {
+            return Err("Skipped by user".to_string());
+        }
+
         // Check cancel
         if should_cancel.load(Ordering::SeqCst) {
             return Err("Cancelled by user".to_string());
@@ -197,6 +227,9 @@ fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
 
         // Check pause
         while is_paused.load(Ordering::SeqCst) {
+            if should_skip.load(Ordering::SeqCst) {
+                return Err("Skipped by user".to_string());
+            }
             if should_cancel.load(Ordering::SeqCst) {
                 return Err("Cancelled by user".to_string());
             }
@@ -233,6 +266,7 @@ fn copy_file_with_overwrite_mode<P: AsRef<Path>, Q: AsRef<Path>>(
     to: Q,
     overwrite_existing: bool,
     should_cancel: &Arc<AtomicBool>,
+    should_skip: &Arc<AtomicBool>,
     is_paused: &Arc<AtomicBool>,
     buffer_size: usize,
     on_progress: &mut dyn FnMut(u64),
@@ -252,6 +286,7 @@ fn copy_file_with_overwrite_mode<P: AsRef<Path>, Q: AsRef<Path>>(
             from,
             &temp_target,
             should_cancel,
+            should_skip,
             is_paused,
             buffer_size,
             on_progress,
@@ -279,6 +314,7 @@ fn copy_file_with_overwrite_mode<P: AsRef<Path>, Q: AsRef<Path>>(
             from,
             target,
             should_cancel,
+            should_skip,
             is_paused,
             buffer_size,
             on_progress,
@@ -295,6 +331,7 @@ async fn perform_copy<R: tauri::Runtime>(
     config: &AppConfig,
     live_config: Arc<Mutex<AppConfig>>,
     should_cancel: Arc<AtomicBool>,
+    should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     overwrite_existing: bool,
     result: &mut ScanResult,
@@ -375,6 +412,7 @@ async fn perform_copy<R: tauri::Runtime>(
     let recent_file_guard_mins = config.recent_file_guard_mins;
     let copy_buffer_size = (config.copy_buffer_size_kb as usize).max(64) * 1024;
     let should_cancel_clone = should_cancel.clone();
+    let should_skip_clone = should_skip.clone();
     let is_paused_clone = is_paused.clone();
     let live_config_clone = live_config.clone();
     let task_id_clone = task_id.clone();
@@ -609,6 +647,12 @@ async fn perform_copy<R: tauri::Runtime>(
             );
             let intervals = stability_check_secs * 5;
             for _ in 0..intervals {
+                if should_skip_clone.load(Ordering::SeqCst) {
+                    return Err(fs_extra::error::Error::new(
+                        fs_extra::error::ErrorKind::Interrupted,
+                        "Skipped by user",
+                    ));
+                }
                 if should_cancel_clone.load(Ordering::SeqCst) {
                     return Err(fs_extra::error::Error::new(
                         fs_extra::error::ErrorKind::Interrupted,
@@ -735,6 +779,31 @@ async fn perform_copy<R: tauri::Runtime>(
         let mut copied_files_list = Vec::new();
 
         for (src, _size) in filtered_files {
+            // Check skip before starting file
+            if should_skip_clone.load(Ordering::SeqCst) {
+                if !copied_files_list.is_empty() {
+                    add_history_entry(
+                        &handle,
+                        HistoryEntry {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            timestamp: Local::now().to_rfc3339(),
+                            action_type: "COPY_SKIPPED".to_string(),
+                            description: format!("Skipped copying {}", folder_name_clone),
+                            folder_name: format!("{} (Skipped)", folder_name_clone),
+                            source_path: source_path_clone.to_string_lossy().to_string(),
+                            target_path: target_full_path_clone.to_string_lossy().to_string(),
+                            copied_files_count: copied_files_list.len(),
+                            total_size: copied_bytes_total,
+                            files: copied_files_list.clone(),
+                        },
+                    );
+                }
+                return Err(fs_extra::error::Error::new(
+                    fs_extra::error::ErrorKind::Interrupted,
+                    "Skipped by user",
+                ));
+            }
+
             // Check cancel before starting file
             if should_cancel_clone.load(Ordering::SeqCst) {
                 // Log partial
@@ -782,6 +851,7 @@ async fn perform_copy<R: tauri::Runtime>(
                 &dst,
                 overwrite_existing,
                 &should_cancel_clone,
+                &should_skip_clone,
                 &is_paused_clone,
                 copy_buffer_size,
                 &mut |delta| {
@@ -795,7 +865,32 @@ async fn perform_copy<R: tauri::Runtime>(
                     copied_files_list.push(file_name_display);
                 }
                 Err(e) => {
-                    if e.contains("Cancelled") {
+                    if e.contains("Skipped") {
+                        // Save partial
+                        if !copied_files_list.is_empty() {
+                            add_history_entry(
+                                &handle,
+                                HistoryEntry {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    timestamp: Local::now().to_rfc3339(),
+                                    action_type: "COPY_SKIPPED".to_string(),
+                                    description: format!("Skipped copying {}", folder_name_clone),
+                                    folder_name: format!("{} (Skipped)", folder_name_clone),
+                                    source_path: source_path_clone.to_string_lossy().to_string(),
+                                    target_path: target_full_path_clone
+                                        .to_string_lossy()
+                                        .to_string(),
+                                    copied_files_count: copied_files_list.len(),
+                                    total_size: copied_bytes_total,
+                                    files: copied_files_list,
+                                },
+                            );
+                        }
+                        return Err(fs_extra::error::Error::new(
+                            fs_extra::error::ErrorKind::Interrupted,
+                            "Skipped by user",
+                        ));
+                    } else if e.contains("Cancelled") {
                         // Save partial
                         if !copied_files_list.is_empty() {
                             add_history_entry(
@@ -909,7 +1004,12 @@ async fn perform_copy<R: tauri::Runtime>(
         }
         Ok(Err(e)) => {
             if let fs_extra::error::ErrorKind::Interrupted = e.kind {
-                let msg = format!("Copy cancelled: {}", folder_name);
+                let is_skip = e.to_string().contains("Skipped");
+                let msg = if is_skip {
+                    format!("Copy skipped: {}", folder_name)
+                } else {
+                    format!("Copy cancelled: {}", folder_name)
+                };
                 emit_log(app_handle, msg.clone(), "warn");
             } else {
                 let err_msg = format!("Failed to copy {}: {}", folder_name, e);
@@ -1025,6 +1125,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         config,
         live_config,
         should_cancel,
+        Arc::new(AtomicBool::new(false)),
         is_paused,
         overwrite_existing,
         &mut result,
@@ -1227,11 +1328,13 @@ async fn temporary_copy_file<R: tauri::Runtime>(
             }
         };
 
+        let no_skip = Arc::new(AtomicBool::new(false));
         copy_file_with_overwrite_mode(
             &source_clone,
             &target_file_clone,
             overwrite_existing,
             &should_cancel,
+            &no_skip,
             &is_paused,
             copy_buffer_size,
             &mut on_progress,
@@ -1285,7 +1388,9 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
     config: &AppConfig,
     live_config: Arc<Mutex<AppConfig>>,
     should_cancel: Arc<AtomicBool>,
+    should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    scan_queue_removals: Arc<Mutex<HashSet<String>>>,
 ) -> ScanResult {
     let mut result = ScanResult {
         scanned_paths: 0,
@@ -1456,6 +1561,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                     if folder_date == today || folder_date == yesterday {
                         result.found_folders.push(latest.name.clone());
 
+                        should_skip.store(false, Ordering::SeqCst);
                         perform_copy(
                             app_handle,
                             latest.path.clone(),
@@ -1464,6 +1570,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             config,
                             live_config.clone(),
                             should_cancel.clone(),
+                            should_skip.clone(),
                             is_paused.clone(),
                             false,
                             &mut result,
@@ -1474,6 +1581,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             &config.filename_includes,
                         )
                         .await;
+                        should_skip.store(false, Ordering::SeqCst);
                     } else {
                         emit_log(
                             app_handle,
@@ -1557,44 +1665,80 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         }
                     };
 
-                    let mut found_any = false;
-
+                    // Pass 1: Collect all subdirectories
+                    let mut sub_dirs: Vec<(PathBuf, String)> = Vec::new();
                     while let Ok(Some(entry)) = sub_entries.next_entry().await {
                         let sub_path = entry.path();
                         if sub_path.is_dir() {
                             let sub_name = entry.file_name().to_string_lossy().to_string();
-                            found_any = true;
-                            result
-                                .found_folders
-                                .push(format!("{}/{}", target_name, sub_name));
-
-                            perform_copy(
-                                app_handle,
-                                sub_path,
-                                sub_name,
-                                &local_target_base,
-                                config,
-                                live_config.clone(),
-                                should_cancel.clone(),
-                                is_paused.clone(),
-                                false,
-                                &mut result,
-                                Some(task.id.clone()),
-                                true,
-                                "scheduled",
-                                &config.file_extensions,
-                                &config.filename_includes,
-                            )
-                            .await;
+                            sub_dirs.push((sub_path, sub_name));
                         }
                     }
 
-                    if !found_any {
+                    if sub_dirs.is_empty() {
                         emit_log(
                             app_handle,
                             format!("No build directories found in {}", target_name),
                             "info",
                         );
+                        continue;
+                    }
+
+                    // Emit all as queued
+                    for (sub_path, sub_name) in &sub_dirs {
+                        emit_scan_queued(
+                            app_handle,
+                            sub_name,
+                            &local_target_base.join(sub_name).to_string_lossy(),
+                            &sub_path.to_string_lossy(),
+                        );
+                    }
+
+                    // Pass 2: Process each folder
+                    for (sub_path, sub_name) in sub_dirs {
+                        if should_cancel.load(Ordering::SeqCst) {
+                            emit_log(app_handle, "Scan cancelled by user".to_string(), "info");
+                            return result;
+                        }
+
+                        // Check if this folder was removed from queue
+                        {
+                            let removals = scan_queue_removals.lock().unwrap();
+                            if removals.contains(&sub_name) {
+                                emit_log(
+                                    app_handle,
+                                    format!("Skipped queued folder (removed by user): {}", sub_name),
+                                    "info",
+                                );
+                                continue;
+                            }
+                        }
+
+                        result
+                            .found_folders
+                            .push(format!("{}/{}", target_name, sub_name));
+
+                        should_skip.store(false, Ordering::SeqCst);
+                        perform_copy(
+                            app_handle,
+                            sub_path,
+                            sub_name,
+                            &local_target_base,
+                            config,
+                            live_config.clone(),
+                            should_cancel.clone(),
+                            should_skip.clone(),
+                            is_paused.clone(),
+                            false,
+                            &mut result,
+                            Some(task.id.clone()),
+                            true,
+                            "scheduled",
+                            &config.file_extensions,
+                            &config.filename_includes,
+                        )
+                        .await;
+                        should_skip.store(false, Ordering::SeqCst);
                     }
                 }
             }

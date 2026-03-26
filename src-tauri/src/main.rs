@@ -37,6 +37,8 @@ struct AppState {
     manual_copy_keys: Arc<Mutex<HashSet<String>>>,
     manual_copy_worker_running: Arc<AtomicBool>,
     should_cancel: Arc<AtomicBool>,
+    should_skip_current: Arc<AtomicBool>,
+    scan_queue_removals: Arc<Mutex<HashSet<String>>>,
     is_paused: Arc<AtomicBool>,
     is_quitting: Arc<AtomicBool>,
 }
@@ -447,7 +449,9 @@ async fn scan_now(
 
     state.is_scanning.store(true, Ordering::SeqCst);
     state.should_cancel.store(false, Ordering::SeqCst);
+    state.should_skip_current.store(false, Ordering::SeqCst);
     state.is_paused.store(false, Ordering::SeqCst);
+    state.scan_queue_removals.lock().unwrap().clear();
 
     let config = state.config.lock().unwrap().clone();
     let live_config = state.config.clone();
@@ -456,7 +460,9 @@ async fn scan_now(
         &config,
         live_config,
         state.should_cancel.clone(),
+        state.should_skip_current.clone(),
         state.is_paused.clone(),
+        state.scan_queue_removals.clone(),
     )
     .await;
 
@@ -479,6 +485,17 @@ fn pause_scan(state: State<AppState>) {
 #[tauri::command]
 fn resume_scan(state: State<AppState>) {
     state.is_paused.store(false, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn skip_current_copy(state: State<AppState>) {
+    state.should_skip_current.store(true, Ordering::SeqCst);
+    state.is_paused.store(false, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn remove_from_scan_queue(state: State<AppState>, folder: String) {
+    state.scan_queue_removals.lock().unwrap().insert(folder);
 }
 
 #[tauri::command]
@@ -1433,6 +1450,8 @@ fn main() {
                 manual_copy_keys: Arc::new(Mutex::new(HashSet::new())),
                 manual_copy_worker_running: Arc::new(AtomicBool::new(false)),
                 should_cancel: Arc::new(AtomicBool::new(false)),
+                should_skip_current: Arc::new(AtomicBool::new(false)),
+                scan_queue_removals: Arc::new(Mutex::new(HashSet::new())),
                 is_paused: Arc::new(AtomicBool::new(false)),
                 is_quitting: Arc::new(AtomicBool::new(false)),
             });
@@ -1445,6 +1464,8 @@ fn main() {
             cancel_scan,
             pause_scan,
             resume_scan,
+            skip_current_copy,
+            remove_from_scan_queue,
             history::get_history,
             history::clear_history,
             history::add_system_event,
