@@ -1,4 +1,5 @@
 ﻿import { reactive } from 'vue';
+import { deriveTaskRecordElapsedSeconds } from './taskRecordElapsed';
 
 export interface ManualCopyFormState {
     sourcePath: string;
@@ -40,6 +41,7 @@ export interface RemoteServerRecord {
     label: string;
     percentage: number;
     completed: boolean;
+    failed: boolean;
     speed: number;
 }
 
@@ -49,6 +51,7 @@ export interface TaskRecord {
     startedAtMs: number;
     finishedAtMs?: number;
     updatedAt: number;
+    elapsedSeconds: number;
     folder: string;
     sourcePath: string;
     localPath: string;
@@ -65,9 +68,14 @@ export interface TaskRecord {
     total: number;
     phase: TaskRecordPhase;
     source: 'manual' | 'scheduled';
+    ignored?: boolean;
     /** Filter rules applied to this task (for display in the task table). */
     filterExtensions: string[];
     filterKeywords: string[];
+    /** Expected number of servers to deploy to (prevents premature finalization). */
+    expectedServerCount?: number;
+    /** Name of the server currently being deployed to. */
+    currentServerName?: string;
 }
 
 export const appStore = reactive({
@@ -107,6 +115,7 @@ function pinTaskRecord(record: TaskRecord) {
 
 function touchTaskRecord(record: TaskRecord) {
     record.updatedAt = Date.now();
+    record.elapsedSeconds = deriveTaskRecordElapsedSeconds(record);
     pinTaskRecord(record);
 }
 
@@ -149,7 +158,7 @@ function findTargetRecord(folder?: string, localPath?: string): TaskRecord | und
 
 function isRecentlyCancelled(folder: string, localPath?: string): boolean {
     const latest = findTargetRecord(folder, localPath);
-    if (!latest || latest.phase !== 'cancelled') return false;
+    if (!latest || latest.phase !== 'cancelled' || latest.ignored) return false;
     return Date.now() - latest.updatedAt < 10_000;
 }
 
@@ -170,6 +179,7 @@ function createTaskRecord(payload: {
         startTime: new Date(now).toLocaleString(),
         startedAtMs: now,
         updatedAt: now,
+        elapsedSeconds: 0,
         folder: payload.folder,
         sourcePath: payload.source_path,
         localPath: payload.local_path,
@@ -186,6 +196,7 @@ function createTaskRecord(payload: {
         total: payload.total_bytes,
         phase: payload.phase,
         source: payload.source,
+        ignored: false,
         filterExtensions: [],
         filterKeywords: [],
     };
@@ -194,6 +205,7 @@ function createTaskRecord(payload: {
 function mergeIntoPrimary(primary: TaskRecord, duplicate: TaskRecord) {
     primary.startedAtMs = Math.min(primary.startedAtMs, duplicate.startedAtMs);
     primary.updatedAt = Math.max(primary.updatedAt, duplicate.updatedAt);
+    primary.elapsedSeconds = Math.max(primary.elapsedSeconds, duplicate.elapsedSeconds ?? 0);
     primary.copyTotal = Math.max(primary.copyTotal, duplicate.copyTotal);
     primary.total = Math.max(primary.total, duplicate.total);
     primary.copied = Math.max(primary.copied, duplicate.copied);
@@ -264,8 +276,10 @@ function finalizeTask(record: TaskRecord) {
     }
     record.deployCompleted = true;
     record.phase = 'completed';
+    record.ignored = false;
     record.speed = 0;
     record.finishedAtMs = Date.now();
+    record.elapsedSeconds = deriveTaskRecordElapsedSeconds(record);
     mergeDuplicatesByLocalPath(record);
     touchTaskRecord(record);
 }
@@ -284,6 +298,7 @@ export function upsertTaskRecord(payload: {
     copied_bytes: number;
     percentage: number;
     speed: number;
+    elapsed_seconds?: number;
     local_path: string;
     remote_path: string;
     source?: string;
@@ -304,6 +319,7 @@ export function upsertTaskRecord(payload: {
             existing.total = Math.max(existing.total, payload.total_bytes);
             existing.copyTotal = Math.max(existing.copyTotal, payload.total_bytes);
             existing.speed = payload.speed;
+            existing.elapsedSeconds = deriveTaskRecordElapsedSeconds(existing, payload.elapsed_seconds);
 
             if (payload.percentage >= 100) {
                 existing.copyCompleted = true;
@@ -330,6 +346,7 @@ export function upsertTaskRecord(payload: {
             phase: 'copying',
             source: (payload.source === 'manual' ? 'manual' : 'scheduled'),
         });
+        record.elapsedSeconds = deriveTaskRecordElapsedSeconds(record, payload.elapsed_seconds);
 
         appStore.taskRecords.unshift(record);
         if (appStore.taskRecords.length > appStore.maxTaskRecords) appStore.taskRecords.pop();
@@ -365,6 +382,7 @@ export function upsertTaskRecord(payload: {
     target.localPath = payload.local_path || target.localPath;
     target.deployPercentage = payload.percentage;
     target.speed = payload.speed;
+    target.elapsedSeconds = deriveTaskRecordElapsedSeconds(target, payload.elapsed_seconds);
 
     if (!target.copyCompleted) {
         target.copyCompleted = true;
@@ -376,6 +394,11 @@ export function upsertTaskRecord(payload: {
     }
 
     const serverLabel = payload.remote_path.trim();
+    // Extract current server name from "[ServerName] /path" format
+    const serverNameMatch = /^\[(.+?)\]/.exec(serverLabel);
+    if (serverNameMatch) {
+        target.currentServerName = serverNameMatch[1];
+    }
     const existingServer = target.remoteServers.find(s => s.label === serverLabel);
     if (existingServer) {
         existingServer.percentage = payload.percentage;
@@ -387,12 +410,21 @@ export function upsertTaskRecord(payload: {
             label: serverLabel,
             percentage: payload.percentage,
             completed: payload.percentage >= 100,
+            failed: false,
             speed: payload.speed,
         });
     }
 
     if (payload.percentage >= 100 && target.remoteServers.length > 0) {
-        target.deployCompleted = target.remoteServers.every(s => s.completed);
+        const allDone = target.remoteServers.every(s => s.completed || s.failed);
+        const expected = target.expectedServerCount ?? 0;
+        // Only mark deploy complete when all expected servers have reported
+        if (expected > 0) {
+            const finishedCount = target.remoteServers.filter(s => s.completed || s.failed).length;
+            target.deployCompleted = allDone && finishedCount >= expected;
+        } else {
+            target.deployCompleted = allDone;
+        }
     }
 
     mergeDuplicatesByLocalPath(target);
@@ -408,7 +440,7 @@ export function enqueueManualCopyTaskRecord(payload: {
 }) {
     const existing = findManualByPaths(payload.sourcePath, payload.localPath, true);
     if (existing) {
-        if (existing.phase === 'completed' || existing.phase === 'cancelled') return;
+        if (existing.phase === 'completed') return;
         touchTaskRecord(existing);
         return;
     }
@@ -455,8 +487,10 @@ export function updateManualCopyTaskState(payload: {
     }
 
     target.phase = payload.state === 'failed' ? 'failed' : 'cancelled';
+    target.ignored = false;
     target.speed = 0;
     target.finishedAtMs = Date.now();
+    target.elapsedSeconds = deriveTaskRecordElapsedSeconds(target);
     touchTaskRecord(target);
 }
 
@@ -479,8 +513,10 @@ export function markTaskRecordCancelled(folder?: string) {
     const target = findTargetRecord(folder, appStore.progress?.localPath);
     if (!target) return;
     target.phase = 'cancelled';
+    target.ignored = false;
     target.speed = 0;
     target.finishedAtMs = Date.now();
+    target.elapsedSeconds = deriveTaskRecordElapsedSeconds(target);
     touchTaskRecord(target);
 }
 
@@ -488,15 +524,53 @@ export function markTaskRecordSkipped(folder?: string) {
     const target = findTargetRecord(folder, appStore.progress?.localPath);
     if (!target) return;
     target.phase = 'cancelled';
+    target.ignored = false;
     target.speed = 0;
     target.finishedAtMs = Date.now();
+    target.elapsedSeconds = deriveTaskRecordElapsedSeconds(target);
     touchTaskRecord(target);
 }
 
-export function removeQueuedTaskRecord(folder: string) {
-    const idx = appStore.taskRecords.findIndex(
-        r => r.folder === folder && r.phase === 'queued'
-    );
+export function markTaskRecordIgnored(id: string) {
+    const target = appStore.taskRecords.find(r => r.id === id);
+    if (!target) return;
+    target.phase = 'cancelled';
+    target.ignored = true;
+    target.speed = 0;
+    target.finishedAtMs = Date.now();
+    target.elapsedSeconds = deriveTaskRecordElapsedSeconds(target);
+    touchTaskRecord(target);
+}
+
+export function prepareTaskRecordForRetry(id: string) {
+    const target = appStore.taskRecords.find(r => r.id === id);
+    if (!target) return;
+    const now = Date.now();
+    target.phase = 'queued';
+    target.ignored = false;
+    target.startedAtMs = now;
+    target.startTime = new Date(now).toLocaleString();
+    target.updatedAt = now;
+    target.finishedAtMs = undefined;
+    target.elapsedSeconds = 0;
+    target.copyPercentage = 0;
+    target.copyCompleted = false;
+    target.deployPercentage = 0;
+    target.deployCompleted = false;
+    target.speed = 0;
+    target.copied = 0;
+    target.total = 0;
+    target.copyTotal = 0;
+    target.hasRemote = false;
+    target.remoteExpanded = false;
+    target.remoteServers = [];
+    target.expectedServerCount = undefined;
+    target.currentServerName = undefined;
+    pinTaskRecord(target);
+}
+
+export function removeTaskRecord(id: string) {
+    const idx = appStore.taskRecords.findIndex(r => r.id === id);
     if (idx >= 0) {
         appStore.taskRecords.splice(idx, 1);
     }
@@ -508,24 +582,90 @@ function extractFolderByPrefix(msg: string, prefix: string): string | undefined 
     return folder || undefined;
 }
 
+function extractFolderByUpToDate(msg: string): string | undefined {
+    const matched = /^'(.+)' is up to date/i.exec(msg);
+    return matched?.[1]?.trim() || undefined;
+}
+
+function extractServerKey(lowerMsg: string): string | undefined {
+    const matched = /^\[(.+?)\]/.exec(lowerMsg);
+    return matched ? matched[1].toLowerCase() : undefined;
+}
+
+function matchServerRecord(server: RemoteServerRecord, key: string): boolean {
+    const labelLower = server.label.toLowerCase();
+    const bracketKey = `[${key}]`;
+    return labelLower.startsWith(`${bracketKey} `) || labelLower === bracketKey || server.key.toLowerCase() === bracketKey;
+}
+
 function completeFromServerSuccess(target: TaskRecord, lowerMsg: string) {
-    const matched = /^\[(.+?)\]\s+deployment successful$/.exec(lowerMsg);
-    if (matched) {
-        const key = `[${matched[1].toLowerCase()}]`;
+    const key = extractServerKey(lowerMsg);
+    if (key) {
         for (const server of target.remoteServers) {
-            const labelLower = server.label.toLowerCase();
-            if (labelLower.startsWith(`${key} `) || labelLower === key || server.key.toLowerCase() === key) {
+            if (matchServerRecord(server, key)) {
                 server.completed = true;
+                server.failed = false;
                 server.percentage = Math.max(server.percentage, 100);
             }
         }
     }
 
-    if (target.remoteServers.length === 0) {
+    // Check if all expected servers are done
+    const expectedCount = target.expectedServerCount ?? 0;
+    const completedCount = target.remoteServers.filter(s => s.completed).length;
+    const failedCount = target.remoteServers.filter(s => s.failed).length;
+    const finishedCount = completedCount + failedCount;
+
+    if (target.remoteServers.length === 0 && expectedCount <= 0) {
         // Manual deploy or single-server deploy without server tracking — mark complete directly
         target.deployCompleted = true;
-    } else if (target.remoteServers.every(s => s.completed)) {
+    } else if (expectedCount > 0 && finishedCount >= expectedCount) {
         target.deployCompleted = true;
+    } else if (expectedCount <= 0 && target.remoteServers.length > 0 && target.remoteServers.every(s => s.completed || s.failed)) {
+        target.deployCompleted = true;
+    }
+
+    touchTaskRecord(target);
+}
+
+function markServerFailed(target: TaskRecord, lowerMsg: string) {
+    const key = extractServerKey(lowerMsg);
+    let matchedAny = false;
+    if (key) {
+        for (const server of target.remoteServers) {
+            if (matchServerRecord(server, key)) {
+                server.failed = true;
+                server.completed = false;
+                matchedAny = true;
+            }
+        }
+    }
+
+    // Check if all expected servers are done (including failures)
+    const expectedCount = target.expectedServerCount ?? 0;
+    const finishedCount = target.remoteServers.filter(s => s.completed || s.failed).length;
+
+    if (expectedCount > 0 && finishedCount >= expectedCount) {
+        target.deployCompleted = true;
+        // If any server failed, mark as failed
+        target.phase = target.remoteServers.some(s => s.failed) ? 'failed' : 'completed';
+        target.finishedAtMs = Date.now();
+        target.speed = 0;
+        target.elapsedSeconds = deriveTaskRecordElapsedSeconds(target);
+    } else if (expectedCount <= 0 && target.remoteServers.length > 0 && target.remoteServers.every(s => s.completed || s.failed)) {
+        target.deployCompleted = true;
+        target.phase = target.remoteServers.some(s => s.failed) ? 'failed' : 'completed';
+        target.finishedAtMs = Date.now();
+        target.speed = 0;
+        target.elapsedSeconds = deriveTaskRecordElapsedSeconds(target);
+    } else if (!matchedAny) {
+        // Failure occurred before any upload progress was reported (e.g. connection timeout).
+        // No server records exist to match, so mark the task failed directly.
+        target.deployCompleted = true;
+        target.phase = 'failed';
+        target.finishedAtMs = Date.now();
+        target.speed = 0;
+        target.elapsedSeconds = deriveTaskRecordElapsedSeconds(target);
     }
 
     touchTaskRecord(target);
@@ -533,6 +673,13 @@ function completeFromServerSuccess(target: TaskRecord, lowerMsg: string) {
 
 export function syncTaskRecordByLog(msg: string, level: string) {
     const lower = msg.toLowerCase();
+
+    const upToDateFolder = extractFolderByUpToDate(msg);
+    if (upToDateFolder) {
+        const target = findTargetRecord(upToDateFolder);
+        if (target) finalizeTask(target);
+        return;
+    }
 
     const cancelledFolder = extractFolderByPrefix(msg, 'Copy cancelled:');
     if (
@@ -554,30 +701,70 @@ export function syncTaskRecordByLog(msg: string, level: string) {
     const copiedFolder = extractFolderByPrefix(msg, 'Successfully copied:');
     if (copiedFolder) {
         const target = findTargetRecord(copiedFolder);
-        if (target) finalizeTask(target);
+        if (target) {
+            // If the task has remote deployment that hasn't completed yet, don't finalize.
+            // The deploy success/failure events will handle finalization.
+            if (target.hasRemote && !target.deployCompleted) {
+                target.copyCompleted = true;
+                target.copyPercentage = 100;
+                touchTaskRecord(target);
+            } else {
+                finalizeTask(target);
+            }
+        }
         return;
     }
 
     const target = findLatestActiveRecord();
     if (!target || isTerminalPhase(target.phase)) return;
 
-    if (
-        lower.includes('starting deployment for')
-        || lower.includes('deploying to server')
-        || lower.includes('uploading to')
-    ) {
+    // "Starting deployment for N server(s)..." — extract expected count
+    const deployCountMatch = /starting deployment for (\d+) server/i.exec(msg);
+    if (deployCountMatch) {
+        target.hasRemote = true;
+        target.expectedServerCount = parseInt(deployCountMatch[1], 10);
+        target.phase = 'remote_pushing';
+        touchTaskRecord(target);
+        return;
+    }
+
+    // "Starting manual deployment: ... -> [ServerName] host:path"
+    if (lower.includes('starting manual deployment')) {
         target.hasRemote = true;
         target.phase = 'remote_pushing';
         touchTaskRecord(target);
         return;
     }
 
+    // "Deploying to server N/M [ServerName]" — extract current server name
+    const deployingToMatch = /deploying to server \d+\/\d+ \[(.+?)\]/i.exec(msg);
+    if (deployingToMatch) {
+        target.hasRemote = true;
+        target.currentServerName = deployingToMatch[1];
+        target.phase = 'remote_pushing';
+        touchTaskRecord(target);
+        return;
+    }
+
+    if (lower.includes('uploading to')) {
+        target.hasRemote = true;
+        target.phase = 'remote_pushing';
+        touchTaskRecord(target);
+        return;
+    }
+
+    // "[ServerName] Executing post commands..." or "Executing post-deployment commands..."
     if (
         lower.includes('executing post commands')
         || lower.includes('executing post-deployment commands')
     ) {
         target.hasRemote = true;
         target.phase = 'remote_deploying';
+        // Extract server name from "[ServerName] Executing..."
+        const postCmdServerMatch = /^\[(.+?)\]/.exec(msg);
+        if (postCmdServerMatch) {
+            target.currentServerName = postCmdServerMatch[1];
+        }
         touchTaskRecord(target);
         return;
     }
@@ -585,13 +772,21 @@ export function syncTaskRecordByLog(msg: string, level: string) {
     if (lower.includes('deployment successful')) {
         completeFromServerSuccess(target, lower);
         if (target.deployCompleted) {
-            finalizeTask(target);
+            // All servers done — determine final phase
+            const anyFailed = target.remoteServers.some(s => s.failed);
+            if (anyFailed) {
+                target.phase = 'failed';
+                target.speed = 0;
+                target.finishedAtMs = Date.now();
+            } else {
+                finalizeTask(target);
+            }
         }
         return;
     }
 
     if (level === 'error' && lower.includes('deployment failed')) {
-        touchTaskRecord(target);
+        markServerFailed(target, lower);
     }
 }
 
@@ -602,7 +797,53 @@ export function markStaleTasksInterrupted() {
             record.phase = 'interrupted';
             record.speed = 0;
             record.finishedAtMs = record.updatedAt;
+            record.elapsedSeconds = deriveTaskRecordElapsedSeconds(record);
         }
+    }
+}
+
+/**
+ * Pre-register a manual deploy task record so that subsequent deploy events
+ * are associated with the same record and it won't finalize prematurely.
+ */
+export function preRegisterManualDeploy(folder: string, localPath: string, serverCount: number): TaskRecord {
+    // Look for an existing active record for this folder/path
+    let target = findTargetRecord(folder, localPath);
+    if (target && !isTerminalPhase(target.phase)) {
+        target.hasRemote = true;
+        target.expectedServerCount = serverCount;
+        target.phase = 'remote_pushing';
+        touchTaskRecord(target);
+        return target;
+    }
+
+    // Create a new record
+    const record = createTaskRecord({
+        folder,
+        total_bytes: 0,
+        copied_bytes: 0,
+        percentage: 0,
+        speed: 0,
+        local_path: localPath,
+        source_path: '',
+        phase: 'remote_pushing',
+        source: 'manual',
+    });
+    record.hasRemote = true;
+    record.expectedServerCount = serverCount;
+    record.copyCompleted = true;
+    record.copyPercentage = 100;
+    record.elapsedSeconds = 0;
+    appStore.taskRecords.unshift(record);
+    if (appStore.taskRecords.length > appStore.maxTaskRecords) appStore.taskRecords.pop();
+    return record;
+}
+
+export function setManualDeployCurrentServer(taskId: string, serverName: string) {
+    const record = appStore.taskRecords.find(r => r.id === taskId);
+    if (record && !isTerminalPhase(record.phase)) {
+        record.currentServerName = serverName;
+        touchTaskRecord(record);
     }
 }
 

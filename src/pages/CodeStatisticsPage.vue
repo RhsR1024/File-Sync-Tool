@@ -13,6 +13,7 @@ import {
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import CodeStatisticsScopeTreeNode from '@/components/CodeStatisticsScopeTreeNode.vue';
+import { generateCodeStatisticsHtmlReport } from '../lib/codeStatisticsExport';
 import {
   codeCountAnalyze,
   codeCountListScopeTree,
@@ -73,6 +74,7 @@ const errorMsg = ref('');
 const exportMessage = ref<ExportMessageState | null>(null);
 const includeExtensionsInput = ref('');
 const excludeExtensionsInput = ref('');
+const includeVcsDirs = ref(false);
 const oldScopeState = reactive(createScopePanelState());
 const newScopeState = reactive(createScopePanelState());
 const projectScopeState = reactive(createScopePanelState());
@@ -156,13 +158,31 @@ const collectDirectoryKeysFromTree = (nodes: ScopeTreeNode[]): string[] => {
   return keys;
 };
 
+const collectEmptyDirectoryKeys = (nodes: ScopeTreeNode[]): string[] => {
+  const keys: string[] = [];
+  for (const node of nodes) {
+    if (node.kind !== 'directory') continue;
+    const leafKeys = collectLeafKeysFromNode(node);
+    if (leafKeys.length === 0) {
+      keys.push(node.key);
+    }
+    keys.push(...collectEmptyDirectoryKeys(node.children));
+  }
+  return keys;
+};
+
 const defaultExpandedKeysFromTree = (nodes: ScopeTreeNode[]) =>
   nodes.filter((node) => node.kind === 'directory').map((node) => node.key);
 
 const getScopeTotalSelectableFiles = (state: ScopePanelState) =>
   collectLeafKeysFromTree(state.tree).length;
 
-const getScopeSelectedFileCount = (state: ScopePanelState) => state.selectedFilePaths.length;
+const getScopeSelectedFileKeys = (state: ScopePanelState): string[] => {
+  const leafKeySet = new Set(collectLeafKeysFromTree(state.tree));
+  return state.selectedFilePaths.filter((key) => leafKeySet.has(key));
+};
+
+const getScopeSelectedFileCount = (state: ScopePanelState) => getScopeSelectedFileKeys(state).length;
 
 const getScopeSummaryText = (state: ScopePanelState) => {
   const total = getScopeTotalSelectableFiles(state);
@@ -242,7 +262,7 @@ const getMissingScopePanelTitles = () =>
   scopePanels.value
     .filter((panel) => {
       const total = getScopeTotalSelectableFiles(panel.state);
-      return total > 0 && panel.state.selectedFilePaths.length === 0;
+      return total > 0 && getScopeSelectedFileCount(panel.state) === 0;
     })
     .map((panel) => panel.title);
 
@@ -397,12 +417,13 @@ const syncScopeState = (state: ScopePanelState, tree: ScopeTreeNode[]) => {
   const retainedSelection = allLeafKeys.filter((key) => previousSelection.has(key));
   const retainedExpanded = allDirectoryKeys.filter((key) => previousExpanded.has(key));
 
+  const emptyDirKeys = collectEmptyDirectoryKeys(tree);
   state.tree = tree;
   state.selectedFilePaths = preserveEmptySelection
     ? []
     : retainedSelection.length > 0
-      ? retainedSelection
-      : allLeafKeys;
+      ? [...retainedSelection, ...emptyDirKeys.filter((k) => !previousSelection.size || previousSelection.has(k))]
+      : [...allLeafKeys, ...emptyDirKeys];
   state.expandedKeys = preserveCollapsedState
     ? []
     : retainedExpanded.length > 0
@@ -425,6 +446,7 @@ const refreshScopePanel = async (state: ScopePanelState, path: string) => {
       [trimmedPath],
       includedExtensions.value,
       excludedExtensions.value,
+      includeVcsDirs.value,
     );
     syncScopeState(state, tree);
   } catch (error) {
@@ -498,7 +520,21 @@ const browseNew = async () => {
 };
 
 const toggleTreeSelection = (state: ScopePanelState, node: ScopeTreeNode) => {
+  if (isAnalyzing.value) return;
+
   const targetLeafKeys = collectLeafKeysFromNode(node);
+
+  // Empty directory: toggle the directory key itself (harmlessly ignored during analysis)
+  if (targetLeafKeys.length === 0 && node.kind === 'directory') {
+    const idx = state.selectedFilePaths.indexOf(node.key);
+    if (idx >= 0) {
+      state.selectedFilePaths = state.selectedFilePaths.filter((k) => k !== node.key);
+    } else {
+      state.selectedFilePaths = [...state.selectedFilePaths, node.key];
+    }
+    return;
+  }
+
   const selected = new Set(state.selectedFilePaths);
   const allSelected = targetLeafKeys.every((key) => selected.has(key));
 
@@ -513,11 +549,12 @@ const toggleTreeSelection = (state: ScopePanelState, node: ScopeTreeNode) => {
   }
 
   const orderedLeafKeys = collectLeafKeysFromTree(state.tree);
-  state.selectedFilePaths = orderedLeafKeys.filter((key) => selected.has(key));
+  const preservedEmptyDirKeys = collectEmptyDirectoryKeys(state.tree).filter((key) => selected.has(key));
+  state.selectedFilePaths = [...orderedLeafKeys.filter((key) => selected.has(key)), ...preservedEmptyDirKeys];
 };
 
 const selectAllScopes = (state: ScopePanelState) => {
-  state.selectedFilePaths = collectLeafKeysFromTree(state.tree);
+  state.selectedFilePaths = [...collectLeafKeysFromTree(state.tree), ...collectEmptyDirectoryKeys(state.tree)];
 };
 
 const clearScopeSelection = (state: ScopePanelState) => {
@@ -637,7 +674,22 @@ const buildCsvContent = (data: CodeCountResult) => {
   return `\uFEFF${lines.join('\n')}`;
 };
 
-const generateHtmlReport = (data: CodeCountResult) => {
+const generateHtmlReport = (data: CodeCountResult) =>
+  generateCodeStatisticsHtmlReport(data, {
+    mode: mode.value,
+    oldPath: oldPath.value,
+    newPath: newPath.value,
+    oldScopeText: oldScopeSummaryText.value,
+    newScopeText: newScopeSummaryText.value,
+    projectScopeText: projectScopeSummaryText.value,
+    extensionFilterText: extensionFilterSummary.value,
+    netCode: netCode.value,
+    netComment: netComment.value,
+    fileTypeSummaryEntries: fileTypeSummaryEntries.value,
+    t,
+  });
+
+const generateHtmlReportLegacy = (data: CodeCountResult) => {
   const oldScopeText = oldScopeSummaryText.value;
   const newScopeText = newScopeSummaryText.value;
   const projectScopeText = projectScopeSummaryText.value;
@@ -912,18 +964,18 @@ const generateHtmlReport = (data: CodeCountResult) => {
       </section>
 
       <section class="section">
-        <h2>文件类型统计</h2>
+        <h2>${esc(t('codeStatistics.fileTypeTitle'))}</h2>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>文件类型</th>
-                <th>代码+</th>
-                <th>代码-</th>
-                <th>代码~</th>
-                <th>注释+</th>
-                <th>注释-</th>
-                <th>注释~</th>
+                <th>代码新增</th>
+                <th>代码删除</th>
+                <th>代码修改</th>
+                <th>注释新增</th>
+                <th>注释删除</th>
+                <th>注释修改</th>
                 <th>总变更</th>
               </tr>
             </thead>
@@ -941,12 +993,12 @@ const generateHtmlReport = (data: CodeCountResult) => {
             <thead>
               <tr>
                 <th>文件路径</th>
-                <th>代码+</th>
-                <th>代码-</th>
-                <th>代码~</th>
-                <th>注释+</th>
-                <th>注释-</th>
-                <th>注释~</th>
+                <th>代码新增</th>
+                <th>代码删除</th>
+                <th>代码修改</th>
+                <th>注释新增</th>
+                <th>注释删除</th>
+                <th>注释修改</th>
               </tr>
             </thead>
             <tbody>
@@ -959,6 +1011,8 @@ const generateHtmlReport = (data: CodeCountResult) => {
   </body>
 </html>`;
 };
+
+void generateHtmlReportLegacy;
 
 const handleExport = async (format: ExportFormat) => {
   if (!result.value) return;
@@ -1051,18 +1105,19 @@ const startAnalysis = async () => {
       newPath.value.trim(),
       mode.value === 'incremental'
         ? getScopeTotalSelectableFiles(oldScopeState) > 0
-          ? oldScopeState.selectedFilePaths
+          ? getScopeSelectedFileKeys(oldScopeState)
           : undefined
         : undefined,
       mode.value === 'incremental'
         ? getScopeTotalSelectableFiles(newScopeState) > 0
-          ? newScopeState.selectedFilePaths
+          ? getScopeSelectedFileKeys(newScopeState)
           : undefined
         : getScopeTotalSelectableFiles(projectScopeState) > 0
-          ? projectScopeState.selectedFilePaths
+          ? getScopeSelectedFileKeys(projectScopeState)
           : undefined,
       includedExtensions.value,
       excludedExtensions.value,
+      includeVcsDirs.value,
     );
   } catch (error) {
     errorMsg.value = error instanceof Error ? error.message : String(error);
@@ -1074,6 +1129,10 @@ const startAnalysis = async () => {
 watch(mode, () => {
   exportMessage.value = null;
   errorMsg.value = '';
+  void refreshScopeTree();
+});
+
+watch(includeVcsDirs, () => {
   void refreshScopeTree();
 });
 
@@ -1092,15 +1151,20 @@ onUnmounted(() => {
   <div class="flex-1 flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 overflow-y-auto">
     <div class="max-w-6xl w-full mx-auto p-6 pb-10 space-y-5">
     <div class="flex items-start justify-between gap-4">
-      <div>
-        <h1 class="text-2xl font-bold text-slate-900 mb-1">{{ t('codeStatistics.title') }}</h1>
-        <p class="text-slate-500 text-sm">
-          {{
-            mode === 'incremental'
-              ? t('codeStatistics.modeIncrementalDesc')
-              : t('codeStatistics.modeNewProjectDesc')
-          }}
-        </p>
+      <div class="flex items-start gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-sm shrink-0">
+          <BarChart3 class="w-5 h-5 text-white" />
+        </div>
+        <div>
+          <h1 class="text-2xl font-bold text-slate-900 mb-1">{{ t('codeStatistics.title') }}</h1>
+          <p class="text-slate-500 text-sm">
+            {{
+              mode === 'incremental'
+                ? t('codeStatistics.modeIncrementalDesc')
+                : t('codeStatistics.modeNewProjectDesc')
+            }}
+          </p>
+        </div>
       </div>
       <button
         v-if="result"
@@ -1256,6 +1320,18 @@ onUnmounted(() => {
         <p class="mt-2 text-xs font-medium text-slate-600">
           {{ extensionFilterSummary }}
         </p>
+        <label class="mt-4 flex items-center gap-2.5 cursor-pointer select-none">
+          <input
+            v-model="includeVcsDirs"
+            type="checkbox"
+            :disabled="isAnalyzing"
+            class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50"
+          />
+          <span class="text-sm font-medium text-slate-700">{{ t('codeStatistics.includeVcsDirsLabel') }}</span>
+        </label>
+        <p v-if="includeVcsDirs" class="mt-1.5 ml-6.5 text-xs text-amber-600">
+          {{ t('codeStatistics.includeVcsDirsHint') }}
+        </p>
       </div>
 
       <div
@@ -1367,7 +1443,10 @@ onUnmounted(() => {
                 </span>
                 <span>{{ t('codeStatistics.scopeHint') }}</span>
               </div>
-              <div class="rounded-2xl border border-slate-200 bg-slate-50/50 p-3 max-h-[420px] overflow-y-auto">
+              <div
+                class="rounded-2xl border border-slate-200 bg-slate-50/50 p-3 max-h-[420px] overflow-y-auto transition-opacity"
+                :class="isAnalyzing ? 'pointer-events-none opacity-50' : ''"
+              >
                 <CodeStatisticsScopeTreeNode
                   v-for="node in panel.state.tree"
                   :key="node.key"
@@ -1425,6 +1504,7 @@ onUnmounted(() => {
               {{ line }}
             </p>
             <p class="mt-1 text-xs text-slate-400">{{ extensionFilterSummary }}</p>
+            <p class="mt-1 text-xs text-slate-400">{{ t('codeStatistics.countingRuleHint') }}</p>
             <p class="mt-2 text-xs text-slate-400">{{ t('codeStatistics.exportActionsDesc') }}</p>
           </div>
           <div class="flex flex-wrap gap-2">
@@ -1641,14 +1721,14 @@ onUnmounted(() => {
 
           <div class="space-y-2 mb-6">
             <div v-for="entry in fileTypeSummaryEntries" :key="entry.ext" class="flex items-center gap-3">
-              <span class="w-12 text-sm font-mono font-semibold text-slate-700 shrink-0">{{ entry.ext }}</span>
+              <span class="w-24 text-sm font-mono font-semibold text-slate-700 shrink-0 truncate" :title="entry.ext">{{ entry.ext }}</span>
               <div class="flex-1 bg-slate-100 rounded-full h-5 overflow-hidden">
                 <div
                   class="h-full bg-gradient-to-r from-blue-500 to-cyan-500 rounded-full transition-all"
                   :style="{ width: `${Math.round((entry.total / maxFileTypeTotal) * 100)}%` }"
                 ></div>
               </div>
-              <span class="text-sm font-bold text-slate-700 w-10 text-right shrink-0">{{ entry.total }}</span>
+              <span class="w-24 text-sm font-bold text-slate-700 shrink-0 text-right tabular-nums">{{ entry.total.toLocaleString() }}</span>
             </div>
           </div>
 
@@ -1674,12 +1754,12 @@ onUnmounted(() => {
               <thead>
                 <tr class="border-b border-slate-200 bg-slate-50">
                   <th class="px-3 py-2 text-left text-xs font-semibold text-slate-600">{{ t('codeStatistics.fileTypeCol') }}</th>
-                  <th class="px-3 py-2 text-right text-xs font-semibold text-green-700">{{ t('codeStatistics.code') }}+</th>
-                  <th class="px-3 py-2 text-right text-xs font-semibold text-red-700">{{ t('codeStatistics.code') }}-</th>
-                  <th class="px-3 py-2 text-right text-xs font-semibold text-amber-700">{{ t('codeStatistics.code') }}~</th>
-                  <th class="px-3 py-2 text-right text-xs font-semibold text-green-700">{{ t('codeStatistics.comment') }}+</th>
-                  <th class="px-3 py-2 text-right text-xs font-semibold text-red-700">{{ t('codeStatistics.comment') }}-</th>
-                  <th class="px-3 py-2 text-right text-xs font-semibold text-amber-700">{{ t('codeStatistics.comment') }}~</th>
+                  <th class="px-3 py-2 text-right text-xs font-semibold text-green-700">{{ t('codeStatistics.codeAddedCol') }}</th>
+                  <th class="px-3 py-2 text-right text-xs font-semibold text-red-700">{{ t('codeStatistics.codeDeletedCol') }}</th>
+                  <th class="px-3 py-2 text-right text-xs font-semibold text-amber-700">{{ t('codeStatistics.codeModifiedCol') }}</th>
+                  <th class="px-3 py-2 text-right text-xs font-semibold text-green-700">{{ t('codeStatistics.commentAddedCol') }}</th>
+                  <th class="px-3 py-2 text-right text-xs font-semibold text-red-700">{{ t('codeStatistics.commentDeletedCol') }}</th>
+                  <th class="px-3 py-2 text-right text-xs font-semibold text-amber-700">{{ t('codeStatistics.commentModifiedCol') }}</th>
                   <th class="px-3 py-2 text-right text-xs font-semibold text-slate-700">{{ t('codeStatistics.totalChanges') }}</th>
                 </tr>
               </thead>
@@ -1720,12 +1800,12 @@ onUnmounted(() => {
               <thead class="sticky top-0 z-10">
                 <tr class="border-b border-slate-200 bg-slate-50">
                   <th class="px-4 py-3 text-left text-xs font-semibold text-slate-600">{{ t('codeStatistics.filePath') }}</th>
-                  <th class="px-3 py-3 text-right text-xs font-semibold text-green-700">{{ t('codeStatistics.code') }}+</th>
-                  <th class="px-3 py-3 text-right text-xs font-semibold text-red-700">{{ t('codeStatistics.code') }}-</th>
-                  <th class="px-3 py-3 text-right text-xs font-semibold text-amber-700">{{ t('codeStatistics.code') }}~</th>
-                  <th class="px-3 py-3 text-right text-xs font-semibold text-green-700">{{ t('codeStatistics.comment') }}+</th>
-                  <th class="px-3 py-3 text-right text-xs font-semibold text-red-700">{{ t('codeStatistics.comment') }}-</th>
-                  <th class="px-3 py-3 text-right text-xs font-semibold text-amber-700">{{ t('codeStatistics.comment') }}~</th>
+                  <th class="px-3 py-3 text-right text-xs font-semibold text-green-700">{{ t('codeStatistics.codeAddedCol') }}</th>
+                  <th class="px-3 py-3 text-right text-xs font-semibold text-red-700">{{ t('codeStatistics.codeDeletedCol') }}</th>
+                  <th class="px-3 py-3 text-right text-xs font-semibold text-amber-700">{{ t('codeStatistics.codeModifiedCol') }}</th>
+                  <th class="px-3 py-3 text-right text-xs font-semibold text-green-700">{{ t('codeStatistics.commentAddedCol') }}</th>
+                  <th class="px-3 py-3 text-right text-xs font-semibold text-red-700">{{ t('codeStatistics.commentDeletedCol') }}</th>
+                  <th class="px-3 py-3 text-right text-xs font-semibold text-amber-700">{{ t('codeStatistics.commentModifiedCol') }}</th>
                 </tr>
               </thead>
               <tbody>

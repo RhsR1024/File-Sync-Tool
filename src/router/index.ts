@@ -31,6 +31,10 @@ const routes: RouteRecordRaw[] = [
     component: SettingsPage,
   },
   {
+    path: '/tools',
+    component: () => import('../pages/ToolsHubPage.vue'),
+  },
+  {
     path: '/tools/framework-password',
     component: () => import('../pages/FrameworkPasswordPage.vue'),
   },

@@ -736,13 +736,13 @@ fn open_path_parent(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_directory() -> Result<Option<String>, String> {
-    // Open system directory selection dialog
-    // Returns Ok(Some(path)) when user selects a directory
-    // Returns Ok(None) when user cancels
-    let selected_dir = rfd::FileDialog::new().pick_folder();
-
-    Ok(selected_dir.map(|path| path.to_string_lossy().to_string()))
+async fn open_directory() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let selected_dir = rfd::FileDialog::new().pick_folder();
+        Ok(selected_dir.map(|path| path.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1045,12 +1045,29 @@ fn run_remote_command_over_ssh(
     Ok(output.trim().to_string())
 }
 
+/// RSA encrypt plaintext with a PEM public key, return Base64-encoded ciphertext.
+fn rsa_encrypt(public_key_pem: &str, plaintext: &str) -> Result<String, String> {
+    use base64::{engine::general_purpose, Engine as _};
+    use rand::rngs::OsRng;
+    use rsa::{pkcs8::DecodePublicKey, Pkcs1v15Encrypt, RsaPublicKey};
+
+    let public_key = RsaPublicKey::from_public_key_pem(public_key_pem)
+        .map_err(|e| format!("Failed to parse public key: {}", e))?;
+    let mut rng = OsRng;
+    let encrypted = public_key
+        .encrypt(&mut rng, Pkcs1v15Encrypt, plaintext.as_bytes())
+        .map_err(|e| format!("RSA encryption failed: {}", e))?;
+    Ok(general_purpose::STANDARD.encode(&encrypted))
+}
+
 #[tauri::command]
-async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChangeResult>, String> {
-    const OLD_PASSWORD_HASH: &str =
-        "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92";
-    const NEW_PASSWORD_HASH: &str =
-        "4d5c5f61bb3d2c299d3211c2992a28a7849b6ce933919c399ce24903c1715d45";
+async fn change_framework_password(
+    ips: Vec<String>,
+    old_password: Option<String>,
+    new_password: Option<String>,
+) -> Result<Vec<PasswordChangeResult>, String> {
+    let old_passwd = old_password.unwrap_or_else(|| "123456".to_string());
+    let new_passwd = new_password.unwrap_or_else(|| "admin_123".to_string());
 
     let mut results = Vec::new();
     let client = reqwest::Client::new();
@@ -1072,17 +1089,72 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
             continue;
         }
 
-        // Step 1: Login
+        // Step 1: Get RSA public key
+        let pubkey_url = format!("http://{}:21900/openAPI/auth/v1/publicKey", ip);
+        let public_key = match client.get(&pubkey_url).send().await {
+            Ok(response) => match response.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    if let Some(key) = json
+                        .get("data")
+                        .and_then(|d| d.get("publicKey"))
+                        .and_then(|k| k.as_str())
+                    {
+                        key.to_string()
+                    } else {
+                        results.push(PasswordChangeResult {
+                            ip: ip.to_string(),
+                            success: false,
+                            message: format!("Failed to get public key: {:?}", json),
+                            failedAt: Some("login".to_string()),
+                        });
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    results.push(PasswordChangeResult {
+                        ip: ip.to_string(),
+                        success: false,
+                        message: format!("Public key response parse error: {}", e),
+                        failedAt: Some("login".to_string()),
+                    });
+                    continue;
+                }
+            },
+            Err(e) => {
+                results.push(PasswordChangeResult {
+                    ip: ip.to_string(),
+                    success: false,
+                    message: format!("Public key request failed: {}", e),
+                    failedAt: Some("login".to_string()),
+                });
+                continue;
+            }
+        };
+
+        // Step 2: Login with RSA-encrypted password
+        let encrypted_old = match rsa_encrypt(&public_key, &old_passwd) {
+            Ok(v) => v,
+            Err(e) => {
+                results.push(PasswordChangeResult {
+                    ip: ip.to_string(),
+                    success: false,
+                    message: format!("RSA encrypt old password failed: {}", e),
+                    failedAt: Some("login".to_string()),
+                });
+                continue;
+            }
+        };
+
         let login_url = format!("http://{}:21900/openAPI/userMgr/v1/login", ip);
         let login_body = json!({
             "userName": "admin",
-            "userPasswd": OLD_PASSWORD_HASH,
+            "userPasswd": encrypted_old,
             "isUnlockLogin": false
         });
 
         let token = match client
             .post(&login_url)
-            .header("Authorization", "ab94186a-165b-4a18-9337-a9e33809d592")
+            .header("Authorization", "")
             .header("content-type", "application/json")
             .json(&login_body)
             .send()
@@ -1091,7 +1163,6 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
             Ok(response) => {
                 match response.json::<serde_json::Value>().await {
                     Ok(json) => {
-                        // Validate response structure
                         if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
                             if let Some(token) = json
                                 .get("data")
@@ -1144,15 +1215,40 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
             }
         };
 
-        // Step 2: Change Password
+        // Step 3: Change Password with RSA-encrypted old & new passwords
+        let encrypted_old_for_change = match rsa_encrypt(&public_key, &old_passwd) {
+            Ok(v) => v,
+            Err(e) => {
+                results.push(PasswordChangeResult {
+                    ip: ip.to_string(),
+                    success: false,
+                    message: format!("RSA encrypt failed: {}", e),
+                    failedAt: Some("changePasswd".to_string()),
+                });
+                continue;
+            }
+        };
+        let encrypted_new = match rsa_encrypt(&public_key, &new_passwd) {
+            Ok(v) => v,
+            Err(e) => {
+                results.push(PasswordChangeResult {
+                    ip: ip.to_string(),
+                    success: false,
+                    message: format!("RSA encrypt new password failed: {}", e),
+                    failedAt: Some("changePasswd".to_string()),
+                });
+                continue;
+            }
+        };
+
         let change_passwd_url = format!("http://{}:21900/openAPI/userMgr/v1/changePasswd", ip);
         let change_passwd_body = json!({
             "userName": "admin",
-            "oldUserPasswd": OLD_PASSWORD_HASH,
-            "newUserPasswd": NEW_PASSWORD_HASH
+            "oldUserPasswd": encrypted_old_for_change,
+            "newUserPasswd": encrypted_new
         });
 
-        match client
+        let change_success = match client
             .post(&change_passwd_url)
             .header("Authorization", &token)
             .header("content-type", "application/json")
@@ -1163,14 +1259,8 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
             Ok(response) => {
                 match response.json::<serde_json::Value>().await {
                     Ok(json) => {
-                        // Validate response structure
                         if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
-                            results.push(PasswordChangeResult {
-                                ip: ip.to_string(),
-                                success: true,
-                                message: "Success".to_string(),
-                                failedAt: None,
-                            });
+                            true
                         } else {
                             let msg = json
                                 .get("message")
@@ -1182,6 +1272,7 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
                                 message: format!("Change password failed: {}", msg),
                                 failedAt: Some("changePasswd".to_string()),
                             });
+                            false
                         }
                     }
                     Err(e) => {
@@ -1191,6 +1282,7 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
                             message: format!("Change password response parse error: {}", e),
                             failedAt: Some("changePasswd".to_string()),
                         });
+                        false
                     }
                 }
             }
@@ -1201,8 +1293,37 @@ async fn change_framework_password(ips: Vec<String>) -> Result<Vec<PasswordChang
                     message: format!("Change password request failed: {}", e),
                     failedAt: Some("changePasswd".to_string()),
                 });
+                false
             }
+        };
+
+        if !change_success {
+            continue;
         }
+
+        // Step 4: Logout
+        let logout_url = format!("http://{}:21900/openAPI/userMgr/v1/logout", ip);
+        let logout_body = json!({
+            "userName": "admin",
+            "userPasswd": encrypted_old,
+            "token": token
+        });
+
+        // Logout is best-effort; don't fail the overall result if it errors
+        let _ = client
+            .post(&logout_url)
+            .header("Authorization", &token)
+            .header("content-type", "application/json")
+            .json(&logout_body)
+            .send()
+            .await;
+
+        results.push(PasswordChangeResult {
+            ip: ip.to_string(),
+            success: true,
+            message: "Success".to_string(),
+            failedAt: None,
+        });
     }
 
     Ok(results)

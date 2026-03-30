@@ -1,7 +1,23 @@
 {
   "permissions": {
     "allow": [
-      "Bash(pnpm tauri build)"
+      "Bash(pnpm tauri build)",
+      "Bash(cmd /c \"pnpm tauri build\")",
+      "Bash(npx pnpm:*)",
+      "Bash(npx vite:*)",
+      "Bash(npx vue-tsc:*)",
+      "Bash(bash \"C:\\\\Users\\\\Admin\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.0.5\\\\skills\\\\brainstorming\\\\scripts\\\\start-server.sh\" --project-dir \"c:\\\\WorkSpace\\\\Copy\")",
+      "Bash(cmd /c \"pnpm tauri build 2>&1\")",
+      "Bash(grep -n '\"\"version\"\"' package.json)",
+      "Bash(NODE_OPTIONS=\"--max-old-space-size=4096\" pnpm tauri build)",
+      "Bash(export NODE_OPTIONS=\"--max-old-space-size=8192\")",
+      "Bash(grep -r \"code_count\\\\|code-count\\\\|CodeCount\" /c/WorkSpace/Copy/src-tauri/src/*.rs --include=\"*.rs\")",
+      "Bash(cmd /c \"cargo check --manifest-path src-tauri/Cargo.toml 2>&1\")",
+      "Bash(cargo test:*)",
+      "Bash(cargo clean:*)",
+      "Bash(C:/Users/Admin/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.6/scripts/start-server.sh --project-dir c:/WorkSpace/Copy)",
+      "Bash(cat C:/WorkSpace/Copy/.superpowers/brainstorm/*/state/server-info)",
+      "Bash(\"C:/Users/Admin/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.6/skills/brainstorming/scripts/start-server.sh\" --project-dir c:/WorkSpace/Copy)"
     ]
   }
 }

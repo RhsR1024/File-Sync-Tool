@@ -29,13 +29,20 @@ function formatRecordSpeed(bytesPerSec: number): string {
   return `${(bytesPerSec / Math.pow(1024, i)).toFixed(1)} ${units[Math.min(i, 3)]}`;
 }
 
-function statusText(phase: TaskRecordPhase): string {
+function statusText(rec: { phase: TaskRecordPhase; ignored?: boolean; currentServerName?: string }): string {
+  const phase = rec.phase;
   if (phase === 'queued') return t('console.phaseQueued');
   if (phase === 'paused') return t('console.phasePaused');
-  if (phase === 'remote_pushing') return t('console.phaseRemotePushing');
-  if (phase === 'remote_deploying') return t('console.phaseRemoteDeploying');
+  if (phase === 'remote_pushing') {
+    const label = t('console.phaseRemotePushing');
+    return rec.currentServerName ? `${label} (${rec.currentServerName})` : label;
+  }
+  if (phase === 'remote_deploying') {
+    const label = t('console.phaseRemoteDeploying');
+    return rec.currentServerName ? `${label} (${rec.currentServerName})` : label;
+  }
   if (phase === 'failed') return t('console.phaseFailed');
-  if (phase === 'cancelled') return t('console.phaseCancelled');
+  if (phase === 'cancelled') return rec.ignored ? t('console.phaseIgnored') : t('console.phaseCancelled');
   if (phase === 'completed') return t('console.phaseCompleted');
   if (phase === 'interrupted') return t('console.phaseInterrupted');
   return t('console.phaseCopying');
@@ -121,7 +128,7 @@ function progressValue(rec: { phase: TaskRecordPhase; copyPercentage: number; de
             :class="statusClass(rec.phase)"
           >
             <CheckCircle2 v-if="rec.phase === 'completed'" class="w-3.5 h-3.5" />
-            {{ statusText(rec.phase) }}
+            {{ statusText(rec) }}
           </span>
         </div>
 

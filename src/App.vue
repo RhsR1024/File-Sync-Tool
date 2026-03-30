@@ -4,6 +4,7 @@ import { RouterView } from 'vue-router';
 import { onMounted, onUnmounted, watch } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { appStore, addLog, upsertTaskRecord, syncTaskRecordByLog, updateManualCopyTaskState, markStaleTasksInterrupted, type TaskRecord } from '@/lib/store';
+import { deriveTaskRecordElapsedSeconds } from '@/lib/taskRecordElapsed';
 import { getConfig, saveUiState, loadUiState, confirmQuit } from '@/lib/tauri';
 import { startScheduler } from '@/lib/scheduler';
 
@@ -25,10 +26,7 @@ function scheduleSave() {
 
 // Watch for any changes that warrant a persistent save
 watch(() => appStore.logs.length, scheduleSave);
-watch(
-    () => appStore.taskRecords.map(r => `${r.id}:${r.phase}:${r.copyPercentage}:${r.deployPercentage}`).join('|'),
-    scheduleSave,
-);
+watch(() => appStore.taskRecords, scheduleSave, { deep: true });
 
 onMounted(async () => {
     // 1. Load config first to get limits
@@ -51,6 +49,9 @@ onMounted(async () => {
         if (Array.isArray(persisted.task_records) && persisted.task_records.length > 0) {
             const capped = persisted.task_records.slice(0, appStore.maxTaskRecords);
             appStore.taskRecords.push(...(capped as any[]));
+            for (const record of appStore.taskRecords as TaskRecord[]) {
+                record.elapsedSeconds = deriveTaskRecordElapsedSeconds(record);
+            }
         }
     } catch { /* silent – fresh start if file missing or corrupt */ }
 
@@ -111,10 +112,33 @@ onMounted(async () => {
 
     unlistenScanQueued = await listen('scan-queued', (event: { payload: { folder: string; local_path: string; remote_path: string } }) => {
         const p = event.payload;
-        const existing = appStore.taskRecords.find(
-            r => r.folder === p.folder && (r.phase === 'queued' || r.phase === 'copying' || r.phase === 'paused')
+        const existing = appStore.taskRecords.find(r =>
+            r.folder === p.folder
+            && r.localPath === p.local_path
+            && r.sourcePath === p.remote_path
         );
-        if (existing) return;
+        if (existing) {
+            if (existing.ignored) return;
+            const now = Date.now();
+            existing.phase = 'queued';
+            existing.source = 'scheduled';
+            existing.startedAtMs = now;
+            existing.startTime = new Date(now).toLocaleString();
+            existing.copyPercentage = 0;
+            existing.copyCompleted = false;
+            existing.deployPercentage = 0;
+            existing.deployCompleted = false;
+            existing.speed = 0;
+            existing.copied = 0;
+            existing.total = 0;
+            existing.copyTotal = 0;
+            existing.hasRemote = false;
+            existing.remoteServers = [];
+            existing.finishedAtMs = undefined;
+            existing.elapsedSeconds = 0;
+            existing.updatedAt = now;
+            return;
+        }
 
         const now = Date.now();
         const record: TaskRecord = {
@@ -122,6 +146,7 @@ onMounted(async () => {
             startTime: new Date(now).toLocaleString(),
             startedAtMs: now,
             updatedAt: now,
+            elapsedSeconds: 0,
             folder: p.folder,
             sourcePath: p.remote_path,
             localPath: p.local_path,
@@ -138,6 +163,7 @@ onMounted(async () => {
             total: 0,
             phase: 'queued' as const,
             source: 'scheduled' as const,
+            ignored: false,
             filterExtensions: [],
             filterKeywords: [],
         };
@@ -179,7 +205,7 @@ onUnmounted(() => {
     <Sidebar />
     <main class="flex-1 overflow-auto">
       <router-view v-slot="{ Component }">
-        <keep-alive include="MainConsole,CodeStatisticsPage,NetworkToolsPage">
+        <keep-alive include="MainConsole,CodeStatisticsPage,NetworkToolsPage,SettingsPage">
           <component :is="Component" />
         </keep-alive>
       </router-view>

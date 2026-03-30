@@ -1,7 +1,8 @@
+use chardetng::EncodingDetector;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 
@@ -26,18 +27,35 @@ fn get_comment_rules() -> HashMap<&'static str, CommentRule> {
     m.insert(".c", c_style());
     m.insert(".cpp", c_style());
     m.insert(".cc", c_style());
+    m.insert(".cxx", c_style());
+    m.insert(".h", c_style());
+    m.insert(".hh", c_style());
+    m.insert(".hpp", c_style());
+    m.insert(".hxx", c_style());
+    m.insert(".ino", c_style());   // Arduino
+    m.insert(".cs", c_style());    // C#
+    m.insert(".m", c_style());     // Objective-C
+    m.insert(".mm", c_style());    // Objective-C++
     m.insert(".js", c_style());
     m.insert(".ts", c_style());
     m.insert(".tsx", c_style());
     m.insert(".jsx", c_style());
+    m.insert(".mjs", c_style());
+    m.insert(".mts", c_style());
     m.insert(".vue", c_style());
+    m.insert(".svelte", c_style());
     m.insert(".swift", c_style());
     m.insert(".kt", c_style());
+    m.insert(".kts", c_style());
     m.insert(".dart", c_style());
     m.insert(".rs", c_style());
     m.insert(".scala", c_style());
+    m.insert(".groovy", c_style());
+    m.insert(".gradle", c_style());
+    m.insert(".proto", c_style()); // Protocol Buffers
     m.insert(".scss", c_style());
     m.insert(".less", c_style());
+    m.insert(".sass", c_style());
     m.insert(
         ".py",
         CommentRule {
@@ -126,8 +144,85 @@ fn get_comment_rules() -> HashMap<&'static str, CommentRule> {
             multi_end: vec!["]]"],
         },
     );
+    let hash_style = || CommentRule {
+        single_line: vec!["#"],
+        multi_start: vec![],
+        multi_end: vec![],
+    };
+    m.insert(".yaml", hash_style());
+    m.insert(".yml", hash_style());
+    m.insert(".toml", hash_style());
+    m.insert(".ini", hash_style());
+    m.insert(".conf", hash_style());
+    m.insert(".cfg", hash_style());
+    m.insert(".properties", hash_style());
+    m.insert(".cmake", hash_style());
+    m.insert(".dockerfile", hash_style());
+    m.insert(".tf", hash_style());       // Terraform
+    m.insert(".hcl", hash_style());      // HashiCorp
+    m.insert(".nim", hash_style());
+    m.insert(".jl", hash_style());       // Julia
+    m.insert(".ps1", hash_style());      // PowerShell
+    m.insert(".psm1", hash_style());
+    m.insert(".makefile", hash_style());
     m.insert(
-        ".yaml",
+        ".bat",
+        CommentRule {
+            single_line: vec!["REM ", "rem ", "::"],
+            multi_start: vec![],
+            multi_end: vec![],
+        },
+    );
+    m.insert(
+        ".cmd",
+        CommentRule {
+            single_line: vec!["REM ", "rem ", "::"],
+            multi_start: vec![],
+            multi_end: vec![],
+        },
+    );
+    m.insert(
+        ".asm",
+        CommentRule {
+            single_line: vec![";"],
+            multi_start: vec![],
+            multi_end: vec![],
+        },
+    );
+    m.insert(
+        ".s",
+        CommentRule {
+            single_line: vec![";", "#"],
+            multi_start: vec![],
+            multi_end: vec![],
+        },
+    );
+    m.insert(
+        ".vb",
+        CommentRule {
+            single_line: vec!["'"],
+            multi_start: vec![],
+            multi_end: vec![],
+        },
+    );
+    m.insert(
+        ".vbs",
+        CommentRule {
+            single_line: vec!["'"],
+            multi_start: vec![],
+            multi_end: vec![],
+        },
+    );
+    m.insert(
+        ".erl",
+        CommentRule {
+            single_line: vec!["%"],
+            multi_start: vec![],
+            multi_end: vec![],
+        },
+    );
+    m.insert(
+        ".ex",
         CommentRule {
             single_line: vec!["#"],
             multi_start: vec![],
@@ -135,19 +230,47 @@ fn get_comment_rules() -> HashMap<&'static str, CommentRule> {
         },
     );
     m.insert(
-        ".yml",
+        ".exs",
         CommentRule {
             single_line: vec!["#"],
             multi_start: vec![],
             multi_end: vec![],
+        },
+    );
+    m.insert(
+        ".hs",
+        CommentRule {
+            single_line: vec!["--"],
+            multi_start: vec!["{-"],
+            multi_end: vec!["-}"],
         },
     );
     m
 }
 
-fn is_supported_extension(extension: &str) -> bool {
-    let rules = get_comment_rules();
-    rules.contains_key(extension)
+/// Check whether the extension looks like a text-based source file.
+/// We accept ANY extension that is not in a known binary blocklist,
+/// so the tool is language-agnostic.
+fn is_countable_extension(extension: &str) -> bool {
+    if extension.is_empty() {
+        return false;
+    }
+    // Skip known binary / non-text extensions
+    const BINARY_EXTENSIONS: &[&str] = &[
+        ".exe", ".dll", ".so", ".dylib", ".a", ".lib", ".o", ".obj",
+        ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
+        ".zip", ".gz", ".tar", ".bz2", ".xz", ".7z", ".rar", ".zst",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp", ".tif", ".tiff",
+        ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".flv", ".wav", ".ogg", ".flac", ".aac", ".wma", ".webm",
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".ttf", ".otf", ".woff", ".woff2", ".eot",
+        ".class", ".pyc", ".pyo", ".pyd",
+        ".wasm",
+        ".iso", ".img", ".dmg",
+        ".jar", ".war", ".ear",
+        ".DS_Store",
+    ];
+    !BINARY_EXTENSIONS.contains(&extension)
 }
 
 fn get_file_extension(filename: &str) -> String {
@@ -155,6 +278,17 @@ fn get_file_extension(filename: &str) -> String {
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
         .unwrap_or_default()
+}
+
+fn emit_code_count_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
+    let _ = app_handle.emit(
+        "log-message",
+        serde_json::json!({
+            "msg": msg.clone(),
+            "level": level,
+        }),
+    );
+    crate::scanner::write_log_to_file(app_handle, &msg, level);
 }
 
 fn normalize_extension(extension: &str) -> String {
@@ -250,9 +384,16 @@ pub struct CodeCountScopeNode {
 
 // ─── Scanner ─────────────────────────────────────────────────────
 
-struct FileInfo {
-    content: Vec<String>,
-}
+/// Maximum file size in bytes we are willing to diff (10 MB).
+/// Larger files are skipped to avoid excessive memory / CPU usage.
+const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Maximum number of non-empty lines we feed into Myers diff.
+/// Beyond this threshold we fall back to a simple add/delete count.
+const MAX_DIFF_LINES: usize = 50_000;
+
+/// Directory names that are skipped by default (version control metadata).
+const VCS_DIR_NAMES: &[&str] = &[".svn", ".git"];
 
 #[derive(Debug, Default, Clone)]
 struct CodeCountFileFilter {
@@ -295,13 +436,26 @@ enum DiffOp {
 }
 
 fn read_file_lines(path: &Path) -> Result<Vec<String>, std::io::Error> {
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut lines = Vec::new();
-    for line in reader.lines() {
-        lines.push(line?);
+    let bytes = fs::read(path)?;
+
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        let text = String::from_utf8_lossy(&bytes[3..]).into_owned();
+        return Ok(text.lines().map(|line| line.to_string()).collect());
     }
-    Ok(lines)
+
+    if let Ok(text) = String::from_utf8(bytes.clone()) {
+        return Ok(text.lines().map(|line| line.to_string()).collect());
+    }
+
+    // Detect encoding via chardetng and decode accordingly.
+    // Note: decoding may be lossy (replacement characters for unrecognizable bytes),
+    // which is acceptable for code statistics — a partial decode is better than
+    // failing to count the file entirely.
+    let mut detector = EncodingDetector::new();
+    detector.feed(&bytes, true);
+    let encoding = detector.guess(None, true);
+    let (decoded, _, _had_errors) = encoding.decode(&bytes);
+    Ok(decoded.lines().map(|line| line.to_string()).collect())
 }
 
 fn relative_path_to_string(path: &Path) -> String {
@@ -398,7 +552,7 @@ impl ScopeTreeNodeDraft {
 
 fn should_count_file(filename: &str, filter: Option<&CodeCountFileFilter>) -> bool {
     let extension = get_file_extension(filename);
-    if extension.is_empty() || !is_supported_extension(&extension) {
+    if !is_countable_extension(&extension) {
         return false;
     }
 
@@ -490,29 +644,59 @@ fn should_include_file(relative_path: &Path, selection: Option<&CodeCountSelecti
         .contains(relative_path_to_string(relative_path).as_str())
 }
 
-fn scan_files(
+/// Detect whether a file is likely binary by checking the first 8 KB for NUL bytes.
+fn is_likely_binary(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut reader = BufReader::new(file);
+    let mut buf = [0u8; 8192];
+    let Ok(n) = std::io::Read::read(&mut reader, &mut buf) else {
+        return false;
+    };
+    buf[..n].contains(&0)
+}
+
+fn is_vcs_dir(dir_name: &str) -> bool {
+    VCS_DIR_NAMES.iter().any(|&vcs| vcs.eq_ignore_ascii_case(dir_name))
+}
+
+/// Scan directory and collect relative file paths (without reading content).
+fn scan_file_paths(
     root_path: &Path,
     selection: Option<&CodeCountSelection>,
     filter: Option<&CodeCountFileFilter>,
-) -> Result<HashMap<String, FileInfo>, String> {
-    let mut files = HashMap::new();
+    include_vcs_dirs: bool,
+) -> Result<HashSet<String>, String> {
+    let mut paths = HashSet::new();
 
     fn walk(
         dir: &Path,
         root: &Path,
-        files: &mut HashMap<String, FileInfo>,
+        paths: &mut HashSet<String>,
         selection: Option<&CodeCountSelection>,
         filter: Option<&CodeCountFileFilter>,
+        include_vcs_dirs: bool,
     ) -> Result<(), String> {
         let entries = fs::read_dir(dir)
             .map_err(|e| format!("Failed to read directory {}: {}", dir.display(), e))?;
         for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue, // skip unreadable entries gracefully
+            };
             let path = entry.path();
             if path.is_dir() {
-                let relative_dir = path.strip_prefix(root).map_err(|e| e.to_string())?;
+                let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+                if !include_vcs_dirs && is_vcs_dir(&dir_name) {
+                    continue;
+                }
+                let relative_dir = match path.strip_prefix(root) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
                 if should_descend_into_dir(relative_dir, selection) {
-                    walk(&path, root, files, selection, filter)?;
+                    walk(&path, root, paths, selection, filter, include_vcs_dirs)?;
                 }
             } else {
                 let filename = path
@@ -523,32 +707,69 @@ fn scan_files(
                 if !should_count_file(&filename, filter) {
                     continue;
                 }
-                let relative_path = path.strip_prefix(root).map_err(|e| e.to_string())?;
+                let relative_path = match path.strip_prefix(root) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
                 if !should_include_file(relative_path, selection) {
                     continue;
                 }
-                let rel_path = relative_path_to_string(relative_path);
-
-                match read_file_lines(&path) {
-                    Ok(content) => {
-                        files.insert(rel_path, FileInfo { content });
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: failed to read file {}: {}", path.display(), e);
-                    }
-                }
+                paths.insert(relative_path_to_string(relative_path));
             }
         }
         Ok(())
     }
 
-    walk(root_path, root_path, &mut files, selection, filter)?;
-    Ok(files)
+    walk(root_path, root_path, &mut paths, selection, filter, include_vcs_dirs)?;
+    Ok(paths)
+}
+
+/// Read a single file lazily, respecting size limits.
+/// Returns None for files that are too large, binary, or unreadable.
+fn read_file_if_suitable(root: &Path, rel_path: &str) -> Option<Vec<String>> {
+    let abs_path = root.join(rel_path);
+
+    // Check file size first
+    if let Ok(meta) = fs::metadata(&abs_path) {
+        if meta.len() > MAX_FILE_SIZE_BYTES {
+            return None;
+        }
+    }
+
+    // Quick binary detection
+    if is_likely_binary(&abs_path) {
+        return None;
+    }
+
+    read_file_lines(&abs_path).ok()
+}
+
+fn explain_unsuitable_file(abs_path: &Path) -> String {
+    if let Ok(meta) = fs::metadata(abs_path) {
+        if meta.len() > MAX_FILE_SIZE_BYTES {
+            return format!(
+                "file too large ({} bytes > {} bytes)",
+                meta.len(),
+                MAX_FILE_SIZE_BYTES
+            );
+        }
+    }
+
+    if is_likely_binary(abs_path) {
+        return "detected as binary or non-text".to_string();
+    }
+
+    match read_file_lines(abs_path) {
+        Ok(lines) if lines.is_empty() => "empty file".to_string(),
+        Ok(_) => "filtered for an unknown reason".to_string(),
+        Err(err) => format!("failed to read as text: {}", err),
+    }
 }
 
 fn collect_scope_entries(
     root_path: &Path,
     filter: Option<&CodeCountFileFilter>,
+    include_vcs_dirs: bool,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut directories = Vec::new();
     let mut files = Vec::new();
@@ -559,6 +780,7 @@ fn collect_scope_entries(
         directories: &mut Vec<String>,
         files: &mut Vec<String>,
         filter: Option<&CodeCountFileFilter>,
+        include_vcs_dirs: bool,
     ) -> Result<(), String> {
         let entries = fs::read_dir(dir)
             .map_err(|e| format!("Failed to read directory {}: {}", dir.display(), e))?;
@@ -568,9 +790,13 @@ fn collect_scope_entries(
             let path = entry.path();
 
             if path.is_dir() {
+                let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+                if !include_vcs_dirs && is_vcs_dir(&dir_name) {
+                    continue;
+                }
                 let relative_dir = path.strip_prefix(root).map_err(|e| e.to_string())?;
                 directories.push(relative_path_to_string(relative_dir));
-                walk(&path, root, directories, files, filter)?;
+                walk(&path, root, directories, files, filter, include_vcs_dirs)?;
                 continue;
             }
 
@@ -590,7 +816,7 @@ fn collect_scope_entries(
         Ok(())
     }
 
-    walk(root_path, root_path, &mut directories, &mut files, filter)?;
+    walk(root_path, root_path, &mut directories, &mut files, filter, include_vcs_dirs)?;
     Ok((directories, files))
 }
 
@@ -665,6 +891,7 @@ fn insert_scope_file(nodes: &mut BTreeMap<String, ScopeTreeNodeDraft>, relative_
 fn build_scope_tree(
     paths: &[String],
     filter: Option<&CodeCountFileFilter>,
+    include_vcs_dirs: bool,
 ) -> Result<Vec<CodeCountScopeNode>, String> {
     let mut directory_paths = HashSet::new();
     let mut file_paths = HashSet::new();
@@ -680,7 +907,7 @@ fn build_scope_tree(
             return Err(format!("Path does not exist: {}", root_path.display()));
         }
 
-        let (directories, files) = collect_scope_entries(root_path, filter)?;
+        let (directories, files) = collect_scope_entries(root_path, filter, include_vcs_dirs)?;
 
         for directory_path in directories {
             directory_paths.insert(directory_path);
@@ -868,6 +1095,40 @@ fn has_changes(stats: &FileStats) -> bool {
         || stats.comment_modified > 0
 }
 
+/// Fallback for very large files: skip Myers diff, just count all old lines as
+/// deleted and all new lines as added (no "modified" detection).
+fn calculate_file_stats_simple(
+    file_path: &str,
+    old_content: &[String],
+    new_content: &[String],
+) -> FileStats {
+    let file_ext = get_file_extension(file_path);
+    let old_kinds = classify_lines(old_content, &file_ext);
+    let new_kinds = classify_lines(new_content, &file_ext);
+
+    let mut stats = FileStats {
+        file_path: file_path.to_string(),
+        ..Default::default()
+    };
+
+    for kind in &old_kinds {
+        match kind {
+            LineKind::Code => stats.code_deleted += 1,
+            LineKind::Comment => stats.comment_deleted += 1,
+            LineKind::Empty => {}
+        }
+    }
+    for kind in &new_kinds {
+        match kind {
+            LineKind::Code => stats.code_added += 1,
+            LineKind::Comment => stats.comment_added += 1,
+            LineKind::Empty => {}
+        }
+    }
+
+    stats
+}
+
 fn calculate_file_stats(
     file_path: &str,
     old_content: &[String],
@@ -885,6 +1146,12 @@ fn calculate_file_stats(
     let new_line_kinds = classify_lines(new_content, &file_ext);
     let old_non_empty_lines = build_non_empty_lines(&old_lines, &old_line_kinds);
     let new_non_empty_lines = build_non_empty_lines(&new_lines, &new_line_kinds);
+
+    // Guard: fall back to simple counting for very large files
+    if old_non_empty_lines.len() + new_non_empty_lines.len() > MAX_DIFF_LINES {
+        return calculate_file_stats_simple(file_path, old_content, new_content);
+    }
+
     let operations = diff_sequences(&old_non_empty_lines, &new_non_empty_lines);
 
     let mut deleted_code = 0;
@@ -934,14 +1201,15 @@ fn compare_directories(
     old_selection: Option<&CodeCountSelection>,
     new_selection: Option<&CodeCountSelection>,
     filter: Option<&CodeCountFileFilter>,
+    include_vcs_dirs: bool,
 ) -> Result<CodeCountResult, String> {
     let new_root = Path::new(new_path);
     if !new_root.is_dir() {
         return Err(format!("New path does not exist: {}", new_path));
     }
 
-    // Scan old directory (or skip for new project mode when old_path is empty)
-    let old_files = if old_path.is_empty() {
+    // Phase 1: collect file paths only (no content reading)
+    let old_file_paths = if old_path.is_empty() {
         emit_progress(
             app_handle,
             &CodeCountProgress {
@@ -952,7 +1220,7 @@ fn compare_directories(
                 percent: 25,
             },
         );
-        HashMap::new()
+        HashSet::new()
     } else {
         let old_root = Path::new(old_path);
         if !old_root.is_dir() {
@@ -968,10 +1236,9 @@ fn compare_directories(
                 percent: 0,
             },
         );
-        scan_files(old_root, old_selection, filter)?
+        scan_file_paths(old_root, old_selection, filter, include_vcs_dirs)?
     };
 
-    // Phase: scan new directory
     emit_progress(
         app_handle,
         &CodeCountProgress {
@@ -982,25 +1249,53 @@ fn compare_directories(
             percent: 25,
         },
     );
-    let new_files = scan_files(new_root, new_selection, filter)?;
+    let new_file_paths = scan_file_paths(new_root, new_selection, filter, include_vcs_dirs)?;
 
-    // Build union of all file paths
-    let mut all_files: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for key in old_files.keys().chain(new_files.keys()) {
-        if seen.insert(key.clone()) {
-            all_files.push(key.clone());
-        }
+    // Diagnostic: log scan results when selection is active but yields few files
+    if let Some(sel) = new_selection {
+        let sel_files_sample: Vec<&str> = sel.files.iter().map(|s| s.as_str()).take(10).collect();
+        let sel_dirs_sample: Vec<&str> = sel
+            .directories
+            .iter()
+            .map(|s| s.as_str())
+            .take(10)
+            .collect();
+        emit_code_count_log(
+            app_handle,
+            format!(
+                "[code-count debug] selection.files({})={:?}, selection.dirs({})={:?}, scanned_new_files={}",
+                sel.files.len(),
+                sel_files_sample,
+                sel.directories.len(),
+                sel_dirs_sample,
+                new_file_paths.len(),
+            ),
+            "info",
+        );
     }
-    all_files.sort();
+
+    // Build sorted union of all file paths
+    let all_files: Vec<String> = {
+        let mut seen = HashSet::new();
+        let mut list = Vec::new();
+        for key in old_file_paths.iter().chain(new_file_paths.iter()) {
+            if seen.insert(key.clone()) {
+                list.push(key.clone());
+            }
+        }
+        list.sort();
+        list
+    };
 
     let total_files = all_files.len() as i32;
     let mut result = CodeCountResult::default();
-    let empty_content: Vec<String> = Vec::new();
+    let old_root_path = Path::new(old_path);
+    let new_root_path = Path::new(new_path);
 
+    // Phase 2: diff each file – read content lazily one file at a time
     for (idx, file_path) in all_files.iter().enumerate() {
         let processed = idx as i32;
-        if processed % 50 == 0 || processed == total_files - 1 {
+        if processed % 100 == 0 || processed == total_files - 1 {
             emit_progress(
                 app_handle,
                 &CodeCountProgress {
@@ -1017,16 +1312,44 @@ fn compare_directories(
             );
         }
 
-        let old_content = old_files
-            .get(file_path)
-            .map(|f| &f.content)
-            .unwrap_or(&empty_content);
-        let new_content = new_files
-            .get(file_path)
-            .map(|f| &f.content)
-            .unwrap_or(&empty_content);
+        let old_content = if old_file_paths.contains(file_path) {
+            read_file_if_suitable(old_root_path, file_path)
+        } else {
+            None
+        };
+        let new_content = if new_file_paths.contains(file_path) {
+            read_file_if_suitable(new_root_path, file_path)
+        } else {
+            None
+        };
 
-        let stats = calculate_file_stats(file_path, old_content, new_content);
+        // Skip files where both sides were unreadable / too large / binary
+        let empty: Vec<String> = Vec::new();
+        let old_ref = old_content.as_deref().unwrap_or(&empty);
+        let new_ref = new_content.as_deref().unwrap_or(&empty);
+        if old_ref.is_empty() && new_ref.is_empty() {
+            let old_reason = if old_file_paths.contains(file_path) {
+                Some(explain_unsuitable_file(&old_root_path.join(file_path)))
+            } else {
+                None
+            };
+            let new_reason = if new_file_paths.contains(file_path) {
+                Some(explain_unsuitable_file(&new_root_path.join(file_path)))
+            } else {
+                None
+            };
+            emit_code_count_log(
+                app_handle,
+                format!(
+                    "[code-count debug] skipped: {} | old={:?} | new={:?}",
+                    file_path, old_reason, new_reason
+                ),
+                "warn",
+            );
+            continue;
+        }
+
+        let stats = calculate_file_stats(file_path, old_ref, new_ref);
 
         if has_changes(&stats) {
             result.summary.code_added += stats.code_added;
@@ -1047,6 +1370,7 @@ fn compare_directories(
 
             result.files.push(stats);
         }
+        // old_content and new_content are dropped here, freeing memory
     }
 
     result.operation_summary.added_total = result.summary.code_added + result.summary.comment_added;
@@ -1083,10 +1407,12 @@ pub async fn code_count_analyze(
     included_new_paths: Option<Vec<String>>,
     include_extensions: Option<Vec<String>>,
     exclude_extensions: Option<Vec<String>>,
+    include_vcs_dirs: Option<bool>,
 ) -> Result<CodeCountResult, String> {
     let old_selection = included_old_paths.map(CodeCountSelection::from_paths);
     let new_selection = included_new_paths.map(CodeCountSelection::from_paths);
     let filter = CodeCountFileFilter::from_extensions(include_extensions, exclude_extensions);
+    let vcs = include_vcs_dirs.unwrap_or(false);
 
     tauri::async_runtime::spawn_blocking(move || {
         compare_directories(
@@ -1096,6 +1422,7 @@ pub async fn code_count_analyze(
             old_selection.as_ref(),
             new_selection.as_ref(),
             filter.as_ref(),
+            vcs,
         )
     })
     .await
@@ -1103,17 +1430,23 @@ pub async fn code_count_analyze(
 }
 
 #[tauri::command]
-pub fn code_count_list_scope_tree(
+pub async fn code_count_list_scope_tree(
     paths: Vec<String>,
     include_extensions: Option<Vec<String>>,
     exclude_extensions: Option<Vec<String>>,
+    include_vcs_dirs: Option<bool>,
 ) -> Result<Vec<CodeCountScopeNode>, String> {
     if paths.iter().all(|path| path.trim().is_empty()) {
         return Ok(Vec::new());
     }
 
-    let filter = CodeCountFileFilter::from_extensions(include_extensions, exclude_extensions);
-    build_scope_tree(&paths, filter.as_ref())
+    let vcs = include_vcs_dirs.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        let filter = CodeCountFileFilter::from_extensions(include_extensions, exclude_extensions);
+        build_scope_tree(&paths, filter.as_ref(), vcs)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]

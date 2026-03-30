@@ -5,6 +5,7 @@ use chrono::{Duration, Local, NaiveDateTime, NaiveTime, Timelike};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use regex::Regex;
+use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -78,6 +79,85 @@ struct Candidate {
 static LOG_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 fn get_log_mutex() -> &'static Mutex<()> {
     LOG_MUTEX.get_or_init(|| Mutex::new(()))
+}
+
+fn normalize_path_for_match(value: &str) -> String {
+    value.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+/// Minimal typed representation of a persisted UI task record.
+/// Using a concrete struct instead of raw `serde_json::Value` ensures that
+/// field renames in the frontend will surface as deserialization misses rather
+/// than silent match failures.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedTaskRecord {
+    #[serde(default)]
+    folder: String,
+    #[serde(default)]
+    source_path: String,
+    #[serde(default)]
+    local_path: String,
+    #[serde(default)]
+    ignored: bool,
+}
+
+/// One-shot load of all persisted task records from `ui_state.json`.
+/// Call once at the start of a scan and pass the result into `perform_copy`
+/// to avoid repeated file IO + JSON parsing per candidate directory.
+fn load_persisted_task_records<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Vec<PersistedTaskRecord> {
+    let Ok(app_dir) = app_handle.path().app_data_dir() else {
+        return Vec::new();
+    };
+    let ui_state_path = app_dir.join("ui_state.json");
+    let Ok(content) = std::fs::read_to_string(ui_state_path) else {
+        return Vec::new();
+    };
+    let Ok(state) = serde_json::from_str::<Value>(&content) else {
+        return Vec::new();
+    };
+    let Some(arr) = state.get("task_records").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|v| serde_json::from_value::<PersistedTaskRecord>(v.clone()).ok())
+        .collect()
+}
+
+/// Check whether a matching task record exists in the pre-loaded list.
+/// Uses AND logic: both folder AND localPath must match to be considered the
+/// same task, preventing unrelated tasks with the same folder name from
+/// blocking each other's re-copy.
+fn task_record_exists_in(
+    records: &[PersistedTaskRecord],
+    folder: &str,
+    local_path: &Path,
+) -> bool {
+    let normalized_folder = folder.trim().to_lowercase();
+    let normalized_local_path = normalize_path_for_match(&local_path.to_string_lossy());
+
+    records.iter().any(|record| {
+        let rf = record.folder.trim().to_lowercase();
+        let rlp = normalize_path_for_match(&record.local_path);
+        rf == normalized_folder && rlp == normalized_local_path
+    })
+}
+
+fn task_record_ignored_in(
+    records: &[PersistedTaskRecord],
+    source_path: &Path,
+    local_path: &Path,
+) -> bool {
+    let normalized_source_path = normalize_path_for_match(&source_path.to_string_lossy());
+    let normalized_local_path = normalize_path_for_match(&local_path.to_string_lossy());
+
+    records.iter().any(|record| {
+        record.ignored
+            && normalize_path_for_match(&record.source_path) == normalized_source_path
+            && normalize_path_for_match(&record.local_path) == normalized_local_path
+    })
 }
 
 /// Compress `src` into a gzip file at `dst`.
@@ -340,6 +420,7 @@ async fn perform_copy<R: tauri::Runtime>(
     source: &str,
     filter_extensions: &[String],
     filter_includes: &[String],
+    cached_task_records: &[PersistedTaskRecord],
 ) {
     let target_full_path = target_parent_path.join(&folder_name);
 
@@ -404,6 +485,8 @@ async fn perform_copy<R: tauri::Runtime>(
     let folder_name_clone = folder_name.clone();
     let source_path_clone = source_path.clone();
     let target_full_path_clone = target_full_path.clone();
+    let allow_size_mismatch_recopy =
+        !task_record_exists_in(cached_task_records, &folder_name, &target_full_path);
 
     // Clone filter parameters for closure
     let extensions = filter_extensions.to_vec();
@@ -464,11 +547,12 @@ async fn perform_copy<R: tauri::Runtime>(
         }
 
         // Collect files with filtering (Iterative)
-        let mut filtered_files: Vec<(PathBuf, u64, bool)> = Vec::new();
+        let mut filtered_files: Vec<(PathBuf, u64, bool, bool)> = Vec::new();
         let mut total_files_scanned: u64 = 0;
         let mut skipped_by_ext: Vec<String> = Vec::new();
         let mut skipped_by_keyword: Vec<String> = Vec::new();
         let mut skipped_existing: u64 = 0;
+        let mut size_mismatch_recopy: u64 = 0;
         let recent_file_guard_secs = recent_file_guard_mins * 60;
         let now_system = SystemTime::now();
 
@@ -546,24 +630,81 @@ async fn perform_copy<R: tauri::Runtime>(
                             continue;
                         }
 
-                        if overwrite_existing || !dst.exists() {
-                            if let Ok(meta) = entry.metadata() {
-                                let file_size = meta.len();
-                                let is_recent = meta
-                                    .modified()
-                                    .ok()
-                                    .and_then(|modified| {
-                                        now_system.duration_since(modified).ok()
-                                    })
-                                    .map(|age| {
-                                        age < StdDuration::from_secs(recent_file_guard_secs)
-                                    })
-                                    .unwrap_or(true);
+                        if let Ok(meta) = entry.metadata() {
+                            let file_size = meta.len();
+                            let is_recent = meta
+                                .modified()
+                                .ok()
+                                .and_then(|modified| {
+                                    now_system.duration_since(modified).ok()
+                                })
+                                .map(|age| {
+                                    age < StdDuration::from_secs(recent_file_guard_secs)
+                                })
+                                .unwrap_or(true);
 
-                                filtered_files.push((path, file_size, is_recent));
+                            let mut force_overwrite_due_to_size_mismatch = false;
+                            if dst.exists() && !overwrite_existing {
+                                match std::fs::metadata(&dst) {
+                                    Ok(dst_meta) if dst_meta.is_file() => {
+                                        if dst_meta.len() != file_size {
+                                            if allow_size_mismatch_recopy {
+                                                force_overwrite_due_to_size_mismatch = true;
+                                                size_mismatch_recopy += 1;
+                                                emit_log(
+                                                    &handle,
+                                                    format!(
+                                                        "Detected incomplete local file, will re-copy: {} (local {} bytes, remote {} bytes)",
+                                                        dst.display(),
+                                                        dst_meta.len(),
+                                                        file_size
+                                                    ),
+                                                    "warn",
+                                                );
+                                            } else {
+                                                skipped_existing += 1;
+                                                emit_log(
+                                                    &handle,
+                                                    format!(
+                                                        "Detected size mismatch but skipped auto re-copy because task record still exists: {} (local {} bytes, remote {} bytes)",
+                                                        dst.display(),
+                                                        dst_meta.len(),
+                                                        file_size
+                                                    ),
+                                                    "warn",
+                                                );
+                                                continue;
+                                            }
+                                        } else {
+                                            skipped_existing += 1;
+                                            continue;
+                                        }
+                                    }
+                                    Ok(_) => {
+                                        skipped_existing += 1;
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        emit_log(
+                                            &handle,
+                                            format!(
+                                                "Failed to read target metadata for '{}': {}. Will re-copy it.",
+                                                dst.display(),
+                                                error
+                                            ),
+                                            "warn",
+                                        );
+                                        force_overwrite_due_to_size_mismatch = true;
+                                    }
+                                }
                             }
-                        } else {
-                            skipped_existing += 1;
+
+                            filtered_files.push((
+                                path,
+                                file_size,
+                                is_recent,
+                                overwrite_existing || force_overwrite_due_to_size_mismatch,
+                            ));
                         }
                     }
                 }
@@ -577,8 +718,8 @@ async fn perform_copy<R: tauri::Runtime>(
         emit_log(
             &handle,
             format!(
-                "Scan summary for '{}': {} file(s) found, {} matched filters, {} skipped by extension, {} skipped by keyword, {} already exist locally.",
-                folder_name_clone, total_files_scanned, matched_count, ext_skipped, kw_skipped, skipped_existing
+                "Scan summary for '{}': {} file(s) found, {} matched filters, {} skipped by extension, {} skipped by keyword, {} already exist locally, {} scheduled for re-copy due to size mismatch.",
+                folder_name_clone, total_files_scanned, matched_count, ext_skipped, kw_skipped, skipped_existing, size_mismatch_recopy
             ),
             "info",
         );
@@ -612,15 +753,15 @@ async fn perform_copy<R: tauri::Runtime>(
         // --- Stability check ---
         // Only files modified within the configured recent-file window enter the waiting flow.
         // Older files are copied directly; recent files wait `stability_check_secs` then re-check size.
-        let mut files_ready_now: Vec<(PathBuf, u64)> = filtered_files
+        let mut files_ready_now: Vec<(PathBuf, u64, bool)> = filtered_files
             .iter()
-            .filter(|(_, _, is_recent)| !*is_recent)
-            .map(|(path, size, _)| (path.clone(), *size))
+            .filter(|(_, _, is_recent, _)| !*is_recent)
+            .map(|(path, size, _, overwrite)| (path.clone(), *size, *overwrite))
             .collect();
-        let recent_files: Vec<(PathBuf, u64)> = filtered_files
+        let recent_files: Vec<(PathBuf, u64, bool)> = filtered_files
             .into_iter()
-            .filter(|(_, _, is_recent)| *is_recent)
-            .map(|(path, size, _)| (path, size))
+            .filter(|(_, _, is_recent, _)| *is_recent)
+            .map(|(path, size, _, overwrite)| (path, size, overwrite))
             .collect();
 
         if !files_ready_now.is_empty() {
@@ -662,12 +803,12 @@ async fn perform_copy<R: tauri::Runtime>(
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
 
-            for (path, original_size) in recent_files {
+            for (path, original_size, overwrite_this_file) in recent_files {
                 match std::fs::metadata(&path) {
                     Ok(meta) => {
                         let current_size = meta.len();
                         if current_size == original_size {
-                            files_ready_now.push((path, original_size));
+                            files_ready_now.push((path, original_size, overwrite_this_file));
                         } else {
                             let name = path.file_name().unwrap_or_default().to_string_lossy();
                             emit_log(
@@ -690,8 +831,8 @@ async fn perform_copy<R: tauri::Runtime>(
             files_ready_now.extend(recent_files);
         }
 
-        let filtered_files: Vec<(PathBuf, u64)> = files_ready_now;
-        let total_filtered_bytes: u64 = filtered_files.iter().map(|(_, s)| *s).sum();
+        let filtered_files: Vec<(PathBuf, u64, bool)> = files_ready_now;
+        let total_filtered_bytes: u64 = filtered_files.iter().map(|(_, s, _)| *s).sum();
 
         if filtered_files.is_empty() {
             emit_log(
@@ -778,7 +919,7 @@ async fn perform_copy<R: tauri::Runtime>(
         let mut copied_bytes_total = 0;
         let mut copied_files_list = Vec::new();
 
-        for (src, _size) in filtered_files {
+        for (src, _size, overwrite_this_file) in filtered_files {
             // Check skip before starting file
             if should_skip_clone.load(Ordering::SeqCst) {
                 if !copied_files_list.is_empty() {
@@ -849,7 +990,7 @@ async fn perform_copy<R: tauri::Runtime>(
             let copy_res = copy_file_with_overwrite_mode(
                 &src,
                 &dst,
-                overwrite_existing,
+                overwrite_this_file,
                 &should_cancel_clone,
                 &should_skip_clone,
                 &is_paused_clone,
@@ -1117,6 +1258,8 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         errors: vec![],
     };
 
+    // Manual copies always allow size-mismatch re-copy (user explicitly triggered),
+    // so pass an empty slice — task_record_exists_in will always return false.
     perform_copy(
         app_handle,
         source_path,
@@ -1134,6 +1277,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         "manual",
         &file_extensions,
         &filename_includes,
+        &[],
     )
     .await;
 
@@ -1399,6 +1543,9 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
         errors: vec![],
     };
 
+    // Load persisted task records once for the entire scan cycle
+    let cached_task_records = load_persisted_task_records(app_handle);
+
     let re_version = Regex::new(r"^(\d{4}_\d{2}_\d{2}_\d{2}_\d{2})\((.+)\)$").unwrap();
     let now_local = Local::now();
     let now = now_local.naive_local();
@@ -1549,6 +1696,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
 
                 if let Some(latest) = version_matches.first() {
                     let folder_date = latest.datetime.date();
+                    let local_target_path = local_parent.join(&latest.name);
                     emit_log(
                         app_handle,
                         format!(
@@ -1559,6 +1707,19 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                     );
 
                     if folder_date == today || folder_date == yesterday {
+                        if task_record_ignored_in(
+                            &cached_task_records,
+                            &latest.path,
+                            &local_target_path,
+                        ) {
+                            emit_log(
+                                app_handle,
+                                format!("Ignored previously cancelled task: {}", latest.name),
+                                "info",
+                            );
+                            continue;
+                        }
+
                         result.found_folders.push(latest.name.clone());
 
                         should_skip.store(false, Ordering::SeqCst);
@@ -1579,6 +1740,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             "scheduled",
                             &config.file_extensions,
                             &config.filename_includes,
+                            &cached_task_records,
                         )
                         .await;
                         should_skip.store(false, Ordering::SeqCst);
@@ -1686,6 +1848,19 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
 
                     // Emit all as queued
                     for (sub_path, sub_name) in &sub_dirs {
+                        let local_target_path = local_target_base.join(sub_name);
+                        if task_record_ignored_in(
+                            &cached_task_records,
+                            sub_path,
+                            &local_target_path,
+                        ) {
+                            emit_log(
+                                app_handle,
+                                format!("Ignored previously cancelled task: {}", sub_name),
+                                "info",
+                            );
+                            continue;
+                        }
                         emit_scan_queued(
                             app_handle,
                             sub_name,
@@ -1699,6 +1874,20 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         if should_cancel.load(Ordering::SeqCst) {
                             emit_log(app_handle, "Scan cancelled by user".to_string(), "info");
                             return result;
+                        }
+
+                        let local_target_path = local_target_base.join(&sub_name);
+                        if task_record_ignored_in(
+                            &cached_task_records,
+                            &sub_path,
+                            &local_target_path,
+                        ) {
+                            emit_log(
+                                app_handle,
+                                format!("Ignored previously cancelled task: {}", sub_name),
+                                "info",
+                            );
+                            continue;
                         }
 
                         // Check if this folder was removed from queue
@@ -1736,6 +1925,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             "scheduled",
                             &config.file_extensions,
                             &config.filename_includes,
+                            &cached_task_records,
                         )
                         .await;
                         should_skip.store(false, Ordering::SeqCst);

@@ -334,6 +334,7 @@ export async function codeCountAnalyze(
   includedNewPaths?: string[],
   includeExtensions?: string[],
   excludeExtensions?: string[],
+  includeVcsDirs?: boolean,
 ): Promise<CodeCountResult> {
   return await invoke<CodeCountResult>('code_count_analyze', {
     oldPath,
@@ -342,6 +343,7 @@ export async function codeCountAnalyze(
     includedNewPaths,
     includeExtensions,
     excludeExtensions,
+    includeVcsDirs,
   });
 }
 
@@ -349,11 +351,13 @@ export async function codeCountListScopeTree(
   paths: string[],
   includeExtensions?: string[],
   excludeExtensions?: string[],
+  includeVcsDirs?: boolean,
 ): Promise<CodeCountScopeTreeNode[]> {
   return await invoke<CodeCountScopeTreeNode[]>('code_count_list_scope_tree', {
     paths,
     includeExtensions,
     excludeExtensions,
+    includeVcsDirs,
   });
 }
 
@@ -362,8 +366,16 @@ export async function codeCountListScopeTree(
  * @param ips - Array of IP addresses to change password for
  * @returns Array of results indicating success/failure for each IP
  */
-export async function changeFrameworkPassword(ips: string[]): Promise<FrameworkPasswordResult[]> {
-  return await invoke<FrameworkPasswordResult[]>('change_framework_password', { ips });
+export async function changeFrameworkPassword(
+  ips: string[],
+  oldPassword?: string,
+  newPassword?: string,
+): Promise<FrameworkPasswordResult[]> {
+  return await invoke<FrameworkPasswordResult[]>('change_framework_password', {
+    ips,
+    oldPassword,
+    newPassword,
+  });
 }
 
 export async function enableApplianceSsh(request: EnableApplianceSshRequest): Promise<ApplianceSshResult[]> {

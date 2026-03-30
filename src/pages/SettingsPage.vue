@@ -2,10 +2,12 @@
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown } from 'lucide-vue-next';
 import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, openPathParent, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding } from '@/lib/tauri';
-import { appStore } from '@/lib/store';
+import { appStore, preRegisterManualDeploy, setManualDeployCurrentServer } from '@/lib/store';
 import { restartSchedulerInterval } from '@/lib/scheduler';
 import { useI18n } from 'vue-i18n';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+
+defineOptions({ name: 'SettingsPage' });
 
 const { t, locale } = useI18n();
 const configPath = ref('');
@@ -386,9 +388,26 @@ async function handleManualDeploy() {
         let failCount = 0;
         let lastError = '';
 
+        // Count valid server bindings
+        const validBindings = manualServerBindings.value.filter(b =>
+            config.value.servers.find(s => s.id === b.server_id)
+        );
+
+        // Pre-register the task record so all server deploy events share one record
+        const folderName = manualLocalPath.value.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'manual';
+        let taskRecord: ReturnType<typeof preRegisterManualDeploy> | null = null;
+        if (validBindings.length > 0) {
+            taskRecord = preRegisterManualDeploy(folderName, manualLocalPath.value, validBindings.length);
+        }
+
         for (const binding of manualServerBindings.value) {
             const server = config.value.servers.find(s => s.id === binding.server_id);
             if (!server) continue;
+
+            // Set current server name directly from config (no log parsing needed)
+            if (taskRecord) {
+                setManualDeployCurrentServer(taskRecord.id, server.name);
+            }
 
             // Resolve commands from all bound command groups in order
             const postCommands: string[] = [];

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { AlertCircle, CheckCircle2, Loader, Plus, Trash2 } from 'lucide-vue-next';
+import { AlertCircle, CheckCircle2, Globe, KeyRound, Loader, Server } from 'lucide-vue-next';
 import { changeFrameworkPassword, getConfig, type AppConfig, type FrameworkPasswordResult } from '../lib/tauri';
 
 const { t } = useI18n();
@@ -9,6 +9,8 @@ const { t } = useI18n();
 const config = ref<AppConfig | null>(null);
 const selectedIps = ref<string[]>([]);
 const manualIp = ref<string>('');
+const oldPassword = ref<string>('123456');
+const newPassword = ref<string>('admin_123');
 const isLoading = ref<boolean>(false);
 const results = ref<FrameworkPasswordResult[]>([]);
 const currentProgress = ref<{ current: number; total: number } | null>(null);
@@ -57,7 +59,11 @@ const handleExecute = async () => {
     const ipList = allSelectedIps.value;
     currentProgress.value = { current: 0, total: ipList.length };
 
-    const response = await changeFrameworkPassword(ipList);
+    const response = await changeFrameworkPassword(
+      ipList,
+      oldPassword.value || undefined,
+      newPassword.value || undefined,
+    );
     results.value = response;
     currentProgress.value = { current: ipList.length, total: ipList.length };
   } catch (error) {
@@ -93,9 +99,14 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
   <div class="flex-1 flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 overflow-y-auto">
     <div class="max-w-6xl w-full mx-auto p-6 pb-10 space-y-5">
     <!-- Header Section -->
-    <div>
-      <h1 class="text-2xl font-bold text-slate-900 mb-1">{{ t('tools.frameworkPassword.title') }}</h1>
-      <p class="text-slate-500 text-sm">{{ t('tools.frameworkPassword.description') }}</p>
+    <div class="flex items-start gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-sm shrink-0">
+        <KeyRound class="w-5 h-5 text-white" />
+      </div>
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900 mb-1">{{ t('tools.frameworkPassword.title') }}</h1>
+        <p class="text-slate-500 text-sm">{{ t('tools.frameworkPassword.description') }}</p>
+      </div>
     </div>
 
     <!-- Info Banner -->
@@ -112,51 +123,92 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
       <div class="lg:col-span-2 space-y-6">
 
         <!-- Server Selection Card -->
-        <div class="bg-white border border-slate-200 rounded-lg p-6 shadow-sm">
+        <div class="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm">
           <div class="flex items-center gap-2 mb-4">
-            <h3 class="text-lg font-semibold text-slate-900">{{ t('tools.frameworkPassword.selectServer') }}</h3>
-            <span class="text-sm text-slate-500">({{ t('tools.frameworkPassword.optional') }})</span>
+            <Server class="w-4 h-4 text-slate-400" />
+            <h3 class="text-sm font-semibold text-slate-800">{{ t('tools.frameworkPassword.selectServer') }}</h3>
+            <span class="text-xs text-slate-400">({{ t('tools.frameworkPassword.optional') }})</span>
           </div>
 
-          <div v-if="serverOptions.length > 0" class="space-y-2">
-            <div v-for="server in serverOptions" :key="server.id" class="flex items-center gap-3">
+          <div v-if="serverOptions.length > 0" class="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+            <label
+              v-for="server in serverOptions"
+              :key="server.id"
+              :for="`framework-password-server-${server.id}`"
+              class="flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer transition-colors"
+              :class="isServerSelected(server.host) ? 'bg-blue-50 border border-blue-200' : 'hover:bg-slate-50 border border-transparent'"
+            >
               <input
                 type="checkbox"
-                :id="`server-${server.id}`"
+                :id="`framework-password-server-${server.id}`"
                 :checked="isServerSelected(server.host)"
                 @change="toggleServerIp(server.host)"
                 :disabled="isLoading"
                 class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
               />
-              <label :for="`server-${server.id}`" class="flex-1 text-sm text-slate-700 cursor-pointer">
+              <span class="flex-1 text-sm text-slate-700 cursor-pointer">
                 <span class="font-medium">{{ server.name }}</span>
-                <span class="text-slate-500 ml-2">({{ server.host }})</span>
-              </label>
+                <span class="text-slate-400 ml-1">({{ server.host }})</span>
+              </span>
+            </label>
+          </div>
+          <div v-else class="text-sm text-slate-400">{{ t('tools.frameworkPassword.noServers') }}</div>
+        </div>
+
+        <!-- Password Config Card -->
+        <div class="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm">
+          <div class="flex items-center gap-2 mb-4">
+            <KeyRound class="w-4 h-4 text-slate-400" />
+            <h3 class="text-sm font-semibold text-slate-800">{{ t('tools.frameworkPassword.passwordConfig') }}</h3>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+              <label class="block text-xs font-medium text-slate-600">{{ t('tools.frameworkPassword.oldPassword') }}</label>
+              <input
+                v-model="oldPassword"
+                type="text"
+                :placeholder="t('tools.frameworkPassword.oldPasswordPlaceholder')"
+                :disabled="isLoading"
+                class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+              />
+            </div>
+            <div class="space-y-1.5">
+              <label class="block text-xs font-medium text-slate-600">{{ t('tools.frameworkPassword.newPassword') }}</label>
+              <input
+                v-model="newPassword"
+                type="text"
+                :placeholder="t('tools.frameworkPassword.newPasswordPlaceholder')"
+                :disabled="isLoading"
+                class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+              />
             </div>
           </div>
-          <div v-else class="text-sm text-slate-500">{{ t('tools.frameworkPassword.noServers') }}</div>
+          <p class="text-xs text-slate-400 mt-2">{{ t('tools.frameworkPassword.passwordConfigHint') }}</p>
         </div>
 
         <!-- Manual IP Input Card -->
-        <div class="bg-white border border-slate-200 rounded-lg p-6 shadow-sm">
-          <label class="block text-lg font-semibold text-slate-900 mb-4">{{ t('tools.frameworkPassword.manualIp') }}</label>
+        <div class="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm">
+          <div class="flex items-center gap-2 mb-3">
+            <Globe class="w-4 h-4 text-slate-400" />
+            <label class="block text-sm font-semibold text-slate-800">{{ t('tools.frameworkPassword.manualIp') }}</label>
+          </div>
           <div class="space-y-2">
             <input
               v-model="manualIp"
               type="text"
               :placeholder="t('tools.frameworkPassword.manualIpPlaceholder')"
               :disabled="isLoading"
-              class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400"
+              class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
             />
-            <p class="text-xs text-slate-500">{{ t('tools.frameworkPassword.manualIpHint') }}</p>
+            <p class="text-xs text-slate-400">{{ t('tools.frameworkPassword.manualIpHint') }}</p>
           </div>
         </div>
 
         <!-- Selected IPs Display -->
-        <div v-if="allSelectedIps.length > 0" class="bg-slate-50 border border-slate-200 rounded-lg p-4">
-          <p class="text-sm font-medium text-slate-700 mb-3">{{ t('tools.frameworkPassword.selectedIps', { count: allSelectedIps.length }) }}</p>
-          <div class="flex flex-wrap gap-2">
-            <div v-for="ip in allSelectedIps" :key="ip" class="inline-flex items-center gap-2 bg-blue-100 text-blue-900 px-3 py-1 rounded-full text-sm">
+        <div v-if="allSelectedIps.length > 0" class="bg-slate-50 border border-slate-200/80 rounded-xl px-4 py-3">
+          <p class="text-xs font-medium text-slate-500 mb-2">{{ t('tools.frameworkPassword.selectedIps', { count: allSelectedIps.length }) }}</p>
+          <div class="flex flex-wrap gap-1.5">
+            <div v-for="ip in allSelectedIps" :key="ip" class="inline-flex items-center gap-2 bg-blue-100/80 text-blue-800 px-2.5 py-0.5 rounded-md text-xs">
               <span class="font-mono">{{ ip }}</span>
             </div>
           </div>
@@ -166,7 +218,7 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
         <button
           @click="handleExecute"
           :disabled="!isFormValid"
-          class="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-semibold rounded-lg hover:from-blue-700 hover:to-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center justify-center gap-2 text-lg"
+          class="w-full px-5 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:ring-offset-1 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200 flex items-center justify-center gap-2 text-base shadow-sm"
         >
           <Loader v-if="isLoading" class="w-5 h-5 animate-spin" />
           <span>{{ isLoading ? t('tools.frameworkPassword.processing') : t('tools.frameworkPassword.executeButton') }}</span>
@@ -174,8 +226,8 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
       </div>
 
       <!-- Stats Card -->
-      <div class="bg-white border border-slate-200 rounded-lg p-6 shadow-sm h-fit sticky top-8">
-        <h3 class="text-lg font-semibold text-slate-900 mb-4">{{ t('tools.frameworkPassword.results') }}</h3>
+      <div class="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm h-fit sticky top-6">
+        <h3 class="text-sm font-semibold text-slate-800 mb-4">{{ t('tools.frameworkPassword.results') }}</h3>
 
         <div class="space-y-4">
           <div class="flex items-center justify-between">

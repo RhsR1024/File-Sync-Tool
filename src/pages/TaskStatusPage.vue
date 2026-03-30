@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, onActivated, watch, computed } from 'vue';
-import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2, FolderOpen, HardDrive, Cloud, Info, X, SkipForward } from 'lucide-vue-next';
+import { Play, Square, RefreshCw, Clock, Activity, Pause, PlayCircle, XCircle, Copy, Trash2, FolderOpen, HardDrive, Cloud, Info, X, SkipForward, RotateCcw, Server } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
-import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, openPathParent, skipCurrentCopy, removeFromScanQueue, type AppConfig, type DeployServer, type ScanTask } from '@/lib/tauri';
+import { getConfig, cancelScan, pauseScan, resumeScan, addSystemEvent, openPathParent, skipCurrentCopy, removeFromScanQueue, queueTemporaryCopy, type AppConfig, type DeployServer, type ScanTask } from '@/lib/tauri';
+import { deriveTaskRecordElapsedSeconds } from '@/lib/taskRecordElapsed';
 import { useI18n } from 'vue-i18n';
-import { appStore, addLog, markTaskRecordCancelled, setTaskRecordPaused, markTaskRecordSkipped, removeQueuedTaskRecord, type TaskRecord } from '@/lib/store';
+import { appStore, addLog, markTaskRecordCancelled, setTaskRecordPaused, markTaskRecordSkipped, markTaskRecordIgnored, prepareTaskRecordForRetry, removeTaskRecord, type TaskRecord } from '@/lib/store';
 import { startScheduler, stopScheduler, executeScan } from '@/lib/scheduler';
 
 defineOptions({
@@ -86,16 +87,35 @@ function liveProgress(rec: TaskRecord) {
   return null;
 }
 
+function localTargetRoot(rec: TaskRecord): string | null {
+  if (!rec.localPath) return null;
+  const normalized = rec.localPath.replace(/\//g, '\\');
+  const idx = normalized.lastIndexOf('\\');
+  if (idx <= 0) return null;
+  return normalized.slice(0, idx);
+}
+
 async function handleCancel(target: TaskRecord) {
   if (isCancelling.value) return;
 
   isCancelling.value = true;
   const msg = `${t('console.cancelling')} (${target.folder})`;
   addLog(msg, 'info');
-  markTaskRecordCancelled(target.folder);
+  const shouldIgnore = target.source === 'scheduled' && !!target.sourcePath && !!target.localPath;
+  if (shouldIgnore) {
+    markTaskRecordIgnored(target.id);
+  } else {
+    markTaskRecordCancelled(target.folder);
+  }
 
   try {
-    await cancelScan();
+    if (target.phase === 'queued' && target.source === 'scheduled') {
+      await removeFromScanQueue(target.folder);
+    } else if (target.source === 'scheduled') {
+      await skipCurrentCopy();
+    } else {
+      await cancelScan();
+    }
   } catch (e) {
     addLog(`Cancel failed: ${e}`, 'error');
   } finally {
@@ -119,14 +139,35 @@ async function handleSkip(target: TaskRecord) {
   }
 }
 
-async function handleRemoveFromQueue(target: TaskRecord) {
-  try {
-    await removeFromScanQueue(target.folder);
-    removeQueuedTaskRecord(target.folder);
-    addLog(`${t('console.removedFromQueue')} (${target.folder})`, 'info');
-  } catch (e) {
-    addLog(`Remove failed: ${e}`, 'error');
+async function handleRestore(target: TaskRecord) {
+  const targetRootPath = localTargetRoot(target);
+  if (!target.sourcePath || !targetRootPath) {
+    addLog(t('console.restoreCopyFailed', { error: 'Missing source or local target path' }), 'error');
+    return;
   }
+
+  try {
+    prepareTaskRecordForRetry(target.id);
+    await queueTemporaryCopy(
+      target.sourcePath,
+      targetRootPath,
+      false,
+      target.filterExtensions ?? [],
+      target.filterKeywords ?? [],
+    );
+    addLog(`${t('console.restoreCopyStarted')} (${target.folder})`, 'success');
+  } catch (e) {
+    if (target.source === 'scheduled') {
+      markTaskRecordIgnored(target.id);
+    } else {
+      markTaskRecordCancelled(target.folder);
+    }
+    addLog(t('console.restoreCopyFailed', { error: e }), 'error');
+  }
+}
+
+function handleClearRecord(target: TaskRecord) {
+  removeTaskRecord(target.id);
 }
 
 async function togglePause(target: TaskRecord) {
@@ -161,13 +202,14 @@ function formatStartTime(ms: number): string {
   return `${year}-${month}-${day} ${hour}:${min}:${sec}`;
 }
 
-function formatStatus(phase: TaskRecord['phase']) {
+function formatStatus(rec: TaskRecord) {
+  const phase = rec.phase;
   if (phase === 'queued') return t('console.phaseQueued');
   if (phase === 'paused') return t('console.phasePaused');
   if (phase === 'remote_pushing') return t('console.phaseRemotePushing');
   if (phase === 'remote_deploying') return t('console.phaseRemoteDeploying');
   if (phase === 'failed') return t('console.phaseFailed');
-  if (phase === 'cancelled') return t('console.phaseCancelled');
+  if (phase === 'cancelled') return rec.ignored ? t('console.phaseIgnored') : t('console.phaseCancelled');
   if (phase === 'completed') return t('console.phaseCompleted');
   if (phase === 'interrupted') return t('console.phaseInterrupted');
   return t('console.phaseCopying');
@@ -265,13 +307,9 @@ function displayEta(rec: TaskRecord): string {
 }
 
 function displayElapsed(rec: TaskRecord): string {
-  if (rec.phase === 'completed' || rec.phase === 'failed' || rec.phase === 'cancelled' || rec.phase === 'interrupted') {
-    const endMs = rec.finishedAtMs || rec.updatedAt;
-    return formatDuration((endMs - rec.startedAtMs) / 1000);
-  }
-  const elapsed = liveProgress(rec)?.elapsed || 0;
-  if (elapsed > 0) return formatDuration(elapsed);
-  return formatDuration((Date.now() - rec.startedAtMs) / 1000);
+  if (rec.phase === 'queued') return '-';
+  const elapsed = deriveTaskRecordElapsedSeconds(rec, liveProgress(rec)?.elapsed || 0);
+  return formatDuration(elapsed);
 }
 
 function formatFilterRules(rec: TaskRecord): string {
@@ -511,7 +549,7 @@ watch(
                     class="inline-flex items-center px-2 py-1 rounded text-[11px] font-bold ring-1 ring-inset leading-none whitespace-nowrap"
                     :class="statusBadgeClass(rec.phase)"
                   >
-                    {{ formatStatus(rec.phase) }}
+                    {{ formatStatus(rec) }}
                   </span>
                 </div>
 
@@ -532,6 +570,14 @@ watch(
                         :class="progressBarClass(rec.phase)"
                         :style="{ width: `${Math.min(progressValue(rec), 100)}%` }"
                       ></div>
+                    </div>
+                    <div
+                      v-if="rec.currentServerName && (rec.phase === 'remote_pushing' || rec.phase === 'remote_deploying')"
+                      class="flex w-full items-center gap-1 truncate"
+                      :title="rec.currentServerName"
+                    >
+                      <Server class="w-3 h-3 shrink-0 text-purple-500" />
+                      <span class="truncate text-[11px] text-purple-600 font-mono">{{ rec.currentServerName }}</span>
                     </div>
                   </div>
                 </div>
@@ -576,11 +622,11 @@ watch(
 
                 <!-- Per-task Actions -->
                 <div class="flex justify-center gap-1.5">
-                  <template v-if="rec.phase === 'queued'">
+                  <template v-if="rec.phase === 'queued' && rec.source === 'scheduled'">
                     <button
-                      @click="handleRemoveFromQueue(rec)"
+                      @click="handleCancel(rec)"
                       class="inline-flex items-center justify-center rounded-md border border-red-200 bg-white text-red-600 p-1.5 hover:bg-red-50 hover:border-red-300 transition-colors active:scale-95"
-                      :title="t('console.removeFromQueue')"
+                      :title="t('console.cancel')"
                     >
                       <XCircle class="w-4 h-4" />
                     </button>
@@ -611,6 +657,31 @@ watch(
                       :title="t('console.cancel')"
                     >
                       <XCircle class="w-4 h-4" />
+                    </button>
+                  </template>
+                  <template v-else-if="rec.phase === 'cancelled'">
+                    <button
+                      @click="handleRestore(rec)"
+                      class="inline-flex items-center justify-center rounded-md border border-emerald-200 bg-white text-emerald-600 p-1.5 hover:bg-emerald-50 hover:border-emerald-300 transition-colors active:scale-95"
+                      :title="t('console.restoreCopy')"
+                    >
+                      <RotateCcw class="w-4 h-4" />
+                    </button>
+                    <button
+                      @click="handleClearRecord(rec)"
+                      class="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 p-1.5 hover:bg-slate-50 hover:border-slate-300 transition-colors active:scale-95"
+                      :title="t('console.clearSingleRecord')"
+                    >
+                      <Trash2 class="w-4 h-4" />
+                    </button>
+                  </template>
+                  <template v-else-if="rec.phase === 'failed' || rec.phase === 'completed' || rec.phase === 'interrupted'">
+                    <button
+                      @click="handleClearRecord(rec)"
+                      class="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 p-1.5 hover:bg-slate-50 hover:border-slate-300 transition-colors active:scale-95"
+                      :title="t('console.clearSingleRecord')"
+                    >
+                      <Trash2 class="w-4 h-4" />
                     </button>
                   </template>
                   <span v-else class="text-xs text-slate-400">-</span>
@@ -764,6 +835,47 @@ watch(
                 <Copy class="h-3.5 w-3.5" />
                 {{ t('settings.copyPath') }}
               </button>
+            </div>
+
+            <!-- Per-server deploy details -->
+            <div
+              v-if="selectedPathRecord.remoteServers.length > 0"
+              class="flex flex-col rounded-xl border border-slate-200 bg-slate-50 p-4"
+            >
+              <div class="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700">
+                <Server class="h-4 w-4 text-indigo-500" />
+                {{ t('console.serverDeployDetails') }}
+              </div>
+              <div class="flex flex-col gap-2">
+                <div
+                  v-for="server in selectedPathRecord.remoteServers"
+                  :key="server.key"
+                  class="flex items-center gap-3 rounded-lg border px-3 py-2 text-[12px]"
+                  :class="server.failed
+                    ? 'border-rose-200 bg-rose-50'
+                    : server.completed
+                      ? 'border-emerald-200 bg-emerald-50'
+                      : 'border-blue-200 bg-blue-50'"
+                >
+                  <span class="flex-1 font-mono text-slate-700 truncate" :title="server.label">
+                    {{ server.label }}
+                  </span>
+                  <span
+                    class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold ring-1 ring-inset whitespace-nowrap"
+                    :class="server.failed
+                      ? 'bg-rose-100 text-rose-700 ring-rose-300'
+                      : server.completed
+                        ? 'bg-emerald-100 text-emerald-700 ring-emerald-300'
+                        : 'bg-blue-100 text-blue-700 ring-blue-300'"
+                  >
+                    {{ server.failed
+                        ? t('console.serverFailed')
+                        : server.completed
+                          ? t('console.serverSuccess')
+                          : `${server.percentage.toFixed(0)}%` }}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
         </div>

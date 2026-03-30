@@ -34,14 +34,17 @@ const collectLeafKeys = (node: CodeCountScopeTreeNode): string[] => {
 
 const isDirectory = computed(() => props.node.kind === 'directory');
 const leafKeys = computed(() => collectLeafKeys(props.node));
-const hasSelectableLeaves = computed(() => leafKeys.value.length > 0);
 const selectedKeySet = computed(() => new Set(props.selectedLeafKeys));
 const selectedLeafCount = computed(() =>
   leafKeys.value.filter((key) => selectedKeySet.value.has(key)).length,
 );
-const isChecked = computed(
-  () => leafKeys.value.length > 0 && selectedLeafCount.value === leafKeys.value.length,
-);
+const isEmptyDirectory = computed(() => isDirectory.value && leafKeys.value.length === 0);
+const isChecked = computed(() => {
+  if (isEmptyDirectory.value) {
+    return props.selectedLeafKeys.includes(props.node.key);
+  }
+  return leafKeys.value.length > 0 && selectedLeafCount.value === leafKeys.value.length;
+});
 const isPartial = computed(
   () => selectedLeafCount.value > 0 && selectedLeafCount.value < leafKeys.value.length,
 );
@@ -59,7 +62,6 @@ watch(
 );
 
 const handleToggleSelection = () => {
-  if (!hasSelectableLeaves.value) return;
   emit('toggle-selection', props.node);
 };
 
@@ -93,7 +95,6 @@ const handleToggleExpand = () => {
         type="checkbox"
         class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
         :checked="isChecked"
-        :disabled="!hasSelectableLeaves"
         @change="handleToggleSelection"
       />
 
