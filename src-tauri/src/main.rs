@@ -8,6 +8,11 @@ mod history;
 mod network;
 mod persist;
 mod scanner;
+mod task_domain;
+mod task_commands;
+mod task_events;
+mod task_manager;
+mod task_persist;
 
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
@@ -31,6 +36,7 @@ const TRAY_QUIT_ID: &str = "tray_quit";
 
 struct AppState {
     config: Arc<Mutex<AppConfig>>,
+    task_manager: task_manager::TaskManager,
     is_scanning: Arc<AtomicBool>,
     is_manually_deploying: Arc<AtomicBool>,
     manual_copy_queue: Arc<Mutex<VecDeque<ManualCopyQueueItem>>>,
@@ -223,6 +229,7 @@ fn emit_manual_copy_task_state<R: tauri::Runtime>(
 
 fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
     let config = state.config.clone();
+    let task_manager = state.task_manager.clone();
     let manual_copy_queue = state.manual_copy_queue.clone();
     let manual_copy_keys = state.manual_copy_keys.clone();
     let manual_copy_worker_running = state.manual_copy_worker_running.clone();
@@ -265,6 +272,7 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     &app_handle,
                     &config_snapshot,
                     config.clone(),
+                    task_manager.clone(),
                     task.source_path.clone(),
                     task.target_root_path.clone(),
                     task.overwrite_existing,
@@ -459,6 +467,7 @@ async fn scan_now(
         &app_handle,
         &config,
         live_config,
+        state.task_manager.clone(),
         state.should_cancel.clone(),
         state.should_skip_current.clone(),
         state.is_paused.clone(),
@@ -572,6 +581,7 @@ async fn temporary_copy(
         &app_handle,
         &config,
         live_config,
+        state.task_manager.clone(),
         source_path,
         target_root_path,
         overwrite_existing,
@@ -1561,10 +1571,12 @@ fn main() {
             let _ = tray_builder.build(app)?;
 
             let config = config::load_config(app.handle());
+            let task_manager = task_manager::TaskManager::new(app.handle().clone());
             let _ = sync_launch_on_startup(config.launch_and_auto_scan);
             app.manage(network::NetworkState::default());
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
+                task_manager,
                 is_scanning: Arc::new(AtomicBool::new(false)),
                 is_manually_deploying: Arc::new(AtomicBool::new(false)),
                 manual_copy_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -1603,6 +1615,10 @@ fn main() {
             enable_appliance_ssh,
             code_count::code_count_analyze,
             code_count::code_count_list_scope_tree,
+            task_commands::list_task_groups,
+            task_commands::get_task_group_detail,
+            task_commands::clear_task_group,
+            task_commands::clear_task_groups,
             persist::save_ui_state,
             persist::load_ui_state,
             persist::save_kv,

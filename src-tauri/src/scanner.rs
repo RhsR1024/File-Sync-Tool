@@ -1,6 +1,8 @@
 use crate::config::{AppConfig, MatchRule, TaskServerBinding};
 use crate::deploy::deploy_to_remote;
 use crate::history::{add_history_entry, HistoryEntry};
+use crate::task_domain::{TaskSourceType, TaskTriggerSource};
+use crate::task_manager::{TaskManager, TaskStartRequest};
 use chrono::{Duration, Local, NaiveDateTime, NaiveTime, Timelike};
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -410,6 +412,7 @@ async fn perform_copy<R: tauri::Runtime>(
     target_parent_path: &Path,
     config: &AppConfig,
     live_config: Arc<Mutex<AppConfig>>,
+    task_manager: TaskManager,
     should_cancel: Arc<AtomicBool>,
     should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
@@ -481,6 +484,20 @@ async fn perform_copy<R: tauri::Runtime>(
         return;
     }
 
+    let task_handle = if source == "scheduled" {
+        Some(task_manager.begin_scheduled_copy(TaskStartRequest {
+            task_config_id: task_id.clone(),
+            display_name: folder_name.clone(),
+            folder_name: folder_name.clone(),
+            source_path: source_path.to_string_lossy().to_string(),
+            local_target_path: target_full_path.to_string_lossy().to_string(),
+            source_type: TaskSourceType::Scheduled,
+            trigger_source: TaskTriggerSource::Scheduled,
+        }))
+    } else {
+        None
+    };
+
     let app_handle_clone = app_handle.clone();
     let folder_name_clone = folder_name.clone();
     let source_path_clone = source_path.clone();
@@ -500,6 +517,8 @@ async fn perform_copy<R: tauri::Runtime>(
     let live_config_clone = live_config.clone();
     let task_id_clone = task_id.clone();
     let source_clone = source.to_string();
+    let task_manager_clone = task_manager.clone();
+    let task_handle_clone = task_handle.clone();
 
     let copy_task = tauri::async_runtime::spawn_blocking(move || {
         let handle = app_handle_clone;
@@ -1102,6 +1121,19 @@ async fn perform_copy<R: tauri::Runtime>(
                 vec![]
             };
 
+            let has_enabled_deploy_targets = live_server_bindings
+                .iter()
+                .filter_map(|binding| current_config.servers.iter().find(|server| server.id == binding.server_id))
+                .any(|server| server.enabled);
+
+            if let Some(task_handle) = task_handle_clone.as_ref() {
+                let _ = task_manager_clone.mark_copy_completed(
+                    &task_handle.task_group_id,
+                    &task_handle.run_id,
+                    has_enabled_deploy_targets,
+                );
+            }
+
             if live_server_bindings.is_empty() {
                 emit_log(
                     &handle,
@@ -1114,6 +1146,13 @@ async fn perform_copy<R: tauri::Runtime>(
                 return Ok(copied_bytes_total);
             }
 
+            let deploy_tracking = task_handle_clone.as_ref().map(|task_handle| {
+                task_manager_clone.tracking_context(
+                    task_handle.task_group_id.clone(),
+                    task_handle.run_id.clone(),
+                )
+            });
+
             if let Err(e) = deploy_to_remote(
                 &handle,
                 &live_server_bindings,
@@ -1123,9 +1162,16 @@ async fn perform_copy<R: tauri::Runtime>(
                 &folder_name_clone,
                 should_cancel_clone,
                 is_paused_clone,
+                deploy_tracking,
             ) {
                 emit_log(&handle, format!("Deployment failed: {}", e), "error");
             }
+        } else if let Some(task_handle) = task_handle_clone.as_ref() {
+            let _ = task_manager_clone.mark_copy_completed(
+                &task_handle.task_group_id,
+                &task_handle.run_id,
+                false,
+            );
         }
 
         Ok(copied_bytes_total)
@@ -1134,6 +1180,13 @@ async fn perform_copy<R: tauri::Runtime>(
     match copy_task.await {
         Ok(Ok(0)) => {
             // Nothing was copied (all files already up to date) — do not count as "copied"
+            if let Some(task_handle) = task_handle.as_ref() {
+                let _ = task_manager.mark_copy_completed(
+                    &task_handle.task_group_id,
+                    &task_handle.run_id,
+                    false,
+                );
+            }
         }
         Ok(Ok(_)) => {
             emit_log(
@@ -1144,6 +1197,20 @@ async fn perform_copy<R: tauri::Runtime>(
             result.copied_folders.push(folder_name);
         }
         Ok(Err(e)) => {
+            if let Some(task_handle) = task_handle.as_ref() {
+                if let fs_extra::error::ErrorKind::Interrupted = e.kind {
+                    let _ = task_manager.mark_copy_cancelled(
+                        &task_handle.task_group_id,
+                        &task_handle.run_id,
+                    );
+                } else {
+                    let _ = task_manager.mark_copy_failed(
+                        &task_handle.task_group_id,
+                        &task_handle.run_id,
+                        e.to_string(),
+                    );
+                }
+            }
             if let fs_extra::error::ErrorKind::Interrupted = e.kind {
                 let is_skip = e.to_string().contains("Skipped");
                 let msg = if is_skip {
@@ -1159,6 +1226,13 @@ async fn perform_copy<R: tauri::Runtime>(
             }
         }
         Err(e) => {
+            if let Some(task_handle) = task_handle.as_ref() {
+                let _ = task_manager.mark_copy_failed(
+                    &task_handle.task_group_id,
+                    &task_handle.run_id,
+                    format!("Copy task panic: {}", e),
+                );
+            }
             let err_msg = format!("Copy task panic: {}", e);
             emit_log(app_handle, err_msg.clone(), "error");
             result.errors.push(err_msg);
@@ -1170,6 +1244,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     config: &AppConfig,
     live_config: Arc<Mutex<AppConfig>>,
+    task_manager: TaskManager,
     source_path: String,
     target_root_path: String,
     overwrite_existing: bool,
@@ -1267,6 +1342,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         &target_root_path,
         config,
         live_config,
+        task_manager,
         should_cancel,
         Arc::new(AtomicBool::new(false)),
         is_paused,
@@ -1531,6 +1607,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     config: &AppConfig,
     live_config: Arc<Mutex<AppConfig>>,
+    task_manager: TaskManager,
     should_cancel: Arc<AtomicBool>,
     should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
@@ -1730,6 +1807,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             local_parent,
                             config,
                             live_config.clone(),
+                            task_manager.clone(),
                             should_cancel.clone(),
                             should_skip.clone(),
                             is_paused.clone(),
@@ -1915,6 +1993,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             &local_target_base,
                             config,
                             live_config.clone(),
+                            task_manager.clone(),
                             should_cancel.clone(),
                             should_skip.clone(),
                             is_paused.clone(),
