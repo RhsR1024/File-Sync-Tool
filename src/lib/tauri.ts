@@ -75,6 +75,153 @@ export interface AppConfig {
   max_task_records: number;
 }
 
+export type TaskSourceType = 'scheduled' | 'manual';
+
+export type TaskTriggerSource = 'scheduled' | 'manual' | 'recovery';
+
+export type TaskRunType = 'copy_and_deploy' | 'deploy_retry' | 'manual_deploy';
+
+export type TaskSummaryStatus =
+  | 'queued'
+  | 'copying'
+  | 'copy_completed'
+  | 'deploying'
+  | 'partial_failed'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted';
+
+export type CopyState = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+export type DeployState =
+  | 'not_started'
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'partial_failed'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted';
+
+export type AttemptStatus = 'running' | 'success' | 'failed' | 'cancelled' | 'interrupted';
+
+export type DeployStage = 'pending' | 'connecting' | 'uploading' | 'executing_commands' | 'done';
+
+export interface TaskRunHandle {
+  task_group_id: string;
+  run_id: string;
+}
+
+export interface StartManualCopyTaskRequest {
+  source_path: string;
+  target_root_path: string;
+  overwrite_existing?: boolean;
+  file_extensions?: string[];
+  filename_includes?: string[];
+}
+
+export interface StartManualDeployTaskBindingRequest {
+  server_id: string;
+  command_group_ids: string[];
+}
+
+export interface StartManualDeployTaskRequest {
+  task_group_id: string | null;
+  display_name?: string;
+  folder_name?: string;
+  local_path: string;
+  remote_path: string;
+  bindings: StartManualDeployTaskBindingRequest[];
+}
+
+export interface DeployAttempt {
+  attempt_id: string;
+  task_group_id: string;
+  run_id: string;
+  server_id: string;
+  server_name: string;
+  attempt_no: number;
+  trigger_source: TaskTriggerSource;
+  stage: DeployStage;
+  status: AttemptStatus;
+  remote_target: string | null;
+  started_at: string;
+  finished_at: string | null;
+  elapsed_seconds: number;
+  progress_percentage: number | null;
+  error_phase: DeployStage | null;
+  error_message: string | null;
+  last_log_excerpt: string | null;
+}
+
+export interface TaskRun {
+  run_id: string;
+  task_group_id: string;
+  run_type: TaskRunType;
+  trigger_source: TaskTriggerSource;
+  started_at: string;
+  finished_at: string | null;
+  copy_phase: CopyState;
+  deploy_phase: DeployState;
+  deploy_attempts: DeployAttempt[];
+  attempt_ids: string[];
+}
+
+export interface ServerRollup {
+  server_id: string;
+  server_name: string;
+  latest_status: AttemptStatus;
+  latest_attempt_id: string | null;
+  success_count: number;
+  failure_count: number;
+  last_error_message: string | null;
+  attempt_ids: string[];
+}
+
+export interface TaskGroupListItem {
+  task_group_id: string;
+  merge_key: string;
+  task_config_id: string | null;
+  display_name: string;
+  folder_name: string;
+  source_path: string;
+  local_target_path: string;
+  copy_status: CopyState;
+  deploy_status: DeployState;
+  summary_status: TaskSummaryStatus;
+  started_at: string;
+  finished_at: string | null;
+  elapsed_seconds: number;
+  latest_run_id: string | null;
+  had_failures: boolean;
+  server_rollups: ServerRollup[];
+}
+
+export interface TaskGroup extends TaskGroupListItem {
+  source_type: TaskSourceType;
+  runs: TaskRun[];
+}
+
+export interface TaskGroupsSnapshot {
+  groups: TaskGroupListItem[];
+}
+
+export interface TaskGroupDetailSnapshot {
+  task_group_id: string;
+  group: TaskGroup;
+}
+
+export interface TaskLogEntry {
+  task_group_id: string | null;
+  run_id: string | null;
+  server_id: string | null;
+  server_name: string | null;
+  level: 'info' | 'success' | 'warn' | 'error' | 'command' | string;
+  message: string;
+  timestamp: string;
+}
+
 export interface ScanResult {
   scanned_paths: number;
   found_folders: string[];
@@ -189,6 +336,46 @@ export async function queueTemporaryCopy(
 
 export async function previewTemporaryCopy(sourcePath: string, targetRootPath: string): Promise<ManualCopyPreview> {
   return await invoke('preview_temporary_copy', { sourcePath, targetRootPath });
+}
+
+export async function listTaskGroups(): Promise<TaskGroupListItem[]> {
+  return await invoke('list_task_groups');
+}
+
+export async function getTaskGroupDetail(taskGroupId: string): Promise<TaskGroup> {
+  return await invoke('get_task_group_detail', { taskGroupId });
+}
+
+export async function clearTaskGroup(taskGroupId: string): Promise<void> {
+  await invoke('clear_task_group', { taskGroupId });
+}
+
+export async function clearTaskGroups(): Promise<void> {
+  await invoke('clear_task_groups');
+}
+
+export async function cancelTaskRun(taskGroupId: string, runId: string): Promise<void> {
+  await invoke('cancel_task_run', { taskGroupId, runId });
+}
+
+export async function pauseTaskRun(taskGroupId: string, runId: string): Promise<void> {
+  await invoke('pause_task_run', { taskGroupId, runId });
+}
+
+export async function resumeTaskRun(taskGroupId: string, runId: string): Promise<void> {
+  await invoke('resume_task_run', { taskGroupId, runId });
+}
+
+export async function retryTaskGroupDeploy(taskGroupId: string): Promise<TaskRunHandle> {
+  return await invoke('retry_task_group_deploy', { taskGroupId });
+}
+
+export async function startManualCopyTask(request: StartManualCopyTaskRequest): Promise<TaskRunHandle> {
+  return await invoke('start_manual_copy_task', { request });
+}
+
+export async function startManualDeployTask(request: StartManualDeployTaskRequest): Promise<TaskRunHandle> {
+  return await invoke('start_manual_deploy_task', { request });
 }
 
 export async function getAppPaths(): Promise<[string, string]> {
