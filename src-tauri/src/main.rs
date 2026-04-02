@@ -13,6 +13,7 @@ mod task_commands;
 mod task_events;
 mod task_manager;
 mod task_persist;
+mod task_runtime;
 
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
@@ -37,6 +38,7 @@ const TRAY_QUIT_ID: &str = "tray_quit";
 struct AppState {
     config: Arc<Mutex<AppConfig>>,
     task_manager: task_manager::TaskManager,
+    task_runtime: task_runtime::TaskRuntimeRegistry,
     is_scanning: Arc<AtomicBool>,
     is_manually_deploying: Arc<AtomicBool>,
     manual_copy_queue: Arc<Mutex<VecDeque<ManualCopyQueueItem>>>,
@@ -494,6 +496,46 @@ fn pause_scan(state: State<AppState>) {
 #[tauri::command]
 fn resume_scan(state: State<AppState>) {
     state.is_paused.store(false, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn cancel_task_run(
+    state: State<'_, AppState>,
+    task_group_id: String,
+    run_id: String,
+) -> Result<(), String> {
+    state
+        .task_runtime
+        .require_active(&task_group_id, &run_id)?;
+    state.should_cancel.store(true, Ordering::SeqCst);
+    state.is_paused.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn pause_task_run(
+    state: State<'_, AppState>,
+    task_group_id: String,
+    run_id: String,
+) -> Result<(), String> {
+    state
+        .task_runtime
+        .require_active(&task_group_id, &run_id)?;
+    state.is_paused.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn resume_task_run(
+    state: State<'_, AppState>,
+    task_group_id: String,
+    run_id: String,
+) -> Result<(), String> {
+    state
+        .task_runtime
+        .require_active(&task_group_id, &run_id)?;
+    state.is_paused.store(false, Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1577,6 +1619,7 @@ fn main() {
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
                 task_manager,
+                task_runtime: task_runtime::TaskRuntimeRegistry::new(),
                 is_scanning: Arc::new(AtomicBool::new(false)),
                 is_manually_deploying: Arc::new(AtomicBool::new(false)),
                 manual_copy_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -1597,6 +1640,9 @@ fn main() {
             cancel_scan,
             pause_scan,
             resume_scan,
+            cancel_task_run,
+            pause_task_run,
+            resume_task_run,
             skip_current_copy,
             remove_from_scan_queue,
             history::get_history,
