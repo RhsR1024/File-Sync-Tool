@@ -6,17 +6,16 @@ use tauri::Manager;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct UiState {
+    #[serde(default)]
     pub logs: Vec<Value>,
-    pub task_records: Vec<Value>,
 }
 
 #[tauri::command]
 pub fn save_ui_state(
     app_handle: tauri::AppHandle,
     logs: Vec<Value>,
-    task_records: Vec<Value>,
 ) -> Result<(), String> {
-    let state = UiState { logs, task_records };
+    let state = UiState { logs };
     let path = get_ui_state_path(&app_handle);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -81,4 +80,26 @@ fn get_kv_path(app_handle: &tauri::AppHandle, key: &str) -> PathBuf {
         .unwrap()
         .join("kv")
         .join(format!("{}.json", safe_key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UiState;
+
+    #[test]
+    fn ui_state_accepts_logs_only_payload() {
+        let parsed: UiState = serde_json::from_str(r#"{"logs":[{"msg":"ok"}]}"#).unwrap();
+
+        assert_eq!(parsed.logs.len(), 1);
+    }
+
+    #[test]
+    fn ui_state_ignores_legacy_task_records_field() {
+        let parsed: UiState = serde_json::from_str(
+            r#"{"logs":[{"msg":"ok"}],"task_records":[{"id":"legacy-row"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.logs.len(), 1);
+    }
 }

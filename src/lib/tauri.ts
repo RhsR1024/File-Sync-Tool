@@ -499,11 +499,10 @@ export interface CodeCountScopeTreeNode {
 
 export interface UiState {
   logs: unknown[];
-  task_records: unknown[];
 }
 
-export async function saveUiState(logs: unknown[], taskRecords: unknown[]): Promise<void> {
-  await invoke('save_ui_state', { logs, taskRecords });
+export async function saveUiState(logs: unknown[]): Promise<void> {
+  await invoke('save_ui_state', { logs });
 }
 
 export async function loadUiState(): Promise<UiState> {
