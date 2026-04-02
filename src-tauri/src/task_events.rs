@@ -1,8 +1,20 @@
 use crate::task_domain::{ServerRollup, TaskGroup};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const TASK_GROUPS_SNAPSHOT_EVENT: &str = "task-groups-snapshot";
 pub const TASK_GROUP_DETAIL_SNAPSHOT_EVENT: &str = "task-group-detail-snapshot";
+pub const TASK_LOG_EVENT: &str = "task-log";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskLogEntry {
+    pub task_group_id: Option<String>,
+    pub run_id: Option<String>,
+    pub server_id: Option<String>,
+    pub server_name: Option<String>,
+    pub level: String,
+    pub message: String,
+    pub timestamp: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskGroupListItem {

@@ -1619,6 +1619,8 @@ fn main() {
             task_commands::get_task_group_detail,
             task_commands::clear_task_group,
             task_commands::clear_task_groups,
+            task_commands::start_manual_copy_task,
+            task_commands::start_manual_deploy_task,
             persist::save_ui_state,
             persist::load_ui_state,
             persist::save_kv,

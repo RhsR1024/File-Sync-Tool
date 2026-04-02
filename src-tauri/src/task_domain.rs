@@ -56,6 +56,7 @@ pub enum DeployStage {
 pub enum TaskRunType {
     CopyAndDeploy,
     DeployRetry,
+    ManualDeploy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

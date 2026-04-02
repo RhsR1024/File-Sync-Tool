@@ -7,6 +7,7 @@ use crate::task_events::{
     TASK_GROUP_DETAIL_SNAPSHOT_EVENT, TASK_GROUPS_SNAPSHOT_EVENT,
 };
 use crate::task_persist::{load_task_state, save_task_state};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
@@ -22,10 +23,29 @@ pub struct TaskStartRequest {
     pub trigger_source: TaskTriggerSource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunHandle {
     pub task_group_id: String,
     pub run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartManualCopyRequest {
+    pub display_name: String,
+    pub folder_name: String,
+    pub source_path: String,
+    pub local_target_path: String,
+    pub trigger_source: TaskTriggerSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartManualDeployRequest {
+    pub task_group_id: Option<String>,
+    pub display_name: String,
+    pub folder_name: String,
+    pub local_target_path: String,
+    pub source_path: String,
+    pub trigger_source: TaskTriggerSource,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +179,109 @@ impl TaskManager {
             task_group_id: actual_group_id,
             run_id,
         }
+    }
+
+    pub fn begin_manual_copy_run(
+        &self,
+        request: StartManualCopyRequest,
+    ) -> Result<TaskRunHandle, String> {
+        Ok(self.begin_scheduled_copy(TaskStartRequest {
+            task_config_id: None,
+            display_name: request.display_name,
+            folder_name: request.folder_name,
+            source_path: request.source_path,
+            local_target_path: request.local_target_path,
+            source_type: TaskSourceType::Manual,
+            trigger_source: request.trigger_source,
+        }))
+    }
+
+    pub fn begin_manual_deploy_run(
+        &self,
+        request: StartManualDeployRequest,
+    ) -> Result<TaskRunHandle, String> {
+        let started_at = current_timestamp();
+        let merge_key = TaskMergeKey::new(
+            None,
+            request.local_target_path.clone(),
+            request.folder_name.clone(),
+        );
+        let run_id = format!("run-{}", uuid::Uuid::new_v4());
+        let proposed_group_id = request
+            .task_group_id
+            .clone()
+            .unwrap_or_else(|| format!("group-{}", uuid::Uuid::new_v4()));
+        let actual_group_id;
+
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group_index = if let Some(existing_id) = request.task_group_id.clone() {
+                state
+                    .groups
+                    .iter()
+                    .position(|group| group.task_group_id == existing_id)
+                    .ok_or_else(|| format!("Task group not found: {existing_id}"))?
+            } else {
+                state
+                    .groups
+                    .iter()
+                    .position(|group| group.merge_key == merge_key)
+                    .unwrap_or_else(|| {
+                        state.groups.push(TaskGroup {
+                            task_group_id: proposed_group_id.clone(),
+                            merge_key: merge_key.clone(),
+                            task_config_id: None,
+                            source_type: TaskSourceType::Manual,
+                            display_name: request.display_name.clone(),
+                            folder_name: request.folder_name.clone(),
+                            source_path: request.source_path.clone(),
+                            local_target_path: request.local_target_path.clone(),
+                            copy_status: CopyState::Completed,
+                            deploy_status: DeployState::Pending,
+                            summary_status: TaskSummaryStatus::CopyCompleted,
+                            started_at: started_at.clone(),
+                            finished_at: None,
+                            elapsed_seconds: 0,
+                            latest_run_id: None,
+                            had_failures: false,
+                            server_rollups: vec![],
+                            runs: vec![],
+                        });
+                        state.groups.len() - 1
+                    })
+            };
+
+            let group = &mut state.groups[group_index];
+            actual_group_id = group.task_group_id.clone();
+            group.merge_key = merge_key;
+            group.task_config_id = None;
+            group.source_type = TaskSourceType::Manual;
+            group.display_name = request.display_name;
+            group.folder_name = request.folder_name;
+            group.source_path = request.source_path;
+            group.local_target_path = request.local_target_path;
+            group.finished_at = None;
+
+            group.runs.push(TaskRun {
+                run_id: run_id.clone(),
+                task_group_id: group.task_group_id.clone(),
+                run_type: TaskRunType::ManualDeploy,
+                trigger_source: request.trigger_source,
+                started_at: started_at.clone(),
+                finished_at: None,
+                copy_phase: CopyState::Completed,
+                deploy_phase: DeployState::Pending,
+                deploy_attempts: vec![],
+                attempt_ids: vec![],
+            });
+            group.refresh_from_runs();
+        }
+
+        self.after_change(Some(actual_group_id.as_str()));
+        Ok(TaskRunHandle {
+            task_group_id: actual_group_id,
+            run_id,
+        })
     }
 
     pub fn mark_copy_completed(
@@ -746,5 +869,54 @@ mod tests {
         let detail = manager.get_group_detail(&handle.task_group_id).unwrap();
         assert_eq!(detail.summary_status, TaskSummaryStatus::PartialFailed);
         assert!(detail.had_failures);
+    }
+
+    #[test]
+    fn begin_manual_copy_run_creates_manual_group() {
+        let manager = TaskManager::new_in_memory();
+        let handle = manager
+            .begin_manual_copy_run(StartManualCopyRequest {
+                display_name: "hotfix-build".to_string(),
+                folder_name: "hotfix-build".to_string(),
+                source_path: "C:\\drop\\hotfix-build".to_string(),
+                local_target_path: "D:\\deploy\\hotfix-build".to_string(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+
+        let detail = manager.get_group_detail(&handle.task_group_id).unwrap();
+        assert_eq!(detail.source_type, TaskSourceType::Manual);
+        assert_eq!(detail.runs.len(), 1);
+        assert_eq!(detail.runs[0].run_type, TaskRunType::CopyAndDeploy);
+    }
+
+    #[test]
+    fn begin_manual_deploy_run_reuses_existing_group_when_requested() {
+        let manager = TaskManager::new_in_memory();
+        let seed = manager
+            .begin_manual_copy_run(StartManualCopyRequest {
+                display_name: "pkg".to_string(),
+                folder_name: "pkg".to_string(),
+                source_path: "C:\\src\\pkg".to_string(),
+                local_target_path: "D:\\target\\pkg".to_string(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+
+        let deploy = manager
+            .begin_manual_deploy_run(StartManualDeployRequest {
+                task_group_id: Some(seed.task_group_id.clone()),
+                display_name: "pkg".to_string(),
+                folder_name: "pkg".to_string(),
+                local_target_path: "D:\\target\\pkg".to_string(),
+                source_path: "D:\\target\\pkg".to_string(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+
+        let detail = manager.get_group_detail(&seed.task_group_id).unwrap();
+        assert_eq!(deploy.task_group_id, seed.task_group_id);
+        assert_eq!(detail.runs.len(), 2);
+        assert_eq!(detail.runs[1].run_type, TaskRunType::ManualDeploy);
     }
 }
