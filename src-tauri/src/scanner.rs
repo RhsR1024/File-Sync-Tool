@@ -2,16 +2,17 @@ use crate::config::{AppConfig, MatchRule, TaskServerBinding};
 use crate::deploy::deploy_to_remote;
 use crate::history::{add_history_entry, HistoryEntry};
 use crate::task_domain::{TaskSourceType, TaskTriggerSource};
-use crate::task_manager::{TaskManager, TaskStartRequest};
+use crate::task_manager::{TaskManager, TaskRunHandle, TaskStartRequest};
+use crate::task_runtime::{ActiveRunExecution, TaskRuntimeRegistry};
 use chrono::{Duration, Local, NaiveDateTime, NaiveTime, Timelike};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use regex::Regex;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant, SystemTime};
@@ -84,7 +85,10 @@ fn get_log_mutex() -> &'static Mutex<()> {
 }
 
 fn normalize_path_for_match(value: &str) -> String {
-    value.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    value
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
 }
 
 /// Minimal typed representation of a persisted UI task record.
@@ -132,11 +136,7 @@ fn load_persisted_task_records<R: tauri::Runtime>(
 /// Uses AND logic: both folder AND localPath must match to be considered the
 /// same task, preventing unrelated tasks with the same folder name from
 /// blocking each other's re-copy.
-fn task_record_exists_in(
-    records: &[PersistedTaskRecord],
-    folder: &str,
-    local_path: &Path,
-) -> bool {
+fn task_record_exists_in(records: &[PersistedTaskRecord], folder: &str, local_path: &Path) -> bool {
     let normalized_folder = folder.trim().to_lowercase();
     let normalized_local_path = normalize_path_for_match(&local_path.to_string_lossy());
 
@@ -243,6 +243,126 @@ fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, le
         },
     );
     write_log_to_file(app_handle, &msg, level);
+}
+
+fn mark_copy_completed_for_handle(
+    task_manager: &TaskManager,
+    task_handle: Option<&TaskRunHandle>,
+    has_deploy_targets: bool,
+    message: &str,
+) {
+    let Some(task_handle) = task_handle else {
+        return;
+    };
+
+    let _ = task_manager.record_task_log(
+        &task_handle.task_group_id,
+        &task_handle.run_id,
+        None,
+        None,
+        "success",
+        message,
+    );
+    let _ = task_manager.mark_copy_completed(
+        &task_handle.task_group_id,
+        &task_handle.run_id,
+        has_deploy_targets,
+    );
+}
+
+fn mark_copy_failed_for_handle(
+    task_manager: &TaskManager,
+    task_handle: Option<&TaskRunHandle>,
+    message: &str,
+) {
+    let Some(task_handle) = task_handle else {
+        return;
+    };
+
+    let _ = task_manager.mark_copy_failed(
+        &task_handle.task_group_id,
+        &task_handle.run_id,
+        message.to_string(),
+    );
+    let _ = task_manager.record_task_log(
+        &task_handle.task_group_id,
+        &task_handle.run_id,
+        None,
+        None,
+        "error",
+        message,
+    );
+}
+
+fn mark_copy_cancelled_for_handle(
+    task_manager: &TaskManager,
+    task_handle: Option<&TaskRunHandle>,
+    message: &str,
+) {
+    let Some(task_handle) = task_handle else {
+        return;
+    };
+
+    let _ = task_manager.mark_copy_cancelled(&task_handle.task_group_id, &task_handle.run_id);
+    let _ = task_manager.record_task_log(
+        &task_handle.task_group_id,
+        &task_handle.run_id,
+        None,
+        None,
+        "warn",
+        message,
+    );
+}
+
+fn clear_owned_runtime(
+    task_runtime: &TaskRuntimeRegistry,
+    active_execution: Option<&ActiveRunExecution>,
+    run_control_target: &Arc<Mutex<Option<ActiveRunExecution>>>,
+    should_cancel: &Arc<AtomicBool>,
+    should_skip: &Arc<AtomicBool>,
+    is_paused: &Arc<AtomicBool>,
+) {
+    let Some(active_execution) = active_execution else {
+        return;
+    };
+
+    let _ = task_runtime.clear(&active_execution.task_group_id, &active_execution.run_id);
+    let mut target = run_control_target.lock().unwrap();
+    if matches!(target.as_ref(), Some(current) if current == active_execution) {
+        should_cancel.store(false, Ordering::SeqCst);
+        should_skip.store(false, Ordering::SeqCst);
+        is_paused.store(false, Ordering::SeqCst);
+        *target = None;
+    }
+}
+
+fn clear_stale_targeted_run_controls(
+    active_execution: &ActiveRunExecution,
+    run_control_target: &Arc<Mutex<Option<ActiveRunExecution>>>,
+    should_cancel: &Arc<AtomicBool>,
+    should_skip: &Arc<AtomicBool>,
+    is_paused: &Arc<AtomicBool>,
+) {
+    let mut target = run_control_target.lock().unwrap();
+    if matches!(target.as_ref(), Some(current) if current != active_execution) {
+        should_cancel.store(false, Ordering::SeqCst);
+        should_skip.store(false, Ordering::SeqCst);
+        is_paused.store(false, Ordering::SeqCst);
+        *target = None;
+    }
+}
+
+fn run_needs_copy_completion(task_manager: &TaskManager, task_handle: &TaskRunHandle) -> bool {
+    task_manager
+        .get_group_detail(&task_handle.task_group_id)
+        .and_then(|group| {
+            group
+                .runs
+                .into_iter()
+                .find(|run| run.run_id == task_handle.run_id)
+        })
+        .map(|run| run.copy_phase != crate::task_domain::CopyState::Completed)
+        .unwrap_or(true)
 }
 
 fn emit_progress<R: tauri::Runtime>(
@@ -413,12 +533,15 @@ async fn perform_copy<R: tauri::Runtime>(
     config: &AppConfig,
     live_config: Arc<Mutex<AppConfig>>,
     task_manager: TaskManager,
+    task_runtime: TaskRuntimeRegistry,
+    run_control_target: Arc<Mutex<Option<ActiveRunExecution>>>,
     should_cancel: Arc<AtomicBool>,
     should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     overwrite_existing: bool,
     result: &mut ScanResult,
     task_id: Option<String>,
+    task_handle: Option<TaskRunHandle>,
     allow_deploy: bool,
     source: &str,
     filter_extensions: &[String],
@@ -426,6 +549,50 @@ async fn perform_copy<R: tauri::Runtime>(
     cached_task_records: &[PersistedTaskRecord],
 ) {
     let target_full_path = target_parent_path.join(&folder_name);
+    let task_handle = task_handle.or_else(|| {
+        if source == "scheduled" {
+            Some(task_manager.begin_scheduled_copy(TaskStartRequest {
+                task_config_id: task_id.clone(),
+                display_name: folder_name.clone(),
+                folder_name: folder_name.clone(),
+                source_path: source_path.to_string_lossy().to_string(),
+                local_target_path: target_full_path.to_string_lossy().to_string(),
+                source_type: TaskSourceType::Scheduled,
+                trigger_source: TaskTriggerSource::Scheduled,
+            }))
+        } else {
+            None
+        }
+    });
+    let owned_runtime_execution = if source == "scheduled" {
+        if let Some(task_handle) = task_handle.as_ref() {
+            match task_runtime.activate(
+                task_handle.task_group_id.clone(),
+                task_handle.run_id.clone(),
+            ) {
+                Ok(execution) => {
+                    clear_stale_targeted_run_controls(
+                        &execution,
+                        &run_control_target,
+                        &should_cancel,
+                        &should_skip,
+                        &is_paused,
+                    );
+                    Some(execution)
+                }
+                Err(error) => {
+                    emit_log(app_handle, error.clone(), "error");
+                    result.errors.push(error.clone());
+                    mark_copy_failed_for_handle(&task_manager, Some(task_handle), &error);
+                    return;
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     if target_full_path.exists() && !target_full_path.is_dir() {
         let err_msg = format!(
@@ -434,6 +601,15 @@ async fn perform_copy<R: tauri::Runtime>(
         );
         emit_log(app_handle, err_msg.clone(), "error");
         result.errors.push(err_msg);
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &result.errors[0]);
+        clear_owned_runtime(
+            &task_runtime,
+            owned_runtime_execution.as_ref(),
+            &run_control_target,
+            &should_cancel,
+            &should_skip,
+            &is_paused,
+        );
         return;
     }
 
@@ -481,22 +657,17 @@ async fn perform_copy<R: tauri::Runtime>(
         );
         emit_log(app_handle, err_msg.clone(), "error");
         result.errors.push(err_msg);
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &result.errors[0]);
+        clear_owned_runtime(
+            &task_runtime,
+            owned_runtime_execution.as_ref(),
+            &run_control_target,
+            &should_cancel,
+            &should_skip,
+            &is_paused,
+        );
         return;
     }
-
-    let task_handle = if source == "scheduled" {
-        Some(task_manager.begin_scheduled_copy(TaskStartRequest {
-            task_config_id: task_id.clone(),
-            display_name: folder_name.clone(),
-            folder_name: folder_name.clone(),
-            source_path: source_path.to_string_lossy().to_string(),
-            local_target_path: target_full_path.to_string_lossy().to_string(),
-            source_type: TaskSourceType::Scheduled,
-            trigger_source: TaskTriggerSource::Scheduled,
-        }))
-    } else {
-        None
-    };
 
     let app_handle_clone = app_handle.clone();
     let folder_name_clone = folder_name.clone();
@@ -554,13 +725,20 @@ async fn perform_copy<R: tauri::Runtime>(
             }
             emit_log(
                 &handle,
-                format!("Active filter rules for '{}': {}", folder_name_clone, parts.join("; ")),
+                format!(
+                    "Active filter rules for '{}': {}",
+                    folder_name_clone,
+                    parts.join("; ")
+                ),
                 "info",
             );
         } else {
             emit_log(
                 &handle,
-                format!("No filter rules active for '{}' — all files will be considered.", folder_name_clone),
+                format!(
+                    "No filter rules active for '{}' — all files will be considered.",
+                    folder_name_clone
+                ),
                 "info",
             );
         }
@@ -654,12 +832,8 @@ async fn perform_copy<R: tauri::Runtime>(
                             let is_recent = meta
                                 .modified()
                                 .ok()
-                                .and_then(|modified| {
-                                    now_system.duration_since(modified).ok()
-                                })
-                                .map(|age| {
-                                    age < StdDuration::from_secs(recent_file_guard_secs)
-                                })
+                                .and_then(|modified| now_system.duration_since(modified).ok())
+                                .map(|age| age < StdDuration::from_secs(recent_file_guard_secs))
                                 .unwrap_or(true);
 
                             let mut force_overwrite_due_to_size_mismatch = false;
@@ -752,7 +926,10 @@ async fn perform_copy<R: tauri::Runtime>(
         if !skipped_by_keyword.is_empty() {
             emit_log(
                 &handle,
-                format!("Skipped by keyword filter: {}", skipped_by_keyword.join(", ")),
+                format!(
+                    "Skipped by keyword filter: {}",
+                    skipped_by_keyword.join(", ")
+                ),
                 "info",
             );
         }
@@ -1123,16 +1300,20 @@ async fn perform_copy<R: tauri::Runtime>(
 
             let has_enabled_deploy_targets = live_server_bindings
                 .iter()
-                .filter_map(|binding| current_config.servers.iter().find(|server| server.id == binding.server_id))
+                .filter_map(|binding| {
+                    current_config
+                        .servers
+                        .iter()
+                        .find(|server| server.id == binding.server_id)
+                })
                 .any(|server| server.enabled);
 
-            if let Some(task_handle) = task_handle_clone.as_ref() {
-                let _ = task_manager_clone.mark_copy_completed(
-                    &task_handle.task_group_id,
-                    &task_handle.run_id,
-                    has_enabled_deploy_targets,
-                );
-            }
+            mark_copy_completed_for_handle(
+                &task_manager_clone,
+                task_handle_clone.as_ref(),
+                has_enabled_deploy_targets,
+                "Copy completed",
+            );
 
             if live_server_bindings.is_empty() {
                 emit_log(
@@ -1166,11 +1347,12 @@ async fn perform_copy<R: tauri::Runtime>(
             ) {
                 emit_log(&handle, format!("Deployment failed: {}", e), "error");
             }
-        } else if let Some(task_handle) = task_handle_clone.as_ref() {
-            let _ = task_manager_clone.mark_copy_completed(
-                &task_handle.task_group_id,
-                &task_handle.run_id,
+        } else {
+            mark_copy_completed_for_handle(
+                &task_manager_clone,
+                task_handle_clone.as_ref(),
                 false,
+                "Copy completed",
             );
         }
 
@@ -1181,11 +1363,14 @@ async fn perform_copy<R: tauri::Runtime>(
         Ok(Ok(0)) => {
             // Nothing was copied (all files already up to date) — do not count as "copied"
             if let Some(task_handle) = task_handle.as_ref() {
-                let _ = task_manager.mark_copy_completed(
-                    &task_handle.task_group_id,
-                    &task_handle.run_id,
-                    false,
-                );
+                if run_needs_copy_completion(&task_manager, task_handle) {
+                    mark_copy_completed_for_handle(
+                        &task_manager,
+                        Some(task_handle),
+                        false,
+                        "Copy completed with no file changes",
+                    );
+                }
             }
         }
         Ok(Ok(_)) => {
@@ -1197,20 +1382,6 @@ async fn perform_copy<R: tauri::Runtime>(
             result.copied_folders.push(folder_name);
         }
         Ok(Err(e)) => {
-            if let Some(task_handle) = task_handle.as_ref() {
-                if let fs_extra::error::ErrorKind::Interrupted = e.kind {
-                    let _ = task_manager.mark_copy_cancelled(
-                        &task_handle.task_group_id,
-                        &task_handle.run_id,
-                    );
-                } else {
-                    let _ = task_manager.mark_copy_failed(
-                        &task_handle.task_group_id,
-                        &task_handle.run_id,
-                        e.to_string(),
-                    );
-                }
-            }
             if let fs_extra::error::ErrorKind::Interrupted = e.kind {
                 let is_skip = e.to_string().contains("Skipped");
                 let msg = if is_skip {
@@ -1218,26 +1389,33 @@ async fn perform_copy<R: tauri::Runtime>(
                 } else {
                     format!("Copy cancelled: {}", folder_name)
                 };
+                mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &msg);
                 emit_log(app_handle, msg.clone(), "warn");
+                if source == "manual" {
+                    result.errors.push(msg);
+                }
             } else {
                 let err_msg = format!("Failed to copy {}: {}", folder_name, e);
+                mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &err_msg);
                 emit_log(app_handle, err_msg.clone(), "error");
                 result.errors.push(err_msg);
             }
         }
         Err(e) => {
-            if let Some(task_handle) = task_handle.as_ref() {
-                let _ = task_manager.mark_copy_failed(
-                    &task_handle.task_group_id,
-                    &task_handle.run_id,
-                    format!("Copy task panic: {}", e),
-                );
-            }
             let err_msg = format!("Copy task panic: {}", e);
+            mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &err_msg);
             emit_log(app_handle, err_msg.clone(), "error");
             result.errors.push(err_msg);
         }
     }
+    clear_owned_runtime(
+        &task_runtime,
+        owned_runtime_execution.as_ref(),
+        &run_control_target,
+        &should_cancel,
+        &should_skip,
+        &is_paused,
+    );
 }
 
 pub async fn temporary_copy<R: tauri::Runtime>(
@@ -1245,10 +1423,13 @@ pub async fn temporary_copy<R: tauri::Runtime>(
     config: &AppConfig,
     live_config: Arc<Mutex<AppConfig>>,
     task_manager: TaskManager,
+    task_runtime: TaskRuntimeRegistry,
+    task_handle: Option<TaskRunHandle>,
     source_path: String,
     target_root_path: String,
     overwrite_existing: bool,
     should_cancel: Arc<AtomicBool>,
+    should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     file_extensions: Vec<String>,
     filename_includes: Vec<String>,
@@ -1257,34 +1438,43 @@ pub async fn temporary_copy<R: tauri::Runtime>(
     let target_root_path = PathBuf::from(target_root_path.trim());
 
     if source_path.as_os_str().is_empty() {
-        return Err("Source path is required".to_string());
+        let message = "Source path is required".to_string();
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        return Err(message);
     }
     if target_root_path.as_os_str().is_empty() {
-        return Err("Target root path is required".to_string());
+        let message = "Target root path is required".to_string();
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        return Err(message);
     }
     if !source_path.exists() {
-        return Err(format!(
-            "Source path does not exist: {}",
-            source_path.display()
-        ));
+        let message = format!("Source path does not exist: {}", source_path.display());
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        return Err(message);
     }
     if !source_path.is_dir() && !source_path.is_file() {
-        return Err(format!(
+        let message = format!(
             "Source path must be a file or directory: {}",
             source_path.display()
-        ));
+        );
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        return Err(message);
     }
     if !target_root_path.exists() {
-        return Err(format!(
+        let message = format!(
             "Target root directory does not exist: {}",
             target_root_path.display()
-        ));
+        );
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        return Err(message);
     }
     if !target_root_path.is_dir() {
-        return Err(format!(
+        let message = format!(
             "Target root path is not a directory: {}",
             target_root_path.display()
-        ));
+        );
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        return Err(message);
     }
 
     // Handle single file copy
@@ -1292,10 +1482,13 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         return temporary_copy_file(
             app_handle,
             config,
+            task_manager,
+            task_handle,
             source_path,
             target_root_path,
             overwrite_existing,
             should_cancel,
+            should_skip,
             is_paused,
         )
         .await;
@@ -1310,10 +1503,12 @@ pub async fn temporary_copy<R: tauri::Runtime>(
 
     let target_full_path = target_root_path.join(&folder_name);
     if target_full_path == source_path || target_full_path.starts_with(&source_path) {
-        return Err(format!(
+        let message = format!(
             "Target path would be created inside source path, which may cause recursive copying: {}",
             target_full_path.display()
-        ));
+        );
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        return Err(message);
     }
 
     emit_log(
@@ -1343,12 +1538,15 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         config,
         live_config,
         task_manager,
+        task_runtime,
+        Arc::new(Mutex::new(None)),
         should_cancel,
-        Arc::new(AtomicBool::new(false)),
+        should_skip,
         is_paused,
         overwrite_existing,
         &mut result,
         None,
+        task_handle,
         false,
         "manual",
         &file_extensions,
@@ -1368,10 +1566,13 @@ pub async fn temporary_copy<R: tauri::Runtime>(
 async fn temporary_copy_file<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     config: &AppConfig,
+    task_manager: TaskManager,
+    task_handle: Option<TaskRunHandle>,
     source_path: PathBuf,
     target_root_path: PathBuf,
     overwrite_existing: bool,
     should_cancel: Arc<AtomicBool>,
+    should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let file_name = source_path
@@ -1393,20 +1594,24 @@ async fn temporary_copy_file<R: tauri::Runtime>(
 
     // Ensure target directory exists
     if let Err(e) = fs::create_dir_all(&target_root_path).await {
-        return Err(format!(
+        let message = format!(
             "Failed to create target directory {}: {}",
             target_root_path.display(),
             e
-        ));
+        );
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        return Err(message);
     }
 
     // Check if target file already exists
     if target_file.exists() {
         if !target_file.is_file() {
-            return Err(format!(
+            let message = format!(
                 "Target path already exists as a directory and cannot be used as a file: {}",
                 target_file.display()
-            ));
+            );
+            mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+            return Err(message);
         }
         if overwrite_existing {
             emit_log(
@@ -1426,6 +1631,12 @@ async fn temporary_copy_file<R: tauri::Runtime>(
                 ),
                 "info",
             );
+            mark_copy_completed_for_handle(
+                &task_manager,
+                task_handle.as_ref(),
+                false,
+                "Copy completed with no file changes",
+            );
             return Ok(());
         }
     }
@@ -1444,8 +1655,11 @@ async fn temporary_copy_file<R: tauri::Runtime>(
     }
 
     // Get file metadata
-    let meta =
-        std::fs::metadata(&source_path).map_err(|e| format!("Cannot read file metadata: {}", e))?;
+    let meta = std::fs::metadata(&source_path).map_err(|e| {
+        let message = format!("Cannot read file metadata: {}", e);
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        message
+    })?;
     let file_size = meta.len();
 
     // Stability check for recently modified files
@@ -1469,20 +1683,32 @@ async fn temporary_copy_file<R: tauri::Runtime>(
         let intervals = config.stability_check_secs * 5;
         for _ in 0..intervals {
             if should_cancel.load(Ordering::SeqCst) {
-                return Err("Cancelled by user".to_string());
+                let message = "Cancelled by user".to_string();
+                mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &message);
+                return Err(message);
+            }
+            if should_skip.load(Ordering::SeqCst) {
+                let message = "Skipped by user".to_string();
+                mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &message);
+                return Err(message);
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
 
         // Re-check file size
-        let new_meta = std::fs::metadata(&source_path)
-            .map_err(|e| format!("Cannot re-check file metadata: {}", e))?;
+        let new_meta = std::fs::metadata(&source_path).map_err(|e| {
+            let message = format!("Cannot re-check file metadata: {}", e);
+            mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+            message
+        })?;
         if new_meta.len() != file_size {
-            return Err(format!(
+            let message = format!(
                 "File size changed during stability check ({} -> {} bytes), aborting",
                 file_size,
                 new_meta.len()
-            ));
+            );
+            mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+            return Err(message);
         }
     }
 
@@ -1548,23 +1774,21 @@ async fn temporary_copy_file<R: tauri::Runtime>(
             }
         };
 
-        let no_skip = Arc::new(AtomicBool::new(false));
         copy_file_with_overwrite_mode(
             &source_clone,
             &target_file_clone,
             overwrite_existing,
             &should_cancel,
-            &no_skip,
+            &should_skip,
             &is_paused,
             copy_buffer_size,
             &mut on_progress,
         )
     })
-    .await
-    .map_err(|e| format!("Copy task panic: {}", e))?;
+    .await;
 
     match copy_result {
-        Ok(bytes_copied) => {
+        Ok(Ok(bytes_copied)) => {
             emit_log(
                 app_handle,
                 format!(
@@ -1591,14 +1815,32 @@ async fn temporary_copy_file<R: tauri::Runtime>(
                 },
             );
 
+            mark_copy_completed_for_handle(
+                &task_manager,
+                task_handle.as_ref(),
+                false,
+                "Copy completed",
+            );
             Ok(())
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             // Clean up partial file on failure when this was a brand-new target.
             if !target_existed_before {
                 let _ = std::fs::remove_file(&target_file);
             }
+            if e.to_lowercase().contains("cancelled") || e.to_lowercase().contains("skipped") {
+                mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &e);
+                return Err(e);
+            } else {
+                let message = format!("Failed to copy file: {}", e);
+                mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+            }
             Err(format!("Failed to copy file: {}", e))
+        }
+        Err(e) => {
+            let message = format!("Copy task panic: {}", e);
+            mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+            Err(message)
         }
     }
 }
@@ -1608,6 +1850,8 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
     config: &AppConfig,
     live_config: Arc<Mutex<AppConfig>>,
     task_manager: TaskManager,
+    task_runtime: TaskRuntimeRegistry,
+    run_control_target: Arc<Mutex<Option<ActiveRunExecution>>>,
     should_cancel: Arc<AtomicBool>,
     should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
@@ -1808,12 +2052,15 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             config,
                             live_config.clone(),
                             task_manager.clone(),
+                            task_runtime.clone(),
+                            run_control_target.clone(),
                             should_cancel.clone(),
                             should_skip.clone(),
                             is_paused.clone(),
                             false,
                             &mut result,
                             Some(task.id.clone()),
+                            None,
                             true,
                             "scheduled",
                             &config.file_extensions,
@@ -1974,7 +2221,10 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             if removals.contains(&sub_name) {
                                 emit_log(
                                     app_handle,
-                                    format!("Skipped queued folder (removed by user): {}", sub_name),
+                                    format!(
+                                        "Skipped queued folder (removed by user): {}",
+                                        sub_name
+                                    ),
                                     "info",
                                 );
                                 continue;
@@ -1994,12 +2244,15 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             config,
                             live_config.clone(),
                             task_manager.clone(),
+                            task_runtime.clone(),
+                            run_control_target.clone(),
                             should_cancel.clone(),
                             should_skip.clone(),
                             is_paused.clone(),
                             false,
                             &mut result,
                             Some(task.id.clone()),
+                            None,
                             true,
                             "scheduled",
                             &config.file_extensions,

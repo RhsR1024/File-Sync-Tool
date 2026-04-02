@@ -43,6 +43,20 @@ fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, le
     crate::scanner::write_log_to_file(app_handle, &msg, level);
 }
 
+fn emit_log_with_tracking<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    msg: String,
+    level: &str,
+    tracking: Option<&DeployTrackingContext>,
+    server_id: Option<&str>,
+    server_name: Option<&str>,
+) {
+    emit_log(app_handle, msg.clone(), level);
+    if let Some(tracking) = tracking {
+        let _ = tracking.record_log(server_id, server_name, level, &msg);
+    }
+}
+
 fn emit_progress<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     folder: &str,
@@ -119,13 +133,16 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
         return Ok(());
     }
 
-    emit_log(
+    emit_log_with_tracking(
         app_handle,
         format!(
             "Starting deployment for {} server(s)...",
             server_bindings.len()
         ),
         "info",
+        tracking.as_ref(),
+        None,
+        None,
     );
 
     let total_size = calculate_size(local_folder_path);
@@ -154,10 +171,13 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
 
     for (idx, binding) in server_bindings.iter().enumerate() {
         if should_cancel.load(Ordering::SeqCst) {
-            emit_log(
+            emit_log_with_tracking(
                 app_handle,
                 "Remaining deployments cancelled.".to_string(),
                 "warn",
+                tracking.as_ref(),
+                None,
+                None,
             );
             if let Some(tracking) = tracking.as_ref() {
                 let _ = tracking.cancel_pending();
@@ -168,27 +188,33 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
         let server = match all_servers.iter().find(|s| s.id == binding.server_id) {
             Some(s) => s,
             None => {
-                emit_log(
+                emit_log_with_tracking(
                     app_handle,
                     format!("Server ID '{}' not found, skipping.", binding.server_id),
                     "warn",
+                    tracking.as_ref(),
+                    Some(binding.server_id.as_str()),
+                    None,
                 );
                 continue;
             }
         };
 
         if !server.enabled {
-            emit_log(
+            emit_log_with_tracking(
                 app_handle,
                 format!("[{}] Server is disabled, skipping.", server.name),
                 "info",
+                tracking.as_ref(),
+                Some(server.id.as_str()),
+                Some(server.name.as_str()),
             );
             continue;
         }
 
         let commands = resolve_commands(&binding.command_group_ids, command_groups);
 
-        emit_log(
+        emit_log_with_tracking(
             app_handle,
             format!(
                 "Deploying to server {}/{} [{}]",
@@ -197,6 +223,9 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
                 server.name
             ),
             "info",
+            tracking.as_ref(),
+            Some(server.id.as_str()),
+            Some(server.name.as_str()),
         );
 
         if let Err(e) = deploy_single_server(
@@ -211,16 +240,22 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
             "scheduled",
             tracking.clone(),
         ) {
-            emit_log(
+            emit_log_with_tracking(
                 app_handle,
                 format!("[{}] Deployment failed: {}", server.name, e),
                 "error",
+                tracking.as_ref(),
+                Some(server.id.as_str()),
+                Some(server.name.as_str()),
             );
         } else {
-            emit_log(
+            emit_log_with_tracking(
                 app_handle,
                 format!("[{}] Deployment successful", server.name),
                 "success",
+                tracking.as_ref(),
+                Some(server.id.as_str()),
+                Some(server.name.as_str()),
             );
         }
     }
@@ -293,13 +328,16 @@ fn deploy_single_server<R: tauri::Runtime>(
         );
     }
 
-    emit_log(
+    emit_log_with_tracking(
         app_handle,
         format!(
             "[{}] Connecting to {}:{}",
             server.name, server.host, server.remote_path
         ),
         "info",
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(server.name.as_str()),
     );
 
     let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port)).map_err(|e| {
@@ -337,7 +375,14 @@ fn deploy_single_server<R: tauri::Runtime>(
             )
         })?;
 
-    emit_log(app_handle, format!("[{}] Connected", server.name), "info");
+    emit_log_with_tracking(
+        app_handle,
+        format!("[{}] Connected", server.name),
+        "info",
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(server.name.as_str()),
+    );
     if let Some(tracking) = tracking.as_ref() {
         let _ = tracking.mark_stage(
             &server.id,
@@ -347,44 +392,46 @@ fn deploy_single_server<R: tauri::Runtime>(
         );
     }
 
-    let sftp = sess
-        .sftp()
-        .map_err(|e| {
-            report_stage_failure(
-                tracking.as_ref(),
-                &server.id,
-                DeployStage::Uploading,
-                format!("SFTP init failed: {}", e),
-            )
-        })?;
+    let sftp = sess.sftp().map_err(|e| {
+        report_stage_failure(
+            tracking.as_ref(),
+            &server.id,
+            DeployStage::Uploading,
+            format!("SFTP init failed: {}", e),
+        )
+    })?;
 
     match sftp.stat(Path::new(&remote_target)) {
         Ok(_) => {
-            emit_log(
+            emit_log_with_tracking(
                 app_handle,
                 format!(
                     "[{}] Remote directory {} already exists. Continuing upload/overwrite.",
                     server.name, remote_target
                 ),
                 "info",
+                tracking.as_ref(),
+                Some(server.id.as_str()),
+                Some(server.name.as_str()),
             );
         }
         Err(_) => {
-            emit_log(
+            emit_log_with_tracking(
                 app_handle,
                 format!("[{}] Uploading to {}", server.name, remote_target),
                 "info",
+                tracking.as_ref(),
+                Some(server.id.as_str()),
+                Some(server.name.as_str()),
             );
-            let mut channel = sess
-                .channel_session()
-                .map_err(|e| {
-                    report_stage_failure(
-                        tracking.as_ref(),
-                        &server.id,
-                        DeployStage::Uploading,
-                        format!("channel_session failed: {}", e),
-                    )
-                })?;
+            let mut channel = sess.channel_session().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Uploading,
+                    format!("channel_session failed: {}", e),
+                )
+            })?;
             channel
                 .exec(&format!("mkdir -p {}", remote_target))
                 .map_err(|e| {
@@ -395,37 +442,31 @@ fn deploy_single_server<R: tauri::Runtime>(
                         format!("mkdir failed: {}", e),
                     )
                 })?;
-            channel
-                .send_eof()
-                .map_err(|e| {
-                    report_stage_failure(
-                        tracking.as_ref(),
-                        &server.id,
-                        DeployStage::Uploading,
-                        format!("send_eof failed: {}", e),
-                    )
-                })?;
+            channel.send_eof().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Uploading,
+                    format!("send_eof failed: {}", e),
+                )
+            })?;
             let mut s = String::new();
-            channel
-                .read_to_string(&mut s)
-                .map_err(|e| {
-                    report_stage_failure(
-                        tracking.as_ref(),
-                        &server.id,
-                        DeployStage::Uploading,
-                        format!("read failed: {}", e),
-                    )
-                })?;
-            channel
-                .wait_close()
-                .map_err(|e| {
-                    report_stage_failure(
-                        tracking.as_ref(),
-                        &server.id,
-                        DeployStage::Uploading,
-                        format!("wait_close failed: {}", e),
-                    )
-                })?;
+            channel.read_to_string(&mut s).map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Uploading,
+                    format!("read failed: {}", e),
+                )
+            })?;
+            channel.wait_close().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Uploading,
+                    format!("wait_close failed: {}", e),
+                )
+            })?;
         }
     };
 
@@ -453,7 +494,15 @@ fn deploy_single_server<R: tauri::Runtime>(
         tracking.as_ref(),
         Some(server.id.as_str()),
         Some(remote_target.as_str()),
-    )?;
+    )
+    .map_err(|message| {
+        report_transfer_issue(
+            tracking.as_ref(),
+            &server.id,
+            DeployStage::Uploading,
+            message,
+        )
+    })?;
 
     emit_progress(
         app_handle,
@@ -477,23 +526,34 @@ fn deploy_single_server<R: tauri::Runtime>(
                 Some(remote_target.clone()),
             );
         }
-        emit_log(
+        emit_log_with_tracking(
             app_handle,
             format!("[{}] Executing post commands...", server.name),
             "info",
+            tracking.as_ref(),
+            Some(server.id.as_str()),
+            Some(server.name.as_str()),
         );
 
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
-                return Err("Cancelled".to_string());
+                return Err(report_transfer_issue(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::ExecutingCommands,
+                    "Cancelled".to_string(),
+                ));
             }
 
             let final_cmd =
                 substitute_variables(cmd, folder_name, local_folder_path, &remote_target);
-            emit_log(
+            emit_log_with_tracking(
                 app_handle,
                 format!("[{}] $ {}", server.name, final_cmd),
                 "command",
+                tracking.as_ref(),
+                Some(server.id.as_str()),
+                Some(server.name.as_str()),
             );
 
             let mut channel = sess.channel_session().map_err(|e| {
@@ -542,49 +602,59 @@ fn deploy_single_server<R: tauri::Runtime>(
                         while let Some(pos) = output_buf.find('\n') {
                             let line = output_buf[..pos].trim_end_matches('\r').to_string();
                             if !line.is_empty() {
-                                emit_log(
+                                emit_log_with_tracking(
                                     app_handle,
                                     format!("[{}] > {}", server.name, line),
                                     "info",
+                                    tracking.as_ref(),
+                                    Some(server.id.as_str()),
+                                    Some(server.name.as_str()),
                                 );
                             }
                             output_buf = output_buf[pos + 1..].to_string();
                         }
                     }
                     Err(e) => {
-                        emit_log(
+                        emit_log_with_tracking(
                             app_handle,
                             format!("[{}] Read error: {}", server.name, e),
                             "warn",
+                            tracking.as_ref(),
+                            Some(server.id.as_str()),
+                            Some(server.name.as_str()),
                         );
                         break;
                     }
                 }
             }
             if !output_buf.trim().is_empty() {
-                emit_log(
+                emit_log_with_tracking(
                     app_handle,
                     format!("[{}] > {}", server.name, output_buf.trim()),
                     "info",
+                    tracking.as_ref(),
+                    Some(server.id.as_str()),
+                    Some(server.name.as_str()),
                 );
             }
 
-            channel
-                .wait_close()
-                .map_err(|e| {
-                    report_stage_failure(
-                        tracking.as_ref(),
-                        &server.id,
-                        DeployStage::ExecutingCommands,
-                        format!("wait_close failed: {}", e),
-                    )
-                })?;
+            channel.wait_close().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::ExecutingCommands,
+                    format!("wait_close failed: {}", e),
+                )
+            })?;
             let exit_code = channel.exit_status().unwrap_or(-1);
             if exit_code != 0 {
-                emit_log(
+                emit_log_with_tracking(
                     app_handle,
                     format!("[{}] Command exited with code {}", server.name, exit_code),
                     "error",
+                    tracking.as_ref(),
+                    Some(server.id.as_str()),
+                    Some(server.name.as_str()),
                 );
                 return Err(report_stage_failure(
                     tracking.as_ref(),
@@ -624,52 +694,60 @@ pub fn deploy_manual<R: tauri::Runtime>(
     remote_path: &str,
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    tracking: Option<DeployTrackingContext>,
 ) -> Result<(), String> {
-    emit_log(
+    emit_log_with_tracking(
         app_handle,
         format!(
             "Starting manual deployment: {} -> [{}] {}:{}",
             local_path, server.name, server.host, remote_path
         ),
         "info",
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(server.name.as_str()),
     );
 
     let local_p = Path::new(local_path);
     if !local_p.exists() {
-        return Err(format!("Local path does not exist: {}", local_path));
+        return Err(report_stage_failure(
+            tracking.as_ref(),
+            &server.id,
+            DeployStage::Pending,
+            format!("Local path does not exist: {}", local_path),
+        ));
     }
 
-    emit_log(app_handle, "Calculating size...".to_string(), "info");
+    emit_log_with_tracking(
+        app_handle,
+        "Calculating size...".to_string(),
+        "info",
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(server.name.as_str()),
+    );
     let total_size = calculate_size(local_p);
-    emit_log(
+    emit_log_with_tracking(
         app_handle,
         format!("Total size: {} bytes", total_size),
         "info",
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(server.name.as_str()),
     );
-
-    let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port))
-        .map_err(|e| e.to_string())?;
-    let mut sess = Session::new().map_err(|e| e.to_string())?;
-    sess.set_tcp_stream(tcp);
-    sess.handshake().map_err(|e| e.to_string())?;
-    sess.userauth_password(&server.user, &server.password)
-        .map_err(|e| e.to_string())?;
-
-    emit_log(
-        app_handle,
-        "SSH Connected & Authenticated".to_string(),
-        "success",
-    );
-
-    let sftp = sess
-        .sftp()
-        .map_err(|e| format!("SFTP init failed: {}", e))?;
 
     let mut target_path_str = remote_path.to_string();
     if target_path_str.ends_with('/') || target_path_str.ends_with('\\') {
         let name = local_p
             .file_name()
-            .ok_or("Invalid local path: no file name")?
+            .ok_or_else(|| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Pending,
+                    "Invalid local path: no file name".to_string(),
+                )
+            })?
             .to_string_lossy();
         target_path_str = format!(
             "{}/{}",
@@ -680,31 +758,132 @@ pub fn deploy_manual<R: tauri::Runtime>(
     let target_path_str = target_path_str.replace('\\', "/");
     let target_p = Path::new(&target_path_str);
 
-    emit_log(
+    if let Some(tracking) = tracking.as_ref() {
+        let _ = tracking.mark_stage(
+            &server.id,
+            DeployStage::Connecting,
+            None,
+            Some(target_path_str.clone()),
+        );
+    }
+
+    let tcp = TcpStream::connect(format!("{}:{}", server.host, server.port)).map_err(|e| {
+        report_stage_failure(
+            tracking.as_ref(),
+            &server.id,
+            DeployStage::Connecting,
+            e.to_string(),
+        )
+    })?;
+    let mut sess = Session::new().map_err(|e| {
+        report_stage_failure(
+            tracking.as_ref(),
+            &server.id,
+            DeployStage::Connecting,
+            e.to_string(),
+        )
+    })?;
+    sess.set_tcp_stream(tcp);
+    sess.handshake().map_err(|e| {
+        report_stage_failure(
+            tracking.as_ref(),
+            &server.id,
+            DeployStage::Connecting,
+            e.to_string(),
+        )
+    })?;
+    sess.userauth_password(&server.user, &server.password)
+        .map_err(|e| {
+            report_stage_failure(
+                tracking.as_ref(),
+                &server.id,
+                DeployStage::Connecting,
+                e.to_string(),
+            )
+        })?;
+
+    emit_log_with_tracking(
+        app_handle,
+        "SSH Connected & Authenticated".to_string(),
+        "success",
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(server.name.as_str()),
+    );
+
+    if let Some(tracking) = tracking.as_ref() {
+        let _ = tracking.mark_stage(
+            &server.id,
+            DeployStage::Uploading,
+            Some(0.0),
+            Some(target_path_str.clone()),
+        );
+    }
+
+    let sftp = sess.sftp().map_err(|e| {
+        report_stage_failure(
+            tracking.as_ref(),
+            &server.id,
+            DeployStage::Uploading,
+            format!("SFTP init failed: {}", e),
+        )
+    })?;
+
+    emit_log_with_tracking(
         app_handle,
         format!("Uploading to {}", target_path_str),
         "info",
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(server.name.as_str()),
     );
 
     if let Some(parent) = target_p.parent() {
         let parent_str = parent.to_string_lossy().replace('\\', "/");
         if !parent_str.is_empty() {
-            let mut channel = sess
-                .channel_session()
-                .map_err(|e| format!("channel_session failed: {}", e))?;
+            let mut channel = sess.channel_session().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Uploading,
+                    format!("channel_session failed: {}", e),
+                )
+            })?;
             channel
                 .exec(&format!("mkdir -p {}", parent_str))
-                .map_err(|e| format!("mkdir failed: {}", e))?;
-            channel
-                .send_eof()
-                .map_err(|e| format!("send_eof failed: {}", e))?;
+                .map_err(|e| {
+                    report_stage_failure(
+                        tracking.as_ref(),
+                        &server.id,
+                        DeployStage::Uploading,
+                        format!("mkdir failed: {}", e),
+                    )
+                })?;
+            channel.send_eof().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Uploading,
+                    format!("send_eof failed: {}", e),
+                )
+            })?;
             let mut s = String::new();
-            channel
-                .read_to_string(&mut s)
-                .map_err(|e| format!("read failed: {}", e))?;
-            channel
-                .wait_close()
-                .map_err(|e| format!("wait_close failed: {}", e))?;
+            channel.read_to_string(&mut s).map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Uploading,
+                    format!("read failed: {}", e),
+                )
+            })?;
+            channel.wait_close().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Uploading,
+                    format!("wait_close failed: {}", e),
+                )
+            })?;
         }
     }
 
@@ -746,12 +925,27 @@ pub fn deploy_manual<R: tauri::Runtime>(
         &should_cancel,
         &is_paused,
         "manual",
-        None,
-        None,
-        None,
-    )?;
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(target_path_str.as_str()),
+    )
+    .map_err(|message| {
+        report_transfer_issue(
+            tracking.as_ref(),
+            &server.id,
+            DeployStage::Uploading,
+            message,
+        )
+    })?;
 
-    emit_log(app_handle, "Upload complete".to_string(), "success");
+    emit_log_with_tracking(
+        app_handle,
+        "Upload complete".to_string(),
+        "success",
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(server.name.as_str()),
+    );
     emit_progress(
         app_handle,
         &folder_display,
@@ -766,26 +960,78 @@ pub fn deploy_manual<R: tauri::Runtime>(
     );
 
     if !post_commands.is_empty() {
-        emit_log(
+        if let Some(tracking) = tracking.as_ref() {
+            let _ = tracking.mark_stage(
+                &server.id,
+                DeployStage::ExecutingCommands,
+                Some(100.0),
+                Some(target_path_str.clone()),
+            );
+        }
+
+        emit_log_with_tracking(
             app_handle,
             "Executing post-deployment commands...".to_string(),
             "info",
+            tracking.as_ref(),
+            Some(server.id.as_str()),
+            Some(server.name.as_str()),
         );
 
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
-                return Err("Deployment cancelled".to_string());
+                return Err(report_transfer_issue(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::ExecutingCommands,
+                    "Deployment cancelled".to_string(),
+                ));
             }
 
             let final_cmd = substitute_variables(cmd, &folder_display, local_p, &target_path_str);
-            emit_log(app_handle, format!("$ {}", final_cmd), "command");
+            emit_log_with_tracking(
+                app_handle,
+                format!("$ {}", final_cmd),
+                "command",
+                tracking.as_ref(),
+                Some(server.id.as_str()),
+                Some(server.name.as_str()),
+            );
 
-            let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
+            let mut channel = sess.channel_session().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::ExecutingCommands,
+                    e.to_string(),
+                )
+            })?;
             channel
                 .handle_extended_data(ssh2::ExtendedData::Merge)
-                .map_err(|e| e.to_string())?;
-            channel.exec(&final_cmd).map_err(|e| e.to_string())?;
-            channel.send_eof().map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    report_stage_failure(
+                        tracking.as_ref(),
+                        &server.id,
+                        DeployStage::ExecutingCommands,
+                        e.to_string(),
+                    )
+                })?;
+            channel.exec(&final_cmd).map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::ExecutingCommands,
+                    e.to_string(),
+                )
+            })?;
+            channel.send_eof().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::ExecutingCommands,
+                    e.to_string(),
+                )
+            })?;
 
             let mut output_buf = String::new();
             let mut buf = [0u8; 4096];
@@ -798,39 +1044,81 @@ pub fn deploy_manual<R: tauri::Runtime>(
                         while let Some(pos) = output_buf.find('\n') {
                             let line = output_buf[..pos].trim_end_matches('\r').to_string();
                             if !line.is_empty() {
-                                emit_log(app_handle, format!("> {}", line), "info");
+                                emit_log_with_tracking(
+                                    app_handle,
+                                    format!("> {}", line),
+                                    "info",
+                                    tracking.as_ref(),
+                                    Some(server.id.as_str()),
+                                    Some(server.name.as_str()),
+                                );
                             }
                             output_buf = output_buf[pos + 1..].to_string();
                         }
                     }
                     Err(e) => {
-                        emit_log(app_handle, format!("Read error: {}", e), "warn");
+                        emit_log_with_tracking(
+                            app_handle,
+                            format!("Read error: {}", e),
+                            "warn",
+                            tracking.as_ref(),
+                            Some(server.id.as_str()),
+                            Some(server.name.as_str()),
+                        );
                         break;
                     }
                 }
             }
             if !output_buf.trim().is_empty() {
-                emit_log(app_handle, format!("> {}", output_buf.trim()), "info");
+                emit_log_with_tracking(
+                    app_handle,
+                    format!("> {}", output_buf.trim()),
+                    "info",
+                    tracking.as_ref(),
+                    Some(server.id.as_str()),
+                    Some(server.name.as_str()),
+                );
             }
 
-            channel
-                .wait_close()
-                .map_err(|e| format!("wait_close failed: {}", e))?;
+            channel.wait_close().map_err(|e| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::ExecutingCommands,
+                    format!("wait_close failed: {}", e),
+                )
+            })?;
             let exit_code = channel.exit_status().unwrap_or(-1);
             if exit_code != 0 {
-                emit_log(
+                emit_log_with_tracking(
                     app_handle,
                     format!("Command exited with code {}", exit_code),
                     "error",
+                    tracking.as_ref(),
+                    Some(server.id.as_str()),
+                    Some(server.name.as_str()),
                 );
+                return Err(report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::ExecutingCommands,
+                    format!("Command exited with code {}", exit_code),
+                ));
             }
         }
     }
 
-    emit_log(
+    if let Some(tracking) = tracking.as_ref() {
+        let _ = tracking.mark_success(&server.id);
+    }
+
+    emit_log_with_tracking(
         app_handle,
         format!("[{}] Deployment successful", server.name),
         "success",
+        tracking.as_ref(),
+        Some(server.id.as_str()),
+        Some(server.name.as_str()),
     );
     Ok(())
 }
@@ -973,6 +1261,133 @@ fn report_stage_failure(
 ) -> String {
     if let Some(tracking) = tracking {
         let _ = tracking.mark_failure(server_id, stage, message.clone());
+        let _ = tracking.record_log(Some(server_id), None, "error", &message);
     }
     message
+}
+
+fn report_transfer_issue(
+    tracking: Option<&DeployTrackingContext>,
+    server_id: &str,
+    stage: DeployStage,
+    message: String,
+) -> String {
+    if message.to_lowercase().contains("cancelled") {
+        if let Some(tracking) = tracking {
+            let _ = tracking.record_log(Some(server_id), None, "warn", &message);
+            let _ = tracking.cancel_pending();
+        }
+        return message;
+    }
+
+    report_stage_failure(tracking, server_id, stage, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task_domain::{AttemptStatus, DeployStage, TaskTriggerSource};
+    use crate::task_manager::{DeployTarget, StartManualDeployRequest, TaskManager};
+
+    #[test]
+    fn report_stage_failure_records_structured_task_log_excerpt() {
+        let manager = TaskManager::new_in_memory();
+        let handle = manager
+            .begin_manual_deploy_run(StartManualDeployRequest {
+                task_group_id: None,
+                display_name: "pkg".to_string(),
+                folder_name: "pkg".to_string(),
+                local_target_path: "D:\\target\\pkg".to_string(),
+                source_path: "D:\\target\\pkg".to_string(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+        manager
+            .register_deploy_targets(
+                &handle.task_group_id,
+                &handle.run_id,
+                &[DeployTarget {
+                    server_id: "server-a".to_string(),
+                    server_name: "Server A".to_string(),
+                    remote_target: "/srv/pkg".to_string(),
+                    trigger_source: TaskTriggerSource::Manual,
+                }],
+            )
+            .unwrap();
+
+        let tracking =
+            manager.tracking_context(handle.task_group_id.clone(), handle.run_id.clone());
+        let message = report_stage_failure(
+            Some(&tracking),
+            "server-a",
+            DeployStage::Connecting,
+            "connection failed".to_string(),
+        );
+
+        assert_eq!(message, "connection failed");
+
+        let detail = manager.get_group_detail(&handle.task_group_id).unwrap();
+        let attempt = &detail.runs[0].deploy_attempts[0];
+        assert_eq!(attempt.error_phase, Some(DeployStage::Connecting));
+        assert_eq!(attempt.error_message.as_deref(), Some("connection failed"));
+        assert_eq!(
+            attempt.last_log_excerpt.as_deref(),
+            Some("connection failed")
+        );
+    }
+
+    #[test]
+    fn report_transfer_issue_records_cancelled_task_log_excerpt() {
+        let manager = TaskManager::new_in_memory();
+        let handle = manager
+            .begin_manual_deploy_run(StartManualDeployRequest {
+                task_group_id: None,
+                display_name: "pkg".to_string(),
+                folder_name: "pkg".to_string(),
+                local_target_path: "D:\\target\\pkg".to_string(),
+                source_path: "D:\\target\\pkg".to_string(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+        manager
+            .register_deploy_targets(
+                &handle.task_group_id,
+                &handle.run_id,
+                &[DeployTarget {
+                    server_id: "server-a".to_string(),
+                    server_name: "Server A".to_string(),
+                    remote_target: "/srv/pkg".to_string(),
+                    trigger_source: TaskTriggerSource::Manual,
+                }],
+            )
+            .unwrap();
+
+        let tracking =
+            manager.tracking_context(handle.task_group_id.clone(), handle.run_id.clone());
+        tracking
+            .mark_stage(
+                "server-a",
+                DeployStage::Uploading,
+                Some(10.0),
+                Some("/srv/pkg".to_string()),
+            )
+            .unwrap();
+
+        let message = report_transfer_issue(
+            Some(&tracking),
+            "server-a",
+            DeployStage::Uploading,
+            "Deployment cancelled".to_string(),
+        );
+
+        assert_eq!(message, "Deployment cancelled");
+
+        let detail = manager.get_group_detail(&handle.task_group_id).unwrap();
+        let attempt = &detail.runs[0].deploy_attempts[0];
+        assert_eq!(attempt.status, AttemptStatus::Cancelled);
+        assert_eq!(
+            attempt.last_log_excerpt.as_deref(),
+            Some("Deployment cancelled")
+        );
+    }
 }

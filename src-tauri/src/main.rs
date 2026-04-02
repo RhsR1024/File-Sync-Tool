@@ -8,8 +8,8 @@ mod history;
 mod network;
 mod persist;
 mod scanner;
-mod task_domain;
 mod task_commands;
+mod task_domain;
 mod task_events;
 mod task_manager;
 mod task_persist;
@@ -39,7 +39,10 @@ struct AppState {
     config: Arc<Mutex<AppConfig>>,
     task_manager: task_manager::TaskManager,
     task_runtime: task_runtime::TaskRuntimeRegistry,
+    executor_active: Arc<AtomicBool>,
+    run_control_target: Arc<Mutex<Option<task_runtime::ActiveRunExecution>>>,
     is_scanning: Arc<AtomicBool>,
+    is_manual_copying: Arc<AtomicBool>,
     is_manually_deploying: Arc<AtomicBool>,
     manual_copy_queue: Arc<Mutex<VecDeque<ManualCopyQueueItem>>>,
     manual_copy_keys: Arc<Mutex<HashSet<String>>>,
@@ -61,6 +64,39 @@ struct ManualCopyQueueItem {
     overwrite_existing: bool,
     file_extensions: Vec<String>,
     filename_includes: Vec<String>,
+    task_handle: Option<task_manager::TaskRunHandle>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct StartManualCopyTaskRequest {
+    source_path: String,
+    target_root_path: String,
+    #[serde(default)]
+    overwrite_existing: bool,
+    #[serde(default)]
+    file_extensions: Vec<String>,
+    #[serde(default)]
+    filename_includes: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct StartManualDeployBindingRequest {
+    server_id: String,
+    #[serde(default)]
+    command_group_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct StartManualDeployTaskRequest {
+    task_group_id: Option<String>,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    folder_name: String,
+    local_path: String,
+    remote_path: String,
+    #[serde(default)]
+    bindings: Vec<StartManualDeployBindingRequest>,
 }
 
 #[derive(serde::Serialize)]
@@ -87,6 +123,175 @@ struct ManualCopyTaskStateEvent {
     source_path: String,
     local_path: String,
     state: String,
+}
+
+struct ExecutorReservation {
+    executor_active: Arc<AtomicBool>,
+    category_flag: Arc<AtomicBool>,
+}
+
+impl Drop for ExecutorReservation {
+    fn drop(&mut self) {
+        self.category_flag.store(false, Ordering::SeqCst);
+        self.executor_active.store(false, Ordering::SeqCst);
+    }
+}
+
+fn try_reserve_executor(
+    executor_active: Arc<AtomicBool>,
+    category_flag: Arc<AtomicBool>,
+) -> Option<ExecutorReservation> {
+    if executor_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return None;
+    }
+
+    if category_flag
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        executor_active.store(false, Ordering::SeqCst);
+        return None;
+    }
+
+    Some(ExecutorReservation {
+        executor_active,
+        category_flag,
+    })
+}
+
+fn reserve_scan_executor(
+    state: &AppState,
+    already_running_message: &'static str,
+) -> Result<ExecutorReservation, String> {
+    try_reserve_executor(state.executor_active.clone(), state.is_scanning.clone()).ok_or_else(
+        || {
+            if state.is_manually_deploying.load(Ordering::SeqCst) {
+                "Manual deploy already in progress".to_string()
+            } else {
+                already_running_message.to_string()
+            }
+        },
+    )
+}
+
+fn reserve_manual_copy_executor(
+    state: &AppState,
+    already_running_message: &'static str,
+) -> Result<ExecutorReservation, String> {
+    try_reserve_executor(
+        state.executor_active.clone(),
+        state.is_manual_copying.clone(),
+    )
+    .ok_or_else(|| {
+        if state.is_manually_deploying.load(Ordering::SeqCst) {
+            "Manual deploy already in progress".to_string()
+        } else if state.is_scanning.load(Ordering::SeqCst) {
+            "Scan already in progress".to_string()
+        } else {
+            already_running_message.to_string()
+        }
+    })
+}
+
+fn reserve_manual_deploy_executor(state: &AppState) -> Result<ExecutorReservation, String> {
+    try_reserve_executor(
+        state.executor_active.clone(),
+        state.is_manually_deploying.clone(),
+    )
+    .ok_or_else(|| {
+        if state.is_manually_deploying.load(Ordering::SeqCst) {
+            "Manual deploy already in progress".to_string()
+        } else {
+            "Copy or scan already in progress".to_string()
+        }
+    })
+}
+
+fn clear_stale_targeted_run_controls(
+    active_execution: &task_runtime::ActiveRunExecution,
+    run_control_target: &Arc<Mutex<Option<task_runtime::ActiveRunExecution>>>,
+    should_cancel: &Arc<AtomicBool>,
+    should_skip_current: Option<&Arc<AtomicBool>>,
+    is_paused: &Arc<AtomicBool>,
+) {
+    let mut target = run_control_target.lock().unwrap();
+    if matches!(target.as_ref(), Some(current) if current != active_execution) {
+        should_cancel.store(false, Ordering::SeqCst);
+        is_paused.store(false, Ordering::SeqCst);
+        if let Some(should_skip_current) = should_skip_current {
+            should_skip_current.store(false, Ordering::SeqCst);
+        }
+        *target = None;
+    }
+}
+
+fn clear_finished_targeted_run_controls(
+    finished_execution: &task_runtime::ActiveRunExecution,
+    run_control_target: &Arc<Mutex<Option<task_runtime::ActiveRunExecution>>>,
+    should_cancel: &Arc<AtomicBool>,
+    should_skip_current: Option<&Arc<AtomicBool>>,
+    is_paused: &Arc<AtomicBool>,
+) {
+    let mut target = run_control_target.lock().unwrap();
+    if matches!(target.as_ref(), Some(current) if current == finished_execution) {
+        should_cancel.store(false, Ordering::SeqCst);
+        is_paused.store(false, Ordering::SeqCst);
+        if let Some(should_skip_current) = should_skip_current {
+            should_skip_current.store(false, Ordering::SeqCst);
+        }
+        *target = None;
+    }
+}
+
+fn set_scan_session_controls(
+    state: &AppState,
+    cancel: Option<bool>,
+    paused: Option<bool>,
+) -> Result<(), String> {
+    if !state.is_scanning.load(Ordering::SeqCst) {
+        return Err("No scan or copy in progress".to_string());
+    }
+
+    *state.run_control_target.lock().unwrap() = None;
+    if let Some(cancel) = cancel {
+        state.should_cancel.store(cancel, Ordering::SeqCst);
+    }
+    if let Some(paused) = paused {
+        state.is_paused.store(paused, Ordering::SeqCst);
+    }
+
+    Ok(())
+}
+
+fn set_targeted_run_controls(
+    state: &AppState,
+    task_group_id: &str,
+    run_id: &str,
+    cancel: Option<bool>,
+    paused: Option<bool>,
+    skip_current: Option<bool>,
+) -> Result<(), String> {
+    state
+        .task_runtime
+        .apply_if_active(task_group_id, run_id, |active| {
+            *state.run_control_target.lock().unwrap() = Some(active.clone());
+            if let Some(cancel) = cancel {
+                state.should_cancel.store(cancel, Ordering::SeqCst);
+            }
+            if let Some(paused) = paused {
+                state.is_paused.store(paused, Ordering::SeqCst);
+            }
+            if let Some(skip_current) = skip_current {
+                state
+                    .should_skip_current
+                    .store(skip_current, Ordering::SeqCst);
+            }
+        })?;
+
+    Ok(())
 }
 
 fn emit_runtime_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
@@ -213,6 +418,59 @@ fn validate_manual_copy_request(
     ))
 }
 
+fn build_manual_copy_start_request(
+    source_path: &Path,
+    target_root_path: &Path,
+) -> task_manager::StartManualCopyRequest {
+    let folder_name = manual_copy_folder_name(source_path);
+    let local_target_path = resolve_manual_copy_target_path(source_path, target_root_path)
+        .unwrap_or_else(|_| target_root_path.join(&folder_name));
+
+    task_manager::StartManualCopyRequest {
+        display_name: folder_name.clone(),
+        folder_name,
+        source_path: source_path.to_string_lossy().to_string(),
+        local_target_path: local_target_path.to_string_lossy().to_string(),
+        trigger_source: task_domain::TaskTriggerSource::Manual,
+    }
+}
+
+fn manual_deploy_folder_name(local_path: &str) -> String {
+    Path::new(local_path.trim())
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "manual-deploy".to_string())
+}
+
+fn resolve_manual_deploy_remote_target(local_path: &str, remote_path: &str) -> String {
+    let mut resolved = remote_path.trim().to_string();
+    if resolved.ends_with('/') || resolved.ends_with('\\') {
+        if let Some(name) = Path::new(local_path.trim()).file_name() {
+            resolved = format!(
+                "{}/{}",
+                resolved.trim_end_matches(&['/', '\\'][..]),
+                name.to_string_lossy()
+            );
+        }
+    }
+
+    resolved.replace('\\', "/")
+}
+
+fn resolve_manual_deploy_post_commands(
+    command_group_ids: &[String],
+    command_groups: &[config::CommandGroup],
+) -> Vec<String> {
+    let mut commands = Vec::new();
+    for group_id in command_group_ids {
+        if let Some(group) = command_groups.iter().find(|group| &group.id == group_id) {
+            commands.extend(group.commands.iter().cloned());
+        }
+    }
+    commands
+}
+
 fn emit_manual_copy_task_state<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     task: &ManualCopyQueueItem,
@@ -235,16 +493,23 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
     let manual_copy_queue = state.manual_copy_queue.clone();
     let manual_copy_keys = state.manual_copy_keys.clone();
     let manual_copy_worker_running = state.manual_copy_worker_running.clone();
-    let is_scanning = state.is_scanning.clone();
+    let executor_active = state.executor_active.clone();
+    let run_control_target = state.run_control_target.clone();
+    let is_manual_copying = state.is_manual_copying.clone();
     let should_cancel = state.should_cancel.clone();
+    let should_skip_current = state.should_skip_current.clone();
     let is_paused = state.is_paused.clone();
+    let task_runtime = state.task_runtime.clone();
 
     tauri::async_runtime::spawn(async move {
         loop {
-            if is_scanning
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-            {
+            let execution_reservation = loop {
+                if let Some(reservation) =
+                    try_reserve_executor(executor_active.clone(), is_manual_copying.clone())
+                {
+                    break reservation;
+                }
+
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
                 let queue_empty = manual_copy_queue.lock().unwrap().is_empty();
@@ -253,11 +518,10 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     let queue_still_empty = manual_copy_queue.lock().unwrap().is_empty();
                     if queue_still_empty || manual_copy_worker_running.swap(true, Ordering::SeqCst)
                     {
-                        break;
+                        return;
                     }
                 }
-                continue;
-            }
+            };
 
             loop {
                 let next_task = { manual_copy_queue.lock().unwrap().pop_front() };
@@ -266,7 +530,66 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                 };
 
                 should_cancel.store(false, Ordering::SeqCst);
+                should_skip_current.store(false, Ordering::SeqCst);
                 is_paused.store(false, Ordering::SeqCst);
+
+                let source_path = PathBuf::from(task.source_path.trim());
+                let target_root_path = PathBuf::from(task.target_root_path.trim());
+                let run_handle = if let Some(handle) = task.task_handle.clone() {
+                    handle
+                } else {
+                    match task_manager.begin_manual_copy_run(build_manual_copy_start_request(
+                        &source_path,
+                        &target_root_path,
+                    )) {
+                        Ok(handle) => handle,
+                        Err(error) => {
+                            manual_copy_keys.lock().unwrap().remove(&task.key);
+                            emit_manual_copy_task_state(&app_handle, &task, "failed");
+                            emit_runtime_log(
+                                &app_handle,
+                                format!("Manual copy task failed to start: {}", error),
+                                "error",
+                            );
+                            continue;
+                        }
+                    }
+                };
+                let active_execution = match task_runtime
+                    .activate(run_handle.task_group_id.clone(), run_handle.run_id.clone())
+                {
+                    Ok(active_execution) => active_execution,
+                    Err(error) => {
+                        let _ = task_manager.mark_copy_failed(
+                            &run_handle.task_group_id,
+                            &run_handle.run_id,
+                            error.clone(),
+                        );
+                        let _ = task_manager.record_task_log(
+                            &run_handle.task_group_id,
+                            &run_handle.run_id,
+                            None,
+                            None,
+                            "error",
+                            &error,
+                        );
+                        manual_copy_keys.lock().unwrap().remove(&task.key);
+                        emit_manual_copy_task_state(&app_handle, &task, "failed");
+                        emit_runtime_log(
+                            &app_handle,
+                            format!("Manual copy task failed to start: {}", error),
+                            "error",
+                        );
+                        continue;
+                    }
+                };
+                clear_stale_targeted_run_controls(
+                    &active_execution,
+                    &run_control_target,
+                    &should_cancel,
+                    Some(&should_skip_current),
+                    &is_paused,
+                );
                 emit_manual_copy_task_state(&app_handle, &task, "started");
 
                 let config_snapshot = config.lock().unwrap().clone();
@@ -275,36 +598,54 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     &config_snapshot,
                     config.clone(),
                     task_manager.clone(),
+                    task_runtime.clone(),
+                    Some(run_handle.clone()),
                     task.source_path.clone(),
                     task.target_root_path.clone(),
                     task.overwrite_existing,
                     should_cancel.clone(),
+                    should_skip_current.clone(),
                     is_paused.clone(),
                     task.file_extensions.clone(),
                     task.filename_includes.clone(),
                 )
                 .await;
+                let _ = task_runtime.clear(&run_handle.task_group_id, &run_handle.run_id);
+                clear_finished_targeted_run_controls(
+                    &active_execution,
+                    &run_control_target,
+                    &should_cancel,
+                    Some(&should_skip_current),
+                    &is_paused,
+                );
 
                 manual_copy_keys.lock().unwrap().remove(&task.key);
 
                 if let Err(error) = result {
-                    let state = if error.to_lowercase().contains("cancelled") {
-                        "cancelled"
+                    let error_lower = error.to_lowercase();
+                    let state =
+                        if error_lower.contains("cancelled") || error_lower.contains("skipped") {
+                            "cancelled"
+                        } else {
+                            "failed"
+                        };
+                    let level = if state == "cancelled" {
+                        "warn"
                     } else {
-                        "failed"
+                        "error"
                     };
                     emit_manual_copy_task_state(&app_handle, &task, state);
                     emit_runtime_log(
                         &app_handle,
                         format!("Manual copy task failed: {}", error),
-                        "error",
+                        level,
                     );
                 } else {
                     emit_manual_copy_task_state(&app_handle, &task, "completed");
                 }
             }
 
-            is_scanning.store(false, Ordering::SeqCst);
+            drop(execution_reservation);
 
             manual_copy_worker_running.store(false, Ordering::SeqCst);
             let queue_has_items = !manual_copy_queue.lock().unwrap().is_empty();
@@ -453,11 +794,7 @@ async fn scan_now(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ScanResult, String> {
-    if state.is_scanning.load(Ordering::SeqCst) {
-        return Err("Scan already in progress".to_string());
-    }
-
-    state.is_scanning.store(true, Ordering::SeqCst);
+    let _execution_reservation = reserve_scan_executor(state.inner(), "Scan already in progress")?;
     state.should_cancel.store(false, Ordering::SeqCst);
     state.should_skip_current.store(false, Ordering::SeqCst);
     state.is_paused.store(false, Ordering::SeqCst);
@@ -470,6 +807,8 @@ async fn scan_now(
         &config,
         live_config,
         state.task_manager.clone(),
+        state.task_runtime.clone(),
+        state.run_control_target.clone(),
         state.should_cancel.clone(),
         state.should_skip_current.clone(),
         state.is_paused.clone(),
@@ -477,25 +816,22 @@ async fn scan_now(
     )
     .await;
 
-    state.is_scanning.store(false, Ordering::SeqCst);
     Ok(result)
 }
 
 #[tauri::command]
-fn cancel_scan(state: State<AppState>) {
-    state.should_cancel.store(true, Ordering::SeqCst);
-    // Also unpause if paused, so the loop can proceed to cancel
-    state.is_paused.store(false, Ordering::SeqCst);
+fn cancel_scan(state: State<AppState>) -> Result<(), String> {
+    set_scan_session_controls(state.inner(), Some(true), Some(false))
 }
 
 #[tauri::command]
-fn pause_scan(state: State<AppState>) {
-    state.is_paused.store(true, Ordering::SeqCst);
+fn pause_scan(state: State<AppState>) -> Result<(), String> {
+    set_scan_session_controls(state.inner(), None, Some(true))
 }
 
 #[tauri::command]
-fn resume_scan(state: State<AppState>) {
-    state.is_paused.store(false, Ordering::SeqCst);
+fn resume_scan(state: State<AppState>) -> Result<(), String> {
+    set_scan_session_controls(state.inner(), None, Some(false))
 }
 
 #[tauri::command]
@@ -504,12 +840,14 @@ fn cancel_task_run(
     task_group_id: String,
     run_id: String,
 ) -> Result<(), String> {
-    state
-        .task_runtime
-        .require_active(&task_group_id, &run_id)?;
-    state.should_cancel.store(true, Ordering::SeqCst);
-    state.is_paused.store(false, Ordering::SeqCst);
-    Ok(())
+    set_targeted_run_controls(
+        state.inner(),
+        &task_group_id,
+        &run_id,
+        Some(true),
+        Some(false),
+        None,
+    )
 }
 
 #[tauri::command]
@@ -518,11 +856,14 @@ fn pause_task_run(
     task_group_id: String,
     run_id: String,
 ) -> Result<(), String> {
-    state
-        .task_runtime
-        .require_active(&task_group_id, &run_id)?;
-    state.is_paused.store(true, Ordering::SeqCst);
-    Ok(())
+    set_targeted_run_controls(
+        state.inner(),
+        &task_group_id,
+        &run_id,
+        None,
+        Some(true),
+        None,
+    )
 }
 
 #[tauri::command]
@@ -531,17 +872,33 @@ fn resume_task_run(
     task_group_id: String,
     run_id: String,
 ) -> Result<(), String> {
-    state
-        .task_runtime
-        .require_active(&task_group_id, &run_id)?;
-    state.is_paused.store(false, Ordering::SeqCst);
-    Ok(())
+    set_targeted_run_controls(
+        state.inner(),
+        &task_group_id,
+        &run_id,
+        Some(false),
+        Some(false),
+        Some(false),
+    )
 }
 
 #[tauri::command]
-fn skip_current_copy(state: State<AppState>) {
-    state.should_skip_current.store(true, Ordering::SeqCst);
-    state.is_paused.store(false, Ordering::SeqCst);
+fn skip_current_copy(state: State<AppState>) -> Result<(), String> {
+    if !state.is_scanning.load(Ordering::SeqCst) {
+        return Err("Skip current copy is only available during scan or copy".to_string());
+    }
+    let active = state
+        .task_runtime
+        .current()
+        .ok_or_else(|| "No active task run".to_string())?;
+    set_targeted_run_controls(
+        state.inner(),
+        &active.task_group_id,
+        &active.run_id,
+        None,
+        Some(false),
+        Some(true),
+    )
 }
 
 #[tauri::command]
@@ -555,6 +912,204 @@ async fn test_ssh_connection(server: DeployServer) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn start_manual_deploy_task(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: StartManualDeployTaskRequest,
+) -> Result<task_manager::TaskRunHandle, String> {
+    let execution_reservation = reserve_manual_deploy_executor(state.inner())?;
+    if request.bindings.is_empty() {
+        return Err("At least one manual deploy binding is required".to_string());
+    }
+
+    state.should_cancel.store(false, Ordering::SeqCst);
+    state.is_paused.store(false, Ordering::SeqCst);
+
+    let config_snapshot = state.config.lock().unwrap().clone();
+    let folder_name = if request.folder_name.trim().is_empty() {
+        manual_deploy_folder_name(&request.local_path)
+    } else {
+        request.folder_name.trim().to_string()
+    };
+    let display_name = if request.display_name.trim().is_empty() {
+        folder_name.clone()
+    } else {
+        request.display_name.trim().to_string()
+    };
+    let remote_target =
+        resolve_manual_deploy_remote_target(&request.local_path, &request.remote_path);
+
+    let mut resolved_bindings = Vec::with_capacity(request.bindings.len());
+    let mut targets = Vec::with_capacity(request.bindings.len());
+    for binding in &request.bindings {
+        let server = config_snapshot
+            .servers
+            .iter()
+            .find(|server| server.id == binding.server_id)
+            .cloned()
+            .ok_or_else(|| format!("Manual deploy server not found: {}", binding.server_id))?;
+        let post_commands = resolve_manual_deploy_post_commands(
+            &binding.command_group_ids,
+            &config_snapshot.command_groups,
+        );
+        targets.push(task_manager::DeployTarget {
+            server_id: server.id.clone(),
+            server_name: server.name.clone(),
+            remote_target: remote_target.clone(),
+            trigger_source: task_domain::TaskTriggerSource::Manual,
+        });
+        resolved_bindings.push((server, post_commands));
+    }
+
+    let task_manager = state.task_manager.clone();
+    let task_runtime = state.task_runtime.clone();
+    let run_handle =
+        task_manager.begin_manual_deploy_run(task_manager::StartManualDeployRequest {
+            task_group_id: request.task_group_id.clone(),
+            display_name,
+            folder_name,
+            local_target_path: request.local_path.clone(),
+            source_path: request.local_path.clone(),
+            trigger_source: task_domain::TaskTriggerSource::Manual,
+        })?;
+
+    let tracking =
+        task_manager.tracking_context(run_handle.task_group_id.clone(), run_handle.run_id.clone());
+    tracking.register_targets(&targets)?;
+
+    let active_execution =
+        match task_runtime.activate(run_handle.task_group_id.clone(), run_handle.run_id.clone()) {
+            Ok(active_execution) => active_execution,
+            Err(error) => {
+                for target in &targets {
+                    let _ = task_manager.fail_attempt(
+                        &run_handle.task_group_id,
+                        &run_handle.run_id,
+                        &target.server_id,
+                        task_domain::DeployStage::Pending,
+                        error.clone(),
+                    );
+                    let _ = task_manager.record_task_log(
+                        &run_handle.task_group_id,
+                        &run_handle.run_id,
+                        Some(target.server_id.as_str()),
+                        Some(target.server_name.as_str()),
+                        "error",
+                        &error,
+                    );
+                }
+                return Err(error);
+            }
+        };
+    clear_stale_targeted_run_controls(
+        &active_execution,
+        &state.run_control_target,
+        &state.should_cancel,
+        Some(&state.should_skip_current),
+        &state.is_paused,
+    );
+
+    let app_handle_for_task = app_handle.clone();
+    let app_handle_for_result = app_handle.clone();
+    let local_path = request.local_path.clone();
+    let remote_path = request.remote_path.clone();
+    let run_handle_for_task = run_handle.clone();
+    let active_execution_for_task = active_execution.clone();
+    let task_runtime_for_task = task_runtime.clone();
+    let task_manager_for_task = task_manager.clone();
+    let run_control_target = state.run_control_target.clone();
+    let should_cancel = state.should_cancel.clone();
+    let should_cancel_for_cleanup = state.should_cancel.clone();
+    let should_skip_current = state.should_skip_current.clone();
+    let is_paused = state.is_paused.clone();
+    let is_paused_for_cleanup = state.is_paused.clone();
+    let targets_for_task = targets.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let join_result = tauri::async_runtime::spawn_blocking(move || {
+            let _execution_reservation = execution_reservation;
+            let mut first_error: Option<String> = None;
+            for (server, post_commands) in resolved_bindings {
+                if let Err(error) = deploy::deploy_manual(
+                    &app_handle_for_task,
+                    &server,
+                    &post_commands,
+                    &local_path,
+                    &remote_path,
+                    should_cancel.clone(),
+                    is_paused.clone(),
+                    Some(tracking.clone()),
+                ) {
+                    if error.to_lowercase().contains("cancelled") {
+                        let _ = tracking.cancel_pending();
+                        return Err(error);
+                    }
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+            match first_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        })
+        .await;
+
+        let _ = task_runtime_for_task.clear(
+            &run_handle_for_task.task_group_id,
+            &run_handle_for_task.run_id,
+        );
+        clear_finished_targeted_run_controls(
+            &active_execution_for_task,
+            &run_control_target,
+            &should_cancel_for_cleanup,
+            Some(&should_skip_current),
+            &is_paused_for_cleanup,
+        );
+
+        match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let level = if error.to_lowercase().contains("cancelled") {
+                    "warn"
+                } else {
+                    "error"
+                };
+                emit_runtime_log(
+                    &app_handle_for_result,
+                    format!("Manual deploy task failed: {}", error),
+                    level,
+                );
+            }
+            Err(error) => {
+                let message = format!("Manual deploy task panic: {}", error);
+                for target in &targets_for_task {
+                    let _ = task_manager_for_task.fail_attempt(
+                        &run_handle_for_task.task_group_id,
+                        &run_handle_for_task.run_id,
+                        &target.server_id,
+                        task_domain::DeployStage::Pending,
+                        message.clone(),
+                    );
+                    let _ = task_manager_for_task.record_task_log(
+                        &run_handle_for_task.task_group_id,
+                        &run_handle_for_task.run_id,
+                        Some(target.server_id.as_str()),
+                        Some(target.server_name.as_str()),
+                        "error",
+                        &message,
+                    );
+                }
+                emit_runtime_log(&app_handle_for_result, message, "error");
+            }
+        }
+    });
+
+    Ok(run_handle)
+}
+
+#[tauri::command]
 async fn manual_deploy(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -562,22 +1117,79 @@ async fn manual_deploy(
     postCommands: Vec<String>,
     localPath: String,
     remotePath: String,
+    taskGroupId: Option<String>,
 ) -> Result<(), String> {
-    if state.is_manually_deploying.load(Ordering::SeqCst) {
-        return Err("Manual deploy already in progress".to_string());
-    }
-
-    state.is_manually_deploying.store(true, Ordering::SeqCst);
+    let _execution_reservation = reserve_manual_deploy_executor(state.inner())?;
     state.should_cancel.store(false, Ordering::SeqCst);
     state.is_paused.store(false, Ordering::SeqCst);
 
     let should_cancel = state.should_cancel.clone();
     let is_paused = state.is_paused.clone();
-    let is_manually_deploying = state.is_manually_deploying.clone();
+    let task_manager = state.task_manager.clone();
+    let task_runtime = state.task_runtime.clone();
+    let folder_name = manual_deploy_folder_name(&localPath);
+    let run_handle =
+        match task_manager.begin_manual_deploy_run(task_manager::StartManualDeployRequest {
+            task_group_id: taskGroupId.clone(),
+            display_name: folder_name.clone(),
+            folder_name: folder_name.clone(),
+            local_target_path: localPath.clone(),
+            source_path: localPath.clone(),
+            trigger_source: task_domain::TaskTriggerSource::Manual,
+        }) {
+            Ok(handle) => handle,
+            Err(error) => return Err(error),
+        };
+    let server_id = server.id.clone();
+    let server_name = server.name.clone();
+    let remote_target = resolve_manual_deploy_remote_target(&localPath, &remotePath);
+    if let Err(error) = task_manager.register_deploy_targets(
+        &run_handle.task_group_id,
+        &run_handle.run_id,
+        &[task_manager::DeployTarget {
+            server_id: server_id.clone(),
+            server_name: server_name.clone(),
+            remote_target,
+            trigger_source: task_domain::TaskTriggerSource::Manual,
+        }],
+    ) {
+        return Err(error);
+    }
+    let active_execution =
+        match task_runtime.activate(run_handle.task_group_id.clone(), run_handle.run_id.clone()) {
+            Ok(active_execution) => active_execution,
+            Err(error) => {
+                let _ = task_manager.fail_attempt(
+                    &run_handle.task_group_id,
+                    &run_handle.run_id,
+                    &server_id,
+                    task_domain::DeployStage::Pending,
+                    error.clone(),
+                );
+                let _ = task_manager.record_task_log(
+                    &run_handle.task_group_id,
+                    &run_handle.run_id,
+                    Some(server_id.as_str()),
+                    Some(server_name.as_str()),
+                    "error",
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+    clear_stale_targeted_run_controls(
+        &active_execution,
+        &state.run_control_target,
+        &state.should_cancel,
+        Some(&state.should_skip_current),
+        &state.is_paused,
+    );
+    let tracking =
+        task_manager.tracking_context(run_handle.task_group_id.clone(), run_handle.run_id.clone());
 
     // This runs in async context, but deploy_manual uses blocking SSH.
     // We should spawn blocking.
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let join_result = tauri::async_runtime::spawn_blocking(move || {
         deploy::deploy_manual(
             &app_handle,
             &server,
@@ -586,13 +1198,42 @@ async fn manual_deploy(
             &remotePath,
             should_cancel,
             is_paused,
+            Some(tracking),
         )
     })
-    .await
-    .map_err(|e| e.to_string())?;
+    .await;
 
-    is_manually_deploying.store(false, Ordering::SeqCst);
-    result
+    let _ = task_runtime.clear(&run_handle.task_group_id, &run_handle.run_id);
+    clear_finished_targeted_run_controls(
+        &active_execution,
+        &state.run_control_target,
+        &state.should_cancel,
+        Some(&state.should_skip_current),
+        &state.is_paused,
+    );
+
+    match join_result {
+        Ok(result) => result,
+        Err(error) => {
+            let message = format!("Manual deploy task panic: {}", error);
+            let _ = task_manager.fail_attempt(
+                &run_handle.task_group_id,
+                &run_handle.run_id,
+                &server_id,
+                task_domain::DeployStage::Pending,
+                message.clone(),
+            );
+            let _ = task_manager.record_task_log(
+                &run_handle.task_group_id,
+                &run_handle.run_id,
+                Some(server_id.as_str()),
+                Some(server_name.as_str()),
+                "error",
+                &message,
+            );
+            Err(message)
+        }
+    }
 }
 
 #[tauri::command]
@@ -605,37 +1246,157 @@ async fn temporary_copy(
     file_extensions: Vec<String>,
     filename_includes: Vec<String>,
 ) -> Result<(), String> {
-    if state.is_scanning.load(Ordering::SeqCst) {
-        return Err("Operation already in progress".to_string());
-    }
-
-    state.is_scanning.store(true, Ordering::SeqCst);
+    let _execution_reservation =
+        reserve_manual_copy_executor(state.inner(), "Operation already in progress")?;
     state.should_cancel.store(false, Ordering::SeqCst);
+    state.should_skip_current.store(false, Ordering::SeqCst);
     state.is_paused.store(false, Ordering::SeqCst);
 
     let config = state.config.lock().unwrap().clone();
     let live_config = state.config.clone();
     let should_cancel = state.should_cancel.clone();
     let is_paused = state.is_paused.clone();
-    let is_scanning = state.is_scanning.clone();
+    let task_manager = state.task_manager.clone();
+    let task_runtime = state.task_runtime.clone();
+    let run_handle = match task_manager.begin_manual_copy_run(build_manual_copy_start_request(
+        Path::new(source_path.trim()),
+        Path::new(target_root_path.trim()),
+    )) {
+        Ok(handle) => handle,
+        Err(error) => return Err(error),
+    };
+    let active_execution =
+        match task_runtime.activate(run_handle.task_group_id.clone(), run_handle.run_id.clone()) {
+            Ok(active_execution) => active_execution,
+            Err(error) => {
+                let _ = task_manager.mark_copy_failed(
+                    &run_handle.task_group_id,
+                    &run_handle.run_id,
+                    error.clone(),
+                );
+                let _ = task_manager.record_task_log(
+                    &run_handle.task_group_id,
+                    &run_handle.run_id,
+                    None,
+                    None,
+                    "error",
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+    clear_stale_targeted_run_controls(
+        &active_execution,
+        &state.run_control_target,
+        &state.should_cancel,
+        Some(&state.should_skip_current),
+        &state.is_paused,
+    );
 
     let result = scanner::temporary_copy(
         &app_handle,
         &config,
         live_config,
-        state.task_manager.clone(),
+        task_manager,
+        task_runtime.clone(),
+        Some(run_handle.clone()),
         source_path,
         target_root_path,
         overwrite_existing,
         should_cancel,
+        state.should_skip_current.clone(),
         is_paused,
         file_extensions,
         filename_includes,
     )
     .await;
 
-    is_scanning.store(false, Ordering::SeqCst);
+    let _ = task_runtime.clear(&run_handle.task_group_id, &run_handle.run_id);
+    clear_finished_targeted_run_controls(
+        &active_execution,
+        &state.run_control_target,
+        &state.should_cancel,
+        Some(&state.should_skip_current),
+        &state.is_paused,
+    );
     result
+}
+
+#[tauri::command]
+async fn start_manual_copy_task(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: StartManualCopyTaskRequest,
+) -> Result<task_manager::TaskRunHandle, String> {
+    let source_path = PathBuf::from(request.source_path.trim());
+    let target_root_path = PathBuf::from(request.target_root_path.trim());
+
+    validate_manual_copy_request(&source_path, &target_root_path)?;
+    let task_key = manual_copy_queue_key(&source_path, &target_root_path)?;
+
+    {
+        let mut keys = state.manual_copy_keys.lock().unwrap();
+        if keys.contains(&task_key) {
+            return Err(format!(
+                "DUPLICATE_TASK::{} => {}",
+                source_path.display(),
+                target_root_path.display()
+            ));
+        }
+        keys.insert(task_key.clone());
+    }
+
+    let run_handle =
+        match state
+            .task_manager
+            .begin_manual_copy_run(build_manual_copy_start_request(
+                &source_path,
+                &target_root_path,
+            )) {
+            Ok(handle) => handle,
+            Err(error) => {
+                state.manual_copy_keys.lock().unwrap().remove(&task_key);
+                return Err(error);
+            }
+        };
+
+    let (folder_name, local_path, _, _) =
+        validate_manual_copy_request(&source_path, &target_root_path)?;
+
+    state
+        .manual_copy_queue
+        .lock()
+        .unwrap()
+        .push_back(ManualCopyQueueItem {
+            key: task_key,
+            folder_name,
+            source_path: source_path.to_string_lossy().to_string(),
+            local_path,
+            target_root_path: target_root_path.to_string_lossy().to_string(),
+            overwrite_existing: request.overwrite_existing,
+            file_extensions: request.file_extensions,
+            filename_includes: request.filename_includes,
+            task_handle: Some(run_handle.clone()),
+        });
+
+    emit_runtime_log(
+        &app_handle,
+        format!(
+            "Manual copy task queued: {} -> {}",
+            source_path.display(),
+            target_root_path.display()
+        ),
+        "info",
+    );
+
+    if !state
+        .manual_copy_worker_running
+        .swap(true, Ordering::SeqCst)
+    {
+        start_manual_copy_worker(app_handle, state.inner());
+    }
+
+    Ok(run_handle)
 }
 
 #[tauri::command]
@@ -668,6 +1429,20 @@ async fn queue_temporary_copy(
         keys.insert(task_key.clone());
     }
 
+    let run_handle =
+        match state
+            .task_manager
+            .begin_manual_copy_run(build_manual_copy_start_request(
+                &source_path,
+                &target_root_path,
+            )) {
+            Ok(handle) => handle,
+            Err(error) => {
+                state.manual_copy_keys.lock().unwrap().remove(&task_key);
+                return Err(error);
+            }
+        };
+
     let queued_ahead = state.manual_copy_queue.lock().unwrap().len()
         + usize::from(state.manual_copy_worker_running.load(Ordering::SeqCst));
 
@@ -684,6 +1459,7 @@ async fn queue_temporary_copy(
             overwrite_existing,
             file_extensions,
             filename_includes,
+            task_handle: Some(run_handle),
         });
 
     emit_runtime_log(
@@ -1212,50 +1988,48 @@ async fn change_framework_password(
             .send()
             .await
         {
-            Ok(response) => {
-                match response.json::<serde_json::Value>().await {
-                    Ok(json) => {
-                        if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
-                            if let Some(token) = json
-                                .get("data")
-                                .and_then(|d| d.get("token"))
-                                .and_then(|t| t.as_str())
-                            {
-                                token.to_string()
-                            } else {
-                                results.push(PasswordChangeResult {
-                                    ip: ip.to_string(),
-                                    success: false,
-                                    message: "Login response missing token".to_string(),
-                                    failedAt: Some("login".to_string()),
-                                });
-                                continue;
-                            }
+            Ok(response) => match response.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
+                        if let Some(token) = json
+                            .get("data")
+                            .and_then(|d| d.get("token"))
+                            .and_then(|t| t.as_str())
+                        {
+                            token.to_string()
                         } else {
-                            let msg = json
-                                .get("message")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("Unknown error");
                             results.push(PasswordChangeResult {
                                 ip: ip.to_string(),
                                 success: false,
-                                message: format!("Login failed: {}", msg),
+                                message: "Login response missing token".to_string(),
                                 failedAt: Some("login".to_string()),
                             });
                             continue;
                         }
-                    }
-                    Err(e) => {
+                    } else {
+                        let msg = json
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Unknown error");
                         results.push(PasswordChangeResult {
                             ip: ip.to_string(),
                             success: false,
-                            message: format!("Login response parse error: {}", e),
+                            message: format!("Login failed: {}", msg),
                             failedAt: Some("login".to_string()),
                         });
                         continue;
                     }
                 }
-            }
+                Err(e) => {
+                    results.push(PasswordChangeResult {
+                        ip: ip.to_string(),
+                        success: false,
+                        message: format!("Login response parse error: {}", e),
+                        failedAt: Some("login".to_string()),
+                    });
+                    continue;
+                }
+            },
             Err(e) => {
                 results.push(PasswordChangeResult {
                     ip: ip.to_string(),
@@ -1308,36 +2082,34 @@ async fn change_framework_password(
             .send()
             .await
         {
-            Ok(response) => {
-                match response.json::<serde_json::Value>().await {
-                    Ok(json) => {
-                        if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
-                            true
-                        } else {
-                            let msg = json
-                                .get("message")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("Unknown error");
-                            results.push(PasswordChangeResult {
-                                ip: ip.to_string(),
-                                success: false,
-                                message: format!("Change password failed: {}", msg),
-                                failedAt: Some("changePasswd".to_string()),
-                            });
-                            false
-                        }
-                    }
-                    Err(e) => {
+            Ok(response) => match response.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
+                        true
+                    } else {
+                        let msg = json
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Unknown error");
                         results.push(PasswordChangeResult {
                             ip: ip.to_string(),
                             success: false,
-                            message: format!("Change password response parse error: {}", e),
+                            message: format!("Change password failed: {}", msg),
                             failedAt: Some("changePasswd".to_string()),
                         });
                         false
                     }
                 }
-            }
+                Err(e) => {
+                    results.push(PasswordChangeResult {
+                        ip: ip.to_string(),
+                        success: false,
+                        message: format!("Change password response parse error: {}", e),
+                        failedAt: Some("changePasswd".to_string()),
+                    });
+                    false
+                }
+            },
             Err(e) => {
                 results.push(PasswordChangeResult {
                     ip: ip.to_string(),
@@ -1620,7 +2392,10 @@ fn main() {
                 config: Arc::new(Mutex::new(config)),
                 task_manager,
                 task_runtime: task_runtime::TaskRuntimeRegistry::new(),
+                executor_active: Arc::new(AtomicBool::new(false)),
+                run_control_target: Arc::new(Mutex::new(None)),
                 is_scanning: Arc::new(AtomicBool::new(false)),
+                is_manual_copying: Arc::new(AtomicBool::new(false)),
                 is_manually_deploying: Arc::new(AtomicBool::new(false)),
                 manual_copy_queue: Arc::new(Mutex::new(VecDeque::new())),
                 manual_copy_keys: Arc::new(Mutex::new(HashSet::new())),
@@ -1649,6 +2424,8 @@ fn main() {
             history::clear_history,
             history::add_system_event,
             test_ssh_connection,
+            start_manual_copy_task,
+            start_manual_deploy_task,
             manual_deploy,
             temporary_copy,
             queue_temporary_copy,
@@ -1665,8 +2442,6 @@ fn main() {
             task_commands::get_task_group_detail,
             task_commands::clear_task_group,
             task_commands::clear_task_groups,
-            task_commands::start_manual_copy_task,
-            task_commands::start_manual_deploy_task,
             persist::save_ui_state,
             persist::load_ui_state,
             persist::save_kv,

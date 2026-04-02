@@ -3,8 +3,8 @@ use crate::task_domain::{
     TaskRunType, TaskSourceType, TaskState, TaskSummaryStatus, TaskTriggerSource,
 };
 use crate::task_events::{
-    TaskGroupDetailSnapshot, TaskGroupListItem, TaskGroupsSnapshot,
-    TASK_GROUP_DETAIL_SNAPSHOT_EVENT, TASK_GROUPS_SNAPSHOT_EVENT,
+    TaskGroupDetailSnapshot, TaskGroupListItem, TaskGroupsSnapshot, TaskLogEntry,
+    TASK_GROUPS_SNAPSHOT_EVENT, TASK_GROUP_DETAIL_SNAPSHOT_EVENT, TASK_LOG_EVENT,
 };
 use crate::task_persist::{load_task_state, save_task_state};
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,7 @@ impl TaskManager {
 
         let snapshot = manager.snapshot_state();
         let _ = save_task_state(&app_handle, &snapshot);
-        manager.emit_snapshots(None);
+        manager.emit_group_list_snapshot();
         manager
     }
 
@@ -456,10 +456,8 @@ impl TaskManager {
                 attempt.error_phase = Some(stage);
                 attempt.error_message = Some(message);
                 attempt.finished_at = Some(finished_at.clone());
-                attempt.elapsed_seconds = compute_elapsed_seconds(
-                    &attempt.started_at,
-                    attempt.finished_at.as_deref(),
-                );
+                attempt.elapsed_seconds =
+                    compute_elapsed_seconds(&attempt.started_at, attempt.finished_at.as_deref());
                 run.refresh_deploy_phase();
                 if is_terminal_deploy_phase(&run.deploy_phase) {
                     run.finished_at = Some(finished_at.clone());
@@ -490,10 +488,8 @@ impl TaskManager {
                 attempt.status = crate::task_domain::AttemptStatus::Success;
                 attempt.progress_percentage = Some(100.0);
                 attempt.finished_at = Some(finished_at.clone());
-                attempt.elapsed_seconds = compute_elapsed_seconds(
-                    &attempt.started_at,
-                    attempt.finished_at.as_deref(),
-                );
+                attempt.elapsed_seconds =
+                    compute_elapsed_seconds(&attempt.started_at, attempt.finished_at.as_deref());
                 run.refresh_deploy_phase();
                 if is_terminal_deploy_phase(&run.deploy_phase) {
                     run.finished_at = Some(finished_at.clone());
@@ -512,6 +508,50 @@ impl TaskManager {
             task_group_id,
             run_id,
         }
+    }
+
+    pub fn record_task_log(
+        &self,
+        task_group_id: &str,
+        run_id: &str,
+        server_id: Option<&str>,
+        server_name: Option<&str>,
+        level: &str,
+        message: &str,
+    ) -> Result<(), String> {
+        let timestamp = current_timestamp();
+        let resolved_server_name = {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            let run = &mut group.runs[run_index];
+
+            if let Some(server_id) = server_id {
+                let attempt = find_latest_attempt_mut(run, server_id)?;
+                attempt.last_log_excerpt = Some(message.to_string());
+                Some(attempt.server_name.clone())
+            } else {
+                None
+            }
+        };
+
+        if let Some(app_handle) = self.inner.app_handle.as_ref() {
+            let _ = app_handle.emit(
+                TASK_LOG_EVENT,
+                TaskLogEntry {
+                    task_group_id: Some(task_group_id.to_string()),
+                    run_id: Some(run_id.to_string()),
+                    server_id: server_id.map(str::to_string),
+                    server_name: server_name.map(str::to_string).or(resolved_server_name),
+                    level: level.to_string(),
+                    message: message.to_string(),
+                    timestamp,
+                },
+            );
+        }
+
+        self.after_log_change(task_group_id);
+        Ok(())
     }
 
     pub fn cancel_pending_attempts(&self, task_group_id: &str, run_id: &str) -> Result<(), String> {
@@ -586,11 +626,19 @@ impl TaskManager {
     }
 
     fn after_change(&self, task_group_id: Option<&str>) {
-        self.emit_snapshots(task_group_id);
+        self.emit_group_list_snapshot();
+        if let Some(group_id) = task_group_id {
+            self.emit_detail_snapshot(group_id);
+        }
         self.schedule_persist();
     }
 
-    fn emit_snapshots(&self, task_group_id: Option<&str>) {
+    fn after_log_change(&self, task_group_id: &str) {
+        self.emit_detail_snapshot(task_group_id);
+        self.schedule_persist();
+    }
+
+    fn emit_group_list_snapshot(&self) {
         let Some(app_handle) = self.inner.app_handle.as_ref() else {
             return;
         };
@@ -601,17 +649,21 @@ impl TaskManager {
                 groups: self.list_groups(),
             },
         );
+    }
 
-        if let Some(group_id) = task_group_id {
-            if let Some(group) = self.get_group_detail(group_id) {
-                let _ = app_handle.emit(
-                    TASK_GROUP_DETAIL_SNAPSHOT_EVENT,
-                    TaskGroupDetailSnapshot {
-                        task_group_id: group_id.to_string(),
-                        group,
-                    },
-                );
-            }
+    fn emit_detail_snapshot(&self, task_group_id: &str) {
+        let Some(app_handle) = self.inner.app_handle.as_ref() else {
+            return;
+        };
+
+        if let Some(group) = self.get_group_detail(task_group_id) {
+            let _ = app_handle.emit(
+                TASK_GROUP_DETAIL_SNAPSHOT_EVENT,
+                TaskGroupDetailSnapshot {
+                    task_group_id: task_group_id.to_string(),
+                    group,
+                },
+            );
         }
     }
 
@@ -671,13 +723,8 @@ impl DeployTrackingContext {
         stage: DeployStage,
         message: String,
     ) -> Result<(), String> {
-        self.task_manager.fail_attempt(
-            &self.task_group_id,
-            &self.run_id,
-            server_id,
-            stage,
-            message,
-        )
+        self.task_manager
+            .fail_attempt(&self.task_group_id, &self.run_id, server_id, stage, message)
     }
 
     pub fn mark_success(&self, server_id: &str) -> Result<(), String> {
@@ -689,9 +736,29 @@ impl DeployTrackingContext {
         self.task_manager
             .cancel_pending_attempts(&self.task_group_id, &self.run_id)
     }
+
+    pub fn record_log(
+        &self,
+        server_id: Option<&str>,
+        server_name: Option<&str>,
+        level: &str,
+        message: &str,
+    ) -> Result<(), String> {
+        self.task_manager.record_task_log(
+            &self.task_group_id,
+            &self.run_id,
+            server_id,
+            server_name,
+            level,
+            message,
+        )
+    }
 }
 
-fn find_group_mut<'a>(state: &'a mut TaskState, task_group_id: &str) -> Result<&'a mut TaskGroup, String> {
+fn find_group_mut<'a>(
+    state: &'a mut TaskState,
+    task_group_id: &str,
+) -> Result<&'a mut TaskGroup, String> {
     state
         .groups
         .iter_mut()
@@ -802,7 +869,11 @@ mod tests {
             .mark_copy_completed(&handle.task_group_id, &handle.run_id, true)
             .unwrap();
         manager
-            .register_deploy_targets(&handle.task_group_id, &handle.run_id, &[DeployTarget::sample()])
+            .register_deploy_targets(
+                &handle.task_group_id,
+                &handle.run_id,
+                &[DeployTarget::sample()],
+            )
             .unwrap();
         manager
             .fail_attempt(
@@ -833,7 +904,10 @@ mod tests {
             .register_deploy_targets(
                 &handle.task_group_id,
                 &handle.run_id,
-                &[DeployTarget::named("server-a"), DeployTarget::named("server-b")],
+                &[
+                    DeployTarget::named("server-a"),
+                    DeployTarget::named("server-b"),
+                ],
             )
             .unwrap();
         manager
@@ -874,6 +948,45 @@ mod tests {
     }
 
     #[test]
+    fn manual_copy_completion_marks_group_completed() {
+        let manager = TaskManager::new_in_memory();
+        let handle = manager
+            .begin_manual_copy_run(StartManualCopyRequest {
+                display_name: "hotfix-build".to_string(),
+                folder_name: "hotfix-build".to_string(),
+                source_path: "C:\\drop\\hotfix-build".to_string(),
+                local_target_path: "D:\\deploy\\hotfix-build".to_string(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+
+        manager
+            .mark_copy_completed(&handle.task_group_id, &handle.run_id, false)
+            .unwrap();
+        manager
+            .record_task_log(
+                &handle.task_group_id,
+                &handle.run_id,
+                None,
+                None,
+                "success",
+                "Manual copy completed",
+            )
+            .unwrap();
+
+        let detail = manager.get_group_detail(&handle.task_group_id).unwrap();
+        assert_eq!(detail.summary_status, TaskSummaryStatus::Completed);
+        assert_eq!(detail.copy_status, CopyState::Completed);
+        assert_eq!(detail.deploy_status, DeployState::NotStarted);
+        assert_eq!(
+            detail.latest_run_id.as_deref(),
+            Some(handle.run_id.as_str())
+        );
+        assert!(detail.finished_at.is_some());
+        assert!(detail.runs[0].finished_at.is_some());
+    }
+
+    #[test]
     fn begin_manual_deploy_run_reuses_existing_group_when_requested() {
         let manager = TaskManager::new_in_memory();
         let seed = manager
@@ -904,6 +1017,88 @@ mod tests {
     }
 
     #[test]
+    fn manual_deploy_failure_is_recorded_under_manual_deploy_run() {
+        let manager = TaskManager::new_in_memory();
+        let seed = manager
+            .begin_manual_copy_run(StartManualCopyRequest {
+                display_name: "pkg".to_string(),
+                folder_name: "pkg".to_string(),
+                source_path: "C:\\src\\pkg".to_string(),
+                local_target_path: "D:\\target\\pkg".to_string(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+        manager
+            .mark_copy_completed(&seed.task_group_id, &seed.run_id, false)
+            .unwrap();
+
+        let deploy = manager
+            .begin_manual_deploy_run(StartManualDeployRequest {
+                task_group_id: Some(seed.task_group_id.clone()),
+                display_name: "pkg".to_string(),
+                folder_name: "pkg".to_string(),
+                local_target_path: "D:\\target\\pkg".to_string(),
+                source_path: "D:\\target\\pkg".to_string(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+        manager
+            .register_deploy_targets(
+                &deploy.task_group_id,
+                &deploy.run_id,
+                &[DeployTarget {
+                    server_id: "server-manual".to_string(),
+                    server_name: "Manual Server".to_string(),
+                    remote_target: "/srv/pkg".to_string(),
+                    trigger_source: TaskTriggerSource::Manual,
+                }],
+            )
+            .unwrap();
+        manager
+            .fail_attempt(
+                &deploy.task_group_id,
+                &deploy.run_id,
+                "server-manual",
+                DeployStage::ExecutingCommands,
+                "manual deploy failed".to_string(),
+            )
+            .unwrap();
+        manager
+            .record_task_log(
+                &deploy.task_group_id,
+                &deploy.run_id,
+                Some("server-manual"),
+                Some("Manual Server"),
+                "error",
+                "manual deploy failed",
+            )
+            .unwrap();
+
+        let detail = manager.get_group_detail(&deploy.task_group_id).unwrap();
+        assert_eq!(detail.summary_status, TaskSummaryStatus::Failed);
+        assert_eq!(
+            detail.latest_run_id.as_deref(),
+            Some(deploy.run_id.as_str())
+        );
+        assert_eq!(detail.runs.len(), 2);
+        assert!(detail.runs[0].deploy_attempts.is_empty());
+        assert_eq!(detail.runs[1].run_type, TaskRunType::ManualDeploy);
+        assert_eq!(detail.runs[1].run_id, deploy.run_id);
+        assert_eq!(detail.runs[1].deploy_attempts.len(), 1);
+        assert_eq!(
+            detail.runs[1].deploy_attempts[0].error_message.as_deref(),
+            Some("manual deploy failed")
+        );
+        assert_eq!(
+            detail.runs[1].deploy_attempts[0]
+                .last_log_excerpt
+                .as_deref(),
+            Some("manual deploy failed")
+        );
+        assert_eq!(detail.server_rollups[0].failure_count, 1);
+    }
+
+    #[test]
     fn begin_manual_deploy_run_preserves_group_identity_when_reusing() {
         let manager = TaskManager::new_in_memory();
         let seed = manager.begin_scheduled_copy(TaskStartRequest::sample());
@@ -931,7 +1126,10 @@ mod tests {
         assert_eq!(after.task_config_id, before_task_config_id);
         assert_eq!(after.source_type, before_source_type);
         assert_eq!(after.runs.len(), before_run_count + 1);
-        assert_eq!(after.runs.last().unwrap().run_type, TaskRunType::ManualDeploy);
+        assert_eq!(
+            after.runs.last().unwrap().run_type,
+            TaskRunType::ManualDeploy
+        );
     }
 
     #[test]
