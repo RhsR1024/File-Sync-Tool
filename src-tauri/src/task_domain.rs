@@ -386,6 +386,8 @@ impl TaskRun {
             DeployState::Interrupted
         } else if cancelled_count == total {
             DeployState::Cancelled
+        } else if interrupted_count > 0 && failed_count == 0 && cancelled_count == 0 {
+            DeployState::Interrupted
         } else if failed_count > 0 || cancelled_count > 0 {
             DeployState::PartialFailed
         } else {
@@ -503,5 +505,64 @@ mod tests {
             state.groups[0].runs[0].deploy_attempts[0].status,
             AttemptStatus::Interrupted
         );
+    }
+
+    #[test]
+    fn mixed_success_and_interrupted_deploy_is_interrupted() {
+        let mut run = TaskRun {
+            run_id: "run-1".to_string(),
+            task_group_id: "group-1".to_string(),
+            run_type: TaskRunType::CopyAndDeploy,
+            trigger_source: TaskTriggerSource::Manual,
+            started_at: "2026-04-02T12:00:00+08:00".to_string(),
+            finished_at: Some("2026-04-02T12:00:30+08:00".to_string()),
+            copy_phase: CopyState::Completed,
+            deploy_phase: DeployState::Running,
+            deploy_attempts: vec![
+                DeployAttempt {
+                    attempt_id: "attempt-1".to_string(),
+                    task_group_id: "group-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    server_id: "server-a".to_string(),
+                    server_name: "Server A".to_string(),
+                    attempt_no: 1,
+                    trigger_source: TaskTriggerSource::Manual,
+                    stage: DeployStage::Done,
+                    status: AttemptStatus::Success,
+                    remote_target: Some("/srv/release".to_string()),
+                    started_at: "2026-04-02T12:00:05+08:00".to_string(),
+                    finished_at: Some("2026-04-02T12:00:15+08:00".to_string()),
+                    elapsed_seconds: 10,
+                    progress_percentage: Some(1.0),
+                    error_phase: None,
+                    error_message: None,
+                    last_log_excerpt: None,
+                },
+                DeployAttempt {
+                    attempt_id: "attempt-2".to_string(),
+                    task_group_id: "group-1".to_string(),
+                    run_id: "run-1".to_string(),
+                    server_id: "server-b".to_string(),
+                    server_name: "Server B".to_string(),
+                    attempt_no: 2,
+                    trigger_source: TaskTriggerSource::Manual,
+                    stage: DeployStage::Uploading,
+                    status: AttemptStatus::Interrupted,
+                    remote_target: Some("/srv/release".to_string()),
+                    started_at: "2026-04-02T12:00:05+08:00".to_string(),
+                    finished_at: Some("2026-04-02T12:00:20+08:00".to_string()),
+                    elapsed_seconds: 15,
+                    progress_percentage: Some(0.4),
+                    error_phase: Some(DeployStage::Uploading),
+                    error_message: Some("Interrupted".to_string()),
+                    last_log_excerpt: None,
+                },
+            ],
+            attempt_ids: vec![],
+        };
+
+        run.refresh_deploy_phase();
+
+        assert_eq!(run.deploy_phase, DeployState::Interrupted);
     }
 }
