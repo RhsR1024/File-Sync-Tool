@@ -79,3 +79,44 @@ store.applyGroupsSnapshot({ groups: [] });
 assert.equal(store.groups.length, 0);
 assert.equal(store.selectedTaskGroupId, null);
 assert.equal(store.selectedGroupDetail, null);
+
+// ── Manual task action tests ─────────────────────────────────────────────────
+const actionCalls = [];
+const actionStore = createTaskStateStore({
+  listTaskGroups: async () => [],
+  getTaskGroupDetail: async () => sampleDetail,
+  startManualCopyTask: async (request) => {
+    actionCalls.push(['copy', request]);
+    return { task_group_id: 'group-copy', run_id: 'run-copy' };
+  },
+  startManualDeployTask: async (request) => {
+    actionCalls.push(['deploy', request]);
+    return { task_group_id: 'group-deploy', run_id: 'run-deploy' };
+  },
+});
+
+const copyHandle = await actionStore.startManualCopy({
+  source_path: 'C:\\src\\pkg',
+  target_root_path: 'D:\\dst',
+  overwrite_existing: false,
+  file_extensions: ['.zip'],
+  filename_includes: ['pkg'],
+});
+
+assert.equal(copyHandle.task_group_id, 'group-copy');
+assert.equal(copyHandle.run_id, 'run-copy');
+
+const deployHandle = await actionStore.startManualDeploy({
+  task_group_id: null,
+  display_name: 'pkg',
+  local_path: 'D:\\dst\\pkg',
+  remote_path: '/srv/pkg',
+  bindings: [],
+});
+
+assert.equal(deployHandle.task_group_id, 'group-deploy');
+assert.equal(deployHandle.run_id, 'run-deploy');
+assert.equal(actionCalls.length, 2);
+assert.equal(actionCalls[0][0], 'copy');
+assert.equal(actionCalls[1][0], 'deploy');
+console.log('taskStateStore manual action tests PASSED');

@@ -294,10 +294,6 @@ export async function testSshConnection(server: DeployServer): Promise<string> {
   return await invoke('test_ssh_connection', { server });
 }
 
-export async function manualDeploy(server: DeployServer, postCommands: string[], localPath: string, remotePath: string): Promise<void> {
-  await invoke('manual_deploy', { server, postCommands, localPath, remotePath });
-}
-
 export interface ManualCopyQueueAck {
   folder_name: string;
   source_path: string;
@@ -312,16 +308,6 @@ export interface ManualCopyPreview {
   resolved_target_path: string;
   source_kind: 'file' | 'directory';
   target_exists: boolean;
-}
-
-export async function temporaryCopy(
-  sourcePath: string,
-  targetRootPath: string,
-  overwriteExisting = false,
-  fileExtensions: string[] = [],
-  filenameIncludes: string[] = [],
-): Promise<void> {
-  await invoke('temporary_copy', { sourcePath, targetRootPath, overwriteExisting, fileExtensions, filenameIncludes });
 }
 
 export async function queueTemporaryCopy(

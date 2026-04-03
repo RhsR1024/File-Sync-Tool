@@ -94,12 +94,26 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
     state.taskLogs.push(entry);
   }
 
+  async function startManualCopy(request: StartManualCopyTaskRequest) {
+    const handle = await api.startManualCopyTask(request);
+    await hydrateTaskState();
+    return handle;
+  }
+
+  async function startManualDeploy(request: StartManualDeployTaskRequest) {
+    const handle = await api.startManualDeployTask(request);
+    await hydrateTaskState();
+    return handle;
+  }
+
   return Object.assign(state, {
     hydrateTaskState,
     selectTaskGroup,
     applyGroupsSnapshot,
     applyDetailSnapshot,
     appendTaskLog,
+    startManualCopy,
+    startManualDeploy,
   });
 }
 

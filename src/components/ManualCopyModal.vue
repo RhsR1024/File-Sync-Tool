@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { X, Play, FolderOpen, ShieldCheck, AlertTriangle, RefreshCw, FilePlus2 } from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
-import { enqueueManualCopyTaskRecord, updateManualCopyForm, getManualCopyForm } from '@/lib/store';
+import { updateManualCopyForm, getManualCopyForm } from '@/lib/store';
 import {
   getConfig,
   previewTemporaryCopy,
@@ -181,14 +181,6 @@ async function enqueueCopy(source: string, target: string, overwriteExisting: bo
   const exts = [...selectedExtensions.value];
   const kws = [...selectedKeywords.value];
   const ack = await queueTemporaryCopy(source, target, overwriteExisting, exts, kws);
-
-  enqueueManualCopyTaskRecord({
-    folder: ack.folder_name,
-    sourcePath: ack.source_path,
-    localPath: ack.local_path,
-    filterExtensions: exts,
-    filterKeywords: kws,
-  });
 
   statusTone.value = 'success';
   statusMsg.value = ack.queued_ahead > 0

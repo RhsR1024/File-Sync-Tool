@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown } from 'lucide-vue-next';
-import { getConfig, saveConfig, testSshConnection, addSystemEvent, manualDeploy, getAppPaths, openPathParent, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding } from '@/lib/tauri';
-import { appStore, preRegisterManualDeploy, setManualDeployCurrentServer } from '@/lib/store';
+import { getConfig, saveConfig, testSshConnection, addSystemEvent, getAppPaths, openPathParent, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding } from '@/lib/tauri';
+import { appStore } from '@/lib/store';
+import { taskStateStore } from '@/lib/taskStateStore';
 import { restartSchedulerInterval } from '@/lib/scheduler';
 import { useI18n } from 'vue-i18n';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -384,56 +385,27 @@ async function handleManualDeploy() {
     manualDeployMsgType.value = '';
 
     try {
-        let successCount = 0;
-        let failCount = 0;
-        let lastError = '';
-
-        // Count valid server bindings
-        const validBindings = manualServerBindings.value.filter(b =>
-            config.value.servers.find(s => s.id === b.server_id)
-        );
-
-        // Pre-register the task record so all server deploy events share one record
         const folderName = manualLocalPath.value.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'manual';
-        let taskRecord: ReturnType<typeof preRegisterManualDeploy> | null = null;
-        if (validBindings.length > 0) {
-            taskRecord = preRegisterManualDeploy(folderName, manualLocalPath.value, validBindings.length);
-        }
 
-        for (const binding of manualServerBindings.value) {
-            const server = config.value.servers.find(s => s.id === binding.server_id);
-            if (!server) continue;
+        const validBindings = manualServerBindings.value
+            .filter(b => config.value.servers.find(s => s.id === b.server_id))
+            .map(b => ({
+                server_id: b.server_id,
+                command_group_ids: [...b.command_group_ids],
+            }));
 
-            // Set current server name directly from config (no log parsing needed)
-            if (taskRecord) {
-                setManualDeployCurrentServer(taskRecord.id, server.name);
-            }
+        await taskStateStore.startManualDeploy({
+            task_group_id: null,
+            display_name: folderName,
+            folder_name: folderName,
+            local_path: manualLocalPath.value,
+            remote_path: manualRemotePath.value,
+            bindings: validBindings,
+        });
 
-            // Resolve commands from all bound command groups in order
-            const postCommands: string[] = [];
-            for (const gid of binding.command_group_ids) {
-                const group = config.value.command_groups.find(g => g.id === gid);
-                if (group) postCommands.push(...group.commands);
-            }
-
-            try {
-                await manualDeploy(server, postCommands, manualLocalPath.value, manualRemotePath.value);
-                successCount++;
-            } catch (e) {
-                failCount++;
-                lastError = String(e);
-                console.error(`Deploy to ${server.name} failed:`, e);
-            }
-        }
-
-        if (failCount === 0) {
-            appStore.manualDeployMsg = t('settings.deploySuccess', { count: successCount });
-            manualDeployMsgType.value = 'success';
-            addSystemEvent('MANUAL_DEPLOY', t('settings.deploySuccessEvent', { count: successCount }));
-        } else {
-            appStore.manualDeployMsg = t('settings.deployFinished', { success: successCount, failed: failCount, error: lastError });
-            manualDeployMsgType.value = 'error';
-        }
+        appStore.manualDeployMsg = t('settings.deploySuccess', { count: validBindings.length });
+        manualDeployMsgType.value = 'success';
+        addSystemEvent('MANUAL_DEPLOY', t('settings.deploySuccessEvent', { count: validBindings.length }));
     } catch (e) {
         appStore.manualDeployMsg = t('settings.deployError', { error: String(e) });
         manualDeployMsgType.value = 'error';
@@ -522,7 +494,6 @@ async function save() {
     try {
         await saveConfig(config.value);
         if (config.value.max_log_lines > 0) appStore.maxLogLines = config.value.max_log_lines;
-        if (config.value.max_task_records > 0) appStore.maxTaskRecords = config.value.max_task_records;
         showStatusMsg(t('settings.saved'));
         addSystemEvent('CONFIG_CHANGE', t('settings.saved'));
         await restartSchedulerInterval();

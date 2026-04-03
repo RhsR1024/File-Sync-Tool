@@ -117,14 +117,6 @@ struct ManualCopyPreview {
     target_exists: bool,
 }
 
-#[derive(Clone, serde::Serialize)]
-struct ManualCopyTaskStateEvent {
-    folder: String,
-    source_path: String,
-    local_path: String,
-    state: String,
-}
-
 struct ExecutorReservation {
     executor_active: Arc<AtomicBool>,
     category_flag: Arc<AtomicBool>,
@@ -471,22 +463,6 @@ fn resolve_manual_deploy_post_commands(
     commands
 }
 
-fn emit_manual_copy_task_state<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    task: &ManualCopyQueueItem,
-    state: &str,
-) {
-    let _ = app_handle.emit(
-        "manual-copy-task-state",
-        ManualCopyTaskStateEvent {
-            folder: task.folder_name.clone(),
-            source_path: task.source_path.clone(),
-            local_path: task.local_path.clone(),
-            state: state.to_string(),
-        },
-    );
-}
-
 fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
     let config = state.config.clone();
     let task_manager = state.task_manager.clone();
@@ -545,7 +521,6 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                         Ok(handle) => handle,
                         Err(error) => {
                             manual_copy_keys.lock().unwrap().remove(&task.key);
-                            emit_manual_copy_task_state(&app_handle, &task, "failed");
                             emit_runtime_log(
                                 &app_handle,
                                 format!("Manual copy task failed to start: {}", error),
@@ -574,7 +549,6 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                             &error,
                         );
                         manual_copy_keys.lock().unwrap().remove(&task.key);
-                        emit_manual_copy_task_state(&app_handle, &task, "failed");
                         emit_runtime_log(
                             &app_handle,
                             format!("Manual copy task failed to start: {}", error),
@@ -590,7 +564,6 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     Some(&should_skip_current),
                     &is_paused,
                 );
-                emit_manual_copy_task_state(&app_handle, &task, "started");
 
                 let config_snapshot = config.lock().unwrap().clone();
                 let result = scanner::temporary_copy(
@@ -634,14 +607,11 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     } else {
                         "error"
                     };
-                    emit_manual_copy_task_state(&app_handle, &task, state);
                     emit_runtime_log(
                         &app_handle,
                         format!("Manual copy task failed: {}", error),
                         level,
                     );
-                } else {
-                    emit_manual_copy_task_state(&app_handle, &task, "completed");
                 }
             }
 
@@ -2426,8 +2396,6 @@ fn main() {
             test_ssh_connection,
             start_manual_copy_task,
             start_manual_deploy_task,
-            manual_deploy,
-            temporary_copy,
             queue_temporary_copy,
             preview_temporary_copy,
             get_app_paths,
