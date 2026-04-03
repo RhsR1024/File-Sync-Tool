@@ -111,6 +111,19 @@ function copyStatusLabel(status: string): string {
   return map[status] ?? status;
 }
 
+function localExecStatusLabel(status: string): string {
+  const map: Record<string, string> = {
+    not_started: '-',
+    running: t('console.phaseLocalExecuting'),
+    completed: t('console.phaseCompleted'),
+    partial_failed: t('console.phasePartialFailed'),
+    failed: t('console.phaseFailed'),
+    cancelled: t('console.phaseCancelled'),
+    interrupted: t('console.phaseInterrupted'),
+  };
+  return map[status] ?? status;
+}
+
 function formatTime(isoStr: string): string {
   const d = new Date(isoStr);
   const h = String(d.getHours()).padStart(2, '0');
@@ -236,11 +249,15 @@ function logLevelClass(level: string): string {
           </div>
         </div>
 
-        <!-- Copy & Deploy Status Cards -->
-        <div class="grid gap-3 sm:grid-cols-2">
+        <!-- Copy & Local Exec & Deploy Status Cards -->
+        <div class="grid gap-3 sm:grid-cols-3">
           <div class="rounded-lg border border-slate-200 p-3">
             <div class="text-xs font-semibold text-slate-500 mb-2">{{ t('console.copyStatus') }}</div>
             <div class="text-sm font-medium text-slate-700">{{ copyStatusLabel(group.copy_status) }}</div>
+          </div>
+          <div v-if="group.local_exec_status !== 'not_started'" class="rounded-lg border border-slate-200 p-3">
+            <div class="text-xs font-semibold text-slate-500 mb-2">{{ t('console.phaseLocalScripts') }}</div>
+            <div class="text-sm font-medium text-slate-700">{{ localExecStatusLabel(group.local_exec_status) }}</div>
           </div>
           <div class="rounded-lg border border-slate-200 p-3">
             <div class="text-xs font-semibold text-slate-500 mb-2">{{ t('console.deployStatus') }}</div>
@@ -349,6 +366,7 @@ function logLevelClass(level: string): string {
                 <tr class="text-slate-500 border-b border-slate-200">
                   <th class="text-left py-2 px-2 font-semibold">Type</th>
                   <th class="text-left py-2 px-2 font-semibold">Copy</th>
+                  <th class="text-left py-2 px-2 font-semibold">{{ t('console.phaseLocalScripts') }}</th>
                   <th class="text-left py-2 px-2 font-semibold">Deploy</th>
                   <th class="text-left py-2 px-2 font-semibold">{{ t('console.startTime') }}</th>
                   <th class="text-left py-2 px-2 font-semibold">End</th>
@@ -358,6 +376,7 @@ function logLevelClass(level: string): string {
                 <tr v-for="run in sections.runs" :key="run.run_id" class="hover:bg-slate-50">
                   <td class="py-2 px-2 text-slate-700 font-mono">{{ runTypeLabel(run.run_type) }}</td>
                   <td class="py-2 px-2 text-slate-600">{{ copyStatusLabel(run.copy_phase) }}</td>
+                  <td class="py-2 px-2 text-slate-600">{{ localExecStatusLabel(run.local_exec_phase) }}</td>
                   <td class="py-2 px-2 text-slate-600">{{ deployStatusLabel(run.deploy_phase) }}</td>
                   <td class="py-2 px-2 text-slate-500 font-mono tabular-nums">{{ formatFullTime(run.started_at) }}</td>
                   <td class="py-2 px-2 text-slate-500 font-mono tabular-nums">{{ run.finished_at ? formatFullTime(run.finished_at) : '-' }}</td>

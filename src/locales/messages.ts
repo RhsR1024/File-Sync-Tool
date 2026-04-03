@@ -92,6 +92,7 @@ export const messages = {
       clearSingleRecord: 'Clear Record',
       phaseCopyCompleted: 'Copy Done',
       phaseLocalExecuting: 'Local Exec',
+      phaseLocalScripts: 'Local Scripts',
       phaseDeploying: 'Deploying',
       phasePartialFailed: 'Partial Failed',
       retryDeploy: 'Retry Deploy',
@@ -283,6 +284,21 @@ export const messages = {
       // Manual deploy server bindings
       manualDeployServerBindings: 'Target Servers & Command Groups',
       manualDeployNoBindings: 'Click "Add Server Binding" to add a deployment target',
+      // Local Script Groups
+      localScriptGroups: 'Local Script Groups',
+      localScriptGroupsDesc: 'Scripts to execute locally after file copy completes',
+      addLocalScriptGroup: 'Add Script Group',
+      editLocalScriptGroup: 'Edit Script Group',
+      noLocalScriptGroups: 'No local script groups configured',
+      onFailure: 'On Failure',
+      onFailureContinue: 'Continue',
+      onFailureAbort: 'Abort',
+      localScriptVariableHint: 'Variables: ${folder_name}, ${local_target}, ${source_path}, ${filename}',
+      postCopyExecutionOrder: 'Post-Copy Execution Order',
+      localFirst: 'Local First',
+      remoteFirst: 'Remote First',
+      parallel: 'Parallel',
+      localScriptBinding: 'Local Script Binding',
     },
     tools: {
       frameworkPassword: {
@@ -767,6 +783,7 @@ export const messages = {
       clearSingleRecord: '清除记录',
       phaseCopyCompleted: '复制完成',
       phaseLocalExecuting: '本地执行中',
+      phaseLocalScripts: '本地脚本',
       phaseDeploying: '部署中',
       phasePartialFailed: '部分失败',
       retryDeploy: '重试部署',
@@ -958,6 +975,21 @@ export const messages = {
       // 手动部署命令组
       manualDeployServerBindings: '目标服务器与命令组',
       manualDeployNoBindings: '点击「添加服务器绑定」添加部署目标',
+      // 本地脚本组
+      localScriptGroups: '本地脚本组',
+      localScriptGroupsDesc: '文件复制完成后在本地执行的脚本',
+      addLocalScriptGroup: '添加脚本组',
+      editLocalScriptGroup: '编辑脚本组',
+      noLocalScriptGroups: '未配置本地脚本组',
+      onFailure: '失败策略',
+      onFailureContinue: '继续执行',
+      onFailureAbort: '中止后续',
+      localScriptVariableHint: '可用变量：${folder_name}, ${local_target}, ${source_path}, ${filename}',
+      postCopyExecutionOrder: '后置操作执行顺序',
+      localFirst: '先本地',
+      remoteFirst: '先远程',
+      parallel: '并行执行',
+      localScriptBinding: '本地脚本绑定',
     },
     tools: {
       frameworkPassword: {
