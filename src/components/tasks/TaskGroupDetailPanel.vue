@@ -39,7 +39,7 @@ const latestRun = computed<TaskRun | null>(() => {
 const isActive = computed(() => {
   if (!props.group) return false;
   const s = props.group.summary_status;
-  return s === 'queued' || s === 'copying' || s === 'copy_completed' || s === 'deploying';
+  return s === 'queued' || s === 'copying' || s === 'copy_completed' || s === 'local_executing' || s === 'deploying';
 });
 
 function statusLabel(status: TaskSummaryStatus): string {
@@ -47,6 +47,7 @@ function statusLabel(status: TaskSummaryStatus): string {
     queued: t('console.phaseQueued'),
     copying: t('console.phaseCopying'),
     copy_completed: t('console.phaseCopyCompleted'),
+    local_executing: t('console.phaseLocalExecuting'),
     deploying: t('console.phaseDeploying'),
     partial_failed: t('console.phasePartialFailed'),
     completed: t('console.phaseCompleted'),
@@ -62,6 +63,7 @@ function statusBadgeClass(status: TaskSummaryStatus): string {
     queued: 'bg-slate-100 text-slate-600 ring-slate-200',
     copying: 'bg-blue-50 text-blue-700 ring-blue-200',
     copy_completed: 'bg-cyan-50 text-cyan-700 ring-cyan-200',
+    local_executing: 'bg-indigo-50 text-indigo-700 ring-indigo-200',
     deploying: 'bg-purple-50 text-purple-700 ring-purple-200',
     partial_failed: 'bg-amber-50 text-amber-700 ring-amber-200',
     completed: 'bg-emerald-50 text-emerald-700 ring-emerald-200',

@@ -5,7 +5,11 @@ use std::collections::BTreeMap;
 pub struct TaskMergeKey(String);
 
 impl TaskMergeKey {
-    pub fn new(task_config_id: Option<String>, local_target_path: String, folder_name: String) -> Self {
+    pub fn new(
+        task_config_id: Option<String>,
+        local_target_path: String,
+        folder_name: String,
+    ) -> Self {
         let task_id = task_config_id.unwrap_or_else(|| "manual".to_string());
         let normalized_path = normalize_path_for_merge(&local_target_path);
         let normalized_folder = normalize_token(&folder_name);
@@ -23,6 +27,7 @@ pub enum TaskSummaryStatus {
     Queued,
     Copying,
     CopyCompleted,
+    LocalExecuting,
     Deploying,
     PartialFailed,
     Completed,
@@ -87,6 +92,18 @@ pub enum CopyState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum LocalExecState {
+    NotStarted,
+    Running,
+    Completed,
+    PartialFailed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum DeployState {
     NotStarted,
     Pending,
@@ -128,6 +145,8 @@ pub struct TaskRun {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub copy_phase: CopyState,
+    #[serde(default = "default_local_exec_state")]
+    pub local_exec_phase: LocalExecState,
     pub deploy_phase: DeployState,
     pub deploy_attempts: Vec<DeployAttempt>,
     pub attempt_ids: Vec<String>,
@@ -156,6 +175,7 @@ pub struct TaskGroup {
     pub source_path: String,
     pub local_target_path: String,
     pub copy_status: CopyState,
+    pub local_exec_status: LocalExecState,
     pub deploy_status: DeployState,
     pub summary_status: TaskSummaryStatus,
     pub started_at: String,
@@ -199,6 +219,7 @@ impl TaskState {
                 source_path: "C:\\source\\Release_01".to_string(),
                 local_target_path: "E:\\target\\builds".to_string(),
                 copy_status: CopyState::Completed,
+                local_exec_status: LocalExecState::NotStarted,
                 deploy_status: DeployState::Running,
                 summary_status: TaskSummaryStatus::Deploying,
                 started_at: "2026-04-02T12:00:00+08:00".to_string(),
@@ -215,6 +236,7 @@ impl TaskState {
                     started_at: "2026-04-02T12:00:00+08:00".to_string(),
                     finished_at: None,
                     copy_phase: CopyState::Completed,
+                    local_exec_phase: LocalExecState::NotStarted,
                     deploy_phase: DeployState::Running,
                     attempt_ids: vec!["attempt-1".to_string()],
                     deploy_attempts: vec![DeployAttempt {
@@ -250,7 +272,16 @@ impl TaskGroup {
             changed |= run.mark_in_progress_as_interrupted(finished_at);
         }
 
-        if changed || matches!(self.summary_status, TaskSummaryStatus::Queued | TaskSummaryStatus::Copying | TaskSummaryStatus::CopyCompleted | TaskSummaryStatus::Deploying) {
+        if changed
+            || matches!(
+                self.summary_status,
+                TaskSummaryStatus::Queued
+                    | TaskSummaryStatus::Copying
+                    | TaskSummaryStatus::CopyCompleted
+                    | TaskSummaryStatus::LocalExecuting
+                    | TaskSummaryStatus::Deploying
+            )
+        {
             self.summary_status = TaskSummaryStatus::Interrupted;
         }
 
@@ -259,7 +290,8 @@ impl TaskGroup {
         if self.finished_at.is_none() && self.summary_status == TaskSummaryStatus::Interrupted {
             self.finished_at = Some(finished_at.to_string());
         }
-        self.elapsed_seconds = compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
+        self.elapsed_seconds =
+            compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
     }
 
     pub fn next_attempt_no_for_server(&self, server_id: &str) -> u32 {
@@ -283,8 +315,13 @@ impl TaskGroup {
         self.started_at = latest_run.started_at.clone();
         self.finished_at = latest_run.finished_at.clone();
         self.copy_status = latest_run.copy_phase.clone();
+        self.local_exec_status = latest_run.local_exec_phase.clone();
         self.deploy_status = latest_run.deploy_phase.clone();
-        self.summary_status = summarize_group(&latest_run.copy_phase, &latest_run.deploy_phase);
+        self.summary_status = summarize_group(
+            &latest_run.copy_phase,
+            &latest_run.local_exec_phase,
+            &latest_run.deploy_phase,
+        );
         self.server_rollups = build_server_rollups(&self.runs);
         self.had_failures = self.runs.iter().any(|run| {
             run.copy_phase == CopyState::Failed
@@ -293,7 +330,8 @@ impl TaskGroup {
                     .iter()
                     .any(|attempt| attempt.status == AttemptStatus::Failed)
         });
-        self.elapsed_seconds = compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
+        self.elapsed_seconds =
+            compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
     }
 }
 
@@ -306,7 +344,15 @@ impl TaskRun {
             changed = true;
         }
 
-        if matches!(self.deploy_phase, DeployState::Pending | DeployState::Running) {
+        if matches!(self.local_exec_phase, LocalExecState::Running) {
+            self.local_exec_phase = LocalExecState::Interrupted;
+            changed = true;
+        }
+
+        if matches!(
+            self.deploy_phase,
+            DeployState::Pending | DeployState::Running
+        ) {
             self.deploy_phase = DeployState::Interrupted;
             changed = true;
         }
@@ -314,7 +360,9 @@ impl TaskRun {
         for attempt in &mut self.deploy_attempts {
             if attempt.status == AttemptStatus::Running {
                 attempt.status = AttemptStatus::Interrupted;
-                attempt.error_phase.get_or_insert_with(|| attempt.stage.clone());
+                attempt
+                    .error_phase
+                    .get_or_insert_with(|| attempt.stage.clone());
                 attempt.finished_at = Some(finished_at.to_string());
                 attempt.elapsed_seconds =
                     compute_elapsed_seconds(&attempt.started_at, attempt.finished_at.as_deref());
@@ -397,6 +445,10 @@ impl TaskRun {
     }
 }
 
+fn default_local_exec_state() -> LocalExecState {
+    LocalExecState::NotStarted
+}
+
 fn normalize_path_for_merge(value: &str) -> String {
     let mut normalized = value.trim().replace('/', "\\");
     while normalized.len() > 3 && normalized.ends_with('\\') {
@@ -424,21 +476,48 @@ fn compute_elapsed_seconds(started_at: &str, finished_at: Option<&str>) -> u64 {
     seconds.max(0) as u64
 }
 
-fn summarize_group(copy_phase: &CopyState, deploy_phase: &DeployState) -> TaskSummaryStatus {
+fn summarize_group(
+    copy_phase: &CopyState,
+    local_exec_phase: &LocalExecState,
+    deploy_phase: &DeployState,
+) -> TaskSummaryStatus {
     match copy_phase {
         CopyState::Pending | CopyState::Running => TaskSummaryStatus::Copying,
         CopyState::Failed => TaskSummaryStatus::Failed,
         CopyState::Cancelled => TaskSummaryStatus::Cancelled,
         CopyState::Interrupted => TaskSummaryStatus::Interrupted,
-        CopyState::Completed => match deploy_phase {
-            DeployState::NotStarted => TaskSummaryStatus::Completed,
-            DeployState::Pending => TaskSummaryStatus::CopyCompleted,
-            DeployState::Running => TaskSummaryStatus::Deploying,
-            DeployState::Completed => TaskSummaryStatus::Completed,
-            DeployState::PartialFailed => TaskSummaryStatus::PartialFailed,
-            DeployState::Failed => TaskSummaryStatus::Failed,
-            DeployState::Cancelled => TaskSummaryStatus::Cancelled,
-            DeployState::Interrupted => TaskSummaryStatus::Interrupted,
+        CopyState::Completed => match local_exec_phase {
+            LocalExecState::Running => TaskSummaryStatus::LocalExecuting,
+            LocalExecState::Failed => TaskSummaryStatus::Failed,
+            LocalExecState::Cancelled => TaskSummaryStatus::Cancelled,
+            LocalExecState::Interrupted => TaskSummaryStatus::Interrupted,
+            LocalExecState::NotStarted
+            | LocalExecState::Completed
+            | LocalExecState::PartialFailed => {
+                // local exec done (or not needed), check deploy
+                match deploy_phase {
+                    DeployState::NotStarted => {
+                        if *local_exec_phase == LocalExecState::PartialFailed {
+                            TaskSummaryStatus::PartialFailed
+                        } else {
+                            TaskSummaryStatus::Completed
+                        }
+                    }
+                    DeployState::Pending => TaskSummaryStatus::CopyCompleted,
+                    DeployState::Running => TaskSummaryStatus::Deploying,
+                    DeployState::Completed => {
+                        if *local_exec_phase == LocalExecState::PartialFailed {
+                            TaskSummaryStatus::PartialFailed
+                        } else {
+                            TaskSummaryStatus::Completed
+                        }
+                    }
+                    DeployState::PartialFailed => TaskSummaryStatus::PartialFailed,
+                    DeployState::Failed => TaskSummaryStatus::Failed,
+                    DeployState::Cancelled => TaskSummaryStatus::Cancelled,
+                    DeployState::Interrupted => TaskSummaryStatus::Interrupted,
+                }
+            }
         },
     }
 }
@@ -501,7 +580,10 @@ mod tests {
         let mut state = TaskState::sample_running();
         state.mark_in_progress_as_interrupted();
 
-        assert_eq!(state.groups[0].summary_status, TaskSummaryStatus::Interrupted);
+        assert_eq!(
+            state.groups[0].summary_status,
+            TaskSummaryStatus::Interrupted
+        );
         assert_eq!(
             state.groups[0].runs[0].deploy_attempts[0].status,
             AttemptStatus::Interrupted
@@ -518,6 +600,7 @@ mod tests {
             started_at: "2026-04-02T12:00:00+08:00".to_string(),
             finished_at: Some("2026-04-02T12:00:30+08:00".to_string()),
             copy_phase: CopyState::Completed,
+            local_exec_phase: LocalExecState::NotStarted,
             deploy_phase: DeployState::Running,
             deploy_attempts: vec![
                 DeployAttempt {

@@ -1,6 +1,9 @@
-use crate::config::{AppConfig, MatchRule, TaskServerBinding};
+use crate::config::{
+    AppConfig, LocalScriptBinding, MatchRule, PostCopyExecutionOrder, TaskServerBinding,
+};
 use crate::deploy::deploy_to_remote;
 use crate::history::{add_history_entry, HistoryEntry};
+use crate::local_exec::{self, LocalExecContext, LocalExecResult};
 use crate::task_domain::{TaskSourceType, TaskTriggerSource};
 use crate::task_manager::{TaskManager, TaskRunHandle, TaskStartRequest};
 use crate::task_runtime::{ActiveRunExecution, TaskRuntimeRegistry};
@@ -363,6 +366,55 @@ fn run_needs_copy_completion(task_manager: &TaskManager, task_handle: &TaskRunHa
         })
         .map(|run| run.copy_phase != crate::task_domain::CopyState::Completed)
         .unwrap_or(true)
+}
+
+fn run_local_scripts<R: tauri::Runtime>(
+    handle: &tauri::AppHandle<R>,
+    current_config: &AppConfig,
+    binding: &LocalScriptBinding,
+    folder_name: &str,
+    target_path: &std::path::Path,
+    source_path: &str,
+    should_cancel: Arc<AtomicBool>,
+    task_manager: &TaskManager,
+    task_handle: Option<&TaskRunHandle>,
+) -> LocalExecResult {
+    // Notify TaskManager that local exec is starting
+    if let Some(th) = task_handle {
+        let _ = task_manager.begin_local_exec(&th.task_group_id, &th.run_id);
+    }
+
+    let ctx = LocalExecContext {
+        folder_name: folder_name.to_string(),
+        local_target: target_path.to_string_lossy().to_string(),
+        source_path: source_path.to_string(),
+        filename: local_exec::find_tar_gz_filename(target_path),
+    };
+
+    let result = local_exec::execute_local_scripts(
+        handle,
+        binding,
+        &current_config.local_command_groups,
+        &ctx,
+        should_cancel,
+    );
+
+    // Update TaskManager with result
+    if let Some(th) = task_handle {
+        if result.success {
+            let _ = task_manager.mark_local_exec_completed(&th.task_group_id, &th.run_id);
+        } else if result.aborted {
+            let _ = task_manager.mark_local_exec_failed(
+                &th.task_group_id,
+                &th.run_id,
+                "Aborted".to_string(),
+            );
+        } else {
+            let _ = task_manager.mark_local_exec_partial_failed(&th.task_group_id, &th.run_id);
+        }
+    }
+
+    result
 }
 
 fn emit_progress<R: tauri::Runtime>(
@@ -1280,80 +1332,227 @@ async fn perform_copy<R: tauri::Runtime>(
             },
         );
 
-        // Deploy: Re-read the latest config so that enabling deploy after scheduler
+        // Post-copy orchestration: local scripts + remote deploy
+        // Re-read the latest config so that enabling deploy after scheduler
         // start is detected without needing to restart the scheduler.
-        // server_bindings are also read from live_config here so that edits made
-        // during a long copy are picked up at deploy time.
         let current_config = live_config_clone.lock().unwrap().clone();
-        if allow_deploy && current_config.deploy_enabled {
-            let live_server_bindings: Vec<TaskServerBinding> = if let Some(ref tid) = task_id_clone
-            {
+
+        // Determine local script binding for this task
+        let local_binding: Option<LocalScriptBinding> = task_id_clone.as_ref().and_then(|tid| {
+            current_config
+                .tasks
+                .iter()
+                .find(|t| &t.id == tid)
+                .and_then(|t| t.local_script_binding.clone())
+                .filter(|b| !b.command_group_ids.is_empty())
+        });
+
+        let execution_order: PostCopyExecutionOrder = task_id_clone
+            .as_ref()
+            .and_then(|tid| {
                 current_config
                     .tasks
                     .iter()
                     .find(|t| &t.id == tid)
-                    .map(|t| t.server_bindings.clone())
-                    .unwrap_or_default()
+                    .map(|t| t.post_copy_execution_order.clone())
+            })
+            .unwrap_or_default();
+
+        let has_local = local_binding.is_some();
+
+        // Determine remote deploy targets
+        let live_server_bindings: Vec<TaskServerBinding> =
+            if allow_deploy && current_config.deploy_enabled {
+                if let Some(ref tid) = task_id_clone {
+                    current_config
+                        .tasks
+                        .iter()
+                        .find(|t| &t.id == tid)
+                        .map(|t| t.server_bindings.clone())
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                }
             } else {
                 vec![]
             };
 
-            let has_enabled_deploy_targets = live_server_bindings
-                .iter()
-                .filter_map(|binding| {
-                    current_config
-                        .servers
-                        .iter()
-                        .find(|server| server.id == binding.server_id)
-                })
-                .any(|server| server.enabled);
+        let has_enabled_deploy_targets = live_server_bindings
+            .iter()
+            .filter_map(|binding| {
+                current_config
+                    .servers
+                    .iter()
+                    .find(|server| server.id == binding.server_id)
+            })
+            .any(|server| server.enabled);
 
-            mark_copy_completed_for_handle(
-                &task_manager_clone,
-                task_handle_clone.as_ref(),
-                has_enabled_deploy_targets,
-                "Copy completed",
-            );
+        let has_remote = !live_server_bindings.is_empty() && has_enabled_deploy_targets;
+        let has_post_actions = has_local || has_remote;
 
-            if live_server_bindings.is_empty() {
-                emit_log(
+        mark_copy_completed_for_handle(
+            &task_manager_clone,
+            task_handle_clone.as_ref(),
+            has_post_actions,
+            "Copy completed",
+        );
+
+        // Execute post-copy actions based on configuration
+        match (has_local, has_remote) {
+            (false, false) => {
+                // No post-copy actions needed
+            }
+            (true, false) => {
+                // Local scripts only
+                run_local_scripts(
                     &handle,
-                    format!(
-                        "No deploy servers selected for task '{}', skipping deployment.",
-                        folder_name_clone
-                    ),
-                    "info",
+                    &current_config,
+                    local_binding.as_ref().unwrap(),
+                    &folder_name_clone,
+                    &target_full_path_clone,
+                    &source_path_clone.to_string_lossy(),
+                    should_cancel_clone,
+                    &task_manager_clone,
+                    task_handle_clone.as_ref(),
                 );
-                return Ok(copied_bytes_total);
             }
-
-            let deploy_tracking = task_handle_clone.as_ref().map(|task_handle| {
-                task_manager_clone.tracking_context(
-                    task_handle.task_group_id.clone(),
-                    task_handle.run_id.clone(),
-                )
-            });
-
-            if let Err(e) = deploy_to_remote(
-                &handle,
-                &live_server_bindings,
-                &current_config.servers,
-                &current_config.command_groups,
-                &target_full_path_clone,
-                &folder_name_clone,
-                should_cancel_clone,
-                is_paused_clone,
-                deploy_tracking,
-            ) {
-                emit_log(&handle, format!("Deployment failed: {}", e), "error");
+            (false, true) => {
+                // Remote deploy only (existing behavior)
+                let deploy_tracking = task_handle_clone.as_ref().map(|th| {
+                    task_manager_clone.tracking_context(th.task_group_id.clone(), th.run_id.clone())
+                });
+                if let Err(e) = deploy_to_remote(
+                    &handle,
+                    &live_server_bindings,
+                    &current_config.servers,
+                    &current_config.command_groups,
+                    &target_full_path_clone,
+                    &folder_name_clone,
+                    should_cancel_clone,
+                    is_paused_clone,
+                    deploy_tracking,
+                ) {
+                    emit_log(&handle, format!("Deployment failed: {}", e), "error");
+                }
             }
-        } else {
-            mark_copy_completed_for_handle(
-                &task_manager_clone,
-                task_handle_clone.as_ref(),
-                false,
-                "Copy completed",
-            );
+            (true, true) => match execution_order {
+                PostCopyExecutionOrder::LocalFirst => {
+                    let local_result = run_local_scripts(
+                        &handle,
+                        &current_config,
+                        local_binding.as_ref().unwrap(),
+                        &folder_name_clone,
+                        &target_full_path_clone,
+                        &source_path_clone.to_string_lossy(),
+                        should_cancel_clone.clone(),
+                        &task_manager_clone,
+                        task_handle_clone.as_ref(),
+                    );
+
+                    if local_result.aborted {
+                        emit_log(
+                            &handle,
+                            "Local script execution aborted — skipping remote deploy".to_string(),
+                            "warn",
+                        );
+                    } else {
+                        let deploy_tracking = task_handle_clone.as_ref().map(|th| {
+                            task_manager_clone
+                                .tracking_context(th.task_group_id.clone(), th.run_id.clone())
+                        });
+                        if let Err(e) = deploy_to_remote(
+                            &handle,
+                            &live_server_bindings,
+                            &current_config.servers,
+                            &current_config.command_groups,
+                            &target_full_path_clone,
+                            &folder_name_clone,
+                            should_cancel_clone,
+                            is_paused_clone,
+                            deploy_tracking,
+                        ) {
+                            emit_log(&handle, format!("Deployment failed: {}", e), "error");
+                        }
+                    }
+                }
+                PostCopyExecutionOrder::RemoteFirst => {
+                    let deploy_tracking = task_handle_clone.as_ref().map(|th| {
+                        task_manager_clone
+                            .tracking_context(th.task_group_id.clone(), th.run_id.clone())
+                    });
+                    if let Err(e) = deploy_to_remote(
+                        &handle,
+                        &live_server_bindings,
+                        &current_config.servers,
+                        &current_config.command_groups,
+                        &target_full_path_clone,
+                        &folder_name_clone,
+                        should_cancel_clone.clone(),
+                        is_paused_clone,
+                        deploy_tracking,
+                    ) {
+                        emit_log(&handle, format!("Deployment failed: {}", e), "error");
+                    }
+                    run_local_scripts(
+                        &handle,
+                        &current_config,
+                        local_binding.as_ref().unwrap(),
+                        &folder_name_clone,
+                        &target_full_path_clone,
+                        &source_path_clone.to_string_lossy(),
+                        should_cancel_clone,
+                        &task_manager_clone,
+                        task_handle_clone.as_ref(),
+                    );
+                }
+                PostCopyExecutionOrder::Parallel => {
+                    let handle_local = handle.clone();
+                    let config_local = current_config.clone();
+                    let binding_local = local_binding.clone().unwrap();
+                    let folder_local = folder_name_clone.clone();
+                    let target_local = target_full_path_clone.clone();
+                    let source_local = source_path_clone.to_string_lossy().to_string();
+                    let cancel_local = should_cancel_clone.clone();
+                    let tm_local = task_manager_clone.clone();
+                    let th_local = task_handle_clone.clone();
+
+                    std::thread::scope(|s| {
+                        let local_thread = s.spawn(|| {
+                            run_local_scripts(
+                                &handle_local,
+                                &config_local,
+                                &binding_local,
+                                &folder_local,
+                                &target_local,
+                                &source_local,
+                                cancel_local,
+                                &tm_local,
+                                th_local.as_ref(),
+                            )
+                        });
+
+                        let deploy_tracking = task_handle_clone.as_ref().map(|th| {
+                            task_manager_clone
+                                .tracking_context(th.task_group_id.clone(), th.run_id.clone())
+                        });
+                        if let Err(e) = deploy_to_remote(
+                            &handle,
+                            &live_server_bindings,
+                            &current_config.servers,
+                            &current_config.command_groups,
+                            &target_full_path_clone,
+                            &folder_name_clone,
+                            should_cancel_clone,
+                            is_paused_clone,
+                            deploy_tracking,
+                        ) {
+                            emit_log(&handle, format!("Deployment failed: {}", e), "error");
+                        }
+
+                        let _ = local_thread.join();
+                    });
+                }
+            },
         }
 
         Ok(copied_bytes_total)

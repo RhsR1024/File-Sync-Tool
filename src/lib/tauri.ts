@@ -6,6 +6,21 @@ export interface CommandGroup {
   commands: string[];
 }
 
+export type OnFailure = 'continue' | 'abort';
+
+export interface LocalCommandGroup {
+  id: string;
+  name: string;
+  commands: string[];
+  on_failure: OnFailure;
+}
+
+export interface LocalScriptBinding {
+  command_group_ids: string[];
+}
+
+export type PostCopyExecutionOrder = 'local_first' | 'remote_first' | 'parallel';
+
 export interface TaskServerBinding {
   server_id: string;
   command_group_ids: string[];
@@ -36,6 +51,8 @@ export interface ScanTask {
   rule: MatchRule;
   /** Per-server deployment bindings with command groups. */
   server_bindings: TaskServerBinding[];
+  local_script_binding: LocalScriptBinding | null;
+  post_copy_execution_order: PostCopyExecutionOrder;
 }
 
 export interface AppConfig {
@@ -52,6 +69,9 @@ export interface AppConfig {
 
   /** Named command groups. */
   command_groups: CommandGroup[];
+
+  /** Named local command groups for post-copy local script execution. */
+  local_command_groups: LocalCommandGroup[];
 
   /** Seconds to wait before copying to verify files are fully written. Minimum: 60. */
   stability_check_secs: number;
@@ -85,6 +105,7 @@ export type TaskSummaryStatus =
   | 'queued'
   | 'copying'
   | 'copy_completed'
+  | 'local_executing'
   | 'deploying'
   | 'partial_failed'
   | 'completed'
@@ -93,6 +114,8 @@ export type TaskSummaryStatus =
   | 'interrupted';
 
 export type CopyState = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+export type LocalExecState = 'not_started' | 'running' | 'completed' | 'partial_failed' | 'failed' | 'cancelled' | 'interrupted';
 
 export type DeployState =
   | 'not_started'
@@ -163,6 +186,7 @@ export interface TaskRun {
   started_at: string;
   finished_at: string | null;
   copy_phase: CopyState;
+  local_exec_phase: LocalExecState;
   deploy_phase: DeployState;
   deploy_attempts: DeployAttempt[];
   attempt_ids: string[];
@@ -188,6 +212,7 @@ export interface TaskGroupListItem {
   source_path: string;
   local_target_path: string;
   copy_status: CopyState;
+  local_exec_status: LocalExecState;
   deploy_status: DeployState;
   summary_status: TaskSummaryStatus;
   started_at: string;

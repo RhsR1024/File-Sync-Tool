@@ -1,6 +1,6 @@
 use crate::task_domain::{
-    CopyState, DeployAttempt, DeployStage, DeployState, TaskGroup, TaskMergeKey, TaskRun,
-    TaskRunType, TaskSourceType, TaskState, TaskSummaryStatus, TaskTriggerSource,
+    CopyState, DeployAttempt, DeployStage, DeployState, LocalExecState, TaskGroup, TaskMergeKey,
+    TaskRun, TaskRunType, TaskSourceType, TaskState, TaskSummaryStatus, TaskTriggerSource,
 };
 use crate::task_events::{
     TaskGroupDetailSnapshot, TaskGroupListItem, TaskGroupsSnapshot, TaskLogEntry,
@@ -134,6 +134,7 @@ impl TaskManager {
                         source_path: request.source_path.clone(),
                         local_target_path: request.local_target_path.clone(),
                         copy_status: CopyState::Pending,
+                        local_exec_status: LocalExecState::NotStarted,
                         deploy_status: DeployState::NotStarted,
                         summary_status: TaskSummaryStatus::Queued,
                         started_at: started_at.clone(),
@@ -167,6 +168,7 @@ impl TaskManager {
                 started_at: started_at.clone(),
                 finished_at: None,
                 copy_phase: CopyState::Running,
+                local_exec_phase: LocalExecState::NotStarted,
                 deploy_phase: DeployState::NotStarted,
                 deploy_attempts: vec![],
                 attempt_ids: vec![],
@@ -229,6 +231,7 @@ impl TaskManager {
                     source_path: request.source_path.clone(),
                     local_target_path: request.local_target_path.clone(),
                     copy_status: CopyState::Completed,
+                    local_exec_status: LocalExecState::NotStarted,
                     deploy_status: DeployState::Pending,
                     summary_status: TaskSummaryStatus::CopyCompleted,
                     started_at: started_at.clone(),
@@ -253,6 +256,7 @@ impl TaskManager {
                 started_at: started_at.clone(),
                 finished_at: None,
                 copy_phase: CopyState::Completed,
+                local_exec_phase: LocalExecState::NotStarted,
                 deploy_phase: DeployState::Pending,
                 deploy_attempts: vec![],
                 attempt_ids: vec![],
@@ -329,6 +333,79 @@ impl TaskManager {
                 let run = &mut group.runs[run_index];
                 run.copy_phase = CopyState::Cancelled;
                 run.finished_at = Some(finished_at.clone());
+            }
+            group.refresh_from_runs();
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
+    }
+
+    pub fn begin_local_exec(&self, task_group_id: &str, run_id: &str) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            {
+                let run = &mut group.runs[run_index];
+                run.local_exec_phase = LocalExecState::Running;
+            }
+            group.refresh_from_runs();
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
+    }
+
+    pub fn mark_local_exec_completed(
+        &self,
+        task_group_id: &str,
+        run_id: &str,
+    ) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            {
+                let run = &mut group.runs[run_index];
+                run.local_exec_phase = LocalExecState::Completed;
+            }
+            group.refresh_from_runs();
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
+    }
+
+    pub fn mark_local_exec_failed(
+        &self,
+        task_group_id: &str,
+        run_id: &str,
+        _message: String,
+    ) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            {
+                let run = &mut group.runs[run_index];
+                run.local_exec_phase = LocalExecState::Failed;
+            }
+            group.refresh_from_runs();
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
+    }
+
+    pub fn mark_local_exec_partial_failed(
+        &self,
+        task_group_id: &str,
+        run_id: &str,
+    ) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            {
+                let run = &mut group.runs[run_index];
+                run.local_exec_phase = LocalExecState::PartialFailed;
             }
             group.refresh_from_runs();
         }

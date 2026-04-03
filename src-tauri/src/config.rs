@@ -14,6 +14,48 @@ pub struct CommandGroup {
     pub commands: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnFailure {
+    Continue,
+    Abort,
+}
+
+impl Default for OnFailure {
+    fn default() -> Self {
+        Self::Continue
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalCommandGroup {
+    pub id: String,
+    pub name: String,
+    pub commands: Vec<String>,
+    #[serde(default)]
+    pub on_failure: OnFailure,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct LocalScriptBinding {
+    #[serde(default)]
+    pub command_group_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PostCopyExecutionOrder {
+    LocalFirst,
+    RemoteFirst,
+    Parallel,
+}
+
+impl Default for PostCopyExecutionOrder {
+    fn default() -> Self {
+        Self::LocalFirst
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TaskServerBinding {
     pub server_id: String,
@@ -56,6 +98,10 @@ pub struct ScanTask {
     /// to run on a given server after the upload completes.
     #[serde(default)]
     pub server_bindings: Vec<TaskServerBinding>,
+    #[serde(default)]
+    pub local_script_binding: Option<LocalScriptBinding>,
+    #[serde(default)]
+    pub post_copy_execution_order: PostCopyExecutionOrder,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -77,6 +123,10 @@ pub struct AppConfig {
     /// Named command groups, each with an ordered list of shell commands.
     #[serde(default)]
     pub command_groups: Vec<CommandGroup>,
+
+    /// Named local command groups for post-copy local script execution.
+    #[serde(default)]
+    pub local_command_groups: Vec<LocalCommandGroup>,
 
     /// Seconds to wait after discovering files before copying, to verify they are fully written.
     #[serde(default = "default_stability_secs")]
@@ -133,6 +183,7 @@ impl Default for AppConfig {
             deploy_enabled: false,
             servers: vec![],
             command_groups: vec![],
+            local_command_groups: vec![],
             stability_check_secs: 120,
             recent_file_guard_mins: MIN_RECENT_FILE_GUARD_MINS,
             launch_and_auto_scan: false,

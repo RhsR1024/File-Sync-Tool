@@ -5,6 +5,7 @@ mod code_count;
 mod config;
 mod deploy;
 mod history;
+mod local_exec;
 mod network;
 mod persist;
 mod scanner;

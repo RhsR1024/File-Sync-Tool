@@ -23,6 +23,7 @@ const config = ref<AppConfig>({
   deploy_enabled: false,
   servers: [],
   command_groups: [],
+  local_command_groups: [],
   stability_check_secs: 120,
   recent_file_guard_mins: 3,
   launch_and_auto_scan: false,
@@ -151,6 +152,8 @@ const taskForm = ref<ScanTask>({
     local_path: null,
     rule: { type: 'VersionMatch', value: '' },
     server_bindings: [],
+    local_script_binding: null,
+    post_copy_execution_order: 'local_first',
 });
 
 function resetTaskForm() {
@@ -162,6 +165,8 @@ function resetTaskForm() {
         local_path: null,
         rule: { type: 'VersionMatch', value: '' },
         server_bindings: [],
+        local_script_binding: null,
+        post_copy_execution_order: 'local_first',
     };
     isEditingTask.value = false;
     editingTaskIndex.value = -1;
