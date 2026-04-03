@@ -1468,107 +1468,6 @@ onUnmounted(clearStatusMsg);
           </div>
         </div>
 
-        <!-- Local Script Groups -->
-        <div class="pt-6 border-t border-slate-100">
-          <div class="flex justify-between items-start gap-4 mb-3">
-            <div>
-              <h4 class="font-medium text-slate-700 flex items-center gap-2">
-                <Terminal class="w-4 h-4 text-teal-500" />
-                {{ t('settings.localScriptGroups') }}
-              </h4>
-              <p class="text-xs text-slate-400 mt-1">{{ t('settings.localScriptGroupsDesc') }}</p>
-            </div>
-            <button @click="addLocalGroup" class="text-xs text-teal-600 hover:text-teal-800 flex items-center gap-1 font-medium bg-teal-50 hover:bg-teal-100 px-3 py-1.5 rounded-lg transition-colors">
-              <Plus class="w-3 h-3" /> {{ t('settings.addLocalScriptGroup') }}
-            </button>
-          </div>
-
-          <div v-if="config.local_command_groups.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
-            {{ t('settings.noLocalScriptGroups') }}
-          </div>
-
-          <div v-else class="space-y-2">
-            <div v-for="(group, gi) in config.local_command_groups" :key="group.id"
-              class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-center justify-between gap-3">
-              <div class="flex items-center gap-3 flex-1 min-w-0">
-                <div class="w-7 h-7 rounded-lg bg-teal-100 text-teal-600 flex items-center justify-center shrink-0">
-                  <Terminal class="w-3.5 h-3.5" />
-                </div>
-                <div class="min-w-0">
-                  <div class="font-medium text-slate-800 text-sm flex items-center gap-2">
-                    {{ group.name }}
-                    <span class="text-xs px-2 py-0.5 rounded-full"
-                          :class="group.on_failure === 'abort' ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-600'">
-                      {{ group.on_failure === 'abort' ? t('settings.onFailureAbort') : t('settings.onFailureContinue') }}
-                    </span>
-                  </div>
-                  <div class="text-xs text-slate-400">{{ group.commands.length }} {{ group.commands.length === 1 ? 'command' : 'commands' }}</div>
-                </div>
-                <div class="flex flex-wrap gap-1 ml-2">
-                  <code v-for="(cmd, ci) in group.commands.slice(0, 2)" :key="ci"
-                    class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-mono truncate max-w-[120px]">{{ cmd }}</code>
-                  <span v-if="group.commands.length > 2" class="text-[10px] text-slate-400">+{{ group.commands.length - 2 }}</span>
-                </div>
-              </div>
-              <div class="flex items-center gap-1 shrink-0">
-                <button @click="editLocalGroup(gi)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
-                  <Edit class="w-4 h-4" />
-                </button>
-                <button @click="removeLocalGroup(gi)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')">
-                  <Trash2 class="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          </div>
-          <p class="mt-2 text-xs text-slate-400 leading-relaxed">{{ t('settings.localScriptVariableHint') }}</p>
-        </div>
-
-        <!-- Local Script Group Edit Modal -->
-        <div v-if="isEditingLocalGroup" class="fixed inset-0 bg-black/50 flex items-center justify-center z-[65] p-4">
-          <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all max-h-[80vh] flex flex-col">
-            <h3 class="text-lg font-bold mb-4 text-slate-800 shrink-0">{{ editingLocalGroupIndex >= 0 ? t('settings.editLocalScriptGroup') : t('settings.addLocalScriptGroup') }}</h3>
-            <div class="space-y-4 flex-1 overflow-y-auto pr-1">
-              <div>
-                <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.nameAlias') }}</label>
-                <input v-model="localGroupForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" />
-              </div>
-              <div>
-                <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.onFailure') }}</label>
-                <select v-model="localGroupForm.on_failure" class="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-teal-500 outline-none">
-                  <option value="continue">{{ t('settings.onFailureContinue') }}</option>
-                  <option value="abort">{{ t('settings.onFailureAbort') }}</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-sm font-medium mb-2 text-slate-700">{{ t('settings.postCommands') }}</label>
-                <div class="flex gap-2 mb-2">
-                  <input v-model="newLocalGroupCommand" @keyup.enter="addLocalGroupCommand"
-                    :placeholder="t('settings.commandPlaceholder')"
-                    class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none font-mono text-sm" />
-                  <button @click="addLocalGroupCommand" type="button" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600">
-                    <Plus class="w-5 h-5" />
-                  </button>
-                </div>
-                <ul class="space-y-1.5 bg-slate-900 rounded-lg p-3 max-h-48 overflow-y-auto">
-                  <li v-for="(cmd, ci) in localGroupForm.commands" :key="ci"
-                    class="flex justify-between items-center text-green-400 font-mono text-xs">
-                    <span class="truncate mr-2">$ {{ cmd }}</span>
-                    <button @click="removeLocalGroupCommand(ci)" type="button" class="text-slate-500 hover:text-red-400 p-1 shrink-0">
-                      <Trash2 class="w-3 h-3" />
-                    </button>
-                  </li>
-                  <li v-if="!localGroupForm.commands.length" class="text-slate-600 text-xs italic text-center">{{ t('settings.commandGroupNoCommands') }}</li>
-                </ul>
-              </div>
-            </div>
-            <div class="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100 shrink-0">
-              <button @click="isEditingLocalGroup = false" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">{{ t('console.cancel') }}</button>
-              <button @click="saveLocalGroup" :disabled="!localGroupForm.name.trim()"
-                class="px-6 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">{{ t('settings.save') }}</button>
-            </div>
-          </div>
-        </div>
-
         <!-- Manual Deploy Tool -->
         <div class="pt-6 border-t border-slate-100 space-y-4">
           <h4 class="text-md font-medium text-slate-700 flex items-center gap-2">
@@ -1704,6 +1603,116 @@ onUnmounted(clearStatusMsg);
               </span>
             </span>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Local Post-Copy Scripts (independent of remote deploy) -->
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-teal-100 text-teal-600 flex items-center justify-center shrink-0">
+            <Terminal class="w-4 h-4" />
+          </div>
+          <div>
+            <h3 class="text-base font-semibold text-slate-700">{{ t('settings.localPostCopyScripts') }}</h3>
+            <p class="text-xs text-slate-400 mt-0.5">{{ t('settings.localPostCopyScriptsDesc') }}</p>
+          </div>
+        </div>
+      </div>
+      <div class="p-6 space-y-4">
+        <!-- Script group list -->
+        <div class="flex justify-between items-center mb-2">
+          <div class="text-sm font-medium text-slate-700">{{ t('settings.localScriptGroups') }}</div>
+          <button @click="addLocalGroup" class="text-xs text-teal-600 hover:text-teal-800 flex items-center gap-1 font-medium bg-teal-50 hover:bg-teal-100 px-3 py-1.5 rounded-lg transition-colors">
+            <Plus class="w-3 h-3" /> {{ t('settings.addLocalScriptGroup') }}
+          </button>
+        </div>
+
+        <div v-if="config.local_command_groups.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
+          {{ t('settings.noLocalScriptGroups') }}
+        </div>
+
+        <div v-else class="space-y-2">
+          <div v-for="(group, gi) in config.local_command_groups" :key="group.id"
+            class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3 flex-1 min-w-0">
+              <div class="w-7 h-7 rounded-lg bg-teal-100 text-teal-600 flex items-center justify-center shrink-0">
+                <Terminal class="w-3.5 h-3.5" />
+              </div>
+              <div class="min-w-0">
+                <div class="font-medium text-slate-800 text-sm flex items-center gap-2">
+                  {{ group.name }}
+                  <span class="text-xs px-2 py-0.5 rounded-full"
+                        :class="group.on_failure === 'abort' ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-600'">
+                    {{ group.on_failure === 'abort' ? t('settings.onFailureAbort') : t('settings.onFailureContinue') }}
+                  </span>
+                </div>
+                <div class="text-xs text-slate-400">{{ group.commands.length }} {{ group.commands.length === 1 ? 'command' : 'commands' }}</div>
+              </div>
+              <div class="flex flex-wrap gap-1 ml-2">
+                <code v-for="(cmd, ci) in group.commands.slice(0, 2)" :key="ci"
+                  class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-mono truncate max-w-[120px]">{{ cmd }}</code>
+                <span v-if="group.commands.length > 2" class="text-[10px] text-slate-400">+{{ group.commands.length - 2 }}</span>
+              </div>
+            </div>
+            <div class="flex items-center gap-1 shrink-0">
+              <button @click="editLocalGroup(gi)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
+                <Edit class="w-4 h-4" />
+              </button>
+              <button @click="removeLocalGroup(gi)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')">
+                <Trash2 class="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <p class="text-xs text-slate-400 leading-relaxed">{{ t('settings.localScriptVariableHint') }}</p>
+      </div>
+    </div>
+
+    <!-- Local Script Group Edit Modal -->
+    <div v-if="isEditingLocalGroup" class="fixed inset-0 bg-black/50 flex items-center justify-center z-[65] p-4">
+      <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all max-h-[80vh] flex flex-col">
+        <h3 class="text-lg font-bold mb-4 text-slate-800 shrink-0">{{ editingLocalGroupIndex >= 0 ? t('settings.editLocalScriptGroup') : t('settings.addLocalScriptGroup') }}</h3>
+        <div class="space-y-4 flex-1 overflow-y-auto pr-1">
+          <div>
+            <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.nameAlias') }}</label>
+            <input v-model="localGroupForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.onFailure') }}</label>
+            <select v-model="localGroupForm.on_failure" class="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-teal-500 outline-none">
+              <option value="continue">{{ t('settings.onFailureContinue') }}</option>
+              <option value="abort">{{ t('settings.onFailureAbort') }}</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-2 text-slate-700">{{ t('settings.postCommands') }}</label>
+            <div class="flex gap-2 mb-2">
+              <input v-model="newLocalGroupCommand" @keyup.enter="addLocalGroupCommand"
+                :placeholder="t('settings.commandPlaceholder')"
+                class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none font-mono text-sm" />
+              <button @click="addLocalGroupCommand" type="button" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600">
+                <Plus class="w-5 h-5" />
+              </button>
+            </div>
+            <ul class="space-y-1.5 bg-slate-900 rounded-lg p-3 max-h-48 overflow-y-auto">
+              <li v-for="(cmd, ci) in localGroupForm.commands" :key="ci"
+                class="flex justify-between items-center text-green-400 font-mono text-xs">
+                <span class="truncate mr-2">$ {{ cmd }}</span>
+                <button @click="removeLocalGroupCommand(ci)" type="button" class="text-slate-500 hover:text-red-400 p-1 shrink-0">
+                  <Trash2 class="w-3 h-3" />
+                </button>
+              </li>
+              <li v-if="!localGroupForm.commands.length" class="text-slate-600 text-xs italic text-center">{{ t('settings.commandGroupNoCommands') }}</li>
+            </ul>
+          </div>
+        </div>
+        <div class="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100 shrink-0">
+          <button @click="isEditingLocalGroup = false" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">{{ t('console.cancel') }}</button>
+          <button @click="saveLocalGroup" :disabled="!localGroupForm.name.trim()"
+            class="px-6 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">{{ t('settings.save') }}</button>
         </div>
       </div>
     </div>

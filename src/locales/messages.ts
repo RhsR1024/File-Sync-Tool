@@ -253,7 +253,7 @@ export const messages = {
       lines: 'lines',
       copyBufferSize: 'Copy Buffer Size',
       copyBufferSizeDesc: 'Read/write chunk size when copying files from network shares. Larger values improve speed for big files but increase memory usage. Default: 4 MB.',
-      postCommandsHint: 'Available variables: ${filename} (tar.gz file stem), ${folder_name} (deployed folder), ${remote_target} (full remote path). Use && to chain commands. Use echo "yes" | to answer interactive prompts.',
+      postCommandsHint: 'Variables: ${filename} (e.g. app-1.0.tar.gz), ${folder_name} (e.g. Release_01), ${remote_target} (e.g. /opt/deploy/Release_01). Chain with &&. Pipe echo "yes" | for prompts.',
       // Command Groups
       commandGroups: 'Command Groups',
       commandGroupsDesc: 'Define reusable named groups of shell commands. Assign them to specific servers in each task.',
@@ -284,8 +284,10 @@ export const messages = {
       // Manual deploy server bindings
       manualDeployServerBindings: 'Target Servers & Command Groups',
       manualDeployNoBindings: 'Click "Add Server Binding" to add a deployment target',
-      // Local Script Groups
-      localScriptGroups: 'Local Script Groups',
+      // Local Post-Copy Scripts
+      localPostCopyScripts: 'Local Post-Copy Scripts',
+      localPostCopyScriptsDesc: 'Execute local scripts (bat/ps1/py) automatically after file copy completes',
+      localScriptGroups: 'Script Groups',
       localScriptGroupsDesc: 'Scripts to execute locally after file copy completes',
       addLocalScriptGroup: 'Add Script Group',
       editLocalScriptGroup: 'Edit Script Group',
@@ -293,7 +295,7 @@ export const messages = {
       onFailure: 'On Failure',
       onFailureContinue: 'Continue',
       onFailureAbort: 'Abort',
-      localScriptVariableHint: 'Variables: ${folder_name}, ${local_target}, ${source_path}, ${filename}',
+      localScriptVariableHint: 'Variables: ${folder_name} (e.g. Release_01), ${local_target} (e.g. E:\\Builds\\Release_01), ${source_path} (e.g. \\\\server\\share\\Release_01), ${filename} (e.g. app-1.0.tar.gz)',
       postCopyExecutionOrder: 'Post-Copy Execution Order',
       localFirst: 'Local First',
       remoteFirst: 'Remote First',
@@ -944,7 +946,7 @@ export const messages = {
       lines: '行',
       copyBufferSize: '复制缓冲区大小',
       copyBufferSizeDesc: '从网络共享目录复制文件时的读写块大小。较大的值可提升大文件复制速度，但会占用更多内存。默认：4 MB。',
-      postCommandsHint: '可用变量：${filename}（tar.gz 文件名去后缀）、${folder_name}（部署文件夹名）、${remote_target}（远程完整路径）。用 && 连接多条命令。用 echo "yes" | 自动回答交互式确认。',
+      postCommandsHint: '可用变量：${filename}（如 app-1.0.tar.gz）、${folder_name}（如 Release_01）、${remote_target}（如 /opt/deploy/Release_01）。用 && 连接多条命令。用 echo "yes" | 自动回答交互式确认。',
       // 命令组
       commandGroups: '命令组管理',
       commandGroupsDesc: '定义可复用的命令组，每组有名称和一批命令。在任务中为每台服务器选择要执行哪些命令组。',
@@ -976,7 +978,9 @@ export const messages = {
       manualDeployServerBindings: '目标服务器与命令组',
       manualDeployNoBindings: '点击「添加服务器绑定」添加部署目标',
       // 本地脚本组
-      localScriptGroups: '本地脚本组',
+      localPostCopyScripts: '本地后置脚本',
+      localPostCopyScriptsDesc: '文件复制完成后自动执行本地脚本（bat/ps1/py）',
+      localScriptGroups: '脚本组',
       localScriptGroupsDesc: '文件复制完成后在本地执行的脚本',
       addLocalScriptGroup: '添加脚本组',
       editLocalScriptGroup: '编辑脚本组',
@@ -984,7 +988,7 @@ export const messages = {
       onFailure: '失败策略',
       onFailureContinue: '继续执行',
       onFailureAbort: '中止后续',
-      localScriptVariableHint: '可用变量：${folder_name}, ${local_target}, ${source_path}, ${filename}',
+      localScriptVariableHint: '可用变量：${folder_name}（如 Release_01）、${local_target}（如 E:\\Builds\\Release_01）、${source_path}（如 \\\\server\\share\\Release_01）、${filename}（如 app-1.0.tar.gz）',
       postCopyExecutionOrder: '后置操作执行顺序',
       localFirst: '先本地',
       remoteFirst: '先远程',
