@@ -217,6 +217,25 @@ fn rotate_log_if_needed(log_path: &Path) {
     }
 }
 
+/// Emit a tool log to the main console (log-message event) and the log file.
+/// The message is prefixed with `【{tool_name}】` for easy identification.
+pub fn emit_tool_log<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    tool_name: &str,
+    msg: &str,
+    level: &str,
+) {
+    let prefixed = format!("【{}】{}", tool_name, msg);
+    let _ = app_handle.emit(
+        "log-message",
+        serde_json::json!({
+            "msg": prefixed,
+            "level": level,
+        }),
+    );
+    write_log_to_file(app_handle, &prefixed, level);
+}
+
 /// Write a log entry to the app log file. Thread-safe. Used by both scanner and deploy modules.
 pub fn write_log_to_file<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,

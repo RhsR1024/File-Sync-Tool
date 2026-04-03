@@ -41,6 +41,18 @@ rsa = "0.9"
 base64 = "0.22"
 rand = "0.8"
 
+# Screen sharing
+scrap = "0.5"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+axum = "0.7"
+async-stream = "0.3"
+bytes = "1"
+local-ip-address = "0.6"
+sha2 = "0.10"
+zip = "2"
+tokio-util = { version = "0.7", features = ["io"] }
+mime_guess = "2"
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

@@ -50,6 +50,14 @@ const routes: RouteRecordRaw[] = [
     path: '/tools/network',
     component: () => import('../pages/NetworkToolsPage.vue'),
   },
+  {
+    path: '/tools/screen-share',
+    component: () => import('../pages/ScreenSharePage.vue'),
+  },
+  {
+    path: '/tools/file-share',
+    component: () => import('../pages/FileSharePage.vue'),
+  },
 ]
 
 const router = createRouter({

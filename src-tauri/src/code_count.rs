@@ -2,9 +2,11 @@ use chardetng::EncodingDetector;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 // ─── Comment Rules ───────────────────────────────────────────────
 
@@ -280,6 +282,8 @@ fn get_file_extension(filename: &str) -> String {
         .unwrap_or_default()
 }
 
+const TOOL_NAME: &str = "代码统计";
+
 fn emit_code_count_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
     let _ = app_handle.emit(
         "log-message",
@@ -391,6 +395,12 @@ const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
 /// Maximum number of non-empty lines we feed into Myers diff.
 /// Beyond this threshold we fall back to a simple add/delete count.
 const MAX_DIFF_LINES: usize = 50_000;
+
+/// Maximum memory budget for the Myers diff trace, in bytes (~500 MB).
+/// If the estimated trace memory exceeds this, fall back to simple counting.
+/// For two completely different files of N and M lines, trace uses roughly
+/// (N+M) * (N+M) * 8 bytes in the worst case.
+const MAX_DIFF_TRACE_BYTES: usize = 512 * 1024 * 1024;
 
 /// Directory names that are skipped by default (version control metadata).
 const VCS_DIR_NAMES: &[&str] = &[".svn", ".git"];
@@ -667,6 +677,7 @@ fn scan_file_paths(
     selection: Option<&CodeCountSelection>,
     filter: Option<&CodeCountFileFilter>,
     include_vcs_dirs: bool,
+    should_cancel: &AtomicBool,
 ) -> Result<HashSet<String>, String> {
     let mut paths = HashSet::new();
 
@@ -677,7 +688,11 @@ fn scan_file_paths(
         selection: Option<&CodeCountSelection>,
         filter: Option<&CodeCountFileFilter>,
         include_vcs_dirs: bool,
+        should_cancel: &AtomicBool,
     ) -> Result<(), String> {
+        if should_cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".to_string());
+        }
         let entries = fs::read_dir(dir)
             .map_err(|e| format!("Failed to read directory {}: {}", dir.display(), e))?;
         for entry in entries {
@@ -696,7 +711,7 @@ fn scan_file_paths(
                     Err(_) => continue,
                 };
                 if should_descend_into_dir(relative_dir, selection) {
-                    walk(&path, root, paths, selection, filter, include_vcs_dirs)?;
+                    walk(&path, root, paths, selection, filter, include_vcs_dirs, should_cancel)?;
                 }
             } else {
                 let filename = path
@@ -720,7 +735,7 @@ fn scan_file_paths(
         Ok(())
     }
 
-    walk(root_path, root_path, &mut paths, selection, filter, include_vcs_dirs)?;
+    walk(root_path, root_path, &mut paths, selection, filter, include_vcs_dirs, should_cancel)?;
     Ok(paths)
 }
 
@@ -988,7 +1003,13 @@ fn diff_sequences(old_lines: &[ComparableLine], new_lines: &[ComparableLine]) ->
     let mut v = vec![0isize; max * 2 + 1];
     let mut trace: Vec<Vec<isize>> = Vec::new();
 
+    let v_size_bytes = (max * 2 + 1) * std::mem::size_of::<isize>();
+
     'outer: for d in 0..=max {
+        // Memory guard: each trace entry is v_size_bytes; abort if cumulative exceeds budget
+        if d * v_size_bytes > MAX_DIFF_TRACE_BYTES {
+            return Vec::new(); // signal caller to use simple fallback
+        }
         trace.push(v.clone());
 
         for k in (-(d as isize)..=(d as isize)).step_by(2) {
@@ -1154,6 +1175,14 @@ fn calculate_file_stats(
 
     let operations = diff_sequences(&old_non_empty_lines, &new_non_empty_lines);
 
+    // If diff_sequences returned empty but inputs were non-empty, it hit the memory guard.
+    // Fall back to simple counting which is still accurate for dissimilar files.
+    if operations.is_empty()
+        && (!old_non_empty_lines.is_empty() || !new_non_empty_lines.is_empty())
+    {
+        return calculate_file_stats_simple(file_path, old_content, new_content);
+    }
+
     let mut deleted_code = 0;
     let mut deleted_comment = 0;
     let mut added_code = 0;
@@ -1202,6 +1231,7 @@ fn compare_directories(
     new_selection: Option<&CodeCountSelection>,
     filter: Option<&CodeCountFileFilter>,
     include_vcs_dirs: bool,
+    should_cancel: &AtomicBool,
 ) -> Result<CodeCountResult, String> {
     let new_root = Path::new(new_path);
     if !new_root.is_dir() {
@@ -1236,7 +1266,7 @@ fn compare_directories(
                 percent: 0,
             },
         );
-        scan_file_paths(old_root, old_selection, filter, include_vcs_dirs)?
+        scan_file_paths(old_root, old_selection, filter, include_vcs_dirs, should_cancel)?
     };
 
     emit_progress(
@@ -1249,7 +1279,7 @@ fn compare_directories(
             percent: 25,
         },
     );
-    let new_file_paths = scan_file_paths(new_root, new_selection, filter, include_vcs_dirs)?;
+    let new_file_paths = scan_file_paths(new_root, new_selection, filter, include_vcs_dirs, should_cancel)?;
 
     // Diagnostic: log scan results when selection is active but yields few files
     if let Some(sel) = new_selection {
@@ -1294,6 +1324,10 @@ fn compare_directories(
 
     // Phase 2: diff each file – read content lazily one file at a time
     for (idx, file_path) in all_files.iter().enumerate() {
+        if should_cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".to_string());
+        }
+
         let processed = idx as i32;
         if processed % 100 == 0 || processed == total_files - 1 {
             emit_progress(
@@ -1414,7 +1448,19 @@ pub async fn code_count_analyze(
     let filter = CodeCountFileFilter::from_extensions(include_extensions, exclude_extensions);
     let vcs = include_vcs_dirs.unwrap_or(false);
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let state = app_handle.state::<crate::AppState>();
+    let should_cancel: Arc<AtomicBool> = Arc::clone(&state.code_count_should_cancel);
+    should_cancel.store(false, Ordering::Relaxed);
+
+    if old_path.is_empty() {
+        crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, &format!("开始分析 (新项目模式) → {}", new_path), "info");
+    } else {
+        crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, &format!("开始分析 {} → {}", old_path, new_path), "info");
+    }
+
+    let log_app = app_handle.clone();
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
         compare_directories(
             &app_handle,
             &old_path,
@@ -1423,10 +1469,43 @@ pub async fn code_count_analyze(
             new_selection.as_ref(),
             filter.as_ref(),
             vcs,
+            &should_cancel,
         )
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    match &result {
+        Ok(r) => {
+            crate::scanner::emit_tool_log(
+                &log_app,
+                TOOL_NAME,
+                &format!(
+                    "分析完成: {} 个文件有变更, 代码 +{} -{} ~{}, 注释 +{} -{} ~{}",
+                    r.files.len(),
+                    r.summary.code_added, r.summary.code_deleted, r.summary.code_modified,
+                    r.summary.comment_added, r.summary.comment_deleted, r.summary.comment_modified,
+                ),
+                "success",
+            );
+        }
+        Err(e) if e == "cancelled" => {
+            crate::scanner::emit_tool_log(&log_app, TOOL_NAME, "分析已取消", "info");
+        }
+        Err(e) => {
+            crate::scanner::emit_tool_log(&log_app, TOOL_NAME, &format!("分析失败: {}", e), "error");
+        }
+    }
+
+    result
+}
+
+#[tauri::command]
+pub async fn code_count_cancel(app_handle: AppHandle) -> Result<(), String> {
+    let state = app_handle.state::<crate::AppState>();
+    state.code_count_should_cancel.store(true, Ordering::Relaxed);
+    crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, "正在取消分析...", "info");
+    Ok(())
 }
 
 #[tauri::command]

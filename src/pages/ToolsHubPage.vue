@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { ArrowRight, BarChart3, Globe, KeyRound, Shield, type LucideIcon } from 'lucide-vue-next';
+import { ArrowRight, BarChart3, Globe, KeyRound, MonitorUp, Share2, Shield, type LucideIcon } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
 
 defineOptions({
@@ -58,6 +58,24 @@ const toolCards = computed<ToolCard[]>(() => [
     iconClasses: 'from-violet-500 to-fuchsia-600 shadow-violet-500/20',
     chipKey: 'toolsHub.cards.networkTools.chip',
   },
+  {
+    key: 'screen-share',
+    titleKey: 'sidebar.screenShare',
+    descriptionKey: 'toolsHub.cards.screenShare.description',
+    path: '/tools/screen-share',
+    icon: markRaw(MonitorUp as LucideIcon),
+    iconClasses: 'from-purple-500 to-indigo-600 shadow-purple-500/20',
+    chipKey: 'toolsHub.cards.screenShare.chip',
+  },
+  {
+    key: 'file-share',
+    titleKey: 'sidebar.fileShare',
+    descriptionKey: 'toolsHub.cards.fileShare.description',
+    path: '/tools/file-share',
+    icon: markRaw(Share2 as LucideIcon),
+    iconClasses: 'from-cyan-500 to-teal-600 shadow-cyan-500/20',
+    chipKey: 'toolsHub.cards.fileShare.chip',
+  },
 ]);
 </script>
 
@@ -92,6 +110,12 @@ const toolCards = computed<ToolCard[]>(() => [
             </div>
             <div class="flex h-11 w-11 items-center justify-center rounded-[14px] bg-gradient-to-br from-violet-500 to-fuchsia-500 shadow-lg shadow-violet-500/25">
               <Globe class="h-5 w-5 text-white" />
+            </div>
+            <div class="flex h-11 w-11 items-center justify-center rounded-[14px] bg-gradient-to-br from-purple-500 to-indigo-500 shadow-lg shadow-purple-500/25">
+              <MonitorUp class="h-5 w-5 text-white" />
+            </div>
+            <div class="flex h-11 w-11 items-center justify-center rounded-[14px] bg-gradient-to-br from-cyan-500 to-teal-500 shadow-lg shadow-cyan-500/25">
+              <Share2 class="h-5 w-5 text-white" />
             </div>
           </div>
         </div>

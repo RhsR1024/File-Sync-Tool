@@ -17,7 +17,14 @@
       "Bash(cargo clean:*)",
       "Bash(C:/Users/Admin/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.6/scripts/start-server.sh --project-dir c:/WorkSpace/Copy)",
       "Bash(cat C:/WorkSpace/Copy/.superpowers/brainstorm/*/state/server-info)",
-      "Bash(\"C:/Users/Admin/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.6/skills/brainstorming/scripts/start-server.sh\" --project-dir c:/WorkSpace/Copy)"
+      "Bash(\"C:/Users/Admin/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.6/skills/brainstorming/scripts/start-server.sh\" --project-dir c:/WorkSpace/Copy)",
+      "Bash(git commit -m ':*)",
+      "Bash(cargo check:*)",
+      "WebFetch(domain:www.claudeskills.com)",
+      "Bash(python3 ./.trellis/scripts/task.py create \"brainstorm: lan-file-share 局域网文件共享工具\" --slug lan-file-share-brainstorm)",
+      "Bash(pnpm add:*)",
+      "Bash(npx tauri:*)",
+      "Bash(cmd /c \"pnpm tauri:build:versioned-exe\")"
     ]
   }
 }

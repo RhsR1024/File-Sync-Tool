@@ -10,12 +10,14 @@ import {
   GitCompareArrows,
   Loader,
   Trash2,
+  XCircle,
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import CodeStatisticsScopeTreeNode from '@/components/CodeStatisticsScopeTreeNode.vue';
 import { generateCodeStatisticsHtmlReport } from '../lib/codeStatisticsExport';
 import {
   codeCountAnalyze,
+  codeCountCancel,
   codeCountListScopeTree,
   openDirectory,
   openPathParent,
@@ -1120,9 +1122,20 @@ const startAnalysis = async () => {
       includeVcsDirs.value,
     );
   } catch (error) {
-    errorMsg.value = error instanceof Error ? error.message : String(error);
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg !== 'cancelled') {
+      errorMsg.value = msg;
+    }
   } finally {
     isAnalyzing.value = false;
+  }
+};
+
+const cancelAnalysis = async () => {
+  try {
+    await codeCountCancel();
+  } catch (error) {
+    console.error(error);
   }
 };
 
@@ -1462,15 +1475,25 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <div class="flex gap-3">
       <button
         @click="startAnalysis"
         :disabled="isAnalyzing"
-        class="w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-semibold rounded-lg hover:from-blue-700 hover:to-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center justify-center gap-2 text-lg"
+        class="flex-1 px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-semibold rounded-lg hover:from-blue-700 hover:to-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center justify-center gap-2 text-lg"
       >
         <Loader v-if="isAnalyzing" class="w-5 h-5 animate-spin" />
         <BarChart3 v-else class="w-5 h-5" />
         <span>{{ isAnalyzing ? t('codeStatistics.analyzing') : t('codeStatistics.startAnalysis') }}</span>
       </button>
+      <button
+        v-if="isAnalyzing"
+        @click="cancelAnalysis"
+        class="px-6 py-3 bg-gradient-to-r from-red-500 to-red-600 text-white font-semibold rounded-lg hover:from-red-600 hover:to-red-700 focus:outline-none focus:ring-2 focus:ring-red-500/50 transition-all duration-200 flex items-center justify-center gap-2 text-lg"
+      >
+        <XCircle class="w-5 h-5" />
+        <span>{{ t('codeStatistics.cancelAnalysis') }}</span>
+      </button>
+      </div>
     </div>
 
     <div v-if="isAnalyzing && progress" class="bg-white border border-slate-200 rounded-lg p-6 shadow-sm mb-6">

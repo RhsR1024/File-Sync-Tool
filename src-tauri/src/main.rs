@@ -4,11 +4,13 @@
 mod code_count;
 mod config;
 mod deploy;
+mod fileshare;
 mod history;
 mod local_exec;
 mod network;
 mod persist;
 mod scanner;
+mod screenshare;
 mod task_commands;
 mod task_domain;
 mod task_events;
@@ -53,6 +55,9 @@ struct AppState {
     scan_queue_removals: Arc<Mutex<HashSet<String>>>,
     is_paused: Arc<AtomicBool>,
     is_quitting: Arc<AtomicBool>,
+    code_count_should_cancel: Arc<AtomicBool>,
+    screen_share: Arc<screenshare::ScreenShareHandle>,
+    file_share: Arc<fileshare::FileShareHandle>,
 }
 
 #[derive(Clone, Debug)]
@@ -2376,6 +2381,9 @@ fn main() {
                 scan_queue_removals: Arc::new(Mutex::new(HashSet::new())),
                 is_paused: Arc::new(AtomicBool::new(false)),
                 is_quitting: Arc::new(AtomicBool::new(false)),
+                code_count_should_cancel: Arc::new(AtomicBool::new(false)),
+                screen_share: Arc::new(screenshare::ScreenShareHandle::new()),
+                file_share: Arc::new(fileshare::FileShareHandle::new()),
             });
             Ok(())
         })
@@ -2406,6 +2414,7 @@ fn main() {
             change_framework_password,
             enable_appliance_ssh,
             code_count::code_count_analyze,
+            code_count::code_count_cancel,
             code_count::code_count_list_scope_tree,
             task_commands::list_task_groups,
             task_commands::get_task_group_detail,
@@ -2420,6 +2429,14 @@ fn main() {
             network::get_tcp_connections,
             network::test_ports,
             network::send_wol,
+            screenshare::screen_share_list_monitors,
+            screenshare::screen_share_start,
+            screenshare::screen_share_stop,
+            screenshare::screen_share_get_status,
+            fileshare::file_share_pick_directory,
+            fileshare::file_share_start,
+            fileshare::file_share_stop,
+            fileshare::file_share_get_status,
             confirm_quit
         ])
         .run(tauri::generate_context!())

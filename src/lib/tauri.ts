@@ -544,6 +544,10 @@ export async function codeCountAnalyze(
   });
 }
 
+export async function codeCountCancel(): Promise<void> {
+  await invoke('code_count_cancel');
+}
+
 export async function codeCountListScopeTree(
   paths: string[],
   includeExtensions?: string[],
@@ -662,4 +666,87 @@ export async function testPorts(request: PortTestRequest): Promise<PortTestResul
 
 export async function sendWol(request: WolRequest): Promise<WolResult> {
   return await invoke('send_wol', { request });
+}
+
+// ─── Screen Share ─────────────────────────────────────
+
+export interface ScreenShareConfig {
+  port: number;
+  password: string | null;
+  monitor_index: number;
+  quality: number;
+  fps: number;
+  show_cursor: boolean;
+}
+
+export interface MonitorInfo {
+  index: number;
+  name: string;
+  width: number;
+  height: number;
+  is_primary: boolean;
+}
+
+export interface ScreenShareStatus {
+  is_active: boolean;
+  viewer_count: number;
+  fps_actual: number;
+  bitrate_kbps: number;
+  uptime_secs: number;
+  server_url: string;
+  all_urls: string[];
+}
+
+export async function screenShareListMonitors(): Promise<MonitorInfo[]> {
+  return await invoke<MonitorInfo[]>('screen_share_list_monitors');
+}
+
+export async function screenShareStart(config: ScreenShareConfig): Promise<string> {
+  return await invoke<string>('screen_share_start', { config });
+}
+
+export async function screenShareStop(): Promise<void> {
+  await invoke('screen_share_stop');
+}
+
+export async function screenShareGetStatus(): Promise<ScreenShareStatus> {
+  return await invoke<ScreenShareStatus>('screen_share_get_status');
+}
+
+// ─── File Share ───────────────────────────────────────────
+
+export interface SharedDir {
+  alias: string;
+  path: string;
+}
+
+export interface FileShareConfig {
+  port: number;
+  shared_dirs: SharedDir[];
+  password: string | null;
+}
+
+export interface FileShareStatus {
+  is_active: boolean;
+  download_count: number;
+  uptime_secs: number;
+  server_url: string;
+  all_urls: string[];
+  shared_dirs: SharedDir[];
+}
+
+export async function fileSharePickDirectory(): Promise<SharedDir | null> {
+  return await invoke<SharedDir | null>('file_share_pick_directory');
+}
+
+export async function fileShareStart(config: FileShareConfig): Promise<string> {
+  return await invoke<string>('file_share_start', { config });
+}
+
+export async function fileShareStop(): Promise<void> {
+  await invoke('file_share_stop');
+}
+
+export async function fileShareGetStatus(): Promise<FileShareStatus> {
+  return await invoke<FileShareStatus>('file_share_get_status');
 }

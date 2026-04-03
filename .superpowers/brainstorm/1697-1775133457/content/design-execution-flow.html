@@ -1,0 +1,148 @@
+<h2>Design Section 2: Execution Flow &amp; Module Design</h2>
+<p class="subtitle">How local scripts integrate into the copy → deploy lifecycle</p>
+
+<div class="section">
+  <h3>Execution Flow (scanner.rs junction point)</h3>
+  <div class="mockup">
+    <div class="mockup-header">Post-Copy Decision Flow</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 0.82rem; line-height: 1.8; padding: 1.5rem;">
+<pre style="margin:0; white-space:pre-wrap;">
+Copy Completed ✓
+    │
+    ├── has local_script_binding?  ──── NO ──┐
+    │           YES                          │
+    │                                        │
+    ├── has server_bindings + deploy?  ── NO ─┤
+    │           YES                          │
+    │                                        │
+    ▼                                        │
+┌─────────────────────────────┐              │
+│  Read post_copy_execution_order  │         │
+└─────────────────────────────┘              │
+    │                                        │
+    ├── <span style="color:#34d399;">LocalFirst</span>                          │
+    │   1. Run local scripts                 │
+    │   2. Check on_failure → abort?         │
+    │   3. Run remote deploy                 │
+    │                                        │
+    ├── <span style="color:#818cf8;">RemoteFirst</span>                         │
+    │   1. Run remote deploy                 │
+    │   2. Run local scripts                 │
+    │                                        │
+    ├── <span style="color:#f59e0b;">Parallel</span>                            │
+    │   1. spawn both concurrently           │
+    │   2. await both                        │
+    │                                        │
+    ▼                                        ▼
+  Done                                Only run whichever
+                                      is configured
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>New Module: local_exec.rs</h3>
+  <div class="mockup">
+    <div class="mockup-header">local_exec.rs — Public API</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 0.82rem; line-height: 1.6;">
+<pre style="margin:0; white-space:pre-wrap;">
+<span style="color:#818cf8;">/// Execute local script groups for a completed copy task</span>
+pub fn execute_local_scripts(
+    app_handle: &AppHandle,
+    binding: &LocalScriptBinding,
+    all_groups: &[LocalCommandGroup],
+    local_folder_path: &Path,
+    folder_name: &str,
+    source_path: &str,
+    should_cancel: Arc&lt;AtomicBool&gt;,
+) -> LocalExecResult
+
+<span style="color:#818cf8;">/// Resolve a single command: auto-detect interpreter or pass through</span>
+fn resolve_command(raw: &str, vars: &VarMap) -> ResolvedCommand
+
+<span style="color:#818cf8;">/// Run one command as subprocess, capture output, emit logs</span>
+fn run_single_command(
+    cmd: &ResolvedCommand,
+    working_dir: &Path,
+    app_handle: &AppHandle,
+) -> Result&lt;CommandOutput, String&gt;
+
+<span style="color:#6b7280;">// Return type</span>
+struct LocalExecResult {
+    success: bool,
+    group_results: Vec&lt;GroupResult&gt;,  <span style="color:#6b7280;">// per-group success/failure</span>
+    aborted: bool,                    <span style="color:#6b7280;">// true if on_failure=abort triggered</span>
+}
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>scanner.rs Changes (Orchestration)</h3>
+  <div class="mockup">
+    <div class="mockup-header">scanner.rs — Post-Copy Orchestration (pseudocode)</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 0.82rem; line-height: 1.6;">
+<pre style="margin:0; white-space:pre-wrap;">
+<span style="color:#6b7280;">// After copy completes, read live config</span>
+let has_local = local_script_binding.is_some();
+let has_remote = deploy_enabled && !server_bindings.is_empty();
+
+match (has_local, has_remote, execution_order) {
+    (true, true, LocalFirst) => {
+        let local_result = execute_local_scripts(...);
+        if local_result.aborted {
+            emit_log("Local script aborted, skipping deploy");
+            return;
+        }
+        deploy_to_remote(...);
+    }
+    (true, true, RemoteFirst) => {
+        deploy_to_remote(...);
+        execute_local_scripts(...);
+    }
+    (true, true, Parallel) => {
+        <span style="color:#f59e0b;">// spawn_blocking for local, existing blocking for remote</span>
+        let (local_r, remote_r) = join!(local_task, remote_task);
+    }
+    (true, false, _) => execute_local_scripts(...),
+    (false, true, _) => deploy_to_remote(...),
+    (false, false, _) => { <span style="color:#6b7280;">/* nothing to do */</span> }
+}
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>on_failure Abort Behavior</h3>
+  <div class="mockup">
+    <div class="mockup-header">Abort Scope</div>
+    <div class="mockup-body" style="padding: 1.2rem; line-height: 1.8;">
+      <p><strong>Within local scripts:</strong> If a group with <code>on_failure: abort</code> fails, skip remaining local groups.</p>
+      <p><strong>Cross to remote deploy:</strong> Only blocks remote deploy when <code>execution_order = local_first</code>. In <code>parallel</code> mode, remote deploy is already running and won't be stopped.</p>
+      <p><strong>In <code>remote_first</code>:</strong> Remote deploy failure does NOT block local scripts (they are independent concerns).</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Task State Machine Integration (Phase A)</h3>
+  <div class="mockup">
+    <div class="mockup-header">New Stage in TaskGroup Status Flow</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 0.82rem; line-height: 1.8; padding: 1.2rem;">
+<pre style="margin:0; white-space:pre-wrap;">
+queued → copying → copy_completed
+                        │
+              ┌─────────┼──────────┐
+              ▼         ▼          ▼
+      <span style="color:#34d399;">local_executing</span>  deploying   <span style="color:#f59e0b;">(parallel: both)</span>
+              │         │
+              ▼         ▼
+         completed / partial_failed / failed
+</pre>
+      <p style="margin-top:1rem; color: #9ca3af;">TaskManager gains: <code>begin_local_exec()</code>, <code>mark_local_exec_completed()</code>, <code>mark_local_exec_failed()</code></p>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,82 @@
+<h2>Architecture Approaches</h2>
+<p class="subtitle">How to integrate local post-copy scripts into the existing system</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Separate Types + New Module</h3>
+      <p><strong>LocalCommandGroup</strong> as an independent type alongside <strong>CommandGroup</strong></p>
+      <p>New <code>local_exec.rs</code> module handles script execution</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4>
+          <ul>
+            <li>Clean separation: remote commands vs local scripts have different semantics (SSH vs subprocess)</li>
+            <li>LocalCommandGroup can carry <code>on_failure</code> field without affecting remote CommandGroup</li>
+            <li>Auto-interpreter detection logic isolated in its own module</li>
+            <li>Easier to extend independently (e.g., timeout, working directory per group)</li>
+          </ul>
+        </div>
+        <div class="cons"><h4>Cons</h4>
+          <ul>
+            <li>Two similar-looking types in config — users may confuse them</li>
+            <li>Config file grows with a new top-level array</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Unified CommandGroup + Discriminator</h3>
+      <p>Single <strong>CommandGroup</strong> type with a <code>target: "remote" | "local"</code> field</p>
+      <p>Execution dispatched based on target type</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4>
+          <ul>
+            <li>One concept for users to learn — "command groups" that run either locally or remotely</li>
+            <li>Reuses existing UI components for command group management</li>
+          </ul>
+        </div>
+        <div class="cons"><h4>Cons</h4>
+          <ul>
+            <li>Forced to add <code>on_failure</code>, interpreter logic to a type designed for SSH commands</li>
+            <li>Binding model becomes awkward: local groups don't need server_id</li>
+            <li>Existing remote-only code paths need guards everywhere</li>
+            <li>Breaking change to config format — migration needed</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Separate Types + Inline in scanner.rs</h3>
+      <p>Same as A but script execution logic lives directly in <code>scanner.rs</code> (no new module)</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4>
+          <ul>
+            <li>Fewer files — execution happens right where copy completes</li>
+            <li>All post-copy logic in one place</li>
+          </ul>
+        </div>
+        <div class="cons"><h4>Cons</h4>
+          <ul>
+            <li>scanner.rs already 1500+ lines, adding script execution makes it harder to maintain</li>
+            <li>Mixes file-copy concerns with subprocess management</li>
+            <li>Harder to unit test interpreter detection and script execution independently</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top: 2rem; padding: 1.5rem; background: rgba(99,102,241,0.08); border-radius: 12px;">
+  <h3 style="color: #818cf8; margin-top:0;">Recommendation: A</h3>
+  <p>Separate types + new module. The remote and local execution semantics are fundamentally different (SSH session vs Windows subprocess). Forcing them into one type creates awkward conditionals everywhere. A dedicated <code>local_exec.rs</code> keeps scanner.rs focused and makes the script logic independently testable.</p>
+</div>
