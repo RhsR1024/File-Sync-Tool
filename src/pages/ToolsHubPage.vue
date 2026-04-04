@@ -3,6 +3,7 @@ import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { ArrowRight, BarChart3, Globe, KeyRound, MonitorUp, Share2, Shield, type LucideIcon } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
+import { appStore } from '@/lib/store';
 
 defineOptions({
   name: 'ToolsHubPage',
@@ -19,6 +20,18 @@ interface ToolCard {
   icon: Component;
   iconClasses: string;
   chipKey: string;
+}
+
+function isToolActive(key: string) {
+  if (key === 'screen-share') {
+    return appStore.toolRuntime.screenShare;
+  }
+
+  if (key === 'file-share') {
+    return appStore.toolRuntime.fileShare;
+  }
+
+  return false;
 }
 
 const toolCards = computed<ToolCard[]>(() => [
@@ -129,9 +142,17 @@ const toolCards = computed<ToolCard[]>(() => [
         >
           <div class="flex items-start justify-between gap-3">
             <div
-              class="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br text-white shadow-lg"
+              class="relative flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br text-white shadow-lg"
               :class="card.iconClasses"
             >
+              <span
+                v-if="isToolActive(card.key)"
+                class="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center"
+                aria-hidden="true"
+              >
+                <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/70"></span>
+                <span class="relative inline-flex h-2.5 w-2.5 rounded-full border border-white bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.18)]"></span>
+              </span>
               <component :is="card.icon" class="h-6 w-6" />
             </div>
             <span class="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold tracking-[0.14em] text-slate-500 uppercase">

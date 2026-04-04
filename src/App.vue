@@ -5,13 +5,17 @@ import { onMounted, onUnmounted, watch } from 'vue';
 import { RouterView } from 'vue-router';
 
 import { startScheduler } from '@/lib/scheduler';
-import { appStore, addLog } from '@/lib/store';
+import { appStore, addLog, setToolRuntime } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import {
   confirmQuit,
+  fileShareGetStatus,
   getConfig,
   loadUiState,
   saveUiState,
+  screenShareGetStatus,
+  type FileShareStatus,
+  type ScreenShareStatus,
   type TaskGroupDetailSnapshot,
   type TaskGroupsSnapshot,
   type TaskLogEntry,
@@ -23,6 +27,8 @@ let unlistenTaskGroups: (() => void) | null = null;
 let unlistenTaskDetail: (() => void) | null = null;
 let unlistenTaskLog: (() => void) | null = null;
 let unlistenBeforeQuit: (() => void) | null = null;
+let unlistenScreenShareStatus: (() => void) | null = null;
+let unlistenFileShareStatus: (() => void) | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 function scheduleSave() {
@@ -37,6 +43,19 @@ function scheduleSave() {
 }
 
 watch(() => appStore.logs.length, scheduleSave);
+
+async function hydrateToolRuntime() {
+  try {
+    const [screenShareStatus, fileShareStatus] = await Promise.all([
+      screenShareGetStatus(),
+      fileShareGetStatus(),
+    ]);
+    setToolRuntime('screenShare', screenShareStatus.is_active);
+    setToolRuntime('fileShare', fileShareStatus.is_active);
+  } catch (error) {
+    addLog(`Tool runtime status load failed: ${error}`, 'error');
+  }
+}
 
 onMounted(async () => {
   let cfg = null;
@@ -126,6 +145,16 @@ onMounted(async () => {
     await confirmQuit();
   });
 
+  await hydrateToolRuntime();
+
+  unlistenScreenShareStatus = await listen<ScreenShareStatus>('screen-share-status', (event) => {
+    setToolRuntime('screenShare', event.payload.is_active);
+  });
+
+  unlistenFileShareStatus = await listen<FileShareStatus>('file-share-status', (event) => {
+    setToolRuntime('fileShare', event.payload.is_active);
+  });
+
   if (cfg?.launch_and_auto_scan && !appStore.isRunning) {
     try {
       await startScheduler();
@@ -146,13 +175,15 @@ onUnmounted(() => {
   if (unlistenTaskDetail) unlistenTaskDetail();
   if (unlistenTaskLog) unlistenTaskLog();
   if (unlistenBeforeQuit) unlistenBeforeQuit();
+  if (unlistenScreenShareStatus) unlistenScreenShareStatus();
+  if (unlistenFileShareStatus) unlistenFileShareStatus();
 });
 </script>
 
 <template>
   <div class="flex h-screen bg-slate-50 font-sans text-slate-900">
     <Sidebar />
-    <main class="flex-1 overflow-auto">
+    <main class="flex flex-1 flex-col overflow-hidden">
       <router-view v-slot="{ Component }">
         <keep-alive include="MainConsole,CodeStatisticsPage,NetworkToolsPage,SettingsPage">
           <component :is="Component" />

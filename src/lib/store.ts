@@ -24,6 +24,11 @@ export interface ProgressState {
     source?: 'manual' | 'scheduled';
 }
 
+export interface ToolRuntimeState {
+    screenShare: boolean;
+    fileShare: boolean;
+}
+
 export const appStore = reactive({
     logs: [] as LogEntry[],
     progress: null as ProgressState | null,
@@ -32,7 +37,15 @@ export const appStore = reactive({
     isManualDeploying: false,
     manualDeployMsg: '',
     maxLogLines: 200,
+    toolRuntime: {
+        screenShare: false,
+        fileShare: false,
+    } as ToolRuntimeState,
 });
+
+export function setToolRuntime<K extends keyof ToolRuntimeState>(tool: K, active: boolean) {
+    appStore.toolRuntime[tool] = active;
+}
 
 export function addLog(msg: string, type: 'info' | 'error' | 'success' | 'command' = 'info') {
     const time = new Date().toLocaleTimeString();

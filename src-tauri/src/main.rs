@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod async_utils;
 mod code_count;
 mod config;
 mod deploy;
@@ -1540,6 +1541,35 @@ fn open_path_parent(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn open_directory() -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let selected_dir = rfd::FileDialog::new().pick_folder();
@@ -1631,6 +1661,18 @@ fn validate_ip(ip: &str) -> bool {
         return false;
     }
     parts.iter().all(|part| part.parse::<u8>().is_ok())
+}
+
+const DEVICE_BATCH_CONCURRENCY_LIMIT: usize = 4;
+const DEVICE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const DEVICE_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn build_device_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(DEVICE_HTTP_CONNECT_TIMEOUT)
+        .timeout(DEVICE_HTTP_REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| format!("Failed to create device HTTP client: {}", e))
 }
 
 async fn get_appliance_ssh_status(
@@ -1864,6 +1906,236 @@ fn rsa_encrypt(public_key_pem: &str, plaintext: &str) -> Result<String, String> 
     Ok(general_purpose::STANDARD.encode(&encrypted))
 }
 
+fn password_change_failure(ip: &str, message: String, failed_at: &str) -> PasswordChangeResult {
+    PasswordChangeResult {
+        ip: ip.to_string(),
+        success: false,
+        message,
+        failedAt: Some(failed_at.to_string()),
+    }
+}
+
+async fn change_framework_password_for_ip(
+    client: reqwest::Client,
+    ip_input: String,
+    old_passwd: String,
+    new_passwd: String,
+) -> Option<PasswordChangeResult> {
+    let ip = ip_input.trim().to_string();
+    if ip.is_empty() {
+        return None;
+    }
+
+    if !validate_ip(&ip) {
+        return Some(password_change_failure(
+            &ip,
+            format!("Invalid IP address: {}", ip),
+            "login",
+        ));
+    }
+
+    let pubkey_url = format!("http://{}:21900/openAPI/auth/v1/publicKey", ip);
+    let public_key = match client.get(&pubkey_url).send().await {
+        Ok(response) => match response.json::<serde_json::Value>().await {
+            Ok(json) => match json
+                .get("data")
+                .and_then(|d| d.get("publicKey"))
+                .and_then(|k| k.as_str())
+            {
+                Some(key) => key.to_string(),
+                None => {
+                    return Some(password_change_failure(
+                        &ip,
+                        format!("Failed to get public key: {:?}", json),
+                        "login",
+                    ));
+                }
+            },
+            Err(e) => {
+                return Some(password_change_failure(
+                    &ip,
+                    format!("Public key response parse error: {}", e),
+                    "login",
+                ));
+            }
+        },
+        Err(e) => {
+            return Some(password_change_failure(
+                &ip,
+                format!("Public key request failed: {}", e),
+                "login",
+            ));
+        }
+    };
+
+    let encrypted_old = match rsa_encrypt(&public_key, &old_passwd) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(password_change_failure(
+                &ip,
+                format!("RSA encrypt old password failed: {}", e),
+                "login",
+            ));
+        }
+    };
+
+    let login_url = format!("http://{}:21900/openAPI/userMgr/v1/login", ip);
+    let login_body = json!({
+        "userName": "admin",
+        "userPasswd": encrypted_old,
+        "isUnlockLogin": false
+    });
+
+    let token = match client
+        .post(&login_url)
+        .header("Authorization", "")
+        .header("content-type", "application/json")
+        .json(&login_body)
+        .send()
+        .await
+    {
+        Ok(response) => match response.json::<serde_json::Value>().await {
+            Ok(json) => {
+                if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
+                    match json
+                        .get("data")
+                        .and_then(|d| d.get("token"))
+                        .and_then(|t| t.as_str())
+                    {
+                        Some(token) => token.to_string(),
+                        None => {
+                            return Some(password_change_failure(
+                                &ip,
+                                "Login response missing token".to_string(),
+                                "login",
+                            ));
+                        }
+                    }
+                } else {
+                    let msg = json
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Unknown error");
+                    return Some(password_change_failure(
+                        &ip,
+                        format!("Login failed: {}", msg),
+                        "login",
+                    ));
+                }
+            }
+            Err(e) => {
+                return Some(password_change_failure(
+                    &ip,
+                    format!("Login response parse error: {}", e),
+                    "login",
+                ));
+            }
+        },
+        Err(e) => {
+            return Some(password_change_failure(
+                &ip,
+                format!("Login request failed: {}", e),
+                "login",
+            ));
+        }
+    };
+
+    let encrypted_old_for_change = match rsa_encrypt(&public_key, &old_passwd) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(password_change_failure(
+                &ip,
+                format!("RSA encrypt failed: {}", e),
+                "changePasswd",
+            ));
+        }
+    };
+    let encrypted_new = match rsa_encrypt(&public_key, &new_passwd) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(password_change_failure(
+                &ip,
+                format!("RSA encrypt new password failed: {}", e),
+                "changePasswd",
+            ));
+        }
+    };
+
+    let change_passwd_url = format!("http://{}:21900/openAPI/userMgr/v1/changePasswd", ip);
+    let change_passwd_body = json!({
+        "userName": "admin",
+        "oldUserPasswd": encrypted_old_for_change,
+        "newUserPasswd": encrypted_new
+    });
+
+    let change_success = match client
+        .post(&change_passwd_url)
+        .header("Authorization", &token)
+        .header("content-type", "application/json")
+        .json(&change_passwd_body)
+        .send()
+        .await
+    {
+        Ok(response) => match response.json::<serde_json::Value>().await {
+            Ok(json) => {
+                if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
+                    true
+                } else {
+                    let msg = json
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Unknown error");
+                    return Some(password_change_failure(
+                        &ip,
+                        format!("Change password failed: {}", msg),
+                        "changePasswd",
+                    ));
+                }
+            }
+            Err(e) => {
+                return Some(password_change_failure(
+                    &ip,
+                    format!("Change password response parse error: {}", e),
+                    "changePasswd",
+                ));
+            }
+        },
+        Err(e) => {
+            return Some(password_change_failure(
+                &ip,
+                format!("Change password request failed: {}", e),
+                "changePasswd",
+            ));
+        }
+    };
+
+    if !change_success {
+        return None;
+    }
+
+    let logout_url = format!("http://{}:21900/openAPI/userMgr/v1/logout", ip);
+    let logout_body = json!({
+        "userName": "admin",
+        "userPasswd": encrypted_old,
+        "token": token
+    });
+
+    let _ = client
+        .post(&logout_url)
+        .header("Authorization", &token)
+        .header("content-type", "application/json")
+        .json(&logout_body)
+        .send()
+        .await;
+
+    Some(PasswordChangeResult {
+        ip,
+        success: true,
+        message: "Success".to_string(),
+        failedAt: None,
+    })
+}
+
 #[tauri::command]
 async fn change_framework_password(
     ips: Vec<String>,
@@ -1872,406 +2144,181 @@ async fn change_framework_password(
 ) -> Result<Vec<PasswordChangeResult>, String> {
     let old_passwd = old_password.unwrap_or_else(|| "123456".to_string());
     let new_passwd = new_password.unwrap_or_else(|| "admin_123".to_string());
+    let client = build_device_http_client()?;
 
-    let mut results = Vec::new();
-    let client = reqwest::Client::new();
+    let results = crate::async_utils::run_ordered_with_limit(
+        ips,
+        DEVICE_BATCH_CONCURRENCY_LIMIT,
+        move |ip| {
+            let client = client.clone();
+            let old_passwd = old_passwd.clone();
+            let new_passwd = new_passwd.clone();
+            async move { change_framework_password_for_ip(client, ip, old_passwd, new_passwd).await }
+        },
+    )
+    .await?;
 
-    for ip in ips.iter() {
-        let ip = ip.trim();
-        if ip.is_empty() {
-            continue;
-        }
+    Ok(results.into_iter().flatten().collect())
+}
 
-        // Validate IP format (basic check)
-        if !validate_ip(ip) {
-            results.push(PasswordChangeResult {
-                ip: ip.to_string(),
-                success: false,
-                message: format!("Invalid IP address: {}", ip),
-                failedAt: Some("login".to_string()),
-            });
-            continue;
-        }
-
-        // Step 1: Get RSA public key
-        let pubkey_url = format!("http://{}:21900/openAPI/auth/v1/publicKey", ip);
-        let public_key = match client.get(&pubkey_url).send().await {
-            Ok(response) => match response.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    if let Some(key) = json
-                        .get("data")
-                        .and_then(|d| d.get("publicKey"))
-                        .and_then(|k| k.as_str())
-                    {
-                        key.to_string()
-                    } else {
-                        results.push(PasswordChangeResult {
-                            ip: ip.to_string(),
-                            success: false,
-                            message: format!("Failed to get public key: {:?}", json),
-                            failedAt: Some("login".to_string()),
-                        });
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    results.push(PasswordChangeResult {
-                        ip: ip.to_string(),
-                        success: false,
-                        message: format!("Public key response parse error: {}", e),
-                        failedAt: Some("login".to_string()),
-                    });
-                    continue;
-                }
-            },
-            Err(e) => {
-                results.push(PasswordChangeResult {
-                    ip: ip.to_string(),
-                    success: false,
-                    message: format!("Public key request failed: {}", e),
-                    failedAt: Some("login".to_string()),
-                });
-                continue;
-            }
-        };
-
-        // Step 2: Login with RSA-encrypted password
-        let encrypted_old = match rsa_encrypt(&public_key, &old_passwd) {
-            Ok(v) => v,
-            Err(e) => {
-                results.push(PasswordChangeResult {
-                    ip: ip.to_string(),
-                    success: false,
-                    message: format!("RSA encrypt old password failed: {}", e),
-                    failedAt: Some("login".to_string()),
-                });
-                continue;
-            }
-        };
-
-        let login_url = format!("http://{}:21900/openAPI/userMgr/v1/login", ip);
-        let login_body = json!({
-            "userName": "admin",
-            "userPasswd": encrypted_old,
-            "isUnlockLogin": false
-        });
-
-        let token = match client
-            .post(&login_url)
-            .header("Authorization", "")
-            .header("content-type", "application/json")
-            .json(&login_body)
-            .send()
-            .await
-        {
-            Ok(response) => match response.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
-                        if let Some(token) = json
-                            .get("data")
-                            .and_then(|d| d.get("token"))
-                            .and_then(|t| t.as_str())
-                        {
-                            token.to_string()
-                        } else {
-                            results.push(PasswordChangeResult {
-                                ip: ip.to_string(),
-                                success: false,
-                                message: "Login response missing token".to_string(),
-                                failedAt: Some("login".to_string()),
-                            });
-                            continue;
-                        }
-                    } else {
-                        let msg = json
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Unknown error");
-                        results.push(PasswordChangeResult {
-                            ip: ip.to_string(),
-                            success: false,
-                            message: format!("Login failed: {}", msg),
-                            failedAt: Some("login".to_string()),
-                        });
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    results.push(PasswordChangeResult {
-                        ip: ip.to_string(),
-                        success: false,
-                        message: format!("Login response parse error: {}", e),
-                        failedAt: Some("login".to_string()),
-                    });
-                    continue;
-                }
-            },
-            Err(e) => {
-                results.push(PasswordChangeResult {
-                    ip: ip.to_string(),
-                    success: false,
-                    message: format!("Login request failed: {}", e),
-                    failedAt: Some("login".to_string()),
-                });
-                continue;
-            }
-        };
-
-        // Step 3: Change Password with RSA-encrypted old & new passwords
-        let encrypted_old_for_change = match rsa_encrypt(&public_key, &old_passwd) {
-            Ok(v) => v,
-            Err(e) => {
-                results.push(PasswordChangeResult {
-                    ip: ip.to_string(),
-                    success: false,
-                    message: format!("RSA encrypt failed: {}", e),
-                    failedAt: Some("changePasswd".to_string()),
-                });
-                continue;
-            }
-        };
-        let encrypted_new = match rsa_encrypt(&public_key, &new_passwd) {
-            Ok(v) => v,
-            Err(e) => {
-                results.push(PasswordChangeResult {
-                    ip: ip.to_string(),
-                    success: false,
-                    message: format!("RSA encrypt new password failed: {}", e),
-                    failedAt: Some("changePasswd".to_string()),
-                });
-                continue;
-            }
-        };
-
-        let change_passwd_url = format!("http://{}:21900/openAPI/userMgr/v1/changePasswd", ip);
-        let change_passwd_body = json!({
-            "userName": "admin",
-            "oldUserPasswd": encrypted_old_for_change,
-            "newUserPasswd": encrypted_new
-        });
-
-        let change_success = match client
-            .post(&change_passwd_url)
-            .header("Authorization", &token)
-            .header("content-type", "application/json")
-            .json(&change_passwd_body)
-            .send()
-            .await
-        {
-            Ok(response) => match response.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
-                        true
-                    } else {
-                        let msg = json
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Unknown error");
-                        results.push(PasswordChangeResult {
-                            ip: ip.to_string(),
-                            success: false,
-                            message: format!("Change password failed: {}", msg),
-                            failedAt: Some("changePasswd".to_string()),
-                        });
-                        false
-                    }
-                }
-                Err(e) => {
-                    results.push(PasswordChangeResult {
-                        ip: ip.to_string(),
-                        success: false,
-                        message: format!("Change password response parse error: {}", e),
-                        failedAt: Some("changePasswd".to_string()),
-                    });
-                    false
-                }
-            },
-            Err(e) => {
-                results.push(PasswordChangeResult {
-                    ip: ip.to_string(),
-                    success: false,
-                    message: format!("Change password request failed: {}", e),
-                    failedAt: Some("changePasswd".to_string()),
-                });
-                false
-            }
-        };
-
-        if !change_success {
-            continue;
-        }
-
-        // Step 4: Logout
-        let logout_url = format!("http://{}:21900/openAPI/userMgr/v1/logout", ip);
-        let logout_body = json!({
-            "userName": "admin",
-            "userPasswd": encrypted_old,
-            "token": token
-        });
-
-        // Logout is best-effort; don't fail the overall result if it errors
-        let _ = client
-            .post(&logout_url)
-            .header("Authorization", &token)
-            .header("content-type", "application/json")
-            .json(&logout_body)
-            .send()
-            .await;
-
-        results.push(PasswordChangeResult {
-            ip: ip.to_string(),
-            success: true,
-            message: "Success".to_string(),
-            failedAt: None,
-        });
+async fn enable_appliance_ssh_for_ip(
+    client: reqwest::Client,
+    ip_input: String,
+    ssh_username: String,
+    ssh_password: String,
+    add_whitelist_rule: bool,
+) -> Option<ApplianceSshResult> {
+    let ip = ip_input.trim().to_string();
+    if ip.is_empty() {
+        return None;
     }
 
-    Ok(results)
+    let mut result = ApplianceSshResult {
+        ip: ip.clone(),
+        success: false,
+        message: String::new(),
+        previous_enable: None,
+        current_enable: None,
+        port: None,
+        whitelist_source_ip: None,
+        whitelist_applied: None,
+    };
+
+    if !validate_ip(&ip) {
+        result.message = format!("Invalid IP address: {}", ip);
+        return Some(result);
+    }
+
+    let initial_status = match get_appliance_ssh_status(&client, &ip).await {
+        Ok(status) => status,
+        Err(e) => {
+            result.message = format!("Failed to get SSH status: {}", e);
+            return Some(result);
+        }
+    };
+
+    result.previous_enable = initial_status.enable;
+    result.port = initial_status.port;
+
+    let current_status = if initial_status.enable == Some(1) {
+        initial_status
+    } else {
+        if let Err(e) = enable_appliance_ssh_via_api(&client, &ip).await {
+            result.message = format!("Failed to enable SSH: {}", e);
+            return Some(result);
+        }
+        match wait_for_appliance_ssh_enabled(&client, &ip, 10, Duration::from_secs(1)).await {
+            Ok(status) => status,
+            Err(e) => {
+                result.message = format!("SSH status verification failed: {}", e);
+                return Some(result);
+            }
+        }
+    };
+
+    result.current_enable = current_status.enable;
+    result.port = current_status.port.or(result.port).or(Some(23333));
+    let ssh_port = result.port.unwrap_or(23333);
+
+    if add_whitelist_rule {
+        if ssh_username.is_empty() || ssh_password.is_empty() {
+            result.whitelist_applied = Some(false);
+            result.message =
+                "SSH username and password are required when adding an iptables whitelist rule"
+                    .to_string();
+            return Some(result);
+        }
+
+        let source_ip = match detect_local_source_ip(&ip, ssh_port) {
+            Ok(source_ip) => source_ip,
+            Err(e) => {
+                result.whitelist_applied = Some(false);
+                result.message = format!("Failed to determine local source IP: {}", e);
+                return Some(result);
+            }
+        };
+
+        result.whitelist_source_ip = Some(source_ip.clone());
+
+        let ip_owned = ip.clone();
+        let user_owned = ssh_username.clone();
+        let password_owned = ssh_password.clone();
+        let command = build_iptables_whitelist_command(&source_ip, ssh_port);
+
+        let whitelist_result = match tauri::async_runtime::spawn_blocking(move || {
+            run_remote_command_over_ssh(&ip_owned, ssh_port, &user_owned, &password_owned, &command)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                result.whitelist_applied = Some(false);
+                result.message = format!("Failed to run the SSH whitelist task: {}", e);
+                return Some(result);
+            }
+        };
+
+        match whitelist_result {
+            Ok(_) => {
+                result.success = true;
+                result.whitelist_applied = Some(true);
+                result.message = format!(
+                    "SSH is enabled. Added an iptables whitelist rule for {}:{}",
+                    source_ip, ssh_port
+                );
+            }
+            Err(e) => {
+                result.whitelist_applied = Some(false);
+                result.message = format!(
+                    "SSH is enabled, but failed to add the iptables whitelist rule for {}:{}: {}",
+                    source_ip, ssh_port, e
+                );
+            }
+        }
+    } else {
+        result.success = true;
+        result.message = if result.previous_enable == Some(1) {
+            format!("SSH is already enabled. Port: {}", ssh_port)
+        } else {
+            format!("SSH enabled successfully. Port: {}", ssh_port)
+        };
+    }
+
+    Some(result)
 }
 
 #[tauri::command]
 async fn enable_appliance_ssh(
     request: ApplianceSshRequest,
 ) -> Result<Vec<ApplianceSshResult>, String> {
-    let mut results = Vec::new();
-    let client = reqwest::Client::new();
+    let client = build_device_http_client()?;
+    let ips = request.ips;
     let ssh_username = request.ssh_username.trim().to_string();
-    let ssh_password = request.ssh_password.clone();
+    let ssh_password = request.ssh_password;
+    let add_whitelist_rule = request.add_whitelist_rule;
 
-    for ip in request.ips.iter() {
-        let ip = ip.trim();
-        if ip.is_empty() {
-            continue;
-        }
-
-        let mut result = ApplianceSshResult {
-            ip: ip.to_string(),
-            success: false,
-            message: String::new(),
-            previous_enable: None,
-            current_enable: None,
-            port: None,
-            whitelist_source_ip: None,
-            whitelist_applied: None,
-        };
-
-        if !validate_ip(ip) {
-            result.message = format!("Invalid IP address: {}", ip);
-            results.push(result);
-            continue;
-        }
-
-        let initial_status = match get_appliance_ssh_status(&client, ip).await {
-            Ok(status) => status,
-            Err(e) => {
-                result.message = format!("Failed to get SSH status: {}", e);
-                results.push(result);
-                continue;
-            }
-        };
-
-        result.previous_enable = initial_status.enable;
-        result.port = initial_status.port;
-
-        let current_status = if initial_status.enable == Some(1) {
-            initial_status
-        } else {
-            if let Err(e) = enable_appliance_ssh_via_api(&client, ip).await {
-                result.message = format!("Failed to enable SSH: {}", e);
-                results.push(result);
-                continue;
-            }
-            match wait_for_appliance_ssh_enabled(&client, ip, 10, Duration::from_secs(1)).await {
-                Ok(status) => status,
-                Err(e) => {
-                    result.message = format!("SSH status verification failed: {}", e);
-                    results.push(result);
-                    continue;
-                }
-            }
-        };
-
-        result.current_enable = current_status.enable;
-        result.port = current_status.port.or(result.port).or(Some(23333));
-        let ssh_port = result.port.unwrap_or(23333);
-
-        if request.add_whitelist_rule {
-            if ssh_username.is_empty() || ssh_password.is_empty() {
-                result.whitelist_applied = Some(false);
-                result.message =
-                    "SSH username and password are required when adding an iptables whitelist rule"
-                        .to_string();
-                results.push(result);
-                continue;
-            }
-
-            let source_ip = match detect_local_source_ip(ip, ssh_port) {
-                Ok(source_ip) => source_ip,
-                Err(e) => {
-                    result.whitelist_applied = Some(false);
-                    result.message = format!("Failed to determine local source IP: {}", e);
-                    results.push(result);
-                    continue;
-                }
-            };
-
-            result.whitelist_source_ip = Some(source_ip.clone());
-
-            let ip_owned = ip.to_string();
-            let user_owned = ssh_username.clone();
-            let password_owned = ssh_password.clone();
-            let command = build_iptables_whitelist_command(&source_ip, ssh_port);
-
-            let whitelist_result = match tauri::async_runtime::spawn_blocking(move || {
-                run_remote_command_over_ssh(
-                    &ip_owned,
-                    ssh_port,
-                    &user_owned,
-                    &password_owned,
-                    &command,
+    let results = crate::async_utils::run_ordered_with_limit(
+        ips,
+        DEVICE_BATCH_CONCURRENCY_LIMIT,
+        move |ip| {
+            let client = client.clone();
+            let ssh_username = ssh_username.clone();
+            let ssh_password = ssh_password.clone();
+            async move {
+                enable_appliance_ssh_for_ip(
+                    client,
+                    ip,
+                    ssh_username,
+                    ssh_password,
+                    add_whitelist_rule,
                 )
-            })
-            .await
-            {
-                Ok(result) => result,
-                Err(e) => {
-                    result.whitelist_applied = Some(false);
-                    result.message = format!("Failed to run the SSH whitelist task: {}", e);
-                    results.push(result);
-                    continue;
-                }
-            };
-
-            match whitelist_result {
-                Ok(_) => {
-                    result.success = true;
-                    result.whitelist_applied = Some(true);
-                    result.message = format!(
-                        "SSH is enabled. Added an iptables whitelist rule for {}:{}",
-                        source_ip, ssh_port
-                    );
-                }
-                Err(e) => {
-                    result.whitelist_applied = Some(false);
-                    result.message = format!(
-                        "SSH is enabled, but failed to add the iptables whitelist rule for {}:{}: {}",
-                        source_ip, ssh_port, e
-                    );
-                }
+                .await
             }
-        } else {
-            result.success = true;
-            result.message = if result.previous_enable == Some(1) {
-                format!("SSH is already enabled. Port: {}", ssh_port)
-            } else {
-                format!("SSH enabled successfully. Port: {}", ssh_port)
-            };
-        }
+        },
+    )
+    .await?;
 
-        results.push(result);
-    }
-
-    Ok(results)
+    Ok(results.into_iter().flatten().collect())
 }
 
 fn main() {
@@ -2409,6 +2456,7 @@ fn main() {
             preview_temporary_copy,
             get_app_paths,
             open_path_parent,
+            open_url,
             open_directory,
             save_text_file,
             change_framework_password,
@@ -2430,6 +2478,7 @@ fn main() {
             network::test_ports,
             network::send_wol,
             screenshare::screen_share_list_monitors,
+            screenshare::screen_share_list_interfaces,
             screenshare::screen_share_start,
             screenshare::screen_share_stop,
             screenshare::screen_share_get_status,

@@ -185,12 +185,12 @@ onMounted(async () => {
       </div>
 
       <!-- Task groups table area -->
-      <div class="flex-1 bg-slate-50 p-4 overflow-auto">
+      <div class="flex-1 min-h-0 bg-slate-50 p-4 overflow-auto">
         <Empty
           v-if="!rows.length"
           :icon="Activity"
           :title="t('console.noTaskGroups')"
-          class="min-h-[220px]"
+          class="h-full min-h-[320px]"
         />
 
         <TaskGroupsTable

@@ -10,7 +10,7 @@ import {
   ArrowUpFromLine,
   Clock,
   Play,
-  Square,
+  Power,
   ChevronDown,
   ChevronUp,
   ExternalLink,
@@ -525,7 +525,7 @@ onUnmounted(() => {
             class="w-full rounded-xl border border-red-200 bg-red-50 px-6 py-3.5 text-sm font-semibold text-red-600 shadow-sm transition hover:border-red-300 hover:bg-red-100"
           >
             <span class="flex items-center justify-center gap-2">
-              <Square class="h-4 w-4" />
+              <Power class="h-4 w-4" />
               {{ t('tools.screenShare.stopShare') }}
             </span>
           </button>

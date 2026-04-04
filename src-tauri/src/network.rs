@@ -1,9 +1,64 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{Emitter, State};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+
+type ProbeFuture = Pin<Box<dyn Future<Output = Option<f64>> + Send>>;
+
+async fn first_successful_probe(probes: Vec<ProbeFuture>) -> Option<f64> {
+    if probes.is_empty() {
+        return None;
+    }
+
+    let mut tasks = JoinSet::new();
+    for probe in probes {
+        tasks.spawn(probe);
+    }
+
+    while let Some(joined) = tasks.join_next().await {
+        if let Ok(Some(latency_ms)) = joined {
+            tasks.abort_all();
+            return Some(latency_ms);
+        }
+    }
+
+    None
+}
+
+async fn probe_tcp_port(ip: String, port: u16, timeout: std::time::Duration) -> Option<f64> {
+    let addr = format!("{}:{}", ip, port);
+    let start = std::time::Instant::now();
+
+    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await {
+        Ok(Ok(_stream)) => Some(start.elapsed().as_secs_f64() * 1000.0),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            Some(start.elapsed().as_secs_f64() * 1000.0)
+        }
+        _ => None,
+    }
+}
+
+async fn tcp_ping_ports(ip: &str, ports: &[u16], timeout_ms: u64) -> (bool, Option<f64>) {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let probes = ports
+        .iter()
+        .copied()
+        .map(|port| {
+            let ip = ip.to_string();
+            Box::pin(async move { probe_tcp_port(ip, port, timeout).await }) as ProbeFuture
+        })
+        .collect();
+
+    match first_successful_probe(probes).await {
+        Some(latency_ms) => (true, Some(latency_ms)),
+        None => (false, None),
+    }
+}
 
 // ─── Ping Scan ───────────────────────────────────────────────────────────────
 
@@ -40,32 +95,7 @@ impl Default for NetworkState {
 /// "connection refused" the host is alive (there is a TCP stack answering).
 async fn tcp_ping(ip: &str, timeout_ms: u64) -> (bool, Option<f64>) {
     let ports: &[u16] = &[80, 443, 22, 135, 445];
-    let timeout = std::time::Duration::from_millis(timeout_ms);
-
-    for &port in ports {
-        let addr = format!("{}:{}", ip, port);
-        let start = std::time::Instant::now();
-
-        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await {
-            Ok(Ok(_stream)) => {
-                // Connected — host is alive
-                return (true, Some(start.elapsed().as_secs_f64() * 1000.0));
-            }
-            Ok(Err(e)) => {
-                // ConnectionRefused means the host IS alive, just no service on that port
-                let kind = e.kind();
-                if kind == std::io::ErrorKind::ConnectionRefused {
-                    return (true, Some(start.elapsed().as_secs_f64() * 1000.0));
-                }
-                // Other errors (e.g. network unreachable) — try next port
-            }
-            Err(_) => {
-                // Timeout — try next port
-            }
-        }
-    }
-
-    (false, None)
+    tcp_ping_ports(ip, ports, timeout_ms).await
 }
 
 fn validate_prefix(prefix: &str) -> Result<(), String> {
@@ -238,6 +268,12 @@ fn well_known_port_name(port: u16) -> &'static str {
     }
 }
 
+fn top_port_counts(mut ports: Vec<PortCount>, limit: usize) -> Vec<PortCount> {
+    ports.sort_by(|a, b| b.count.cmp(&a.count));
+    ports.truncate(limit);
+    ports
+}
+
 #[tauri::command]
 pub async fn get_tcp_connections() -> Result<TcpConnectionStats, String> {
     let output = tokio::process::Command::new("netstat")
@@ -315,8 +351,7 @@ pub async fn get_tcp_connections() -> Result<TcpConnectionStats, String> {
             count,
         })
         .collect();
-    by_remote_port.truncate(20);
-    by_remote_port.sort_by(|a, b| b.count.cmp(&a.count));
+    by_remote_port = top_port_counts(by_remote_port, 20);
 
     Ok(TcpConnectionStats {
         total,
@@ -392,12 +427,11 @@ pub async fn test_ports(request: PortTestRequest) -> Result<PortTestResult, Stri
             let addr = format!("{}:{}", host, port);
             let start = std::time::Instant::now();
 
-            let open = match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr))
-                .await
-            {
-                Ok(Ok(_)) => true,
-                _ => false,
-            };
+            let open =
+                match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await {
+                    Ok(Ok(_)) => true,
+                    _ => false,
+                };
 
             let latency_ms = if open {
                 Some(start.elapsed().as_secs_f64() * 1000.0)
@@ -501,10 +535,7 @@ pub async fn send_wol(request: WolRequest) -> Result<WolResult, String> {
         packet.extend_from_slice(&mac_bytes);
     }
 
-    let broadcast_ip = request
-        .broadcast_ip
-        .as_deref()
-        .unwrap_or("255.255.255.255");
+    let broadcast_ip = request.broadcast_ip.as_deref().unwrap_or("255.255.255.255");
     let port = request.port.unwrap_or(9);
     let dest = format!("{}:{}", broadcast_ip, port);
 
@@ -525,5 +556,66 @@ pub async fn send_wol(request: WolRequest) -> Result<WolResult, String> {
             success: false,
             message: format!("Failed to send magic packet: {}", e),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{first_successful_probe, top_port_counts, PortCount};
+    use std::pin::Pin;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn first_successful_probe_returns_without_waiting_for_slow_failures() {
+        let started = Instant::now();
+        let latency = first_successful_probe(vec![
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                None
+            }) as Pin<Box<dyn std::future::Future<Output = Option<f64>> + Send>>,
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Some(7.5)
+            }) as Pin<Box<dyn std::future::Future<Output = Option<f64>> + Send>>,
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                None
+            }) as Pin<Box<dyn std::future::Future<Output = Option<f64>> + Send>>,
+        ])
+        .await;
+
+        assert_eq!(latency, Some(7.5));
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn top_port_counts_sorts_before_truncating() {
+        let ports = vec![
+            PortCount {
+                port: 1000,
+                name: String::new(),
+                count: 1,
+            },
+            PortCount {
+                port: 1001,
+                name: String::new(),
+                count: 8,
+            },
+            PortCount {
+                port: 1002,
+                name: String::new(),
+                count: 3,
+            },
+            PortCount {
+                port: 1003,
+                name: String::new(),
+                count: 9,
+            },
+        ];
+
+        let top = top_port_counts(ports, 2);
+        let ports_only: Vec<u16> = top.into_iter().map(|entry| entry.port).collect();
+
+        assert_eq!(ports_only, vec![1003, 1001]);
     }
 }

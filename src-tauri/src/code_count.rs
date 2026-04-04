@@ -2,10 +2,10 @@ use chardetng::EncodingDetector;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 
 // ─── Comment Rules ───────────────────────────────────────────────
@@ -34,10 +34,10 @@ fn get_comment_rules() -> HashMap<&'static str, CommentRule> {
     m.insert(".hh", c_style());
     m.insert(".hpp", c_style());
     m.insert(".hxx", c_style());
-    m.insert(".ino", c_style());   // Arduino
-    m.insert(".cs", c_style());    // C#
-    m.insert(".m", c_style());     // Objective-C
-    m.insert(".mm", c_style());    // Objective-C++
+    m.insert(".ino", c_style()); // Arduino
+    m.insert(".cs", c_style()); // C#
+    m.insert(".m", c_style()); // Objective-C
+    m.insert(".mm", c_style()); // Objective-C++
     m.insert(".js", c_style());
     m.insert(".ts", c_style());
     m.insert(".tsx", c_style());
@@ -160,11 +160,11 @@ fn get_comment_rules() -> HashMap<&'static str, CommentRule> {
     m.insert(".properties", hash_style());
     m.insert(".cmake", hash_style());
     m.insert(".dockerfile", hash_style());
-    m.insert(".tf", hash_style());       // Terraform
-    m.insert(".hcl", hash_style());      // HashiCorp
+    m.insert(".tf", hash_style()); // Terraform
+    m.insert(".hcl", hash_style()); // HashiCorp
     m.insert(".nim", hash_style());
-    m.insert(".jl", hash_style());       // Julia
-    m.insert(".ps1", hash_style());      // PowerShell
+    m.insert(".jl", hash_style()); // Julia
+    m.insert(".ps1", hash_style()); // PowerShell
     m.insert(".psm1", hash_style());
     m.insert(".makefile", hash_style());
     m.insert(
@@ -259,17 +259,72 @@ fn is_countable_extension(extension: &str) -> bool {
     }
     // Skip known binary / non-text extensions
     const BINARY_EXTENSIONS: &[&str] = &[
-        ".exe", ".dll", ".so", ".dylib", ".a", ".lib", ".o", ".obj",
-        ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
-        ".zip", ".gz", ".tar", ".bz2", ".xz", ".7z", ".rar", ".zst",
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp", ".tif", ".tiff",
-        ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".flv", ".wav", ".ogg", ".flac", ".aac", ".wma", ".webm",
-        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-        ".ttf", ".otf", ".woff", ".woff2", ".eot",
-        ".class", ".pyc", ".pyo", ".pyd",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".a",
+        ".lib",
+        ".o",
+        ".obj",
+        ".bin",
+        ".dat",
+        ".db",
+        ".sqlite",
+        ".sqlite3",
+        ".zip",
+        ".gz",
+        ".tar",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        ".zst",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".svg",
+        ".webp",
+        ".tif",
+        ".tiff",
+        ".mp3",
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".flv",
+        ".wav",
+        ".ogg",
+        ".flac",
+        ".aac",
+        ".wma",
+        ".webm",
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".ttf",
+        ".otf",
+        ".woff",
+        ".woff2",
+        ".eot",
+        ".class",
+        ".pyc",
+        ".pyo",
+        ".pyd",
         ".wasm",
-        ".iso", ".img", ".dmg",
-        ".jar", ".war", ".ear",
+        ".iso",
+        ".img",
+        ".dmg",
+        ".jar",
+        ".war",
+        ".ear",
         ".DS_Store",
     ];
     !BINARY_EXTENSIONS.contains(&extension)
@@ -284,7 +339,11 @@ fn get_file_extension(filename: &str) -> String {
 
 const TOOL_NAME: &str = "代码统计";
 
-fn emit_code_count_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
+fn emit_code_count_log<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    msg: String,
+    level: &str,
+) {
     let _ = app_handle.emit(
         "log-message",
         serde_json::json!({
@@ -668,7 +727,9 @@ fn is_likely_binary(path: &Path) -> bool {
 }
 
 fn is_vcs_dir(dir_name: &str) -> bool {
-    VCS_DIR_NAMES.iter().any(|&vcs| vcs.eq_ignore_ascii_case(dir_name))
+    VCS_DIR_NAMES
+        .iter()
+        .any(|&vcs| vcs.eq_ignore_ascii_case(dir_name))
 }
 
 /// Scan directory and collect relative file paths (without reading content).
@@ -711,7 +772,15 @@ fn scan_file_paths(
                     Err(_) => continue,
                 };
                 if should_descend_into_dir(relative_dir, selection) {
-                    walk(&path, root, paths, selection, filter, include_vcs_dirs, should_cancel)?;
+                    walk(
+                        &path,
+                        root,
+                        paths,
+                        selection,
+                        filter,
+                        include_vcs_dirs,
+                        should_cancel,
+                    )?;
                 }
             } else {
                 let filename = path
@@ -735,7 +804,15 @@ fn scan_file_paths(
         Ok(())
     }
 
-    walk(root_path, root_path, &mut paths, selection, filter, include_vcs_dirs, should_cancel)?;
+    walk(
+        root_path,
+        root_path,
+        &mut paths,
+        selection,
+        filter,
+        include_vcs_dirs,
+        should_cancel,
+    )?;
     Ok(paths)
 }
 
@@ -831,7 +908,14 @@ fn collect_scope_entries(
         Ok(())
     }
 
-    walk(root_path, root_path, &mut directories, &mut files, filter, include_vcs_dirs)?;
+    walk(
+        root_path,
+        root_path,
+        &mut directories,
+        &mut files,
+        filter,
+        include_vcs_dirs,
+    )?;
     Ok((directories, files))
 }
 
@@ -1177,8 +1261,7 @@ fn calculate_file_stats(
 
     // If diff_sequences returned empty but inputs were non-empty, it hit the memory guard.
     // Fall back to simple counting which is still accurate for dissimilar files.
-    if operations.is_empty()
-        && (!old_non_empty_lines.is_empty() || !new_non_empty_lines.is_empty())
+    if operations.is_empty() && (!old_non_empty_lines.is_empty() || !new_non_empty_lines.is_empty())
     {
         return calculate_file_stats_simple(file_path, old_content, new_content);
     }
@@ -1266,7 +1349,13 @@ fn compare_directories(
                 percent: 0,
             },
         );
-        scan_file_paths(old_root, old_selection, filter, include_vcs_dirs, should_cancel)?
+        scan_file_paths(
+            old_root,
+            old_selection,
+            filter,
+            include_vcs_dirs,
+            should_cancel,
+        )?
     };
 
     emit_progress(
@@ -1279,7 +1368,13 @@ fn compare_directories(
             percent: 25,
         },
     );
-    let new_file_paths = scan_file_paths(new_root, new_selection, filter, include_vcs_dirs, should_cancel)?;
+    let new_file_paths = scan_file_paths(
+        new_root,
+        new_selection,
+        filter,
+        include_vcs_dirs,
+        should_cancel,
+    )?;
 
     // Diagnostic: log scan results when selection is active but yields few files
     if let Some(sel) = new_selection {
@@ -1453,9 +1548,19 @@ pub async fn code_count_analyze(
     should_cancel.store(false, Ordering::Relaxed);
 
     if old_path.is_empty() {
-        crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, &format!("开始分析 (新项目模式) → {}", new_path), "info");
+        crate::scanner::emit_tool_log(
+            &app_handle,
+            TOOL_NAME,
+            &format!("开始分析 (新项目模式) → {}", new_path),
+            "info",
+        );
     } else {
-        crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, &format!("开始分析 {} → {}", old_path, new_path), "info");
+        crate::scanner::emit_tool_log(
+            &app_handle,
+            TOOL_NAME,
+            &format!("开始分析 {} → {}", old_path, new_path),
+            "info",
+        );
     }
 
     let log_app = app_handle.clone();
@@ -1483,8 +1588,12 @@ pub async fn code_count_analyze(
                 &format!(
                     "分析完成: {} 个文件有变更, 代码 +{} -{} ~{}, 注释 +{} -{} ~{}",
                     r.files.len(),
-                    r.summary.code_added, r.summary.code_deleted, r.summary.code_modified,
-                    r.summary.comment_added, r.summary.comment_deleted, r.summary.comment_modified,
+                    r.summary.code_added,
+                    r.summary.code_deleted,
+                    r.summary.code_modified,
+                    r.summary.comment_added,
+                    r.summary.comment_deleted,
+                    r.summary.comment_modified,
                 ),
                 "success",
             );
@@ -1493,7 +1602,12 @@ pub async fn code_count_analyze(
             crate::scanner::emit_tool_log(&log_app, TOOL_NAME, "分析已取消", "info");
         }
         Err(e) => {
-            crate::scanner::emit_tool_log(&log_app, TOOL_NAME, &format!("分析失败: {}", e), "error");
+            crate::scanner::emit_tool_log(
+                &log_app,
+                TOOL_NAME,
+                &format!("分析失败: {}", e),
+                "error",
+            );
         }
     }
 
@@ -1503,7 +1617,9 @@ pub async fn code_count_analyze(
 #[tauri::command]
 pub async fn code_count_cancel(app_handle: AppHandle) -> Result<(), String> {
     let state = app_handle.state::<crate::AppState>();
-    state.code_count_should_cancel.store(true, Ordering::Relaxed);
+    state
+        .code_count_should_cancel
+        .store(true, Ordering::Relaxed);
     crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, "正在取消分析...", "info");
     Ok(())
 }

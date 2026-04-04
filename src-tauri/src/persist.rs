@@ -11,10 +11,7 @@ pub struct UiState {
 }
 
 #[tauri::command]
-pub fn save_ui_state(
-    app_handle: tauri::AppHandle,
-    logs: Vec<Value>,
-) -> Result<(), String> {
+pub fn save_ui_state(app_handle: tauri::AppHandle, logs: Vec<Value>) -> Result<(), String> {
     let state = UiState { logs };
     let path = get_ui_state_path(&app_handle);
     if let Some(parent) = path.parent() {
@@ -95,10 +92,9 @@ mod tests {
 
     #[test]
     fn ui_state_ignores_legacy_task_records_field() {
-        let parsed: UiState = serde_json::from_str(
-            r#"{"logs":[{"msg":"ok"}],"task_records":[{"id":"legacy-row"}]}"#,
-        )
-        .unwrap();
+        let parsed: UiState =
+            serde_json::from_str(r#"{"logs":[{"msg":"ok"}],"task_records":[{"id":"legacy-row"}]}"#)
+                .unwrap();
 
         assert_eq!(parsed.logs.len(), 1);
     }

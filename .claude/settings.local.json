@@ -24,7 +24,9 @@
       "Bash(python3 ./.trellis/scripts/task.py create \"brainstorm: lan-file-share 局域网文件共享工具\" --slug lan-file-share-brainstorm)",
       "Bash(pnpm add:*)",
       "Bash(npx tauri:*)",
-      "Bash(cmd /c \"pnpm tauri:build:versioned-exe\")"
+      "Bash(cmd /c \"pnpm tauri:build:versioned-exe\")",
+      "Bash(cargo build:*)",
+      "Bash(grep -n \"flex flex-1 flex-col\" c:/WorkSpace/File-Sync-Tool/src/pages/*.vue)"
     ]
   }
 }
