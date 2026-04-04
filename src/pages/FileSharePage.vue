@@ -1,8 +1,23 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { Share2, Copy, QrCode, Plus, Trash2, Wifi, Clock, Play, Square, FolderOpen, ChevronDown, ChevronUp } from 'lucide-vue-next';
+import {
+  Share2,
+  Copy,
+  QrCode,
+  Plus,
+  Trash2,
+  Wifi,
+  Clock,
+  Play,
+  Square,
+  FolderOpen,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+} from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import QRCode from 'qrcode';
 import {
   fileSharePickDirectory,
@@ -18,7 +33,6 @@ defineOptions({ name: 'FileSharePage' });
 
 const { t } = useI18n();
 
-// ─── State ───
 const sharedDirs = ref<SharedDir[]>([]);
 const port = ref(9800);
 const passwordEnabled = ref(false);
@@ -31,61 +45,65 @@ const errorMsg = ref('');
 const copiedUrl = ref(false);
 const showQr = ref(false);
 const showAltUrls = ref(false);
+const showConnectionDetails = ref(false);
 
 const status = ref<FileShareStatus>({
   is_active: false,
-  download_count: 0,
+  connection_count: 0,
   uptime_secs: 0,
   server_url: '',
   all_urls: [],
   shared_dirs: [],
+  connected_ips: [],
 });
 
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
 const qrCanvas = ref<HTMLCanvasElement | null>(null);
 
-// ─── Computed ───
 const formattedUptime = computed(() => {
-  const s = status.value.uptime_secs;
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  const seconds = status.value.uptime_secs;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 });
 
-const altUrls = computed(() => (status.value.all_urls || []).filter((u) => u !== serverUrl.value));
+const altUrls = computed(() => (status.value.all_urls || []).filter((url) => url !== serverUrl.value));
+const connectedIps = computed(() => status.value.connected_ips || []);
+const connectionCount = computed(() => status.value.connection_count ?? connectedIps.value.length);
 
-// ─── QR Code rendering ───
 watch([showQr, serverUrl], async ([show, url]) => {
-  if (!show || !url) return;
-  await nextTick();
-  if (qrCanvas.value) {
-    await QRCode.toCanvas(qrCanvas.value, url, {
-      width: 128,
-      margin: 1,
-      color: { dark: '#1e293b', light: '#ffffff' },
-    });
+  if (!show || !url) {
+    return;
   }
+  await nextTick();
+  if (!qrCanvas.value) {
+    return;
+  }
+  await QRCode.toCanvas(qrCanvas.value, url, {
+    width: 128,
+    margin: 1,
+    color: { dark: '#0f766e', light: '#ffffff' },
+  });
 });
 
-// ─── Actions ───
 async function pickDirectory() {
   try {
-    const dir = await fileSharePickDirectory();
-    if (dir) {
-      // Deduplicate by path
-      if (!sharedDirs.value.some((d) => d.path === dir.path)) {
-        // Ensure alias is unique
-        let alias = dir.alias;
-        let counter = 1;
-        while (sharedDirs.value.some((d) => d.alias === alias)) {
-          alias = `${dir.alias}-${counter++}`;
-        }
-        sharedDirs.value.push({ ...dir, alias });
-      }
+    const directory = await fileSharePickDirectory();
+    if (!directory) {
+      return;
     }
-  } catch (e) {
-    errorMsg.value = String(e);
+    if (sharedDirs.value.some((dir) => dir.path === directory.path)) {
+      return;
+    }
+    let alias = directory.alias;
+    let counter = 1;
+    while (sharedDirs.value.some((dir) => dir.alias === alias)) {
+      alias = `${directory.alias}-${counter++}`;
+    }
+    sharedDirs.value.push({ ...directory, alias });
+  } catch (error) {
+    errorMsg.value = String(error);
   }
 }
 
@@ -105,8 +123,9 @@ async function startShare() {
     const url = await fileShareStart(config);
     serverUrl.value = url;
     isActive.value = true;
-  } catch (e: any) {
-    errorMsg.value = t('tools.fileShare.errStartFailed', { error: String(e) });
+    showConnectionDetails.value = false;
+  } catch (error) {
+    errorMsg.value = t('tools.fileShare.errStartFailed', { error: String(error) });
   } finally {
     isStarting.value = false;
   }
@@ -115,19 +134,19 @@ async function startShare() {
 async function stopShare() {
   try {
     await fileShareStop();
-  } catch (_) {
-    // ignore
-  }
+  } catch {}
   isActive.value = false;
   serverUrl.value = '';
   showQr.value = false;
+  showConnectionDetails.value = false;
   status.value = {
     is_active: false,
-    download_count: 0,
+    connection_count: 0,
     uptime_secs: 0,
     server_url: '',
     all_urls: [],
     shared_dirs: [],
+    connected_ips: [],
   };
 }
 
@@ -135,39 +154,49 @@ async function copyUrl() {
   try {
     await navigator.clipboard.writeText(serverUrl.value);
     copiedUrl.value = true;
-    setTimeout(() => (copiedUrl.value = false), 1800);
-  } catch (_) {
-    // ignore
-  }
+    setTimeout(() => {
+      copiedUrl.value = false;
+    }, 1800);
+  } catch {}
 }
 
 async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text);
-  } catch (_) {}
+  } catch {}
+}
+
+async function openInBrowser() {
+  if (!serverUrl.value) {
+    return;
+  }
+  try {
+    await invoke('open_url', { url: serverUrl.value });
+  } catch {}
 }
 
 function addLog(level: string, message: string) {
   const now = new Date();
   const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
   logs.value.unshift({ level, message, time });
-  if (logs.value.length > 50) logs.value.length = 50;
+  if (logs.value.length > 50) {
+    logs.value.length = 50;
+  }
 }
 
-// ─── Event Listeners ───
 let unlistenStatus: UnlistenFn | null = null;
 let unlistenLog: UnlistenFn | null = null;
 
 onMounted(async () => {
   try {
-    const s = await fileShareGetStatus();
-    if (s.is_active) {
+    const currentStatus = await fileShareGetStatus();
+    if (currentStatus.is_active) {
       isActive.value = true;
-      serverUrl.value = s.server_url;
-      sharedDirs.value = s.shared_dirs;
-      status.value = s;
+      serverUrl.value = currentStatus.server_url;
+      sharedDirs.value = currentStatus.shared_dirs;
+      status.value = currentStatus;
     }
-  } catch (_) {}
+  } catch {}
 
   unlistenStatus = await listen<FileShareStatus>('file-share-status', (event) => {
     status.value = event.payload;
@@ -175,11 +204,11 @@ onMounted(async () => {
       isActive.value = true;
       serverUrl.value = event.payload.server_url;
     }
-    // Server stopped unexpectedly (e.g. crash) — sync frontend state
-    if (!event.payload.is_active && isActive.value) {
+    if (!event.payload.is_active) {
       isActive.value = false;
       serverUrl.value = '';
       showQr.value = false;
+      showConnectionDetails.value = false;
     }
   });
 
@@ -196,262 +225,402 @@ onUnmounted(() => {
 
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-gradient-to-br from-slate-50 to-slate-100">
-    <div class="mx-auto w-full max-w-6xl space-y-5 p-6 pb-10">
-
-      <!-- Header -->
-      <div class="flex items-center gap-3">
-        <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500 to-teal-600 shadow-sm">
-          <Share2 class="h-5 w-5 text-white" />
+    <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-6 pb-10">
+      <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div class="flex items-start gap-3">
+          <div class="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-teal-500 to-cyan-600 shadow-sm">
+            <Share2 class="h-5 w-5 text-white" />
+            <span
+              v-if="isActive"
+              class="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-white bg-emerald-500"
+            >
+              <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
+            </span>
+          </div>
+          <div>
+            <h1 class="text-2xl font-bold text-slate-900">{{ t('sidebar.fileShare') }}</h1>
+            <p class="mt-1 text-sm text-slate-500">
+              {{ isActive ? serverUrl : t('tools.fileShare.emptyPlaceholder') }}
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 class="text-2xl font-bold text-slate-900">{{ t('sidebar.fileShare') }}</h1>
+        <div
+          class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm"
+          :class="isActive ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'"
+        >
+          <span class="h-2 w-2 rounded-full" :class="isActive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'"></span>
+          {{ isActive ? t('tools.fileShare.statusActive') : t('tools.fileShare.statusIdle') }}
         </div>
       </div>
 
-      <!-- Main Card -->
-      <div class="overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-sm">
-        <div class="grid grid-cols-1 divide-y lg:grid-cols-5 lg:divide-x lg:divide-y-0">
+      <div class="grid grid-cols-1 gap-5 lg:grid-cols-5">
+        <div class="space-y-4 lg:col-span-3">
+          <div class="fs-card">
+            <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <p class="fs-section-label !mb-0">{{ t('tools.fileShare.sharedDirs') }}</p>
+              <button
+                type="button"
+                :disabled="isActive"
+                @click="pickDirectory"
+                class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-sm font-semibold text-teal-700 shadow-sm transition hover:border-teal-300 hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Plus class="h-4 w-4" />
+                {{ t('tools.fileShare.addDir') }}
+              </button>
+            </div>
 
-          <!-- Left: Config -->
-          <div class="col-span-3 space-y-5 p-5">
+            <div
+              v-if="sharedDirs.length === 0"
+              class="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center"
+            >
+              <FolderOpen class="mb-3 h-8 w-8 text-slate-300" />
+              <p class="text-sm text-slate-500">{{ t('tools.fileShare.noDirs') }}</p>
+            </div>
 
-            <!-- Shared Dirs -->
-            <div>
-              <div class="mb-2 flex items-center justify-between">
-                <label class="text-sm font-medium text-slate-700">{{ t('tools.fileShare.sharedDirs') }}</label>
+            <div v-else class="space-y-2">
+              <div
+                v-for="(dir, index) in sharedDirs"
+                :key="dir.path"
+                class="group flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 transition hover:border-teal-200 hover:bg-white"
+              >
+                <div class="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-teal-50 text-teal-600">
+                  <FolderOpen class="h-4 w-4" />
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="mb-1 flex items-center gap-2">
+                    <span class="rounded-md bg-teal-100 px-2 py-0.5 font-mono text-xs font-semibold text-teal-700">
+                      {{ dir.alias }}
+                    </span>
+                  </div>
+                  <div class="truncate text-xs text-slate-500" :title="dir.path">{{ dir.path }}</div>
+                </div>
                 <button
+                  v-if="!isActive"
                   type="button"
-                  :disabled="isActive"
-                  @click="pickDirectory"
-                  class="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                  @click="removeDir(index)"
+                  class="rounded-lg p-2 text-slate-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100"
+                  :title="t('tools.fileShare.removeDir')"
                 >
-                  <Plus class="h-3.5 w-3.5" />
-                  {{ t('tools.fileShare.addDir') }}
+                  <Trash2 class="h-4 w-4" />
                 </button>
               </div>
-
-              <!-- Empty state -->
-              <div
-                v-if="sharedDirs.length === 0"
-                class="flex items-center gap-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm text-slate-400"
-              >
-                <FolderOpen class="h-5 w-5 shrink-0 text-slate-300" />
-                {{ t('tools.fileShare.noDirs') }}
-              </div>
-
-              <!-- Dir list -->
-              <div v-else class="space-y-2">
-                <div
-                  v-for="(dir, i) in sharedDirs"
-                  :key="dir.path"
-                  class="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5"
-                >
-                  <FolderOpen class="mt-0.5 h-4 w-4 shrink-0 text-cyan-500" />
-                  <div class="min-w-0 flex-1">
-                    <div class="flex items-center gap-2">
-                      <span class="text-xs font-semibold text-slate-500 uppercase tracking-wide">{{ t('tools.fileShare.aliasLabel') }}</span>
-                      <span class="rounded bg-cyan-50 px-1.5 py-0.5 text-xs font-mono font-bold text-cyan-700 border border-cyan-200">{{ dir.alias }}</span>
-                    </div>
-                    <div class="mt-0.5 truncate text-xs text-slate-500" :title="dir.path">{{ dir.path }}</div>
-                  </div>
-                  <button
-                    v-if="!isActive"
-                    type="button"
-                    @click="removeDir(i)"
-                    class="shrink-0 rounded p-1 text-slate-400 transition hover:bg-red-50 hover:text-red-500"
-                    :title="t('tools.fileShare.removeDir')"
-                  >
-                    <Trash2 class="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
             </div>
-
-            <!-- Port + Password -->
-            <div class="grid grid-cols-2 gap-4">
-              <div>
-                <label class="mb-1.5 block text-sm font-medium text-slate-700">{{ t('tools.fileShare.port') }}</label>
-                <input
-                  v-model.number="port"
-                  type="number"
-                  min="1024"
-                  max="65535"
-                  :disabled="isActive"
-                  class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 transition focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-50"
-                >
-                <p class="mt-1 text-xs text-slate-400">{{ t('tools.fileShare.portHint') }}</p>
-              </div>
-              <div>
-                <label class="mb-1.5 flex items-center gap-2 text-sm font-medium text-slate-700">
-                  <input
-                    v-model="passwordEnabled"
-                    type="checkbox"
-                    :disabled="isActive"
-                    class="h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
-                  >
-                  {{ t('tools.fileShare.passwordToggle') }}
-                </label>
-                <input
-                  v-if="passwordEnabled"
-                  v-model="password"
-                  type="password"
-                  :disabled="isActive"
-                  :placeholder="t('tools.fileShare.passwordInput')"
-                  class="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 transition focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 disabled:opacity-50"
-                >
-              </div>
-            </div>
-
-            <!-- Error -->
-            <div
-              v-if="errorMsg"
-              class="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600"
-            >
-              {{ errorMsg }}
-            </div>
-
-            <!-- Start / Stop -->
-            <button
-              v-if="!isActive"
-              type="button"
-              @click="startShare"
-              :disabled="isStarting || sharedDirs.length === 0"
-              class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-600 to-teal-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-500/25 transition hover:from-cyan-700 hover:to-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Play class="h-4 w-4" />
-              {{ isStarting ? t('tools.fileShare.starting') : t('tools.fileShare.startShare') }}
-            </button>
-            <button
-              v-else
-              type="button"
-              @click="stopShare"
-              class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-red-500 to-rose-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-red-500/25 transition hover:from-red-600 hover:to-rose-700"
-            >
-              <Square class="h-4 w-4" />
-              {{ t('tools.fileShare.stopShare') }}
-            </button>
           </div>
 
-          <!-- Right: Status Panel -->
-          <div class="col-span-2 flex flex-col bg-slate-50/50 p-5">
-            <!-- Status indicator -->
-            <div class="mb-4 flex items-center gap-2">
-              <div
-                class="h-2.5 w-2.5 rounded-full"
-                :class="isActive
-                  ? 'bg-cyan-500 shadow-[0_0_6px_rgba(6,182,212,0.5)] animate-pulse'
-                  : 'bg-slate-300'"
-              ></div>
-              <span
-                class="text-sm font-semibold"
-                :class="isActive ? 'text-cyan-600' : 'text-slate-400'"
+          <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div class="fs-card">
+              <p class="fs-section-label">{{ t('tools.fileShare.port') }}</p>
+              <input
+                v-model.number="port"
+                type="number"
+                min="1024"
+                max="65535"
+                :disabled="isActive"
+                class="fs-input w-full"
               >
-                {{ isActive ? t('tools.fileShare.statusActive') : t('tools.fileShare.statusIdle') }}
-              </span>
+              <p class="mt-2 text-xs text-slate-500">{{ t('tools.fileShare.portHint') }}</p>
             </div>
 
-            <!-- Active: URL + Stats -->
-            <template v-if="isActive && serverUrl">
-              <!-- Access URL -->
-              <div class="mb-4">
-                <label class="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-400">
-                  {{ t('tools.fileShare.accessUrl') }}
+            <div class="fs-card">
+              <div class="mb-3 flex items-center justify-between gap-3">
+                <p class="fs-section-label !mb-0">{{ t('tools.fileShare.passwordToggle') }}</p>
+                <label class="fs-toggle">
+                  <input v-model="passwordEnabled" type="checkbox" :disabled="isActive" class="sr-only">
+                  <span class="fs-toggle-track" :class="passwordEnabled ? 'bg-teal-600' : 'bg-slate-300'">
+                    <span class="fs-toggle-thumb" :class="passwordEnabled ? 'translate-x-4' : 'translate-x-0'"></span>
+                  </span>
                 </label>
-                <div class="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
-                  <code class="flex-1 truncate text-sm font-bold text-cyan-600">{{ serverUrl }}</code>
-                  <button
-                    type="button"
-                    @click="copyUrl"
-                    class="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-                    :title="t('tools.fileShare.copyUrl')"
-                    aria-label="Copy URL"
-                  >
-                    <Copy class="h-4 w-4" :class="copiedUrl ? 'text-cyan-500' : ''" />
-                  </button>
-                  <button
-                    type="button"
-                    @click="showQr = !showQr"
-                    class="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-                    :title="showQr ? t('tools.fileShare.hideQrCode') : t('tools.fileShare.showQrCode')"
-                    aria-label="Toggle QR Code"
-                  >
-                    <QrCode class="h-4 w-4" />
-                  </button>
-                </div>
-                <p v-if="copiedUrl" class="mt-1 text-xs text-cyan-500">{{ t('tools.fileShare.copied') }}</p>
-                <p v-else class="mt-1 text-xs text-slate-400">{{ t('tools.fileShare.qrCodeHint') }}</p>
               </div>
+              <input
+                v-if="passwordEnabled"
+                v-model="password"
+                type="password"
+                :disabled="isActive"
+                :placeholder="t('tools.fileShare.passwordInput')"
+                class="fs-input w-full"
+              >
+              <div v-else class="flex h-10 items-center rounded-lg border border-dashed border-slate-200 px-3 text-sm text-slate-400">
+                --
+              </div>
+            </div>
+          </div>
 
-              <!-- QR Code Canvas -->
-              <div v-if="showQr" class="mb-4 flex justify-center">
-                <div class="rounded-lg border border-slate-200 bg-white p-2">
+          <div v-if="errorMsg" class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600 shadow-sm">
+            {{ errorMsg }}
+          </div>
+
+          <button
+            v-if="!isActive"
+            type="button"
+            @click="startShare"
+            :disabled="isStarting || sharedDirs.length === 0"
+            class="w-full rounded-xl bg-gradient-to-r from-teal-600 to-cyan-600 px-6 py-3.5 text-sm font-semibold text-white shadow-sm transition hover:from-teal-700 hover:to-cyan-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <span class="flex items-center justify-center gap-2">
+              <Play class="h-4 w-4" />
+              {{ isStarting ? t('tools.fileShare.starting') : t('tools.fileShare.startShare') }}
+            </span>
+          </button>
+          <button
+            v-else
+            type="button"
+            @click="stopShare"
+            class="w-full rounded-xl border border-red-200 bg-red-50 px-6 py-3.5 text-sm font-semibold text-red-600 shadow-sm transition hover:border-red-300 hover:bg-red-100"
+          >
+            <span class="flex items-center justify-center gap-2">
+              <Square class="h-4 w-4" />
+              {{ t('tools.fileShare.stopShare') }}
+            </span>
+          </button>
+        </div>
+
+        <div class="space-y-4 lg:col-span-2">
+          <template v-if="isActive && serverUrl">
+            <div class="fs-card">
+              <p class="fs-section-label">{{ t('tools.fileShare.accessUrl') }}</p>
+              <div class="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <code class="flex-1 truncate font-mono text-sm font-semibold text-teal-700">{{ serverUrl }}</code>
+                <button
+                  type="button"
+                  @click="copyUrl"
+                  class="fs-icon-button"
+                  :title="t('tools.fileShare.copyUrl')"
+                  aria-label="Copy URL"
+                >
+                  <Copy class="h-4 w-4" :class="copiedUrl ? 'text-teal-600' : ''" />
+                </button>
+                <button
+                  type="button"
+                  @click="showQr = !showQr"
+                  class="fs-icon-button"
+                  :title="showQr ? t('tools.fileShare.hideQrCode') : t('tools.fileShare.showQrCode')"
+                  aria-label="Toggle QR Code"
+                >
+                  <QrCode class="h-4 w-4" :class="showQr ? 'text-teal-600' : ''" />
+                </button>
+                <button type="button" @click="openInBrowser" class="fs-icon-button" title="Open in browser">
+                  <ExternalLink class="h-4 w-4" />
+                </button>
+              </div>
+              <p v-if="copiedUrl" class="mt-2 text-xs text-teal-600">{{ t('tools.fileShare.copied') }}</p>
+              <p v-else class="mt-2 text-xs text-slate-500">{{ t('tools.fileShare.qrCodeHint') }}</p>
+
+              <div v-if="showQr" class="mt-4 flex justify-center">
+                <div class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
                   <canvas ref="qrCanvas" width="128" height="128" />
                 </div>
               </div>
 
-              <!-- Alt URLs -->
-              <div v-if="altUrls.length > 0" class="mb-4">
-                <button @click="showAltUrls = !showAltUrls" class="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-slate-600">
-                  <component :is="showAltUrls ? ChevronUp : ChevronDown" class="h-3 w-3" />
+              <div v-if="altUrls.length > 0" class="mt-4">
+                <button type="button" @click="showAltUrls = !showAltUrls" class="fs-inline-button">
+                  <component :is="showAltUrls ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />
                   {{ t('tools.fileShare.altUrls', { n: altUrls.length }) }}
                 </button>
-                <div v-if="showAltUrls" class="mt-1 space-y-1">
-                  <div v-for="url in altUrls" :key="url" class="flex items-center gap-1 rounded bg-slate-100 px-2 py-1 text-xs text-slate-500">
-                    <code class="flex-1 truncate">{{ url }}</code>
-                    <button @click="copyText(url)" class="shrink-0 text-slate-400 hover:text-slate-600">
-                      <Copy class="h-3 w-3" />
+                <div v-if="showAltUrls" class="mt-3 space-y-2">
+                  <div
+                    v-for="url in altUrls"
+                    :key="url"
+                    class="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"
+                  >
+                    <code class="flex-1 truncate font-mono text-xs text-slate-600">{{ url }}</code>
+                    <button type="button" @click="copyText(url)" class="text-slate-400 transition hover:text-teal-600">
+                      <Copy class="h-3.5 w-3.5" />
                     </button>
                   </div>
                 </div>
               </div>
+            </div>
 
-              <!-- Stats -->
-              <div class="grid grid-cols-2 gap-3">
-                <div class="rounded-lg border border-slate-200 bg-white p-3">
-                  <div class="flex items-center gap-2 text-slate-400">
-                    <Wifi class="h-3.5 w-3.5" />
-                    <span class="text-xs">{{ t('tools.fileShare.downloadCount') }}</span>
+            <div class="grid grid-cols-1 gap-3">
+              <div class="fs-stat-card">
+                <div class="mb-3 flex items-start justify-between gap-3">
+                  <div class="flex items-center gap-2 text-slate-500">
+                    <Wifi class="h-4 w-4 text-teal-600" />
+                    <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">
+                      {{ t('tools.fileShare.connectionCount') }}
+                    </span>
                   </div>
-                  <div class="mt-1 text-xl font-bold text-slate-800">{{ status.download_count }}</div>
+                  <button type="button" class="fs-detail-button" @click="showConnectionDetails = !showConnectionDetails">
+                    {{ t('tools.fileShare.connectionDetails') }}
+                    <component :is="showConnectionDetails ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />
+                  </button>
                 </div>
-                <div class="rounded-lg border border-slate-200 bg-white p-3">
-                  <div class="flex items-center gap-2 text-slate-400">
-                    <Clock class="h-3.5 w-3.5" />
-                    <span class="text-xs">{{ t('tools.fileShare.uptime') }}</span>
-                  </div>
-                  <div class="mt-1 text-xl font-bold tabular-nums text-slate-800">{{ formattedUptime }}</div>
+                <div class="font-mono text-3xl font-bold text-slate-900">{{ connectionCount }}</div>
+              </div>
+
+              <div class="fs-stat-card">
+                <div class="mb-2 flex items-center gap-2 text-slate-500">
+                  <Clock class="h-4 w-4 text-teal-600" />
+                  <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">{{ t('tools.fileShare.uptime') }}</span>
+                </div>
+                <div class="font-mono text-2xl font-bold text-slate-900">{{ formattedUptime }}</div>
+              </div>
+            </div>
+
+            <div v-if="showConnectionDetails" class="fs-card">
+              <div class="mb-3">
+                <h3 class="text-sm font-semibold text-slate-900">{{ t('tools.fileShare.connectedIpList') }}</h3>
+                <p class="text-xs text-slate-500">{{ t('tools.fileShare.connectionCount') }}: {{ connectionCount }}</p>
+              </div>
+              <div v-if="connectedIps.length > 0" class="space-y-2">
+                <div
+                  v-for="ip in connectedIps"
+                  :key="ip"
+                  class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-700"
+                >
+                  {{ ip }}
                 </div>
               </div>
-            </template>
-
-            <!-- Idle placeholder -->
-            <template v-else>
-              <div class="flex flex-1 items-center justify-center">
-                <div class="text-center text-slate-300">
-                  <Share2 class="mx-auto mb-2 h-12 w-12 opacity-40" />
-                  <p class="text-sm">{{ t('tools.fileShare.emptyPlaceholder') }}</p>
-                </div>
+              <div v-else class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-400">
+                {{ t('tools.fileShare.noConnections') }}
               </div>
-            </template>
+            </div>
+          </template>
 
-            <!-- Logs -->
-            <div v-if="logs.length > 0" class="mt-4 border-t border-slate-200 pt-3">
-              <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                {{ t('tools.fileShare.logTitle') }}
-              </h3>
-              <div class="max-h-36 space-y-1 overflow-y-auto">
-                <div v-for="(log, i) in logs" :key="i" class="flex gap-2 text-xs">
-                  <span class="shrink-0 font-mono text-slate-400">{{ log.time }}</span>
-                  <span :class="log.level === 'error' ? 'text-red-500' : 'text-slate-600'">
-                    {{ log.message }}
-                  </span>
-                </div>
+          <template v-else>
+            <div class="flex min-h-56 flex-col items-center justify-center rounded-xl border border-slate-200/80 bg-white p-8 text-center shadow-sm">
+              <div class="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-teal-50 text-teal-600">
+                <Share2 class="h-7 w-7" />
+              </div>
+              <p class="text-sm text-slate-500">{{ t('tools.fileShare.emptyPlaceholder') }}</p>
+            </div>
+          </template>
+
+          <div v-if="logs.length > 0" class="fs-card">
+            <h3 class="fs-section-label">{{ t('tools.fileShare.logTitle') }}</h3>
+            <div class="max-h-48 space-y-2 overflow-y-auto">
+              <div v-for="(log, index) in logs" :key="index" class="flex gap-3 text-xs">
+                <span class="shrink-0 font-mono text-slate-400">{{ log.time }}</span>
+                <span :class="log.level === 'error' ? 'text-red-600' : 'text-slate-600'">{{ log.message }}</span>
               </div>
             </div>
           </div>
-
         </div>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.fs-card {
+  border: 1px solid rgb(226 232 240 / 0.8);
+  border-radius: 0.75rem;
+  background: white;
+  padding: 1.25rem;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
+}
+
+.fs-stat-card {
+  border: 1px solid rgb(226 232 240 / 0.8);
+  border-radius: 0.75rem;
+  background: white;
+  padding: 1rem;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
+}
+
+.fs-section-label {
+  margin-bottom: 1rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgb(100 116 139);
+}
+
+.fs-input {
+  border: 1px solid rgb(203 213 225);
+  border-radius: 0.75rem;
+  background: white;
+  padding: 0.65rem 0.9rem;
+  font-size: 0.875rem;
+  color: rgb(15 23 42);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.fs-input:focus {
+  border-color: rgb(13 148 136);
+  box-shadow: 0 0 0 3px rgb(13 148 136 / 0.12);
+}
+
+.fs-input:disabled {
+  cursor: not-allowed;
+  background-color: rgb(248 250 252);
+  color: rgb(148 163 184);
+}
+
+.fs-toggle {
+  position: relative;
+  display: inline-flex;
+}
+
+.fs-toggle-track {
+  display: block;
+  height: 20px;
+  width: 36px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  transition: background-color 0.2s ease;
+}
+
+.fs-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  height: 16px;
+  width: 16px;
+  border-radius: 9999px;
+  background: white;
+  box-shadow: 0 1px 3px rgb(15 23 42 / 0.2);
+  transition: transform 0.2s ease;
+}
+
+.fs-icon-button {
+  border: 1px solid rgb(226 232 240);
+  border-radius: 0.65rem;
+  background: white;
+  padding: 0.45rem;
+  color: rgb(100 116 139);
+  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.fs-icon-button:hover {
+  border-color: rgb(153 246 228);
+  background: rgb(240 253 250);
+  color: rgb(13 148 136);
+}
+
+.fs-inline-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgb(100 116 139);
+  transition: color 0.15s ease;
+}
+
+.fs-inline-button:hover {
+  color: rgb(13 148 136);
+}
+
+.fs-detail-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 9999px;
+  background: rgb(248 250 252);
+  padding: 0.35rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgb(71 85 105);
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.fs-detail-button:hover {
+  border-color: rgb(153 246 228);
+  background: rgb(240 253 250);
+  color: rgb(13 148 136);
+}
+</style>

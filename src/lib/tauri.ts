@@ -672,11 +672,19 @@ export async function sendWol(request: WolRequest): Promise<WolResult> {
 
 export interface ScreenShareConfig {
   port: number;
+  username: string | null;
   password: string | null;
   monitor_index: number;
   quality: number;
   fps: number;
   show_cursor: boolean;
+  /** Bind address: "0.0.0.0" for all interfaces, or a specific IP. */
+  bind_address?: string | null;
+}
+
+export interface NetworkInterfaceInfo {
+  name: string;
+  ip: string;
 }
 
 export interface MonitorInfo {
@@ -690,15 +698,21 @@ export interface MonitorInfo {
 export interface ScreenShareStatus {
   is_active: boolean;
   viewer_count: number;
+  connection_count: number;
   fps_actual: number;
   bitrate_kbps: number;
   uptime_secs: number;
   server_url: string;
   all_urls: string[];
+  connected_ips: string[];
 }
 
 export async function screenShareListMonitors(): Promise<MonitorInfo[]> {
   return await invoke<MonitorInfo[]>('screen_share_list_monitors');
+}
+
+export async function screenShareListInterfaces(): Promise<NetworkInterfaceInfo[]> {
+  return await invoke<NetworkInterfaceInfo[]>('screen_share_list_interfaces');
 }
 
 export async function screenShareStart(config: ScreenShareConfig): Promise<string> {
@@ -728,11 +742,12 @@ export interface FileShareConfig {
 
 export interface FileShareStatus {
   is_active: boolean;
-  download_count: number;
+  connection_count: number;
   uptime_secs: number;
   server_url: string;
   all_urls: string[];
   shared_dirs: SharedDir[];
+  connected_ips: string[];
 }
 
 export async function fileSharePickDirectory(): Promise<SharedDir | null> {
