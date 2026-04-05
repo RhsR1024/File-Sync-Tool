@@ -93,6 +93,7 @@ impl TaskManager {
         manager
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new_in_memory() -> Self {
         Self {
             inner: Arc::new(TaskManagerInner {

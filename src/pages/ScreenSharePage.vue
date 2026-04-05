@@ -114,7 +114,9 @@ async function loadMonitors() {
 async function loadInterfaces() {
   try {
     interfaces.value = await screenShareListInterfaces();
-  } catch {}
+  } catch {
+    /* Ignore optional interface listing failures. */
+  }
 }
 
 const KV_KEY = 'screen_share_settings';
@@ -151,7 +153,9 @@ async function saveSettings() {
         autoStart: autoStart.value,
       } satisfies SavedSettings,
     });
-  } catch {}
+  } catch {
+    /* Persisting settings is best-effort for this page. */
+  }
 }
 
 async function loadSettings() {
@@ -171,7 +175,9 @@ async function loadSettings() {
     selectedMonitor.value = saved.selectedMonitor ?? 0;
     selectedBindAddress.value = saved.selectedBindAddress ?? '0.0.0.0';
     autoStart.value = saved.autoStart ?? false;
-  } catch {}
+  } catch {
+    /* Ignore malformed legacy saved settings. */
+  }
 }
 
 async function startShare() {
@@ -203,7 +209,9 @@ async function startShare() {
 async function stopShare() {
   try {
     await screenShareStop();
-  } catch {}
+  } catch {
+    /* Ignore stop errors while resetting local state. */
+  }
   isActive.value = false;
   serverUrl.value = '';
   showQr.value = false;
@@ -228,13 +236,17 @@ async function copyUrl() {
     setTimeout(() => {
       copiedUrl.value = false;
     }, 1800);
-  } catch {}
+  } catch {
+    /* Clipboard access can fail in restricted environments. */
+  }
 }
 
 async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text);
-  } catch {}
+  } catch {
+    /* Clipboard access can fail in restricted environments. */
+  }
 }
 
 async function openInBrowser() {
@@ -243,7 +255,9 @@ async function openInBrowser() {
   }
   try {
     await invoke('open_url', { url: serverUrl.value });
-  } catch {}
+  } catch {
+    /* Opening the system browser is best-effort. */
+  }
 }
 
 function addLog(level: string, message: string) {
@@ -285,7 +299,9 @@ onMounted(async () => {
       serverUrl.value = currentStatus.server_url;
       status.value = currentStatus;
     }
-  } catch {}
+  } catch {
+    /* Ignore status probe failures during page bootstrap. */
+  }
 
   if (autoStart.value && !isActive.value && monitors.value.length > 0) {
     await startShare();

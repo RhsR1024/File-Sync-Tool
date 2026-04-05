@@ -1,53 +1,115 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import {
-  Share2,
   Copy,
-  QrCode,
-  Plus,
-  Trash2,
-  Wifi,
-  Clock,
+  ExternalLink,
+  KeyRound,
   Play,
+  Plus,
   Power,
-  FolderOpen,
+  QrCode,
+  RefreshCw,
+  Save,
+  Share2,
+  Trash2,
   ChevronDown,
   ChevronUp,
-  ExternalLink,
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import QRCode from 'qrcode';
 import {
-  fileSharePickDirectory,
-  fileShareStart,
-  fileShareStop,
   fileShareGetStatus,
-  type SharedDir,
-  type FileShareConfig,
+  fileShareLoadSettings,
+  fileSharePickDirectory,
+  fileShareSaveSettings,
+  fileShareStartSaved,
+  fileShareStop,
+  getConfig,
+  saveConfig,
+  type AppConfig,
+  type FileShareAccountSaveRequest,
+  type FileShareAccountView,
+  type FileShareDeleteMode,
+  type FileShareIpFilterMode,
+  type FileSharePermissionPreset,
+  type FileSharePermissionSet,
+  type FileShareRoot,
+  type FileShareSettingsSaveRequest,
+  type FileShareSettingsView,
   type FileShareStatus,
 } from '../lib/tauri';
 
 defineOptions({ name: 'FileSharePage' });
 
+const GUEST = 'guest';
+const MAX_SESSION_TTL_MINUTES = 7 * 24 * 60;
+type PermKey = keyof FileSharePermissionSet;
+type EditAccount = FileShareAccountView & { new_password: string; clear_password: boolean };
+type Draft = Omit<FileShareSettingsView, 'accounts'> & { accounts: EditAccount[] };
+
 const { t } = useI18n();
 
-const sharedDirs = ref<SharedDir[]>([]);
-const port = ref(9800);
-const passwordEnabled = ref(false);
-const password = ref('');
+const permDefs: PermKey[] = [
+  'browse',
+  'download_file',
+  'download_archive',
+  'upload_file',
+  'upload_directory',
+  'create_directory',
+  'create_text',
+  'rename',
+  'delete',
+  'preview_image',
+  'search_current',
+  'search_global',
+];
 
-const isActive = ref(false);
-const isStarting = ref(false);
-const serverUrl = ref('');
-const errorMsg = ref('');
-const copiedUrl = ref(false);
-const showQr = ref(false);
-const showAltUrls = ref(false);
-const showConnectionDetails = ref(false);
+const readOnly = (): FileSharePermissionSet => ({
+  browse: true,
+  download_file: true,
+  download_archive: true,
+  upload_file: false,
+  upload_directory: false,
+  create_directory: false,
+  create_text: false,
+  rename: false,
+  delete: false,
+  preview_image: true,
+  search_current: true,
+  search_global: true,
+});
 
-const status = ref<FileShareStatus>({
+const readWrite = (): FileSharePermissionSet => ({
+  browse: true,
+  download_file: true,
+  download_archive: true,
+  upload_file: true,
+  upload_directory: true,
+  create_directory: true,
+  create_text: true,
+  rename: true,
+  delete: true,
+  preview_image: true,
+  search_current: true,
+  search_global: true,
+});
+
+const clonePerms = (v: FileSharePermissionSet): FileSharePermissionSet => ({ ...v });
+const permsForPreset = (preset: FileSharePermissionPreset) => (preset === 'read_write' ? readWrite() : readOnly());
+const permissionLabel = (key: PermKey) => t(`tools.fileShare.permissions.${key}`);
+const guestView = (): FileShareAccountView => ({
+  id: GUEST,
+  name: t('tools.fileShare.defaultGuestName'),
+  enabled: true,
+  preset: 'read_only',
+  permissions: readOnly(),
+  password_set: false,
+});
+const editAccount = (a: FileShareAccountView): EditAccount => ({ ...a, permissions: clonePerms(a.permissions), new_password: '', clear_password: false });
+
+const blankStatus = (): FileShareStatus => ({
   is_active: false,
   connection_count: 0,
   uptime_secs: 0,
@@ -57,197 +119,352 @@ const status = ref<FileShareStatus>({
   connected_ips: [],
 });
 
-const logs = ref<{ level: string; message: string; time: string }[]>([]);
+const blankDraft = (): Draft => ({
+  port: 8080,
+  roots: [],
+  guest_access_enabled: true,
+  accounts: [editAccount(guestView())],
+  session_ttl_minutes: 30,
+  ip_filter_mode: 'off',
+  ip_rules: [],
+  image_preview_enabled: true,
+  thumbnail_enabled: false,
+  delete_mode: 'recycle_bin',
+  remember_settings: true,
+  auto_start_on_page_open: false,
+  auto_start_with_windows: false,
+});
+
+const toDraft = (view: FileShareSettingsView, cfg: AppConfig | null): Draft => {
+  const accounts = view.accounts.map(editAccount);
+  if (!accounts.some((a) => a.id === GUEST)) accounts.unshift(editAccount(guestView()));
+  const guest = accounts.find((a) => a.id === GUEST);
+  if (guest) guest.enabled = view.guest_access_enabled;
+  return {
+    ...view,
+    roots: view.roots.map((r) => ({ ...r })),
+    accounts,
+    ip_rules: [...view.ip_rules],
+    auto_start_with_windows: cfg?.launch_and_auto_start_file_share ?? view.auto_start_with_windows,
+  };
+};
+
+const slug = (s: string, fallback: string) =>
+  s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || fallback;
+
+const buildReq = (d: Draft): FileShareSettingsSaveRequest => ({
+  port: d.port,
+  roots: d.roots.map((r) => ({ id: r.id.trim(), alias: r.alias.trim(), path: r.path.trim(), enabled: r.enabled })),
+  guest_access_enabled: d.guest_access_enabled,
+  accounts: d.accounts.map((a): FileShareAccountSaveRequest => ({
+    id: a.id.trim(),
+    name: a.name.trim(),
+    enabled: a.id === GUEST ? d.guest_access_enabled : a.enabled,
+    preset: a.preset,
+    permissions: clonePerms(a.permissions),
+    new_password: a.new_password.trim() || null,
+    clear_password: a.clear_password,
+  })),
+  session_ttl_minutes: d.session_ttl_minutes,
+  ip_filter_mode: d.ip_filter_mode,
+  ip_rules: d.ip_rules.map((x) => x.trim()).filter(Boolean),
+  image_preview_enabled: d.image_preview_enabled,
+  thumbnail_enabled: d.thumbnail_enabled,
+  delete_mode: d.delete_mode,
+  remember_settings: d.remember_settings,
+  auto_start_on_page_open: d.auto_start_on_page_open,
+  auto_start_with_windows: d.auto_start_with_windows,
+});
+
+const draft = ref<Draft>(blankDraft());
+const status = ref<FileShareStatus>(blankStatus());
+const appConfig = ref<AppConfig | null>(null);
+const notice = ref('');
+const errorMsg = ref('');
+const newIpRule = ref('');
+const isLoading = ref(true);
+const isSaving = ref(false);
+const isApplying = ref(false);
+const isActive = ref(false);
+const serverUrl = ref('');
+const copied = ref(false);
+const showQr = ref(false);
+const showAltUrls = ref(false);
+const showConnections = ref(false);
 const qrCanvas = ref<HTMLCanvasElement | null>(null);
+const logs = ref<{ level: string; message: string; time: string }[]>([]);
 
-const formattedUptime = computed(() => {
-  const seconds = status.value.uptime_secs;
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+const guest = computed(() => draft.value.accounts.find((a) => a.id === GUEST) ?? null);
+const customAccounts = computed(() => draft.value.accounts.filter((a) => a.id !== GUEST));
+const enabledRoots = computed(() => draft.value.roots.filter((r) => r.enabled));
+const enabledCustomAccounts = computed(() => customAccounts.value.filter((a) => a.enabled));
+const altUrls = computed(() => (status.value.all_urls ?? []).filter((u) => u !== serverUrl.value));
+const connectedIps = computed(() => status.value.connected_ips ?? []);
+const connCount = computed(() => status.value.connection_count ?? connectedIps.value.length);
+const uptime = computed(() => {
+  const sec = status.value.uptime_secs;
+  return `${String(Math.floor(sec / 3600)).padStart(2, '0')}:${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+});
+const presetOpts = computed(() => [
+  { value: 'read_only' as FileSharePermissionPreset, label: t('tools.fileShare.presetReadOnly') },
+  { value: 'read_write' as FileSharePermissionPreset, label: t('tools.fileShare.presetReadWrite') },
+  { value: 'custom' as FileSharePermissionPreset, label: t('tools.fileShare.presetCustom') },
+]);
+const ipOpts = computed(() => [
+  { value: 'off' as FileShareIpFilterMode, label: t('tools.fileShare.ipFilterOff') },
+  { value: 'whitelist' as FileShareIpFilterMode, label: t('tools.fileShare.ipFilterWhitelist') },
+  { value: 'blacklist' as FileShareIpFilterMode, label: t('tools.fileShare.ipFilterBlacklist') },
+]);
+const delOpts = computed(() => [
+  { value: 'recycle_bin' as FileShareDeleteMode, label: t('tools.fileShare.deleteRecycleBin') },
+  { value: 'permanent' as FileShareDeleteMode, label: t('tools.fileShare.deletePermanent') },
+]);
+
+const errors = computed(() => {
+  const out: string[] = [];
+  if (draft.value.port < 1024 || draft.value.port > 65535) out.push(t('tools.fileShare.validation.portRange'));
+  if (draft.value.session_ttl_minutes < 1 || draft.value.session_ttl_minutes > MAX_SESSION_TTL_MINUTES) {
+    out.push(t('tools.fileShare.validation.sessionTtlRange', { max: MAX_SESSION_TTL_MINUTES }));
+  }
+  if (draft.value.ip_filter_mode !== 'off' && draft.value.ip_rules.length === 0) out.push(t('tools.fileShare.validation.ipRuleRequired'));
+  const rootAliases = new Set<string>();
+  const rootPaths = new Set<string>();
+  for (const root of draft.value.roots) {
+    if (!root.alias.trim()) out.push(t('tools.fileShare.validation.rootAliasRequired'));
+    if (!root.path.trim()) out.push(t('tools.fileShare.validation.rootPathRequired'));
+    const ak = root.alias.trim().toLowerCase();
+    const pk = root.path.trim().toLowerCase();
+    if (rootAliases.has(ak)) out.push(t('tools.fileShare.validation.duplicateRootAlias', { value: root.alias }));
+    if (rootPaths.has(pk)) out.push(t('tools.fileShare.validation.duplicateRootPath', { value: root.path }));
+    rootAliases.add(ak);
+    rootPaths.add(pk);
+  }
+  const ids = new Set<string>();
+  for (const a of draft.value.accounts) {
+    if (!a.id.trim()) out.push(t('tools.fileShare.validation.accountIdRequired'));
+    if (!a.name.trim()) out.push(t('tools.fileShare.validation.accountNameRequired'));
+    const key = a.id.trim().toLowerCase();
+    if (ids.has(key)) out.push(t('tools.fileShare.validation.duplicateAccountId', { value: a.id }));
+    ids.add(key);
+  }
+  return [...new Set(out)];
 });
 
-const altUrls = computed(() => (status.value.all_urls || []).filter((url) => url !== serverUrl.value));
-const connectedIps = computed(() => status.value.connected_ips || []);
-const connectionCount = computed(() => status.value.connection_count ?? connectedIps.value.length);
+const lockoutWarn = computed(() => !draft.value.guest_access_enabled && enabledCustomAccounts.value.length === 0);
+const canSave = computed(() => !isLoading.value && !isSaving.value && errors.value.length === 0);
+const canStart = computed(() => canSave.value && enabledRoots.value.length > 0 && !isApplying.value);
+const formDisabled = computed(() => isLoading.value || isSaving.value || isApplying.value);
 
-watch([showQr, serverUrl], async ([show, url]) => {
-  if (!show || !url) {
-    return;
+const stamp = () => {
+  const n = new Date();
+  return `${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}:${String(n.getSeconds()).padStart(2, '0')}`;
+};
+
+const setStatus = (next: FileShareStatus) => {
+  status.value = { ...blankStatus(), ...next, all_urls: next.all_urls ?? [], shared_dirs: next.shared_dirs ?? [], connected_ips: next.connected_ips ?? [] };
+  isActive.value = status.value.is_active;
+  serverUrl.value = status.value.server_url;
+  if (!status.value.is_active) {
+    showQr.value = false;
+    showConnections.value = false;
   }
-  await nextTick();
-  if (!qrCanvas.value) {
-    return;
+};
+
+const saveStartup = async (enabled: boolean) => {
+  const base = appConfig.value ?? (await getConfig());
+  if (base.launch_and_auto_start_file_share === enabled) return;
+  const next = { ...base, launch_and_auto_start_file_share: enabled };
+  await saveConfig(next);
+  appConfig.value = next;
+};
+
+const saveSettings = async (msg = t('tools.fileShare.settingsSaved')) => {
+  if (errors.value.length > 0) {
+    errorMsg.value = errors.value[0];
+    return false;
   }
-  await QRCode.toCanvas(qrCanvas.value, url, {
-    width: 128,
-    margin: 1,
-    color: { dark: '#0f766e', light: '#ffffff' },
-  });
-});
-
-async function pickDirectory() {
-  try {
-    const directory = await fileSharePickDirectory();
-    if (!directory) {
-      return;
-    }
-    if (sharedDirs.value.some((dir) => dir.path === directory.path)) {
-      return;
-    }
-    let alias = directory.alias;
-    let counter = 1;
-    while (sharedDirs.value.some((dir) => dir.alias === alias)) {
-      alias = `${directory.alias}-${counter++}`;
-    }
-    sharedDirs.value.push({ ...directory, alias });
-  } catch (error) {
-    errorMsg.value = String(error);
-  }
-}
-
-function removeDir(index: number) {
-  sharedDirs.value.splice(index, 1);
-}
-
-async function startShare() {
+  isSaving.value = true;
   errorMsg.value = '';
-  isStarting.value = true;
   try {
-    const config: FileShareConfig = {
-      port: port.value,
-      shared_dirs: sharedDirs.value,
-      password: passwordEnabled.value && password.value ? password.value : null,
-    };
-    const url = await fileShareStart(config);
-    serverUrl.value = url;
-    isActive.value = true;
-    showConnectionDetails.value = false;
-  } catch (error) {
-    errorMsg.value = t('tools.fileShare.errStartFailed', { error: String(error) });
+    const saved = await fileShareSaveSettings(buildReq(draft.value));
+    await saveStartup(draft.value.auto_start_with_windows);
+    draft.value = toDraft(saved, appConfig.value);
+    notice.value = msg;
+    return true;
+  } catch (e) {
+    errorMsg.value = String(e);
+    return false;
   } finally {
-    isStarting.value = false;
+    isSaving.value = false;
   }
-}
+};
 
-async function stopShare() {
+const startShare = async (restart = false, persist = true, msg?: string) => {
+  if (enabledRoots.value.length === 0) {
+    errorMsg.value = t('tools.fileShare.startRequiresRoot');
+    return;
+  }
+  isApplying.value = true;
+  errorMsg.value = '';
+  try {
+    if (persist) {
+      const ok = await saveSettings(restart ? t('tools.fileShare.settingsSavedRestarting') : t('tools.fileShare.settingsSavedStarting'));
+      if (!ok) return;
+    }
+    if (restart && isActive.value) {
+      try {
+        await fileShareStop();
+      } catch {
+        /* Ignore stop races during restart. */
+      }
+    }
+    serverUrl.value = await fileShareStartSaved();
+    try {
+      setStatus(await fileShareGetStatus());
+    } catch {
+      /* Status refresh is best-effort after start. */
+    }
+    isActive.value = true;
+    notice.value = msg ?? (restart ? t('tools.fileShare.restartSuccess') : t('tools.fileShare.startSuccess'));
+  } catch (e) {
+    errorMsg.value = t('tools.fileShare.errStartFailed', { error: String(e) });
+  } finally {
+    isApplying.value = false;
+  }
+};
+
+const stopShare = async () => {
+  isApplying.value = true;
+  errorMsg.value = '';
   try {
     await fileShareStop();
-  } catch {}
-  isActive.value = false;
-  serverUrl.value = '';
-  showQr.value = false;
-  showConnectionDetails.value = false;
-  status.value = {
-    is_active: false,
-    connection_count: 0,
-    uptime_secs: 0,
-    server_url: '',
-    all_urls: [],
-    shared_dirs: [],
-    connected_ips: [],
-  };
-}
+    setStatus(blankStatus());
+    notice.value = t('tools.fileShare.stopSuccess');
+  } catch (e) {
+    errorMsg.value = String(e);
+  } finally {
+    isApplying.value = false;
+  }
+};
 
-async function copyUrl() {
+const addRoot = async (target?: FileShareRoot) => {
   try {
-    await navigator.clipboard.writeText(serverUrl.value);
-    copiedUrl.value = true;
-    setTimeout(() => {
-      copiedUrl.value = false;
-    }, 1800);
-  } catch {}
-}
+    const dir = await fileSharePickDirectory();
+    if (!dir) return;
+    if (!target && draft.value.roots.some((r) => r.path === dir.path)) {
+      notice.value = t('tools.fileShare.duplicateRootNotice');
+      return;
+    }
+    if (target) {
+      target.path = dir.path;
+      if (!target.alias.trim()) target.alias = dir.alias;
+      return;
+    }
+    const used = new Set(draft.value.roots.map((r) => r.id));
+    let id = slug(dir.alias, 'root');
+    let n = 2;
+    while (used.has(id)) id = `${slug(dir.alias, 'root')}-${n++}`;
+    draft.value.roots.push({ id, alias: dir.alias, path: dir.path, enabled: true });
+  } catch (e) {
+    errorMsg.value = String(e);
+  }
+};
 
-async function copyText(text: string) {
+const addAccount = () => {
+  const base = slug('account', 'account');
+  const used = new Set(draft.value.accounts.map((a) => a.id.toLowerCase()));
+  let id = base;
+  let n = 2;
+  while (used.has(id)) id = `${base}-${n++}`;
+  draft.value.accounts.push({ id, name: t('tools.fileShare.newAccountDefaultName'), enabled: true, preset: 'read_write', permissions: readWrite(), password_set: false, new_password: '', clear_password: false });
+};
+
+const onPreset = (a: EditAccount) => {
+  if (a.preset !== 'custom') a.permissions = permsForPreset(a.preset);
+};
+
+const onPassword = (a: EditAccount) => {
+  if (a.new_password.trim()) a.clear_password = false;
+};
+
+const onClear = (a: EditAccount) => {
+  if (a.clear_password) a.new_password = '';
+};
+
+const copy = async (text: string) => {
   try {
     await navigator.clipboard.writeText(text);
-  } catch {}
-}
-
-async function openInBrowser() {
-  if (!serverUrl.value) {
-    return;
+    copied.value = text === serverUrl.value;
+    if (copied.value) setTimeout(() => { copied.value = false; }, 1800);
+  } catch {
+    /* Clipboard access can fail in restricted environments. */
   }
+};
+
+const openBrowser = async () => {
+  if (!serverUrl.value) return;
   try {
     await invoke('open_url', { url: serverUrl.value });
-  } catch {}
-}
-
-function addLog(level: string, message: string) {
-  const now = new Date();
-  const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-  logs.value.unshift({ level, message, time });
-  if (logs.value.length > 50) {
-    logs.value.length = 50;
+  } catch {
+    /* Opening the system browser is best-effort. */
   }
-}
+};
 
-let unlistenStatus: UnlistenFn | null = null;
-let unlistenLog: UnlistenFn | null = null;
+watch([showQr, serverUrl], async ([show, url]) => {
+  if (!show || !url || !qrCanvas.value) return;
+  await nextTick();
+  await QRCode.toCanvas(qrCanvas.value, url, { width: 128, margin: 1, color: { dark: '#0f766e', light: '#ffffff' } });
+});
+
+let offStatus: UnlistenFn | null = null;
+let offLog: UnlistenFn | null = null;
 
 onMounted(async () => {
+  offStatus = await listen<FileShareStatus>('file-share-status', (e) => setStatus(e.payload));
+  offLog = await listen<{ level: string; message: string }>('file-share-log', (e) => {
+    logs.value.unshift({ level: e.payload.level, message: e.payload.message, time: stamp() });
+    if (logs.value.length > 50) logs.value.length = 50;
+  });
   try {
-    const currentStatus = await fileShareGetStatus();
-    if (currentStatus.is_active) {
-      isActive.value = true;
-      serverUrl.value = currentStatus.server_url;
-      sharedDirs.value = currentStatus.shared_dirs;
-      status.value = currentStatus;
+    const [view, cfg, current] = await Promise.all([fileShareLoadSettings(), getConfig(), fileShareGetStatus()]);
+    appConfig.value = cfg;
+    draft.value = toDraft(view, cfg);
+    setStatus(current);
+    if (draft.value.auto_start_on_page_open && !current.is_active && draft.value.roots.some((r) => r.enabled)) {
+      await startShare(false, false, t('tools.fileShare.autoStartedOnPageOpen'));
     }
-  } catch {}
-
-  unlistenStatus = await listen<FileShareStatus>('file-share-status', (event) => {
-    status.value = event.payload;
-    if (event.payload.is_active && !isActive.value) {
-      isActive.value = true;
-      serverUrl.value = event.payload.server_url;
-    }
-    if (!event.payload.is_active) {
-      isActive.value = false;
-      serverUrl.value = '';
-      showQr.value = false;
-      showConnectionDetails.value = false;
-    }
-  });
-
-  unlistenLog = await listen<{ level: string; message: string }>('file-share-log', (event) => {
-    addLog(event.payload.level, event.payload.message);
-  });
+  } catch (e) {
+    errorMsg.value = String(e);
+  } finally {
+    isLoading.value = false;
+  }
 });
 
 onUnmounted(() => {
-  unlistenStatus?.();
-  unlistenLog?.();
+  offStatus?.();
+  offLog?.();
 });
 </script>
 
 <template>
-  <div class="flex flex-1 flex-col overflow-y-auto bg-gradient-to-br from-slate-50 to-slate-100">
-    <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-6 pb-10">
-      <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+  <div class="flex flex-1 flex-col overflow-y-auto bg-gradient-to-br from-slate-50 to-teal-50/40">
+    <div class="mx-auto flex w-full max-w-7xl flex-col gap-5 p-6 pb-10">
+      <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div class="flex items-start gap-3">
           <div class="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-teal-500 to-cyan-600 shadow-sm">
             <Share2 class="h-5 w-5 text-white" />
-            <span
-              v-if="isActive"
-              class="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-white bg-emerald-500"
-            >
+            <span v-if="isActive" class="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-white bg-emerald-500">
               <span class="h-1.5 w-1.5 rounded-full bg-white"></span>
             </span>
           </div>
           <div>
             <h1 class="text-2xl font-bold text-slate-900">{{ t('sidebar.fileShare') }}</h1>
             <p class="mt-1 text-sm text-slate-500">
-              {{ isActive ? serverUrl : t('tools.fileShare.emptyPlaceholder') }}
+              {{ isActive ? serverUrl : t('tools.fileShare.consoleDescription') }}
             </p>
           </div>
         </div>
-        <div
-          class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm"
-          :class="isActive ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'"
-        >
+        <div class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm" :class="isActive ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'">
           <span class="h-2 w-2 rounded-full" :class="isActive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'"></span>
           {{ isActive ? t('tools.fileShare.statusActive') : t('tools.fileShare.statusIdle') }}
         </div>
@@ -256,239 +473,222 @@ onUnmounted(() => {
       <div class="grid grid-cols-1 gap-5 lg:grid-cols-5">
         <div class="space-y-4 lg:col-span-3">
           <div class="fs-card">
-            <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <p class="fs-section-label !mb-0">{{ t('tools.fileShare.sharedDirs') }}</p>
-              <button
-                type="button"
-                :disabled="isActive"
-                @click="pickDirectory"
-                class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-sm font-semibold text-teal-700 shadow-sm transition hover:border-teal-300 hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <Plus class="h-4 w-4" />
-                {{ t('tools.fileShare.addDir') }}
+            <div class="mb-4 flex items-center justify-between gap-3">
+              <div>
+                <p class="fs-label-sm">{{ t('tools.fileShare.sharedRootsTitle') }}</p>
+                <p class="text-sm text-slate-500">{{ t('tools.fileShare.sharedRootsDescription') }}</p>
+              </div>
+              <button type="button" :disabled="formDisabled" @click="addRoot()" class="fs-btn fs-btn-soft">
+                <Plus class="h-4 w-4" />{{ t('tools.fileShare.addDir') }}
               </button>
             </div>
-
-            <div
-              v-if="sharedDirs.length === 0"
-              class="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center"
-            >
-              <FolderOpen class="mb-3 h-8 w-8 text-slate-300" />
-              <p class="text-sm text-slate-500">{{ t('tools.fileShare.noDirs') }}</p>
+            <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+              {{ t('tools.fileShare.noDirs') }}
             </div>
-
-            <div v-else class="space-y-2">
-              <div
-                v-for="(dir, index) in sharedDirs"
-                :key="dir.path"
-                class="group flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 transition hover:border-teal-200 hover:bg-white"
-              >
-                <div class="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-teal-50 text-teal-600">
-                  <FolderOpen class="h-4 w-4" />
-                </div>
-                <div class="min-w-0 flex-1">
-                  <div class="mb-1 flex items-center gap-2">
-                    <span class="rounded-md bg-teal-100 px-2 py-0.5 font-mono text-xs font-semibold text-teal-700">
-                      {{ dir.alias }}
-                    </span>
+            <div v-else class="space-y-3">
+              <div v-for="(root, index) in draft.roots" :key="root.id" class="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div class="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr),auto]">
+                  <div>
+                    <label class="fs-label">{{ t('tools.fileShare.aliasLabel') }}</label>
+                    <input v-model="root.alias" :disabled="formDisabled" class="fs-input w-full" />
                   </div>
-                  <div class="truncate text-xs text-slate-500" :title="dir.path">{{ dir.path }}</div>
+                  <label class="fs-toggle-line">
+                    <span class="fs-toggle">
+                      <input v-model="root.enabled" type="checkbox" :disabled="formDisabled" class="sr-only">
+                      <span class="fs-toggle-track" :class="root.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="root.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span>
+                    </span>
+                    <span>{{ t('tools.fileShare.enabledLabel') }}</span>
+                  </label>
                 </div>
-                <button
-                  v-if="!isActive"
-                  type="button"
-                  @click="removeDir(index)"
-                  class="rounded-lg p-2 text-slate-400 opacity-0 transition hover:bg-red-50 hover:text-red-600 group-hover:opacity-100"
-                  :title="t('tools.fileShare.removeDir')"
-                >
-                  <Trash2 class="h-4 w-4" />
-                </button>
+                <div class="mt-3 flex flex-col gap-2 sm:flex-row">
+                  <input :value="root.path" readonly class="fs-input w-full bg-slate-100" />
+                  <button type="button" :disabled="formDisabled" @click="addRoot(root)" class="fs-btn fs-btn-plain">{{ t('tools.fileShare.changePath') }}</button>
+                  <button type="button" :disabled="formDisabled" @click="draft.roots.splice(index, 1)" class="fs-btn fs-btn-danger"><Trash2 class="h-4 w-4" /></button>
+                </div>
               </div>
             </div>
           </div>
 
-          <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div class="fs-card">
-              <p class="fs-section-label">{{ t('tools.fileShare.port') }}</p>
-              <input
-                v-model.number="port"
-                type="number"
-                min="1024"
-                max="65535"
-                :disabled="isActive"
-                class="fs-input w-full"
-              >
-              <p class="mt-2 text-xs text-slate-500">{{ t('tools.fileShare.portHint') }}</p>
+          <div class="fs-card">
+            <p class="fs-label-sm">{{ t('tools.fileShare.generalSettingsTitle') }}</p>
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div>
+                <label class="fs-label">{{ t('tools.fileShare.port') }}</label>
+                <input v-model.number="draft.port" type="number" min="1024" max="65535" :disabled="formDisabled" class="fs-input w-full" />
+              </div>
+              <div>
+                <label class="fs-label">{{ t('tools.fileShare.sessionTtlMinutes') }}</label>
+                <input
+                  v-model.number="draft.session_ttl_minutes"
+                  type="number"
+                  min="1"
+                  :max="MAX_SESSION_TTL_MINUTES"
+                  :disabled="formDisabled"
+                  class="fs-input w-full"
+                />
+              </div>
+              <div>
+                <label class="fs-label">{{ t('tools.fileShare.deleteMode') }}</label>
+                <select v-model="draft.delete_mode" :disabled="formDisabled" class="fs-select w-full">
+                  <option v-for="opt in delOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="fs-label">{{ t('tools.fileShare.ipFilter') }}</label>
+                <select v-model="draft.ip_filter_mode" :disabled="formDisabled" class="fs-select w-full">
+                  <option v-for="opt in ipOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                </select>
+              </div>
+            </div>
+            <div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.guest_access_enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.guest_access_enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.guest_access_enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.guestAccess') }}</span></label>
+              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.image_preview_enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.image_preview_enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.image_preview_enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.imagePreview') }}</span></label>
+              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.thumbnail_enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.thumbnail_enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.thumbnail_enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.thumbnails') }}</span></label>
+              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.remember_settings" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.remember_settings ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.remember_settings ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.rememberSettings') }}</span></label>
+              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.auto_start_on_page_open" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.auto_start_on_page_open ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.auto_start_on_page_open ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.autoStartOnPageOpen') }}</span></label>
+              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.auto_start_with_windows" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.auto_start_with_windows ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.auto_start_with_windows ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.restoreOnStartup') }}</span></label>
+            </div>
+            <div v-if="draft.ip_filter_mode !== 'off'" class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div class="flex flex-col gap-2 sm:flex-row">
+                <input v-model="newIpRule" :disabled="formDisabled" class="fs-input w-full" :placeholder="t('tools.fileShare.ipRulePlaceholder')" @keyup.enter="draft.ip_rules.includes(newIpRule.trim()) || !newIpRule.trim() ? null : (draft.ip_rules.push(newIpRule.trim()), newIpRule = '')" />
+                <button type="button" :disabled="formDisabled" class="fs-btn fs-btn-plain" @click="draft.ip_rules.includes(newIpRule.trim()) || !newIpRule.trim() ? null : (draft.ip_rules.push(newIpRule.trim()), newIpRule = '')">{{ t('tools.fileShare.addRule') }}</button>
+              </div>
+              <div v-if="draft.ip_rules.length > 0" class="mt-3 flex flex-wrap gap-2">
+                <span v-for="(rule, index) in draft.ip_rules" :key="`${rule}-${index}`" class="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-mono text-slate-700">
+                  {{ rule }}
+                  <button type="button" :disabled="formDisabled" class="ml-2 text-slate-400 hover:text-red-500" @click="draft.ip_rules.splice(index, 1)">×</button>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="fs-card">
+            <div class="mb-4 flex items-center justify-between gap-3">
+              <div>
+                <p class="fs-label-sm">{{ t('tools.fileShare.guestAndAccountsTitle') }}</p>
+                <p class="text-sm text-slate-500">{{ t('tools.fileShare.guestAndAccountsDescription') }}</p>
+              </div>
+              <button type="button" :disabled="formDisabled" @click="addAccount" class="fs-btn fs-btn-soft"><Plus class="h-4 w-4" />{{ t('tools.fileShare.addAccount') }}</button>
             </div>
 
-            <div class="fs-card">
+            <div v-if="guest" class="fs-account">
               <div class="mb-3 flex items-center justify-between gap-3">
-                <p class="fs-section-label !mb-0">{{ t('tools.fileShare.passwordToggle') }}</p>
-                <label class="fs-toggle">
-                  <input v-model="passwordEnabled" type="checkbox" :disabled="isActive" class="sr-only">
-                  <span class="fs-toggle-track" :class="passwordEnabled ? 'bg-teal-600' : 'bg-slate-300'">
-                    <span class="fs-toggle-thumb" :class="passwordEnabled ? 'translate-x-4' : 'translate-x-0'"></span>
-                  </span>
-                </label>
+                <div class="font-semibold text-slate-900">{{ t('tools.fileShare.guestAccount') }}</div>
+                <span class="rounded-full border px-2 py-1 text-xs" :class="guest.password_set || guest.new_password ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'">
+                  {{ guest.password_set || guest.new_password ? t('tools.fileShare.passwordSetState') : t('tools.fileShare.noPasswordState') }}
+                </span>
               </div>
-              <input
-                v-if="passwordEnabled"
-                v-model="password"
-                type="password"
-                :disabled="isActive"
-                :placeholder="t('tools.fileShare.passwordInput')"
-                class="fs-input w-full"
-              >
-              <div v-else class="flex h-10 items-center rounded-lg border border-dashed border-slate-200 px-3 text-sm text-slate-400">
-                --
+              <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div><label class="fs-label">{{ t('tools.fileShare.displayName') }}</label><input v-model="guest.name" :disabled="formDisabled" class="fs-input w-full" /></div>
+                <div><label class="fs-label">{{ t('tools.fileShare.loginId') }}</label><input :value="guest.id" disabled class="fs-input w-full bg-slate-100" /></div>
+                <div class="md:col-span-2">
+                  <label class="fs-label">{{ t('tools.fileShare.guestPassword') }}</label>
+                  <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="guest.new_password" type="password" :disabled="formDisabled" class="fs-input w-full pl-10" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(guest)" /></div>
+                  <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="guest.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(guest)" />{{ t('tools.fileShare.clearGuestPasswordOnSave') }}</label>
+                </div>
+                <div class="md:col-span-2">
+                  <label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label>
+                  <select v-model="guest.preset" :disabled="formDisabled" class="fs-select w-full" @change="onPreset(guest)"><option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select>
+                </div>
+              </div>
+              <div v-if="guest.preset === 'custom'" class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                <label v-for="p in permDefs" :key="`guest-${p}`" class="fs-perm"><input v-model="guest.permissions[p]" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="guest.preset = 'custom'" /><span>{{ permissionLabel(p) }}</span></label>
+              </div>
+            </div>
+
+            <div v-if="customAccounts.length === 0" class="mt-4 rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+              {{ t('tools.fileShare.noCustomAccounts') }}
+            </div>
+            <div v-else class="mt-4 space-y-4">
+              <div v-for="account in customAccounts" :key="account.id" class="fs-account">
+                <div class="mb-3 flex items-center justify-between gap-3">
+                  <div class="font-semibold text-slate-900">{{ account.name || account.id }}</div>
+                  <button type="button" :disabled="formDisabled" class="fs-btn fs-btn-danger" @click="draft.accounts = draft.accounts.filter((a) => a.id !== account.id)"><Trash2 class="h-4 w-4" /></button>
+                </div>
+                <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div><label class="fs-label">{{ t('tools.fileShare.displayName') }}</label><input v-model="account.name" :disabled="formDisabled" class="fs-input w-full" /></div>
+                  <div><label class="fs-label">{{ t('tools.fileShare.loginId') }}</label><input v-model="account.id" :disabled="formDisabled" class="fs-input w-full" /></div>
+                  <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="account.enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="account.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="account.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.accountEnabled') }}</span></label>
+                  <div><label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label><select v-model="account.preset" :disabled="formDisabled" class="fs-select w-full" @change="onPreset(account)"><option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></div>
+                  <div class="md:col-span-2">
+                    <label class="fs-label">{{ t('tools.fileShare.accountPassword') }}</label>
+                    <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="account.new_password" type="password" :disabled="formDisabled" class="fs-input w-full pl-10" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(account)" /></div>
+                    <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="account.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(account)" />{{ t('tools.fileShare.clearAccountPasswordOnSave') }}</label>
+                  </div>
+                </div>
+                <div v-if="account.preset === 'custom'" class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  <label v-for="p in permDefs" :key="`${account.id}-${p}`" class="fs-perm"><input v-model="account.permissions[p]" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="account.preset = 'custom'" /><span>{{ permissionLabel(p) }}</span></label>
+                </div>
               </div>
             </div>
           </div>
-
-          <div v-if="errorMsg" class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600 shadow-sm">
-            {{ errorMsg }}
-          </div>
-
-          <button
-            v-if="!isActive"
-            type="button"
-            @click="startShare"
-            :disabled="isStarting || sharedDirs.length === 0"
-            class="w-full rounded-xl bg-gradient-to-r from-teal-600 to-cyan-600 px-6 py-3.5 text-sm font-semibold text-white shadow-sm transition hover:from-teal-700 hover:to-cyan-700 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <span class="flex items-center justify-center gap-2">
-              <Play class="h-4 w-4" />
-              {{ isStarting ? t('tools.fileShare.starting') : t('tools.fileShare.startShare') }}
-            </span>
-          </button>
-          <button
-            v-else
-            type="button"
-            @click="stopShare"
-            class="w-full rounded-xl border border-red-200 bg-red-50 px-6 py-3.5 text-sm font-semibold text-red-600 shadow-sm transition hover:border-red-300 hover:bg-red-100"
-          >
-            <span class="flex items-center justify-center gap-2">
-              <Power class="h-4 w-4" />
-              {{ t('tools.fileShare.stopShare') }}
-            </span>
-          </button>
         </div>
 
         <div class="space-y-4 lg:col-span-2">
+          <div class="fs-card">
+            <p class="fs-label-sm">{{ t('tools.fileShare.applyAndRuntimeTitle') }}</p>
+            <div v-if="errorMsg" class="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{{ errorMsg }}</div>
+            <div v-if="notice" class="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{{ notice }}</div>
+            <div v-if="errors.length" class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+              <div class="font-semibold">{{ t('tools.fileShare.fixBeforeSaving') }}</div>
+              <ul class="mt-2 list-disc pl-5"><li v-for="item in errors" :key="item">{{ item }}</li></ul>
+            </div>
+            <div v-if="lockoutWarn" class="mb-3 rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-700">
+              {{ t('tools.fileShare.lockoutWarning') }}
+            </div>
+            <div class="grid grid-cols-1 gap-3">
+              <button type="button" :disabled="!canSave" @click="saveSettings()" class="fs-btn fs-btn-main w-full"><Save class="h-4 w-4" />{{ isSaving ? t('tools.fileShare.saving') : t('tools.fileShare.saveSettings') }}</button>
+              <button v-if="!isActive" type="button" :disabled="!canStart" @click="startShare(false, true)" class="fs-btn fs-btn-start w-full"><Play class="h-4 w-4" />{{ isApplying ? t('tools.fileShare.starting') : t('tools.fileShare.startShare') }}</button>
+              <button v-else type="button" :disabled="!canStart" @click="startShare(true, true)" class="fs-btn fs-btn-start w-full"><RefreshCw class="h-4 w-4" />{{ isApplying ? t('tools.fileShare.restarting') : t('tools.fileShare.saveAndRestart') }}</button>
+              <button v-if="isActive" type="button" :disabled="isApplying" @click="stopShare" class="fs-btn fs-btn-danger w-full"><Power class="h-4 w-4" />{{ t('tools.fileShare.stopShare') }}</button>
+            </div>
+            <div class="mt-4 grid grid-cols-2 gap-3">
+              <div class="fs-stat"><div class="fs-stat-label">{{ t('tools.fileShare.enabledRoots') }}</div><div class="fs-stat-value">{{ enabledRoots.length }}</div></div>
+              <div class="fs-stat"><div class="fs-stat-label">{{ t('tools.fileShare.enabledAccounts') }}</div><div class="fs-stat-value">{{ enabledCustomAccounts.length + (draft.guest_access_enabled ? 1 : 0) }}</div></div>
+            </div>
+          </div>
+
           <template v-if="isActive && serverUrl">
             <div class="fs-card">
-              <p class="fs-section-label">{{ t('tools.fileShare.accessUrl') }}</p>
+              <p class="fs-label-sm">{{ t('tools.fileShare.accessUrl') }}</p>
               <div class="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
                 <code class="flex-1 truncate font-mono text-sm font-semibold text-teal-700">{{ serverUrl }}</code>
-                <button
-                  type="button"
-                  @click="copyUrl"
-                  class="fs-icon-button"
-                  :title="t('tools.fileShare.copyUrl')"
-                  aria-label="Copy URL"
-                >
-                  <Copy class="h-4 w-4" :class="copiedUrl ? 'text-teal-600' : ''" />
-                </button>
-                <button
-                  type="button"
-                  @click="showQr = !showQr"
-                  class="fs-icon-button"
-                  :title="showQr ? t('tools.fileShare.hideQrCode') : t('tools.fileShare.showQrCode')"
-                  aria-label="Toggle QR Code"
-                >
-                  <QrCode class="h-4 w-4" :class="showQr ? 'text-teal-600' : ''" />
-                </button>
-                <button type="button" @click="openInBrowser" class="fs-icon-button" title="Open in browser">
-                  <ExternalLink class="h-4 w-4" />
-                </button>
+                <button type="button" @click="copy(serverUrl)" class="fs-icon" :title="t('tools.fileShare.copyUrl')"><Copy class="h-4 w-4" :class="copied ? 'text-teal-600' : ''" /></button>
+                <button type="button" @click="showQr = !showQr" class="fs-icon" :title="showQr ? t('tools.fileShare.hideQrCode') : t('tools.fileShare.showQrCode')"><QrCode class="h-4 w-4" :class="showQr ? 'text-teal-600' : ''" /></button>
+                <button type="button" @click="openBrowser" class="fs-icon" :title="t('tools.fileShare.openInBrowser')"><ExternalLink class="h-4 w-4" /></button>
               </div>
-              <p v-if="copiedUrl" class="mt-2 text-xs text-teal-600">{{ t('tools.fileShare.copied') }}</p>
-              <p v-else class="mt-2 text-xs text-slate-500">{{ t('tools.fileShare.qrCodeHint') }}</p>
-
-              <div v-if="showQr" class="mt-4 flex justify-center">
-                <div class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
-                  <canvas ref="qrCanvas" width="128" height="128" />
-                </div>
-              </div>
-
-              <div v-if="altUrls.length > 0" class="mt-4">
-                <button type="button" @click="showAltUrls = !showAltUrls" class="fs-inline-button">
-                  <component :is="showAltUrls ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />
-                  {{ t('tools.fileShare.altUrls', { n: altUrls.length }) }}
-                </button>
-                <div v-if="showAltUrls" class="mt-3 space-y-2">
-                  <div
-                    v-for="url in altUrls"
-                    :key="url"
-                    class="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"
-                  >
+              <div v-if="showQr" class="mt-4 flex justify-center"><div class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm"><canvas ref="qrCanvas" width="128" height="128" /></div></div>
+              <div v-if="altUrls.length" class="mt-4">
+                <button type="button" @click="showAltUrls = !showAltUrls" class="fs-link"><component :is="showAltUrls ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />{{ t('tools.fileShare.altUrls', { n: altUrls.length }) }}</button>
+                <div v-if="showAltUrls" class="mt-2 space-y-2">
+                  <div v-for="url in altUrls" :key="url" class="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
                     <code class="flex-1 truncate font-mono text-xs text-slate-600">{{ url }}</code>
-                    <button type="button" @click="copyText(url)" class="text-slate-400 transition hover:text-teal-600">
-                      <Copy class="h-3.5 w-3.5" />
-                    </button>
+                    <button type="button" @click="copy(url)" class="text-slate-400 hover:text-teal-600"><Copy class="h-3.5 w-3.5" /></button>
                   </div>
                 </div>
               </div>
             </div>
 
-            <div class="grid grid-cols-1 gap-3">
-              <div class="fs-stat-card">
-                <div class="mb-3 flex items-start justify-between gap-3">
-                  <div class="flex items-center gap-2 text-slate-500">
-                    <Wifi class="h-4 w-4 text-teal-600" />
-                    <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">
-                      {{ t('tools.fileShare.connectionCount') }}
-                    </span>
-                  </div>
-                  <button type="button" class="fs-detail-button" @click="showConnectionDetails = !showConnectionDetails">
-                    {{ t('tools.fileShare.connectionDetails') }}
-                    <component :is="showConnectionDetails ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                <div class="font-mono text-3xl font-bold text-slate-900">{{ connectionCount }}</div>
-              </div>
-
-              <div class="fs-stat-card">
-                <div class="mb-2 flex items-center gap-2 text-slate-500">
-                  <Clock class="h-4 w-4 text-teal-600" />
-                  <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">{{ t('tools.fileShare.uptime') }}</span>
-                </div>
-                <div class="font-mono text-2xl font-bold text-slate-900">{{ formattedUptime }}</div>
-              </div>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div class="fs-stat"><div class="fs-stat-label">{{ t('tools.fileShare.connectionCount') }}</div><div class="fs-stat-value">{{ connCount }}</div></div>
+              <div class="fs-stat"><div class="fs-stat-label">{{ t('tools.fileShare.uptime') }}</div><div class="fs-stat-value">{{ uptime }}</div></div>
             </div>
 
-            <div v-if="showConnectionDetails" class="fs-card">
-              <div class="mb-3">
-                <h3 class="text-sm font-semibold text-slate-900">{{ t('tools.fileShare.connectedIpList') }}</h3>
-                <p class="text-xs text-slate-500">{{ t('tools.fileShare.connectionCount') }}: {{ connectionCount }}</p>
+            <div class="fs-card">
+              <div class="mb-3 flex items-center justify-between">
+                <div class="text-sm font-semibold text-slate-900">{{ t('tools.fileShare.connectedIpList') }}</div>
+                <button type="button" class="fs-link" @click="showConnections = !showConnections"><component :is="showConnections ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />{{ t('tools.fileShare.connectionDetails') }}</button>
               </div>
-              <div v-if="connectedIps.length > 0" class="space-y-2">
-                <div
-                  v-for="ip in connectedIps"
-                  :key="ip"
-                  class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-700"
-                >
-                  {{ ip }}
-                </div>
+              <div v-if="showConnections && connectedIps.length" class="space-y-2">
+                <div v-for="ip in connectedIps" :key="ip" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-700">{{ ip }}</div>
               </div>
-              <div v-else class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-400">
-                {{ t('tools.fileShare.noConnections') }}
-              </div>
+              <div v-else class="text-sm text-slate-500">{{ showConnections ? t('tools.fileShare.noConnections') : t('tools.fileShare.expandConnectionsHint') }}</div>
             </div>
           </template>
 
-          <template v-else>
-            <div class="flex min-h-56 flex-col items-center justify-center rounded-xl border border-slate-200/80 bg-white p-8 text-center shadow-sm">
-              <div class="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-teal-50 text-teal-600">
-                <Share2 class="h-7 w-7" />
-              </div>
-              <p class="text-sm text-slate-500">{{ t('tools.fileShare.emptyPlaceholder') }}</p>
-            </div>
-          </template>
-
-          <div v-if="logs.length > 0" class="fs-card">
-            <h3 class="fs-section-label">{{ t('tools.fileShare.logTitle') }}</h3>
-            <div class="max-h-48 space-y-2 overflow-y-auto">
+          <div v-if="logs.length" class="fs-card">
+            <p class="fs-label-sm">{{ t('tools.fileShare.logTitle') }}</p>
+            <div class="max-h-56 space-y-2 overflow-y-auto">
               <div v-for="(log, index) in logs" :key="index" class="flex gap-3 text-xs">
                 <span class="shrink-0 font-mono text-slate-400">{{ log.time }}</span>
                 <span :class="log.level === 'error' ? 'text-red-600' : 'text-slate-600'">{{ log.message }}</span>
@@ -502,125 +702,21 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.fs-card {
-  border: 1px solid rgb(226 232 240 / 0.8);
-  border-radius: 0.75rem;
-  background: white;
-  padding: 1.25rem;
-  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
-}
-
-.fs-stat-card {
-  border: 1px solid rgb(226 232 240 / 0.8);
-  border-radius: 0.75rem;
-  background: white;
-  padding: 1rem;
-  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
-}
-
-.fs-section-label {
-  margin-bottom: 1rem;
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: rgb(100 116 139);
-}
-
-.fs-input {
-  border: 1px solid rgb(203 213 225);
-  border-radius: 0.75rem;
-  background: white;
-  padding: 0.65rem 0.9rem;
-  font-size: 0.875rem;
-  color: rgb(15 23 42);
-  outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.fs-input:focus {
-  border-color: rgb(13 148 136);
-  box-shadow: 0 0 0 3px rgb(13 148 136 / 0.12);
-}
-
-.fs-input:disabled {
-  cursor: not-allowed;
-  background-color: rgb(248 250 252);
-  color: rgb(148 163 184);
-}
-
-.fs-toggle {
-  position: relative;
-  display: inline-flex;
-}
-
-.fs-toggle-track {
-  display: block;
-  height: 20px;
-  width: 36px;
-  flex-shrink: 0;
-  border-radius: 9999px;
-  transition: background-color 0.2s ease;
-}
-
-.fs-toggle-thumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  height: 16px;
-  width: 16px;
-  border-radius: 9999px;
-  background: white;
-  box-shadow: 0 1px 3px rgb(15 23 42 / 0.2);
-  transition: transform 0.2s ease;
-}
-
-.fs-icon-button {
-  border: 1px solid rgb(226 232 240);
-  border-radius: 0.65rem;
-  background: white;
-  padding: 0.45rem;
-  color: rgb(100 116 139);
-  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
-}
-
-.fs-icon-button:hover {
-  border-color: rgb(153 246 228);
-  background: rgb(240 253 250);
-  color: rgb(13 148 136);
-}
-
-.fs-inline-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: rgb(100 116 139);
-  transition: color 0.15s ease;
-}
-
-.fs-inline-button:hover {
-  color: rgb(13 148 136);
-}
-
-.fs-detail-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  border: 1px solid rgb(226 232 240);
-  border-radius: 9999px;
-  background: rgb(248 250 252);
-  padding: 0.35rem 0.7rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: rgb(71 85 105);
-  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
-}
-
-.fs-detail-button:hover {
-  border-color: rgb(153 246 228);
-  background: rgb(240 253 250);
-  color: rgb(13 148 136);
-}
+.fs-card,.fs-stat{border:1px solid rgb(226 232 240 / .85);border-radius:.75rem;background:#fff;box-shadow:0 1px 2px rgb(15 23 42 / .06)}
+.fs-card{padding:1.25rem}.fs-stat{padding:1rem}
+.fs-label-sm{margin-bottom:.75rem;font-size:.7rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:rgb(100 116 139)}
+.fs-label{display:block;margin-bottom:.4rem;font-size:.75rem;font-weight:600;color:rgb(71 85 105)}
+.fs-input,.fs-select{border:1px solid rgb(203 213 225);border-radius:.75rem;background:#fff;padding:.65rem .9rem;font-size:.875rem;color:rgb(15 23 42);outline:none;transition:border-color .15s ease,box-shadow .15s ease}
+.fs-select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364758b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:2.25rem}
+.fs-input:focus,.fs-select:focus{border-color:rgb(13 148 136);box-shadow:0 0 0 3px rgb(13 148 136 / .12)}
+.fs-input:disabled,.fs-select:disabled{cursor:not-allowed;background:rgb(248 250 252);color:rgb(148 163 184)}
+.fs-toggle{position:relative;display:inline-flex}.fs-toggle-track{display:block;height:20px;width:36px;flex-shrink:0;border-radius:9999px;transition:background-color .2s ease}.fs-toggle-thumb{position:absolute;top:2px;left:2px;height:16px;width:16px;border-radius:9999px;background:#fff;box-shadow:0 1px 3px rgb(15 23 42 /.2);transition:transform .2s ease}
+.fs-toggle-line{display:flex;align-items:center;gap:.75rem;border:1px solid rgb(226 232 240 / .8);border-radius:.75rem;background:#fff;padding:.9rem 1rem;font-size:.875rem;font-weight:500;color:rgb(51 65 85)}
+.fs-btn{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border-radius:.75rem;padding:.8rem 1rem;font-size:.875rem;font-weight:600;transition:all .15s ease}
+.fs-btn-main{border:1px solid rgb(186 230 253);background:rgb(239 246 255);color:rgb(3 105 161)}.fs-btn-soft{border:1px solid rgb(153 246 228);background:rgb(240 253 250);color:rgb(15 118 110)}.fs-btn-start{border:none;background:linear-gradient(135deg,rgb(13 148 136),rgb(8 145 178));color:#fff;box-shadow:0 8px 20px rgb(13 148 136 /.18)}.fs-btn-plain{border:1px solid rgb(226 232 240);background:#fff;color:rgb(51 65 85)}.fs-btn-danger{border:1px solid rgb(254 202 202);background:rgb(254 242 242);color:rgb(220 38 38)}
+.fs-btn:disabled{opacity:.4;cursor:not-allowed}.fs-account{border:1px solid rgb(226 232 240 / .9);border-radius:1rem;background:linear-gradient(180deg,#fff 0%,rgb(248 250 252) 100%);padding:1rem}
+.fs-perm{display:flex;align-items:center;gap:.6rem;border:1px solid rgb(226 232 240 / .8);border-radius:.85rem;background:#fff;padding:.75rem .85rem;font-size:.875rem;color:rgb(51 65 85)}
+.fs-icon{border:1px solid rgb(226 232 240);border-radius:.65rem;background:#fff;padding:.45rem;color:rgb(100 116 139);transition:all .15s ease}.fs-icon:hover{border-color:rgb(153 246 228);background:rgb(240 253 250);color:rgb(13 148 136)}
+.fs-link{display:inline-flex;align-items:center;gap:.35rem;font-size:.75rem;font-weight:600;color:rgb(100 116 139)}.fs-link:hover{color:rgb(13 148 136)}
+.fs-stat-label{margin-bottom:.35rem;font-size:.7rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:rgb(100 116 139)}.fs-stat-value{font-family:ui-monospace,SFMono-Regular,monospace;font-size:1.5rem;font-weight:700;color:rgb(15 23 42)}
 </style>

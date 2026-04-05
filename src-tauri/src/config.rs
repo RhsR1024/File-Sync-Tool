@@ -14,17 +14,12 @@ pub struct CommandGroup {
     pub commands: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OnFailure {
+    #[default]
     Continue,
     Abort,
-}
-
-impl Default for OnFailure {
-    fn default() -> Self {
-        Self::Continue
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -42,18 +37,13 @@ pub struct LocalScriptBinding {
     pub command_group_ids: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PostCopyExecutionOrder {
+    #[default]
     LocalFirst,
     RemoteFirst,
     Parallel,
-}
-
-impl Default for PostCopyExecutionOrder {
-    fn default() -> Self {
-        Self::LocalFirst
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -140,6 +130,9 @@ pub struct AppConfig {
     pub launch_and_auto_scan: bool,
 
     #[serde(default)]
+    pub launch_and_auto_start_file_share: bool,
+
+    #[serde(default)]
     pub close_to_tray: bool,
 
     #[serde(default = "default_max_log_lines")]
@@ -187,6 +180,7 @@ impl Default for AppConfig {
             stability_check_secs: 120,
             recent_file_guard_mins: MIN_RECENT_FILE_GUARD_MINS,
             launch_and_auto_scan: false,
+            launch_and_auto_start_file_share: false,
             close_to_tray: false,
             max_log_lines: 200,
             copy_buffer_size_kb: 4096,

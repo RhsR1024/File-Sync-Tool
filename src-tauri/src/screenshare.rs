@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -721,7 +723,7 @@ mod cursor_overlay {
         bmi.bmiHeader.biHeight = -ch; // top-down
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB.0 as u32;
+        bmi.bmiHeader.biCompression = BI_RGB.0;
 
         let mut bits: *mut std::ffi::c_void = ptr::null_mut();
         let hbm = match CreateDIBSection(hdc_mem, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {

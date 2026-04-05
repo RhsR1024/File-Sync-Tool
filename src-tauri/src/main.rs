@@ -61,6 +61,7 @@ struct AppState {
     file_share: Arc<fileshare::FileShareHandle>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct ManualCopyQueueItem {
     key: String,
@@ -176,6 +177,7 @@ fn reserve_scan_executor(
     )
 }
 
+#[allow(dead_code)]
 fn reserve_manual_copy_executor(
     state: &AppState,
     already_running_message: &'static str,
@@ -701,7 +703,7 @@ fn should_close_to_tray(app: &tauri::AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
+pub(crate) fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         const RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -761,7 +763,9 @@ fn save_config_cmd(
 ) -> Result<(), String> {
     config::validate_config(&config)?;
     let config = config::normalize_config(config);
-    sync_launch_on_startup(config.launch_and_auto_scan)?;
+    sync_launch_on_startup(
+        config.launch_and_auto_scan || config.launch_and_auto_start_file_share,
+    )?;
     *state.config.lock().unwrap() = config.clone();
     config::save_config(&app_handle, &config)
 }
@@ -1087,6 +1091,7 @@ async fn start_manual_deploy_task(
 }
 
 #[tauri::command]
+#[allow(dead_code, non_snake_case)]
 async fn manual_deploy(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -1120,7 +1125,7 @@ async fn manual_deploy(
     let server_id = server.id.clone();
     let server_name = server.name.clone();
     let remote_target = resolve_manual_deploy_remote_target(&localPath, &remotePath);
-    if let Err(error) = task_manager.register_deploy_targets(
+    task_manager.register_deploy_targets(
         &run_handle.task_group_id,
         &run_handle.run_id,
         &[task_manager::DeployTarget {
@@ -1129,9 +1134,7 @@ async fn manual_deploy(
             remote_target,
             trigger_source: task_domain::TaskTriggerSource::Manual,
         }],
-    ) {
-        return Err(error);
-    }
+    )?;
     let active_execution =
         match task_runtime.activate(run_handle.task_group_id.clone(), run_handle.run_id.clone()) {
             Ok(active_execution) => active_execution,
@@ -1214,6 +1217,7 @@ async fn manual_deploy(
 }
 
 #[tauri::command]
+#[allow(dead_code)]
 async fn temporary_copy(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -1608,6 +1612,7 @@ fn save_text_file(
     Ok(Some(target_path.to_string_lossy().to_string()))
 }
 
+#[allow(non_snake_case)]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct PasswordChangeResult {
     pub ip: String,
@@ -2343,9 +2348,9 @@ fn main() {
 
                 if is_quitting {
                     // Already confirmed quit (via confirm_quit command) — allow close
-                } else if should_close_to_tray(&window.app_handle()) {
+                } else if should_close_to_tray(window.app_handle()) {
                     api.prevent_close();
-                    hide_main_window(&window.app_handle());
+                    hide_main_window(window.app_handle());
                 } else {
                     // close_to_tray=false, first X click: intercept to let frontend save
                     api.prevent_close();
@@ -2409,7 +2414,9 @@ fn main() {
 
             let config = config::load_config(app.handle());
             let task_manager = task_manager::TaskManager::new(app.handle().clone());
-            let _ = sync_launch_on_startup(config.launch_and_auto_scan);
+            let _ = sync_launch_on_startup(
+                config.launch_and_auto_scan || config.launch_and_auto_start_file_share,
+            );
             app.manage(network::NetworkState::default());
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
@@ -2483,6 +2490,9 @@ fn main() {
             screenshare::screen_share_stop,
             screenshare::screen_share_get_status,
             fileshare::file_share_pick_directory,
+            fileshare::persist::file_share_load_settings,
+            fileshare::persist::file_share_save_settings,
+            fileshare::file_share_start_saved,
             fileshare::file_share_start,
             fileshare::file_share_stop,
             fileshare::file_share_get_status,

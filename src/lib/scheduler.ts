@@ -4,7 +4,6 @@ import { i18n } from '../i18n';
 
 // Helper to access translation function outside components
 const t = (key: string, args?: any) => {
-    // @ts-ignore
     return i18n.global.t(key, args);
 };
 

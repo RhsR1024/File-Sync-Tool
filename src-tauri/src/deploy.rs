@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::config::{CommandGroup, DeployServer, TaskServerBinding};
 use crate::task_domain::DeployStage;
 use crate::task_manager::{DeployTarget, DeployTrackingContext};

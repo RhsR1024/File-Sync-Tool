@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use chardetng::EncodingDetector;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};

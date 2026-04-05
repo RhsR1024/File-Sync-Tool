@@ -44,7 +44,7 @@ let resultTimer: ReturnType<typeof setTimeout> | null = null;
 
 function isValidMac(mac: string): boolean {
   // With separators: AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF
-  if (/^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$/.test(mac)) return true;
+  if (/^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$/.test(mac)) return true;
   // 12 hex chars without separator
   if (/^[0-9A-Fa-f]{12}$/.test(mac)) return true;
   return false;

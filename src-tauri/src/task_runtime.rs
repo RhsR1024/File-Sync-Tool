@@ -119,6 +119,7 @@ impl TaskRuntimeRegistry {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn require_active(
         &self,
         task_group_id: &str,

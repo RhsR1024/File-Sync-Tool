@@ -82,6 +82,9 @@ export interface AppConfig {
   /** One switch: launch on startup + auto start scheduler scan after app launch */
   launch_and_auto_scan: boolean;
 
+  /** Launch the app with the system and automatically restore file share if saved settings allow it. */
+  launch_and_auto_start_file_share: boolean;
+
   /** When enabled, clicking the window close button hides to tray instead of exiting. */
   close_to_tray: boolean;
 
@@ -734,6 +737,83 @@ export interface SharedDir {
   path: string;
 }
 
+export type FileSharePermissionPreset = 'read_only' | 'read_write' | 'custom';
+export type FileShareDeleteMode = 'recycle_bin' | 'permanent';
+export type FileShareIpFilterMode = 'off' | 'whitelist' | 'blacklist';
+
+export interface FileShareRoot {
+  id: string;
+  alias: string;
+  path: string;
+  enabled: boolean;
+}
+
+export interface FileSharePermissionSet {
+  browse: boolean;
+  download_file: boolean;
+  download_archive: boolean;
+  upload_file: boolean;
+  upload_directory: boolean;
+  create_directory: boolean;
+  create_text: boolean;
+  rename: boolean;
+  delete: boolean;
+  preview_image: boolean;
+  search_current: boolean;
+  search_global: boolean;
+}
+
+export interface FileShareAccountView {
+  id: string;
+  name: string;
+  enabled: boolean;
+  preset: FileSharePermissionPreset;
+  permissions: FileSharePermissionSet;
+  password_set: boolean;
+}
+
+export interface FileShareAccountSaveRequest {
+  id: string;
+  name: string;
+  enabled: boolean;
+  preset: FileSharePermissionPreset;
+  permissions: FileSharePermissionSet;
+  new_password?: string | null;
+  clear_password: boolean;
+}
+
+export interface FileShareSettingsView {
+  port: number;
+  roots: FileShareRoot[];
+  guest_access_enabled: boolean;
+  accounts: FileShareAccountView[];
+  session_ttl_minutes: number;
+  ip_filter_mode: FileShareIpFilterMode;
+  ip_rules: string[];
+  image_preview_enabled: boolean;
+  thumbnail_enabled: boolean;
+  delete_mode: FileShareDeleteMode;
+  remember_settings: boolean;
+  auto_start_on_page_open: boolean;
+  auto_start_with_windows: boolean;
+}
+
+export interface FileShareSettingsSaveRequest {
+  port: number;
+  roots: FileShareRoot[];
+  guest_access_enabled: boolean;
+  accounts: FileShareAccountSaveRequest[];
+  session_ttl_minutes: number;
+  ip_filter_mode: FileShareIpFilterMode;
+  ip_rules: string[];
+  image_preview_enabled: boolean;
+  thumbnail_enabled: boolean;
+  delete_mode: FileShareDeleteMode;
+  remember_settings: boolean;
+  auto_start_on_page_open: boolean;
+  auto_start_with_windows: boolean;
+}
+
 export interface FileShareConfig {
   port: number;
   shared_dirs: SharedDir[];
@@ -754,8 +834,20 @@ export async function fileSharePickDirectory(): Promise<SharedDir | null> {
   return await invoke<SharedDir | null>('file_share_pick_directory');
 }
 
+export async function fileShareLoadSettings(): Promise<FileShareSettingsView> {
+  return await invoke<FileShareSettingsView>('file_share_load_settings');
+}
+
+export async function fileShareSaveSettings(request: FileShareSettingsSaveRequest): Promise<FileShareSettingsView> {
+  return await invoke<FileShareSettingsView>('file_share_save_settings', { request });
+}
+
 export async function fileShareStart(config: FileShareConfig): Promise<string> {
   return await invoke<string>('file_share_start', { config });
+}
+
+export async function fileShareStartSaved(): Promise<string> {
+  return await invoke<string>('file_share_start_saved');
 }
 
 export async function fileShareStop(): Promise<void> {

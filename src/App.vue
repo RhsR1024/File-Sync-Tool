@@ -10,6 +10,7 @@ import { taskStateStore } from '@/lib/taskStateStore';
 import {
   confirmQuit,
   fileShareGetStatus,
+  fileShareStartSaved,
   getConfig,
   loadUiState,
   saveUiState,
@@ -160,6 +161,14 @@ onMounted(async () => {
       await startScheduler();
     } catch (e) {
       addLog(`Auto-start check failed: ${e}`, 'error');
+    }
+  }
+
+  if (cfg?.launch_and_auto_start_file_share) {
+    try {
+      await fileShareStartSaved();
+    } catch (e) {
+      addLog(`Auto file share start failed: ${e}`, 'error');
     }
   }
 });
