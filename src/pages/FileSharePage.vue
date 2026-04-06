@@ -470,7 +470,7 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div class="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,380px)]">
+      <div class="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1.7fr)_minmax(320px,380px)]">
         <div class="space-y-4">
           <div class="fs-card">
             <div class="mb-4 flex items-center justify-between gap-3">
@@ -632,7 +632,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="space-y-4 xl:sticky xl:top-6">
+        <div class="space-y-4 lg:sticky lg:top-6">
           <div class="fs-card">
             <p class="fs-label-sm">{{ t('tools.fileShare.applyAndRuntimeTitle') }}</p>
             <div v-if="errorMsg" class="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{{ errorMsg }}</div>
