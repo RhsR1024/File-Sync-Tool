@@ -1,9 +1,7 @@
 import type {
-  FileShareListResponse,
-  FileShareRootSummary,
-  FileShareSearchResult,
-  FileShareSearchScope,
+  FileShareSearchResponse,
   FileShareSession,
+  FileShareTreeResponse,
 } from './types';
 
 export class FileShareApiError extends Error {
@@ -40,24 +38,14 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
-function buildMultipart(
-  root: string,
-  parent: string,
-  files: File[],
-): FormData {
+function buildMultipart(parentNodeId: string, files: File[]): FormData {
   const data = new FormData();
-  data.set('root', root);
-  data.set('parent', parent);
+  data.set('parent_node_id', parentNodeId);
   for (const file of files) {
     const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
     data.append('file', file, relativePath);
   }
   return data;
-}
-
-function buildDownloadPath(root: string, relativePath: string): string {
-  const segments = [root, ...relativePath.split('/').filter(Boolean)];
-  return segments.map((segment) => encodeURIComponent(segment)).join('/');
 }
 
 export const fileShareApi = {
@@ -81,105 +69,100 @@ export const fileShareApi = {
       method: 'POST',
     }, 'empty');
   },
-  listRoots() {
-    return request<FileShareRootSummary[]>('/api/roots');
-  },
-  listEntries(root: string, path = '') {
-    const query = new URLSearchParams({ root });
-    if (path) {
-      query.set('path', path);
+  getTree(nodeId?: string | null) {
+    const query = new URLSearchParams();
+    if (nodeId) {
+      query.set('node_id', nodeId);
     }
-    return request<FileShareListResponse>(`/api/list?${query.toString()}`);
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return request<FileShareTreeResponse>(`/api/tree${suffix}`);
   },
-  search(keyword: string, scope: FileShareSearchScope, root?: string, path?: string) {
+  search(keyword: string, nodeId?: string | null) {
     const query = new URLSearchParams({
       keyword,
-      scope,
     });
-    if (root) {
-      query.set('root', root);
+    if (nodeId) {
+      query.set('node_id', nodeId);
     }
-    if (path) {
-      query.set('path', path);
-    }
-    return request<FileShareSearchResult[]>(`/api/search?${query.toString()}`);
+    return request<FileShareSearchResponse>(`/api/tree/search?${query.toString()}`);
   },
-  uploadFiles(root: string, parent: string, files: File[]) {
+  uploadFiles(parentNodeId: string, files: File[]) {
     return request<void>('/api/upload/files', {
       method: 'POST',
-      body: buildMultipart(root, parent, files),
+      body: buildMultipart(parentNodeId, files),
     }, 'empty');
   },
-  uploadDirectory(root: string, parent: string, files: File[]) {
+  uploadDirectory(parentNodeId: string, files: File[]) {
     return request<void>('/api/upload/directory', {
       method: 'POST',
-      body: buildMultipart(root, parent, files),
+      body: buildMultipart(parentNodeId, files),
     }, 'empty');
   },
-  createDirectory(root: string, parent: string, name: string) {
-    return request<void>('/api/entries/directory', {
+  createDirectory(parentNodeId: string, name: string) {
+    return request<void>('/api/nodes/directory', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        root,
-        parent,
+        parent_node_id: parentNodeId,
         name,
       }),
     }, 'empty');
   },
-  createText(root: string, parent: string, name: string, content: string) {
-    return request<void>('/api/entries/text', {
+  createText(parentNodeId: string, name: string, content: string) {
+    return request<void>('/api/nodes/text', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        root,
-        parent,
+        parent_node_id: parentNodeId,
         name,
         content,
       }),
     }, 'empty');
   },
-  rename(root: string, path: string, toName: string) {
-    return request<void>('/api/entries/rename', {
+  rename(nodeId: string, toName: string) {
+    return request<void>('/api/nodes/rename', {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        root,
-        path,
+        node_id: nodeId,
         to_name: toName,
       }),
     }, 'empty');
   },
-  remove(root: string, path: string) {
-    return request<void>('/api/entries', {
+  remove(nodeId: string) {
+    return request<void>('/api/nodes', {
       method: 'DELETE',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        root,
-        path,
+        node_id: nodeId,
       }),
     }, 'empty');
   },
-  previewUrl(root: string, path: string) {
+  previewUrl(nodeId: string) {
     const query = new URLSearchParams({
-      root,
-      path,
+      node_id: nodeId,
     });
     return `/api/preview?${query.toString()}`;
   },
-  downloadFileUrl(root: string, path: string) {
-    return `/download/file/${buildDownloadPath(root, path)}`;
+  downloadFileUrl(nodeId: string) {
+    const query = new URLSearchParams({
+      node_id: nodeId,
+    });
+    return `/api/download/file?${query.toString()}`;
   },
-  downloadArchiveUrl(root: string, path: string) {
-    return `/download/zip/${buildDownloadPath(root, path)}`;
+  downloadArchiveUrl(nodeId: string) {
+    const query = new URLSearchParams({
+      node_id: nodeId,
+    });
+    return `/api/download/archive?${query.toString()}`;
   },
 };
 
@@ -189,6 +172,10 @@ export function isUnauthorized(error: unknown): boolean {
 
 export function isForbidden(error: unknown): boolean {
   return error instanceof FileShareApiError && error.status === 403;
+}
+
+export function isNotFound(error: unknown): boolean {
+  return error instanceof FileShareApiError && error.status === 404;
 }
 
 export function getErrorMessage(error: unknown): string {

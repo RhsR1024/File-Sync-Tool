@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watchEffect } from 'vue';
+import { computed, onMounted, ref, watchEffect, type Ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
-import { fileShareApi, getErrorMessage, isForbidden, isUnauthorized } from './api';
+import {
+  fileShareApi,
+  getErrorMessage,
+  isForbidden,
+  isNotFound,
+  isUnauthorized,
+} from './api';
 import CreateDirectoryDialog from './components/CreateDirectoryDialog.vue';
 import DeleteConfirmDialog from './components/DeleteConfirmDialog.vue';
 import EntryTable from './components/EntryTable.vue';
@@ -14,28 +20,24 @@ import SearchBar from './components/SearchBar.vue';
 import ToolbarActions from './components/ToolbarActions.vue';
 import UploadDialog from './components/UploadDialog.vue';
 import {
-  canRenderAction,
-  entryToDisplayEntry,
-  isImageEntry,
-  joinRelativePath,
-  splitPathSegments,
-  type FileShareDisplayEntry,
-  type FileShareRootSummary,
+  canPreviewEntry,
+  shouldPromptForAccountSwitch,
+  type FileShareNode,
   type FileShareSearchScope,
-  type FileShareSearchResult,
   type FileShareSession,
+  type FileShareTreeCurrentKind,
+  type FileShareTreeResponse,
 } from './types';
 
 const { t } = useI18n();
 
 const session = ref<FileShareSession | null>(null);
-const roots = ref<FileShareRootSummary[]>([]);
-const currentRoot = ref('');
-const currentPath = ref('');
-const entries = ref<FileShareDisplayEntry[]>([]);
-const globalResults = ref<FileShareDisplayEntry[]>([]);
+const tree = ref<FileShareTreeResponse | null>(null);
 const keyword = ref('');
-const searchScope = ref<FileShareSearchScope>('current');
+const activeKeyword = ref('');
+const searchScope = ref<FileShareSearchScope>('global');
+const activeSearchScope = ref<FileShareSearchScope>('global');
+const searchResults = ref<FileShareNode[]>([]);
 
 const pageError = ref('');
 const loginError = ref('');
@@ -43,6 +45,7 @@ const uploadError = ref('');
 const textError = ref('');
 const renameError = ref('');
 const deleteError = ref('');
+const createDirectoryError = ref('');
 const flashMessage = ref('');
 
 const loadingSession = ref(true);
@@ -60,56 +63,49 @@ const deleteOpen = ref(false);
 const previewOpen = ref(false);
 const previewTitle = ref('');
 const previewSrc = ref('');
-const createDirectoryError = ref('');
-const renameTarget = ref<FileShareDisplayEntry | null>(null);
-const deleteTarget = ref<FileShareDisplayEntry | null>(null);
+const renameTarget = ref<FileShareNode | null>(null);
+const deleteTarget = ref<FileShareNode | null>(null);
 
-const currentRootPath = computed(() => {
-  return roots.value.find((root) => root.alias === currentRoot.value)?.path || '';
-});
+const currentNodeId = computed(() => tree.value?.current.node_id ?? null);
+const currentKind = computed<FileShareTreeCurrentKind | null>(() => tree.value?.current.kind ?? null);
+const breadcrumbs = computed(() => tree.value?.breadcrumbs ?? []);
+const searchActive = computed(() => activeKeyword.value.length > 0);
+const displayedEntries = computed(() => (
+  searchActive.value
+    ? searchResults.value
+    : tree.value?.children ?? []
+));
 
-const breadcrumbs = computed(() => {
-  const crumbs = [{ label: currentRoot.value || t('app.rootCrumb'), path: '' }];
-  const segments = splitPathSegments(currentPath.value);
-  let path = '';
-  for (const segment of segments) {
-    path = joinRelativePath(path, segment);
-    crumbs.push({
-      label: segment,
-      path,
-    });
-  }
-  return crumbs;
-});
-
-const displayedEntries = computed(() => {
-  if (searchScope.value === 'global' && keyword.value.trim()) {
-    return globalResults.value;
-  }
-
-  if (searchScope.value === 'current' && keyword.value.trim()) {
-    const needle = keyword.value.trim().toLowerCase();
-    return entries.value.filter((entry) => entry.name.toLowerCase().includes(needle));
-  }
-
-  return entries.value;
-});
-
-const emptyText = computed(() => {
-  if (!currentRoot.value) {
-    return t('app.noRoots');
-  }
-  if (searchScope.value === 'global' && keyword.value.trim()) {
-    return t('app.noGlobalResults');
-  }
-  if (searchScope.value === 'current' && keyword.value.trim()) {
-    return t('app.noCurrentResults');
-  }
-  return t('app.emptyDirectory');
-});
-
-const canSearchCurrent = computed(() => Boolean(session.value?.permissions.search_current));
+const canSearchCurrent = computed(() => (
+  currentKind.value !== 'home'
+  && Boolean(session.value?.permissions.search_current)
+));
 const canSearchGlobal = computed(() => Boolean(session.value?.permissions.search_global));
+const browseOnlyHint = computed(() => {
+  const permissions = session.value?.permissions;
+  if (!permissions) {
+    return '';
+  }
+
+  return !permissions.upload_file
+    && !permissions.upload_directory
+    && !permissions.create_directory
+    && !permissions.create_text
+    && !permissions.rename
+    && !permissions.delete
+    ? t('app.browseOnlyHint')
+    : '';
+});
+const emptyText = computed(() => {
+  if (searchActive.value) {
+    return activeSearchScope.value === 'global'
+      ? t('app.noGlobalResults')
+      : t('app.noCurrentResults');
+  }
+  return currentKind.value === 'home'
+    ? t('app.noRoots')
+    : t('app.emptyDirectory');
+});
 const sessionChipText = computed(() => {
   if (!session.value) {
     return t('app.loggedOut');
@@ -118,8 +114,92 @@ const sessionChipText = computed(() => {
     ? t('app.guestLabel', { name: session.value.account_name })
     : session.value.account_name;
 });
+const sessionActionLabel = computed(() => {
+  if (!session.value) {
+    return '';
+  }
+  return session.value.is_guest
+    ? t('app.switchAccount')
+    : t('app.signOut');
+});
+const loginDescription = computed(() => (
+  session.value?.is_guest
+    ? t('login.switchAccountDescription')
+    : t('login.description')
+));
 
-async function bootstrap(preferredRoot?: string, preferredPath?: string) {
+function defaultSearchScope(kind: FileShareTreeCurrentKind | null | undefined): FileShareSearchScope {
+  return kind === 'home' ? 'global' : 'current';
+}
+
+function resetSearchState(kind: FileShareTreeCurrentKind | null | undefined) {
+  const nextScope = defaultSearchScope(kind);
+  keyword.value = '';
+  activeKeyword.value = '';
+  searchScope.value = nextScope;
+  activeSearchScope.value = nextScope;
+  searchResults.value = [];
+}
+
+function syncSearchScope(kind: FileShareTreeCurrentKind, preserveSearch: boolean) {
+  if (!preserveSearch || !activeKeyword.value) {
+    searchScope.value = defaultSearchScope(kind);
+    return;
+  }
+
+  let nextScope = activeSearchScope.value;
+  if (kind === 'home') {
+    nextScope = 'global';
+  }
+
+  if (nextScope === 'current' && !session.value?.permissions.search_current) {
+    nextScope = canSearchGlobal.value ? 'global' : defaultSearchScope(kind);
+  }
+  if (nextScope === 'global' && !session.value?.permissions.search_global) {
+    nextScope = defaultSearchScope(kind);
+  }
+
+  activeSearchScope.value = nextScope;
+  searchScope.value = nextScope;
+}
+
+async function loadTree(
+  nodeId: string | null = null,
+  options: { preserveSearch?: boolean; allowHomeFallback?: boolean } = {},
+) {
+  const preserveSearch = options.preserveSearch ?? false;
+  const allowHomeFallback = options.allowHomeFallback ?? true;
+
+  loadingEntries.value = true;
+  pageError.value = '';
+
+  try {
+    const response = await fileShareApi.getTree(nodeId);
+    tree.value = response;
+    syncSearchScope(response.current.kind, preserveSearch);
+  } catch (error) {
+    if (isNotFound(error) && nodeId && allowHomeFallback) {
+      resetSearchState('home');
+      await loadTree(null, {
+        preserveSearch: false,
+        allowHomeFallback: false,
+      });
+      return;
+    }
+    throw error;
+  } finally {
+    loadingEntries.value = false;
+  }
+
+  if (preserveSearch && activeKeyword.value) {
+    await rerunSearch();
+  }
+}
+
+async function bootstrap(
+  preferredNodeId: string | null = null,
+  options: { preserveSearch?: boolean } = {},
+) {
   loadingSession.value = true;
   pageError.value = '';
 
@@ -127,11 +207,15 @@ async function bootstrap(preferredRoot?: string, preferredPath?: string) {
     session.value = await fileShareApi.getSession();
     loginOpen.value = false;
     loginError.value = '';
-    await loadRoots(preferredRoot, preferredPath);
+    await loadTree(preferredNodeId, {
+      preserveSearch: options.preserveSearch ?? false,
+    });
   } catch (error) {
     session.value = null;
-    entries.value = [];
-    roots.value = [];
+    tree.value = null;
+    searchResults.value = [];
+    activeKeyword.value = '';
+
     if (isUnauthorized(error)) {
       loginOpen.value = true;
       return;
@@ -146,61 +230,29 @@ async function bootstrap(preferredRoot?: string, preferredPath?: string) {
   }
 }
 
-async function loadRoots(preferredRoot?: string, preferredPath?: string) {
-  roots.value = await fileShareApi.listRoots();
-  if (roots.value.length === 0) {
-    currentRoot.value = '';
-    currentPath.value = '';
-    entries.value = [];
+async function executeSearch(rawKeyword: string, scope: FileShareSearchScope) {
+  const trimmed = rawKeyword.trim();
+  if (!trimmed) {
+    resetSearchState(currentKind.value);
     return;
   }
 
-  const nextRoot = preferredRoot && roots.value.some((root) => root.alias === preferredRoot)
-    ? preferredRoot
-    : currentRoot.value && roots.value.some((root) => root.alias === currentRoot.value)
-      ? currentRoot.value
-      : roots.value[0].alias;
+  const effectiveScope = scope === 'current' && currentNodeId.value
+    ? 'current'
+    : 'global';
 
-  currentRoot.value = nextRoot;
-  currentPath.value = preferredPath ?? currentPath.value;
-  await loadEntries();
-}
-
-async function loadEntries() {
-  if (!currentRoot.value) {
-    return;
-  }
-  loadingEntries.value = true;
-  pageError.value = '';
-
-  try {
-    const response = await fileShareApi.listEntries(currentRoot.value, currentPath.value);
-    currentRoot.value = response.root_alias;
-    currentPath.value = response.path;
-    entries.value = response.entries.map((entry) => entryToDisplayEntry(entry, response.root_alias));
-    if (searchScope.value === 'global' && keyword.value.trim()) {
-      await runGlobalSearch();
-    }
-  } catch (error) {
-    pageError.value = getErrorMessage(error);
-  } finally {
-    loadingEntries.value = false;
-  }
-}
-
-async function runGlobalSearch() {
-  if (!currentRoot.value || !keyword.value.trim()) {
-    globalResults.value = [];
-    return;
-  }
   searching.value = true;
   pageError.value = '';
+
   try {
-    const results = await fileShareApi.search(keyword.value, 'global');
-    globalResults.value = results.map((entry: FileShareSearchResult) => ({
-      ...entry,
-      root_alias: entry.root_alias,
-    }));
+    const response = await fileShareApi.search(
+      trimmed,
+      effectiveScope === 'current' ? currentNodeId.value : null,
+    );
+    activeKeyword.value = trimmed;
+    activeSearchScope.value = effectiveScope;
+    searchScope.value = effectiveScope;
+    searchResults.value = response.results;
   } catch (error) {
     pageError.value = getErrorMessage(error);
   } finally {
@@ -208,24 +260,31 @@ async function runGlobalSearch() {
   }
 }
 
-async function handleSearch() {
-  if (searchScope.value === 'current') {
+async function rerunSearch() {
+  if (!activeKeyword.value) {
+    searchResults.value = [];
     return;
   }
-  await runGlobalSearch();
+  await executeSearch(activeKeyword.value, activeSearchScope.value);
+}
+
+async function handleSearch() {
+  await executeSearch(keyword.value, searchScope.value);
 }
 
 function clearSearch() {
-  keyword.value = '';
-  globalResults.value = [];
+  resetSearchState(currentKind.value);
 }
 
 async function handleLogin(payload: { accountId: string; password: string }) {
   loggingIn.value = true;
   loginError.value = '';
+
   try {
     await fileShareApi.login(payload.accountId, payload.password);
-    await bootstrap();
+    await bootstrap(currentNodeId.value, {
+      preserveSearch: searchActive.value,
+    });
   } catch (error) {
     loginError.value = getErrorMessage(error);
   } finally {
@@ -233,12 +292,22 @@ async function handleLogin(payload: { accountId: string; password: string }) {
   }
 }
 
-async function handleLogout() {
+async function handleSessionAction() {
+  if (shouldPromptForAccountSwitch(session.value)) {
+    loginError.value = '';
+    pageError.value = '';
+    loginOpen.value = true;
+    return;
+  }
+
   mutating.value = true;
   pageError.value = '';
+
   try {
     await fileShareApi.logout();
-    await bootstrap(currentRoot.value, currentPath.value);
+    await bootstrap(currentNodeId.value, {
+      preserveSearch: searchActive.value,
+    });
   } catch (error) {
     pageError.value = getErrorMessage(error);
   } finally {
@@ -246,180 +315,10 @@ async function handleLogout() {
   }
 }
 
-async function openDirectory(entry: FileShareDisplayEntry) {
-  if (!entry.is_dir) {
-    if (isImageEntry(entry.name) && session.value?.permissions.preview_image) {
-      openPreview(entry);
-      return;
-    }
-    if (session.value?.permissions.download_file) {
-      triggerDownload(entry.root_alias, entry.relative_path, false);
-    }
-    return;
-  }
-
-  if (searchScope.value === 'global' && keyword.value.trim()) {
-    currentRoot.value = entry.root_alias;
-    currentPath.value = entry.relative_path;
-    searchScope.value = 'current';
-    clearSearch();
-    await loadEntries();
-    return;
-  }
-
-  currentPath.value = entry.relative_path;
-  await loadEntries();
-}
-
-async function navigateTo(path: string) {
-  currentPath.value = path;
-  await loadEntries();
-}
-
-async function handleRootChange(root: string) {
-  currentRoot.value = root;
-  currentPath.value = '';
-  clearSearch();
-  await loadEntries();
-}
-
-function openUpload(mode: 'files' | 'directory') {
-  uploadMode.value = mode;
-  uploadError.value = '';
-  uploadOpen.value = true;
-}
-
-async function submitUpload(files: File[]) {
-  if (!currentRoot.value) {
-    return;
-  }
-  mutating.value = true;
-  uploadError.value = '';
-  try {
-    if (uploadMode.value === 'files') {
-      await fileShareApi.uploadFiles(currentRoot.value, currentPath.value, files);
-    } else {
-      await fileShareApi.uploadDirectory(currentRoot.value, currentPath.value, files);
-    }
-    uploadOpen.value = false;
-    flashMessage.value = uploadMode.value === 'files'
-      ? t('app.uploadFilesSuccess')
-      : t('app.uploadDirectorySuccess');
-    await loadEntries();
-  } catch (error) {
-    uploadError.value = getErrorMessage(error);
-  } finally {
-    mutating.value = false;
-  }
-}
-
-function openCreateDirectoryDialog() {
-  if (!currentRoot.value) {
-    return;
-  }
-  createDirectoryError.value = '';
-  createDirectoryOpen.value = true;
-}
-
-async function submitCreateDirectory(name: string) {
-  if (!currentRoot.value) {
-    return;
-  }
-  if (!name.trim()) {
-    return;
-  }
-  mutating.value = true;
-  createDirectoryError.value = '';
-  try {
-    await fileShareApi.createDirectory(currentRoot.value, currentPath.value, name.trim());
-    createDirectoryOpen.value = false;
-    flashMessage.value = t('app.createDirectorySuccess');
-    await loadEntries();
-  } catch (error) {
-    createDirectoryError.value = getErrorMessage(error);
-  } finally {
-    mutating.value = false;
-  }
-}
-
-async function createText(payload: { name: string; content: string }) {
-  if (!currentRoot.value) {
-    return;
-  }
-  mutating.value = true;
-  textError.value = '';
-  try {
-    await fileShareApi.createText(currentRoot.value, currentPath.value, payload.name, payload.content);
-    newTextOpen.value = false;
-    flashMessage.value = t('app.createTextSuccess');
-    await loadEntries();
-  } catch (error) {
-    textError.value = getErrorMessage(error);
-  } finally {
-    mutating.value = false;
-  }
-}
-
-function openRename(entry: FileShareDisplayEntry) {
-  renameTarget.value = entry;
-  renameError.value = '';
-  renameOpen.value = true;
-}
-
-async function submitRename(name: string) {
-  if (!renameTarget.value) {
-    return;
-  }
-  mutating.value = true;
-  renameError.value = '';
-  try {
-    await fileShareApi.rename(renameTarget.value.root_alias, renameTarget.value.relative_path, name);
-    renameOpen.value = false;
-    renameTarget.value = null;
-    flashMessage.value = t('app.renameSuccess');
-    await refreshAfterMutation();
-  } catch (error) {
-    renameError.value = getErrorMessage(error);
-  } finally {
-    mutating.value = false;
-  }
-}
-
-function openDelete(entry: FileShareDisplayEntry) {
-  deleteTarget.value = entry;
-  deleteError.value = '';
-  deleteOpen.value = true;
-}
-
-async function submitDelete() {
-  if (!deleteTarget.value) {
-    return;
-  }
-  mutating.value = true;
-  deleteError.value = '';
-  try {
-    await fileShareApi.remove(deleteTarget.value.root_alias, deleteTarget.value.relative_path);
-    deleteOpen.value = false;
-    deleteTarget.value = null;
-    flashMessage.value = t('app.deleteSuccess');
-    await refreshAfterMutation();
-  } catch (error) {
-    deleteError.value = getErrorMessage(error);
-  } finally {
-    mutating.value = false;
-  }
-}
-
-function openPreview(entry: FileShareDisplayEntry) {
-  previewTitle.value = entry.name;
-  previewSrc.value = fileShareApi.previewUrl(entry.root_alias, entry.relative_path);
-  previewOpen.value = true;
-}
-
-function triggerDownload(root: string, path: string, archive: boolean) {
-  const href = archive
-    ? fileShareApi.downloadArchiveUrl(root, path)
-    : fileShareApi.downloadFileUrl(root, path);
+function triggerDownload(node: FileShareNode) {
+  const href = node.is_dir
+    ? fileShareApi.downloadArchiveUrl(node.node_id)
+    : fileShareApi.downloadFileUrl(node.node_id);
   const link = document.createElement('a');
   link.href = href;
   link.target = '_blank';
@@ -428,11 +327,219 @@ function triggerDownload(root: string, path: string, archive: boolean) {
   document.body.removeChild(link);
 }
 
-async function refreshAfterMutation() {
-  if (searchScope.value === 'global' && keyword.value.trim()) {
-    await runGlobalSearch();
-  } else {
-    await loadEntries();
+function openPreview(node: FileShareNode) {
+  previewTitle.value = node.name;
+  previewSrc.value = fileShareApi.previewUrl(node.node_id);
+  previewOpen.value = true;
+}
+
+async function openEntry(node: FileShareNode) {
+  if (node.is_dir) {
+    clearSearch();
+    await loadTree(node.node_id);
+    return;
+  }
+
+  if (canPreviewEntry(session.value, node)) {
+    openPreview(node);
+    return;
+  }
+  if (node.permissions.download_file) {
+    triggerDownload(node);
+  }
+}
+
+async function navigate(nodeId: string | null) {
+  clearSearch();
+  await loadTree(nodeId);
+}
+
+function currentParentNodeId(): string | null {
+  return currentKind.value === 'home' ? null : currentNodeId.value;
+}
+
+function openUpload(mode: 'files' | 'directory') {
+  if (!currentParentNodeId()) {
+    return;
+  }
+  uploadMode.value = mode;
+  uploadError.value = '';
+  uploadOpen.value = true;
+}
+
+async function refreshCurrentView(
+  preferredNodeId: string | null = currentNodeId.value,
+  options: { preserveSearch?: boolean } = {},
+) {
+  await bootstrap(preferredNodeId, {
+    preserveSearch: options.preserveSearch ?? searchActive.value,
+  });
+}
+
+async function handleMutationError(error: unknown, targetError: Ref<string>) {
+  if (isForbidden(error)) {
+    await refreshCurrentView(currentNodeId.value, {
+      preserveSearch: searchActive.value,
+    });
+    const message = t('app.permissionChanged');
+    pageError.value = message;
+    targetError.value = message;
+    return;
+  }
+
+  if (isUnauthorized(error)) {
+    await refreshCurrentView(currentNodeId.value, {
+      preserveSearch: searchActive.value,
+    });
+    targetError.value = t('login.description');
+    return;
+  }
+
+  targetError.value = getErrorMessage(error);
+}
+
+async function submitUpload(files: File[]) {
+  const parentNodeId = currentParentNodeId();
+  if (!parentNodeId) {
+    return;
+  }
+
+  mutating.value = true;
+  uploadError.value = '';
+
+  try {
+    if (uploadMode.value === 'files') {
+      await fileShareApi.uploadFiles(parentNodeId, files);
+    } else {
+      await fileShareApi.uploadDirectory(parentNodeId, files);
+    }
+    uploadOpen.value = false;
+    flashMessage.value = uploadMode.value === 'files'
+      ? t('app.uploadFilesSuccess')
+      : t('app.uploadDirectorySuccess');
+    await refreshCurrentView();
+  } catch (error) {
+    await handleMutationError(error, uploadError);
+  } finally {
+    mutating.value = false;
+  }
+}
+
+function openCreateDirectoryDialog() {
+  if (!currentParentNodeId()) {
+    return;
+  }
+  createDirectoryError.value = '';
+  createDirectoryOpen.value = true;
+}
+
+async function submitCreateDirectory(name: string) {
+  const parentNodeId = currentParentNodeId();
+  if (!parentNodeId || !name.trim()) {
+    return;
+  }
+
+  mutating.value = true;
+  createDirectoryError.value = '';
+
+  try {
+    await fileShareApi.createDirectory(parentNodeId, name.trim());
+    createDirectoryOpen.value = false;
+    flashMessage.value = t('app.createDirectorySuccess');
+    await refreshCurrentView();
+  } catch (error) {
+    await handleMutationError(error, createDirectoryError);
+  } finally {
+    mutating.value = false;
+  }
+}
+
+async function createText(payload: { name: string; content: string }) {
+  const parentNodeId = currentParentNodeId();
+  if (!parentNodeId || !payload.name.trim()) {
+    return;
+  }
+
+  mutating.value = true;
+  textError.value = '';
+
+  try {
+    await fileShareApi.createText(parentNodeId, payload.name, payload.content);
+    newTextOpen.value = false;
+    flashMessage.value = t('app.createTextSuccess');
+    await refreshCurrentView();
+  } catch (error) {
+    await handleMutationError(error, textError);
+  } finally {
+    mutating.value = false;
+  }
+}
+
+function openRename(node: FileShareNode) {
+  renameTarget.value = node;
+  renameError.value = '';
+  renameOpen.value = true;
+}
+
+async function submitRename(name: string) {
+  if (!renameTarget.value || !name.trim()) {
+    return;
+  }
+
+  mutating.value = true;
+  renameError.value = '';
+
+  try {
+    await fileShareApi.rename(renameTarget.value.node_id, name.trim());
+    renameOpen.value = false;
+    renameTarget.value = null;
+    flashMessage.value = t('app.renameSuccess');
+    await refreshCurrentView(currentNodeId.value, {
+      preserveSearch: searchActive.value,
+    });
+  } catch (error) {
+    await handleMutationError(error, renameError);
+  } finally {
+    mutating.value = false;
+  }
+}
+
+function openDelete(node: FileShareNode) {
+  deleteTarget.value = node;
+  deleteError.value = '';
+  deleteOpen.value = true;
+}
+
+function currentViewDependsOn(node: FileShareNode | null): boolean {
+  if (!node) {
+    return false;
+  }
+  return breadcrumbs.value.some((crumb) => crumb.node_id === node.node_id);
+}
+
+async function submitDelete() {
+  if (!deleteTarget.value) {
+    return;
+  }
+
+  const target = deleteTarget.value;
+  const fallbackNodeId = currentViewDependsOn(target) ? null : currentNodeId.value;
+
+  mutating.value = true;
+  deleteError.value = '';
+
+  try {
+    await fileShareApi.remove(target.node_id);
+    deleteOpen.value = false;
+    deleteTarget.value = null;
+    flashMessage.value = t('app.deleteSuccess');
+    await refreshCurrentView(fallbackNodeId, {
+      preserveSearch: searchActive.value && fallbackNodeId !== null,
+    });
+  } catch (error) {
+    await handleMutationError(error, deleteError);
+  } finally {
+    mutating.value = false;
   }
 }
 
@@ -450,47 +557,23 @@ watchEffect(() => {
     <div class="backdrop"></div>
 
     <main class="page">
-      <section class="hero-card">
-        <div>
-          <p class="eyebrow">{{ t('app.eyebrow') }}</p>
-          <h1>{{ t('app.title') }}</h1>
-          <p class="hero-text">
-            {{ t('app.currentRoot') }}:
-            <strong>{{ currentRoot || t('app.unselected') }}</strong>
-            <span v-if="currentRootPath"> · {{ currentRootPath }}</span>
-          </p>
-        </div>
-
-        <div class="hero-actions">
-          <div class="session-chip" :class="{ guest: session?.is_guest }">
-            {{ sessionChipText }}
-          </div>
-          <button
-            v-if="session"
-            type="button"
-            class="hero-button"
-            :disabled="mutating || loadingSession"
-            @click="handleLogout"
-          >
-            {{ session.is_guest ? t('app.switchAccount') : t('app.signOut') }}
-          </button>
-        </div>
-      </section>
-
       <section class="panel">
         <ToolbarActions
-          :roots="roots"
-          :current-root="currentRoot"
           :breadcrumbs="breadcrumbs"
+          :current-kind="currentKind"
           :permissions="session?.permissions ?? null"
-          :busy="loadingEntries || mutating || loadingSession"
-          @select-root="handleRootChange"
-          @navigate="navigateTo"
+          :session-text="session ? sessionChipText : ''"
+          :session-is-guest="Boolean(session?.is_guest)"
+          :session-action-label="sessionActionLabel"
+          :browse-only-hint="browseOnlyHint"
+          :busy="loadingEntries || mutating || loadingSession || searching"
+          @navigate="navigate"
           @upload-files="openUpload('files')"
           @upload-directory="openUpload('directory')"
           @create-directory="openCreateDirectoryDialog"
           @create-text="newTextOpen = true"
-          @refresh="loadEntries"
+          @refresh="refreshCurrentView()"
+          @session-action="handleSessionAction"
         />
 
         <SearchBar
@@ -498,7 +581,7 @@ watchEffect(() => {
           :scope="searchScope"
           :can-search-current="canSearchCurrent"
           :can-search-global="canSearchGlobal"
-          :busy="searching || loadingEntries || mutating"
+          :busy="searching || loadingEntries || mutating || loadingSession"
           @update:keyword="keyword = $event"
           @update:scope="searchScope = $event"
           @search="handleSearch"
@@ -510,21 +593,16 @@ watchEffect(() => {
 
         <EntryTable
           :entries="displayedEntries"
-          :permissions="session?.permissions ?? null"
+          :session="session"
           :loading="loadingEntries || searching || loadingSession"
           :empty-text="emptyText"
-          :global-search="searchScope === 'global' && keyword.trim().length > 0"
-          @open="openDirectory"
+          :search-active="searchActive"
+          @open="openEntry"
           @preview="openPreview"
-          @download="triggerDownload($event.root_alias, $event.relative_path, false)"
-          @archive="triggerDownload($event.root_alias, $event.relative_path, true)"
+          @download="triggerDownload"
           @rename="openRename"
           @delete="openDelete"
         />
-
-        <div v-if="session && !canRenderAction(session.permissions, 'upload') && !session.permissions.create_directory && !session.permissions.create_text" class="hint-box">
-          {{ t('app.browseOnlyHint') }}
-        </div>
       </section>
     </main>
 
@@ -532,6 +610,7 @@ watchEffect(() => {
       :open="loginOpen"
       :busy="loggingIn"
       :error="loginError"
+      :description="loginDescription"
       @close="loginOpen = false"
       @submit="handleLogin"
     />
@@ -564,7 +643,7 @@ watchEffect(() => {
     <RenameDialog
       :open="renameOpen"
       :busy="mutating"
-      :current-name="renameTarget?.name || ''"
+      :current-name="renameTarget?.name ?? ''"
       :error="renameError"
       @close="renameOpen = false"
       @submit="submitRename"
@@ -573,7 +652,7 @@ watchEffect(() => {
     <DeleteConfirmDialog
       :open="deleteOpen"
       :busy="mutating"
-      :target-name="deleteTarget?.name || ''"
+      :target-name="deleteTarget?.display_path ?? ''"
       :error="deleteError"
       @close="deleteOpen = false"
       @submit="submitDelete"
@@ -609,70 +688,7 @@ watchEffect(() => {
   position: relative;
   max-width: 1240px;
   margin: 0 auto;
-  padding: 36px 20px 48px;
-}
-
-.hero-card,
-.panel {
-  border-radius: 28px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(8, 14, 24, 0.72);
-  backdrop-filter: blur(16px);
-  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.26);
-}
-
-.hero-card {
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 32px;
-  margin-bottom: 20px;
-}
-
-.eyebrow {
-  margin: 0 0 10px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: #79d6cf;
-  font-size: 12px;
-}
-
-.hero-card h1 {
-  margin: 0;
-  font-size: clamp(32px, 5vw, 48px);
-}
-
-.hero-text {
-  margin: 16px 0 0;
-  color: #9cb2c7;
-  line-height: 1.6;
-}
-
-.hero-actions {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.session-chip,
-.hero-button {
-  border-radius: 999px;
-  padding: 10px 16px;
-}
-
-.session-chip {
-  background: rgba(148, 163, 184, 0.12);
-  color: #eff7ff;
-}
-
-.session-chip.guest {
-  background: rgba(34, 197, 94, 0.16);
-}
-
-.hero-button {
-  border: none;
-  background: rgba(56, 189, 248, 0.14);
-  color: #dff7ff;
+  padding: 28px 20px 48px;
 }
 
 .panel {
@@ -680,11 +696,15 @@ watchEffect(() => {
   flex-direction: column;
   gap: 18px;
   padding: 24px;
+  border-radius: 28px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(8, 14, 24, 0.72);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.26);
 }
 
 .flash-banner,
-.error-banner,
-.hint-box {
+.error-banner {
   margin: 0;
   border-radius: 18px;
   padding: 14px 16px;
@@ -700,23 +720,14 @@ watchEffect(() => {
   color: #fecaca;
 }
 
-.hint-box {
-  background: rgba(59, 130, 246, 0.12);
-  color: #c6e6ff;
-}
-
 @media (max-width: 880px) {
   .page {
-    padding: 20px 14px 32px;
+    padding: 18px 14px 32px;
   }
 
-  .hero-card {
-    flex-direction: column;
-    padding: 24px;
-  }
-
-  .hero-actions {
-    flex-wrap: wrap;
+  .panel {
+    padding: 18px;
+    border-radius: 22px;
   }
 }
 </style>

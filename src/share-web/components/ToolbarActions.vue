@@ -1,69 +1,76 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
-import type { FileSharePermissionSet, FileShareRootSummary } from '../types';
-
-interface BreadcrumbItem {
-  label: string;
-  path: string;
-}
+import type {
+  FileShareBreadcrumb,
+  FileSharePermissionSet,
+  FileShareTreeCurrentKind,
+} from '../types';
 
 const props = defineProps<{
-  roots: FileShareRootSummary[];
-  currentRoot: string;
-  breadcrumbs: BreadcrumbItem[];
+  breadcrumbs: FileShareBreadcrumb[];
+  currentKind: FileShareTreeCurrentKind | null;
   permissions: FileSharePermissionSet | null;
+  sessionText?: string;
+  sessionIsGuest?: boolean;
+  sessionActionLabel?: string;
+  browseOnlyHint?: string;
   busy?: boolean;
 }>();
 
 const emit = defineEmits<{
-  'select-root': [root: string];
-  navigate: [path: string];
+  navigate: [nodeId: string | null];
   'upload-files': [];
   'upload-directory': [];
   'create-directory': [];
   'create-text': [];
   refresh: [];
+  'session-action': [];
 }>();
 
 const { t } = useI18n();
 
+const showWriteActions = computed(() => props.currentKind !== 'home');
+
 function canUploadFiles() {
-  return Boolean(props.permissions?.upload_file);
+  return showWriteActions.value && Boolean(props.permissions?.upload_file);
 }
 
 function canUploadDirectory() {
-  return Boolean(props.permissions?.upload_directory);
+  return showWriteActions.value && Boolean(props.permissions?.upload_directory);
 }
 
 function canCreateDirectory() {
-  return Boolean(props.permissions?.create_directory);
+  return showWriteActions.value && Boolean(props.permissions?.create_directory);
 }
 
 function canCreateText() {
-  return Boolean(props.permissions?.create_text);
+  return showWriteActions.value && Boolean(props.permissions?.create_text);
+}
+
+function isCurrentCrumb(index: number): boolean {
+  return index === props.breadcrumbs.length - 1;
 }
 </script>
 
 <template>
   <div class="toolbar">
-    <div class="toolbar-top">
-      <label class="toolbar-select">
-        <span>{{ t('toolbar.sharedRoot') }}</span>
-        <select
-          :value="currentRoot"
-          :disabled="busy || roots.length === 0"
-          @change="emit('select-root', ($event.target as HTMLSelectElement).value)"
-        >
-          <option
-            v-for="root in roots"
-            :key="root.alias"
-            :value="root.alias"
+    <div class="toolbar-row">
+      <div class="breadcrumbs">
+        <template v-for="(crumb, index) in breadcrumbs" :key="crumb.node_id ?? `__home__-${index}`">
+          <button
+            type="button"
+            class="crumb"
+            :class="{ current: isCurrentCrumb(index) }"
+            :disabled="busy || isCurrentCrumb(index)"
+            @click="emit('navigate', crumb.node_id)"
           >
-            {{ root.alias }}
-          </option>
-        </select>
-      </label>
+            {{ crumb.label }}
+          </button>
+          <span v-if="index < breadcrumbs.length - 1" class="crumb-separator" aria-hidden="true">/</span>
+        </template>
+      </div>
 
       <div class="toolbar-actions">
         <button type="button" class="ghost-button" :disabled="busy" @click="emit('refresh')">
@@ -105,20 +112,26 @@ function canCreateText() {
         >
           {{ t('toolbar.createText') }}
         </button>
+        <div v-if="sessionText" class="session-group">
+          <div class="session-chip" :class="{ guest: sessionIsGuest }">
+            {{ sessionText }}
+          </div>
+          <button
+            v-if="sessionActionLabel"
+            type="button"
+            class="ghost-button"
+            :disabled="busy"
+            @click="emit('session-action')"
+          >
+            {{ sessionActionLabel }}
+          </button>
+        </div>
       </div>
     </div>
 
-    <div class="breadcrumbs">
-      <button
-        v-for="crumb in breadcrumbs"
-        :key="crumb.path || '__root__'"
-        type="button"
-        class="crumb"
-        @click="emit('navigate', crumb.path)"
-      >
-        {{ crumb.label }}
-      </button>
-    </div>
+    <p v-if="browseOnlyHint" class="hint-banner">
+      {{ browseOnlyHint }}
+    </p>
   </div>
 </template>
 
@@ -126,10 +139,10 @@ function canCreateText() {
 .toolbar {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
-.toolbar-top {
+.toolbar-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -137,24 +150,22 @@ function canCreateText() {
   gap: 12px;
 }
 
-.toolbar-select {
+.breadcrumbs {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 220px;
-  color: #9ab0c6;
-  font-size: 13px;
-}
-
-.toolbar-select select {
-  border: 1px solid rgba(154, 176, 198, 0.22);
-  border-radius: 12px;
-  background: rgba(11, 20, 32, 0.88);
-  color: #eff7ff;
-  padding: 10px 14px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.session-group {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -162,7 +173,7 @@ function canCreateText() {
 
 .primary-button,
 .ghost-button,
-.crumb {
+.session-chip {
   border: none;
   border-radius: 999px;
   padding: 10px 16px;
@@ -180,6 +191,33 @@ function canCreateText() {
   color: #e7f0fa;
 }
 
+.session-chip {
+  background: rgba(148, 163, 184, 0.12);
+  color: #eff7ff;
+}
+
+.session-chip.guest {
+  background: rgba(34, 197, 94, 0.16);
+}
+
+.crumb {
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: #90adc9;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.crumb.current {
+  color: #eff7ff;
+  font-weight: 700;
+}
+
+.crumb-separator {
+  color: #4d6b88;
+}
+
 .primary-button:disabled,
 .ghost-button:disabled {
   opacity: 0.45;
@@ -187,20 +225,24 @@ function canCreateText() {
 }
 
 .primary-button:not(:disabled):hover,
-.ghost-button:not(:disabled):hover,
-.crumb:hover {
+.ghost-button:not(:disabled):hover {
   transform: translateY(-1px);
 }
 
-.breadcrumbs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.crumb:not(:disabled):hover {
+  color: #d7e7f8;
+  text-decoration: underline;
 }
 
-.crumb {
-  background: rgba(255, 255, 255, 0.06);
-  color: #c7d8ea;
-  padding: 8px 12px;
+.crumb:disabled {
+  cursor: default;
+}
+
+.hint-banner {
+  margin: 0;
+  border-radius: 18px;
+  padding: 12px 14px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #c6e6ff;
 }
 </style>

@@ -500,10 +500,12 @@ onUnmounted(() => {
                     <span>{{ t('tools.fileShare.enabledLabel') }}</span>
                   </label>
                 </div>
-                <div class="mt-3 flex flex-col gap-2 sm:flex-row">
+                <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
                   <input :value="root.path" readonly class="fs-input w-full bg-slate-100" />
-                  <button type="button" :disabled="formDisabled" @click="addRoot(root)" class="fs-btn fs-btn-plain">{{ t('tools.fileShare.changePath') }}</button>
-                  <button type="button" :disabled="formDisabled" @click="draft.roots.splice(index, 1)" class="fs-btn fs-btn-danger"><Trash2 class="h-4 w-4" /></button>
+                  <div class="flex flex-wrap gap-2 sm:shrink-0">
+                    <button type="button" :disabled="formDisabled" @click="addRoot(root)" class="fs-btn fs-btn-plain">{{ t('tools.fileShare.changePath') }}</button>
+                    <button type="button" :disabled="formDisabled" @click="draft.roots.splice(index, 1)" class="fs-btn fs-btn-danger"><Trash2 class="h-4 w-4" /></button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -583,7 +585,7 @@ onUnmounted(() => {
                 <div><label class="fs-label">{{ t('tools.fileShare.loginId') }}</label><input :value="guest.id" disabled class="fs-input w-full bg-slate-100" /></div>
                 <div class="md:col-span-2">
                   <label class="fs-label">{{ t('tools.fileShare.guestPassword') }}</label>
-                  <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="guest.new_password" type="password" :disabled="formDisabled" class="fs-input w-full pl-10" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(guest)" /></div>
+                  <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="guest.new_password" type="password" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(guest)" /></div>
                   <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="guest.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(guest)" />{{ t('tools.fileShare.clearGuestPasswordOnSave') }}</label>
                 </div>
                 <div class="md:col-span-2">
@@ -612,7 +614,7 @@ onUnmounted(() => {
                   <div><label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label><select v-model="account.preset" :disabled="formDisabled" class="fs-select w-full" @change="onPreset(account)"><option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></div>
                   <div class="md:col-span-2">
                     <label class="fs-label">{{ t('tools.fileShare.accountPassword') }}</label>
-                    <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="account.new_password" type="password" :disabled="formDisabled" class="fs-input w-full pl-10" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(account)" /></div>
+                    <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="account.new_password" type="password" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(account)" /></div>
                     <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="account.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(account)" />{{ t('tools.fileShare.clearAccountPasswordOnSave') }}</label>
                   </div>
                 </div>
@@ -706,13 +708,15 @@ onUnmounted(() => {
 .fs-card{padding:1.25rem}.fs-stat{padding:1rem}
 .fs-label-sm{margin-bottom:.75rem;font-size:.7rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:rgb(100 116 139)}
 .fs-label{display:block;margin-bottom:.4rem;font-size:.75rem;font-weight:600;color:rgb(71 85 105)}
-.fs-input,.fs-select{border:1px solid rgb(203 213 225);border-radius:.75rem;background:#fff;padding:.65rem .9rem;font-size:.875rem;color:rgb(15 23 42);outline:none;transition:border-color .15s ease,box-shadow .15s ease}
+.fs-input,.fs-select{min-height:2.75rem;border:1px solid rgb(203 213 225);border-radius:.75rem;background:#fff;padding:.65rem .9rem;font-size:.875rem;line-height:1.5;color:rgb(15 23 42);outline:none;transition:border-color .15s ease,box-shadow .15s ease}
+.fs-input-with-icon{padding-left:2.85rem}
 .fs-select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364758b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:2.25rem}
 .fs-input:focus,.fs-select:focus{border-color:rgb(13 148 136);box-shadow:0 0 0 3px rgb(13 148 136 / .12)}
 .fs-input:disabled,.fs-select:disabled{cursor:not-allowed;background:rgb(248 250 252);color:rgb(148 163 184)}
 .fs-toggle{position:relative;display:inline-flex}.fs-toggle-track{display:block;height:20px;width:36px;flex-shrink:0;border-radius:9999px;transition:background-color .2s ease}.fs-toggle-thumb{position:absolute;top:2px;left:2px;height:16px;width:16px;border-radius:9999px;background:#fff;box-shadow:0 1px 3px rgb(15 23 42 /.2);transition:transform .2s ease}
 .fs-toggle-line{display:flex;align-items:center;gap:.75rem;border:1px solid rgb(226 232 240 / .8);border-radius:.75rem;background:#fff;padding:.9rem 1rem;font-size:.875rem;font-weight:500;color:rgb(51 65 85)}
-.fs-btn{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border-radius:.75rem;padding:.8rem 1rem;font-size:.875rem;font-weight:600;transition:all .15s ease}
+.fs-btn{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;min-height:2.75rem;flex-shrink:0;border-radius:.75rem;padding:.8rem 1rem;font-size:.875rem;font-weight:600;white-space:nowrap;transition:all .15s ease}
+.fs-btn svg{flex-shrink:0}
 .fs-btn-main{border:1px solid rgb(186 230 253);background:rgb(239 246 255);color:rgb(3 105 161)}.fs-btn-soft{border:1px solid rgb(153 246 228);background:rgb(240 253 250);color:rgb(15 118 110)}.fs-btn-start{border:none;background:linear-gradient(135deg,rgb(13 148 136),rgb(8 145 178));color:#fff;box-shadow:0 8px 20px rgb(13 148 136 /.18)}.fs-btn-plain{border:1px solid rgb(226 232 240);background:#fff;color:rgb(51 65 85)}.fs-btn-danger{border:1px solid rgb(254 202 202);background:rgb(254 242 242);color:rgb(220 38 38)}
 .fs-btn:disabled{opacity:.4;cursor:not-allowed}.fs-account{border:1px solid rgb(226 232 240 / .9);border-radius:1rem;background:linear-gradient(180deg,#fff 0%,rgb(248 250 252) 100%);padding:1rem}
 .fs-perm{display:flex;align-items:center;gap:.6rem;border:1px solid rgb(226 232 240 / .8);border-radius:.85rem;background:#fff;padding:.75rem .85rem;font-size:.875rem;color:rgb(51 65 85)}

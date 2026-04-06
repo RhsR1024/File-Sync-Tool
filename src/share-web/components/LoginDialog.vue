@@ -6,6 +6,7 @@ const props = defineProps<{
   open: boolean;
   busy?: boolean;
   error?: string;
+  description?: string;
 }>();
 
 const emit = defineEmits<{
@@ -40,7 +41,7 @@ function handleSubmit() {
       <div class="dialog-header">
         <div>
           <h2>{{ t('login.title') }}</h2>
-          <p>{{ t('login.description') }}</p>
+          <p>{{ description || t('login.description') }}</p>
         </div>
       </div>
 
