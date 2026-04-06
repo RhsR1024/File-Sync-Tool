@@ -31,7 +31,6 @@ const { t } = useI18n();
           type="button"
           class="scope-button"
           :class="{ active: scope === 'current' }"
-          :disabled="busy"
           @click="emit('update:scope', 'current')"
         >
           {{ t('search.current') }}
@@ -41,7 +40,6 @@ const { t } = useI18n();
           type="button"
           class="scope-button"
           :class="{ active: scope === 'global' }"
-          :disabled="busy"
           @click="emit('update:scope', 'global')"
         >
           {{ t('search.global') }}
