@@ -111,7 +111,9 @@ const { t } = useI18n();
 }
 
 .scope-button.active {
+  border-color: rgba(32, 199, 184, 0.3);
   border-color: color-mix(in srgb, var(--fs-accent) 30%, transparent);
+  background: rgba(25, 97, 102, 0.32);
   background: linear-gradient(
     135deg,
     color-mix(in srgb, var(--fs-accent-2) 22%, transparent),

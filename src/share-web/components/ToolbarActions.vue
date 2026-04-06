@@ -64,6 +64,7 @@ function isCurrentCrumb(index: number): boolean {
               type="button"
               class="crumb"
               :class="{ current: isCurrentCrumb(index) }"
+              :aria-current="isCurrentCrumb(index) ? 'page' : undefined"
               :disabled="busy || isCurrentCrumb(index)"
               @click="emit('navigate', crumb.node_id)"
             >
@@ -239,6 +240,7 @@ function isCurrentCrumb(index: number): boolean {
 }
 
 .crumb-separator {
+  color: rgba(138, 162, 186, 0.7);
   color: color-mix(in srgb, var(--fs-muted) 70%, transparent);
 }
 
@@ -251,10 +253,12 @@ function isCurrentCrumb(index: number): boolean {
 .primary-button:not(:disabled):hover,
 .ghost-button:not(:disabled):hover {
   transform: translateY(-1px);
+  border-color: rgba(32, 199, 184, 0.36);
   border-color: color-mix(in srgb, var(--fs-accent) 36%, var(--fs-panel-border));
 }
 
 .crumb:not(:disabled):hover {
+  color: #d8ebfb;
   color: color-mix(in srgb, var(--fs-text) 90%, var(--fs-muted));
   text-decoration: underline;
 }
