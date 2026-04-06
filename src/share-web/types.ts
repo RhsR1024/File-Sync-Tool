@@ -94,7 +94,7 @@ export function canRenderAction(
 }
 
 export function formatFileSize(size: number | null): string {
-  if (!size) {
+  if (size == null) {
     return '-';
   }
   if (size < 1024) {

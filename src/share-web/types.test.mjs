@@ -122,4 +122,16 @@ assert.equal(
   'directories should never render image thumbnails',
 );
 
+assert.equal(
+  shareTypes.formatFileSize(0),
+  '0 B',
+  'zero-byte files should render a real size instead of the unknown placeholder',
+);
+
+assert.equal(
+  shareTypes.formatFileSize(null),
+  '-',
+  'missing sizes should still render the unknown placeholder',
+);
+
 console.log('share-web types tests PASSED');
