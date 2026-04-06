@@ -470,8 +470,8 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div class="grid grid-cols-1 gap-5 lg:grid-cols-5">
-        <div class="space-y-4 lg:col-span-3">
+      <div class="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,380px)]">
+        <div class="space-y-4">
           <div class="fs-card">
             <div class="mb-4 flex items-center justify-between gap-3">
               <div>
@@ -485,28 +485,34 @@ onUnmounted(() => {
             <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
               {{ t('tools.fileShare.noDirs') }}
             </div>
-            <div v-else class="space-y-3">
-              <div v-for="(root, index) in draft.roots" :key="root.id" class="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                <div class="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr),auto]">
-                  <div>
+            <div v-else class="fs-root-list">
+              <div v-for="(root, index) in draft.roots" :key="root.id" class="fs-root-row">
+                <div class="fs-root-row-top">
+                  <div class="min-w-0">
                     <label class="fs-label">{{ t('tools.fileShare.aliasLabel') }}</label>
                     <input v-model="root.alias" :disabled="formDisabled" class="fs-input w-full" />
                   </div>
-                  <label class="fs-toggle-line">
-                    <span class="fs-toggle">
-                      <input v-model="root.enabled" type="checkbox" :disabled="formDisabled" class="sr-only">
-                      <span class="fs-toggle-track" :class="root.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="root.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span>
-                    </span>
-                    <span>{{ t('tools.fileShare.enabledLabel') }}</span>
-                  </label>
-                </div>
-                <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-                  <input :value="root.path" readonly class="fs-input w-full bg-slate-100" />
-                  <div class="flex flex-wrap gap-2 sm:shrink-0">
-                    <button type="button" :disabled="formDisabled" @click="addRoot(root)" class="fs-btn fs-btn-plain">{{ t('tools.fileShare.changePath') }}</button>
-                    <button type="button" :disabled="formDisabled" @click="draft.roots.splice(index, 1)" class="fs-btn fs-btn-danger"><Trash2 class="h-4 w-4" /></button>
+
+                  <div class="fs-root-actions">
+                    <label class="fs-inline-toggle">
+                      <span class="fs-toggle">
+                        <input v-model="root.enabled" type="checkbox" :disabled="formDisabled" class="sr-only">
+                        <span class="fs-toggle-track" :class="root.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="root.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span>
+                      </span>
+                      <span>{{ t('tools.fileShare.enabledLabel') }}</span>
+                    </label>
+
+                    <button type="button" :disabled="formDisabled" @click="addRoot(root)" class="fs-btn fs-btn-plain fs-btn-compact">
+                      {{ t('tools.fileShare.changePath') }}
+                    </button>
+
+                    <button type="button" :disabled="formDisabled" @click="draft.roots.splice(index, 1)" class="fs-btn fs-btn-danger fs-btn-icon">
+                      <Trash2 class="h-4 w-4" />
+                    </button>
                   </div>
                 </div>
+
+                <div class="fs-root-path" :title="root.path">{{ root.path }}</div>
               </div>
             </div>
           </div>
@@ -626,7 +632,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="space-y-4 lg:col-span-2">
+        <div class="space-y-4 xl:sticky xl:top-6">
           <div class="fs-card">
             <p class="fs-label-sm">{{ t('tools.fileShare.applyAndRuntimeTitle') }}</p>
             <div v-if="errorMsg" class="mb-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{{ errorMsg }}</div>
@@ -704,12 +710,18 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.fs-card,.fs-stat{border:1px solid rgb(226 232 240 / .85);border-radius:.75rem;background:#fff;box-shadow:0 1px 2px rgb(15 23 42 / .06)}
-.fs-card{padding:1.25rem}.fs-stat{padding:1rem}
+.fs-card,.fs-stat{border:1px solid rgb(226 232 240 / .9);border-radius:.875rem;background:#fff;box-shadow:0 8px 24px rgb(15 23 42 / .05)}
+.fs-card{padding:1rem}.fs-stat{padding:.9rem}
+.fs-root-list{display:flex;flex-direction:column;gap:.75rem}
+.fs-root-row{border:1px solid rgb(226 232 240 / .9);border-radius:.875rem;background:linear-gradient(180deg,#fff 0%,rgb(248 250 252) 100%);padding:.9rem}
+.fs-root-row-top{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.75rem;align-items:end}
+.fs-root-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:.5rem}
+.fs-inline-toggle{display:inline-flex;align-items:center;gap:.6rem;min-height:2.5rem;padding:0 .75rem;border:1px solid rgb(226 232 240 / .85);border-radius:.75rem;background:#fff;font-size:.8125rem;font-weight:600;color:rgb(51 65 85);white-space:nowrap}
+.fs-root-path{margin-top:.75rem;min-height:2.5rem;display:flex;align-items:center;padding:.7rem .85rem;border:1px solid rgb(226 232 240 / .8);border-radius:.75rem;background:rgb(248 250 252);font-size:.8125rem;color:rgb(71 85 105);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fs-label-sm{margin-bottom:.75rem;font-size:.7rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:rgb(100 116 139)}
 .fs-label{display:block;margin-bottom:.4rem;font-size:.75rem;font-weight:600;color:rgb(71 85 105)}
 .fs-input,.fs-select{min-height:2.75rem;border:1px solid rgb(203 213 225);border-radius:.75rem;background:#fff;padding:.65rem .9rem;font-size:.875rem;line-height:1.5;color:rgb(15 23 42);outline:none;transition:border-color .15s ease,box-shadow .15s ease}
-.fs-input-with-icon{padding-left:2.85rem}
+.fs-input-with-icon{padding-left:3rem}
 .fs-select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364758b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:2.25rem}
 .fs-input:focus,.fs-select:focus{border-color:rgb(13 148 136);box-shadow:0 0 0 3px rgb(13 148 136 / .12)}
 .fs-input:disabled,.fs-select:disabled{cursor:not-allowed;background:rgb(248 250 252);color:rgb(148 163 184)}
@@ -718,9 +730,12 @@ onUnmounted(() => {
 .fs-btn{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;min-height:2.75rem;flex-shrink:0;border-radius:.75rem;padding:.8rem 1rem;font-size:.875rem;font-weight:600;white-space:nowrap;transition:all .15s ease}
 .fs-btn svg{flex-shrink:0}
 .fs-btn-main{border:1px solid rgb(186 230 253);background:rgb(239 246 255);color:rgb(3 105 161)}.fs-btn-soft{border:1px solid rgb(153 246 228);background:rgb(240 253 250);color:rgb(15 118 110)}.fs-btn-start{border:none;background:linear-gradient(135deg,rgb(13 148 136),rgb(8 145 178));color:#fff;box-shadow:0 8px 20px rgb(13 148 136 /.18)}.fs-btn-plain{border:1px solid rgb(226 232 240);background:#fff;color:rgb(51 65 85)}.fs-btn-danger{border:1px solid rgb(254 202 202);background:rgb(254 242 242);color:rgb(220 38 38)}
+.fs-btn-compact{min-height:2.5rem;padding:.65rem .9rem}
+.fs-btn-icon{min-width:2.5rem;min-height:2.5rem;padding:0}
 .fs-btn:disabled{opacity:.4;cursor:not-allowed}.fs-account{border:1px solid rgb(226 232 240 / .9);border-radius:1rem;background:linear-gradient(180deg,#fff 0%,rgb(248 250 252) 100%);padding:1rem}
 .fs-perm{display:flex;align-items:center;gap:.6rem;border:1px solid rgb(226 232 240 / .8);border-radius:.85rem;background:#fff;padding:.75rem .85rem;font-size:.875rem;color:rgb(51 65 85)}
 .fs-icon{border:1px solid rgb(226 232 240);border-radius:.65rem;background:#fff;padding:.45rem;color:rgb(100 116 139);transition:all .15s ease}.fs-icon:hover{border-color:rgb(153 246 228);background:rgb(240 253 250);color:rgb(13 148 136)}
 .fs-link{display:inline-flex;align-items:center;gap:.35rem;font-size:.75rem;font-weight:600;color:rgb(100 116 139)}.fs-link:hover{color:rgb(13 148 136)}
 .fs-stat-label{margin-bottom:.35rem;font-size:.7rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:rgb(100 116 139)}.fs-stat-value{font-family:ui-monospace,SFMono-Regular,monospace;font-size:1.5rem;font-weight:700;color:rgb(15 23 42)}
+@media (max-width: 900px){.fs-root-row-top{grid-template-columns:1fr}.fs-root-actions{justify-content:flex-start}}
 </style>
