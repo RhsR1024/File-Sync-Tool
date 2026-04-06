@@ -60,7 +60,8 @@ struct RuntimeFileShareConfig {
     port: u16,
     roots: Vec<model::FileShareRoot>,
     guest_access_enabled: bool,
-    accounts: Vec<model::PersistedFileShareAccount>,
+    guest_account: model::PersistedFileShareUser,
+    accounts: Vec<model::PersistedFileShareUser>,
     session_ttl_minutes: u32,
     ip_filter_mode: model::IpFilterMode,
     ip_rules: Vec<String>,
@@ -647,14 +648,14 @@ fn runtime_config_from_legacy(config: FileShareConfig) -> Result<RuntimeFileShar
         port: config.port,
         roots,
         guest_access_enabled: true,
-        accounts: vec![model::PersistedFileShareAccount {
-            id: model::GUEST_ACCOUNT_ID.to_string(),
-            name: model::GUEST_ACCOUNT_NAME.to_string(),
+        guest_account: model::PersistedFileShareUser {
+            username: model::DEFAULT_GUEST_USERNAME.to_string(),
             enabled: true,
             preset: model::PermissionPreset::ReadOnly,
             permissions: model::FileSharePermissionSet::read_only(),
             password_hash: config.password.map(|password| hash_password(&password)),
-        }],
+        },
+        accounts: Vec::new(),
         session_ttl_minutes: 30,
         ip_filter_mode: model::IpFilterMode::Off,
         ip_rules: Vec::new(),
@@ -690,6 +691,7 @@ fn runtime_config_from_saved(
         port: config.port,
         roots,
         guest_access_enabled: config.guest_access_enabled,
+        guest_account: config.guest_account,
         accounts: config.accounts,
         session_ttl_minutes: config
             .session_ttl_minutes
@@ -737,22 +739,31 @@ fn find_root(state: &HttpState, key: &str) -> Option<ops::ResolvedRoot> {
         .find(|root| root.id == key || root.alias == key)
 }
 
-fn find_enabled_account<'a>(
+fn find_enabled_user<'a>(
     config: &'a RuntimeFileShareConfig,
-    account_id: &str,
-) -> Option<&'a model::PersistedFileShareAccount> {
-    config.accounts.iter().find(|account| {
-        account.enabled
-            && account.id == account_id
-            && (account.id != model::GUEST_ACCOUNT_ID || config.guest_access_enabled)
-    })
+    username: &str,
+) -> Option<(&'a model::PersistedFileShareUser, bool)> {
+    if config.guest_access_enabled
+        && config.guest_account.enabled
+        && config.guest_account.username == username
+    {
+        return Some((&config.guest_account, true));
+    }
+
+    config
+        .accounts
+        .iter()
+        .find(|account| account.enabled && account.username == username)
+        .map(|account| (account, false))
 }
 
-fn principal_for_account(
-    account: &model::PersistedFileShareAccount,
+fn principal_for_user(
+    account: &model::PersistedFileShareUser,
+    is_guest: bool,
 ) -> auth::ResolvedPrincipal {
     auth::ResolvedPrincipal {
-        account_id: account.id.clone(),
+        username: account.username.clone(),
+        is_guest,
         permissions: account.permissions.clone(),
     }
 }
@@ -762,17 +773,9 @@ fn build_session_response(
     principal: &auth::ResolvedPrincipal,
 ) -> http::ApiSessionResponse {
     let runtime = state.request_runtime();
-    let account = runtime
-        .config
-        .accounts
-        .iter()
-        .find(|account| account.id == principal.account_id);
     http::ApiSessionResponse {
-        account_id: principal.account_id.clone(),
-        account_name: account
-            .map(|account| account.name.clone())
-            .unwrap_or_else(|| principal.account_id.clone()),
-        is_guest: principal.account_id == model::GUEST_ACCOUNT_ID,
+        username: principal.username.clone(),
+        is_guest: principal.is_guest,
         permissions: principal.permissions.clone(),
         features: http::ApiSessionFeatures {
             image_preview_enabled: runtime.config.image_preview_enabled,
@@ -787,12 +790,12 @@ fn session_ttl(config: &RuntimeFileShareConfig) -> Duration {
 
 fn authenticate_account(
     state: &HttpState,
-    account_id: &str,
+    username: &str,
     password: &str,
     client_ip: IpAddr,
 ) -> Result<(auth::ResolvedPrincipal, String), String> {
     let runtime = state.request_runtime();
-    let account = find_enabled_account(&runtime.config, account_id)
+    let (account, is_guest) = find_enabled_user(&runtime.config, username)
         .ok_or_else(|| "Account not found".to_string())?;
     if let Some(expected_hash) = &account.password_hash {
         if !verify_password_hash(expected_hash, password) {
@@ -800,13 +803,21 @@ fn authenticate_account(
         }
     }
 
-    let principal = principal_for_account(account);
+    let principal = principal_for_user(account, is_guest);
     let token = state
         .sessions
         .lock()
         .map_err(|_| "Session store unavailable".to_string())?
         .create(
-            account.id.clone(),
+            if is_guest {
+                auth::SessionSubject::Guest {
+                    username: account.username.clone(),
+                }
+            } else {
+                auth::SessionSubject::Account {
+                    username: account.username.clone(),
+                }
+            },
             session_ttl(&runtime.config),
             client_ip.to_string(),
         );
@@ -828,17 +839,34 @@ fn resolve_request_principal(
     if let Some(token) = find_cookie(headers, SESSION_COOKIE_NAME) {
         if let Ok(mut sessions) = state.sessions.lock() {
             if let Some(record) = sessions.validate(token, &client_ip.to_string()) {
-                if let Some(account) = find_enabled_account(&runtime.config, &record.account_id) {
-                    return Ok(principal_for_account(account));
+                match record.subject {
+                    auth::SessionSubject::Guest { username } => {
+                        if runtime.config.guest_access_enabled
+                            && runtime.config.guest_account.enabled
+                            && runtime.config.guest_account.username == username
+                        {
+                            return Ok(principal_for_user(&runtime.config.guest_account, true));
+                        }
+                    }
+                    auth::SessionSubject::Account { username } => {
+                        if let Some((account, _)) = runtime
+                            .config
+                            .accounts
+                            .iter()
+                            .find(|account| account.enabled && account.username == username)
+                            .map(|account| (account, false))
+                        {
+                            return Ok(principal_for_user(account, false));
+                        }
+                    }
                 }
             }
         }
     }
 
-    if let Some(guest) = find_enabled_account(&runtime.config, model::GUEST_ACCOUNT_ID) {
-        if guest.password_hash.is_none() {
-            return Ok(principal_for_account(guest));
-        }
+    let guest = &runtime.config.guest_account;
+    if runtime.config.guest_access_enabled && guest.enabled && guest.password_hash.is_none() {
+        return Ok(principal_for_user(guest, true));
     }
 
     Err(StatusCode::UNAUTHORIZED)

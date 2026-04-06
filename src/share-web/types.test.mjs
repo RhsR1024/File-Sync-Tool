@@ -37,8 +37,7 @@ const imageEntry = {
 };
 
 const enabledSession = {
-  account_id: 'guest',
-  account_name: 'Guest',
+  username: 'guest',
   is_guest: true,
   permissions: imageEntry.permissions,
   features: {

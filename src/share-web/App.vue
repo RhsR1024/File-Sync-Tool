@@ -111,8 +111,8 @@ const sessionChipText = computed(() => {
     return t('app.loggedOut');
   }
   return session.value.is_guest
-    ? t('app.guestLabel', { name: session.value.account_name })
-    : session.value.account_name;
+    ? t('app.guestLabel', { name: session.value.username })
+    : session.value.username;
 });
 const sessionActionLabel = computed(() => {
   if (!session.value) {
@@ -276,12 +276,12 @@ function clearSearch() {
   resetSearchState(currentKind.value);
 }
 
-async function handleLogin(payload: { accountId: string; password: string }) {
+async function handleLogin(payload: { username: string; password: string }) {
   loggingIn.value = true;
   loginError.value = '';
 
   try {
-    await fileShareApi.login(payload.accountId, payload.password);
+    await fileShareApi.login(payload.username, payload.password);
     await bootstrap(currentNodeId.value, {
       preserveSearch: searchActive.value,
     });

@@ -21,11 +21,47 @@ function toSafeFileName(value) {
   return value.trim().replace(/\s+/g, "-");
 }
 
+function getReleaseDirCandidates(root) {
+  const cargoTargetDir = process.env.CARGO_TARGET_DIR;
+  if (!cargoTargetDir) {
+    return [path.join(root, "src-tauri", "target", "release")];
+  }
+
+  if (path.isAbsolute(cargoTargetDir)) {
+    return [path.join(cargoTargetDir, "release")];
+  }
+
+  return [
+    path.join(root, cargoTargetDir, "release"),
+    path.join(root, "src-tauri", cargoTargetDir, "release"),
+  ];
+}
+
+async function findSourceExe(releaseDirs, binaryName) {
+  for (const releaseDir of releaseDirs) {
+    const sourceExe = path.join(releaseDir, `${binaryName}.exe`);
+
+    try {
+      await access(sourceExe);
+      return { releaseDir, sourceExe };
+    } catch (error) {
+      if (error && error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(
+    `Cannot find ${binaryName}.exe in any release directory: ${releaseDirs.join(
+      ", "
+    )}`
+  );
+}
+
 async function main() {
   const root = process.cwd();
   const tauriConfigPath = path.join(root, "src-tauri", "tauri.conf.json");
   const cargoTomlPath = path.join(root, "src-tauri", "Cargo.toml");
-  const releaseDir = path.join(root, "src-tauri", "target", "release");
 
   const tauriConfigContent = await readFile(tauriConfigPath, "utf8");
   const tauriConfig = JSON.parse(tauriConfigContent);
@@ -39,8 +75,10 @@ async function main() {
   const cargoTomlContent = await readFile(cargoTomlPath, "utf8");
   const binaryName = getCargoPackageName(cargoTomlContent);
 
-  const sourceExe = path.join(releaseDir, `${binaryName}.exe`);
-  await access(sourceExe);
+  const { releaseDir, sourceExe } = await findSourceExe(
+    getReleaseDirCandidates(root),
+    binaryName
+  );
 
   const now = new Date();
   const pad = (n) => String(n).padStart(2, "0");

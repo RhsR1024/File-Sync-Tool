@@ -186,7 +186,7 @@ struct ApiNodeQuery {
 
 #[derive(Deserialize)]
 struct ApiLoginRequest {
-    account_id: String,
+    username: String,
     password: String,
 }
 
@@ -198,8 +198,7 @@ pub(super) struct ApiSessionFeatures {
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ApiSessionResponse {
-    pub(super) account_id: String,
-    pub(super) account_name: String,
+    pub(super) username: String,
     pub(super) is_guest: bool,
     pub(super) permissions: model::FileSharePermissionSet,
     pub(super) features: ApiSessionFeatures,
@@ -235,7 +234,7 @@ async fn handler_login(
     }
 
     let (principal, token) =
-        match authenticate_account(&state, request.account_id.trim(), &request.password, addr.ip())
+        match authenticate_account(&state, request.username.trim(), &request.password, addr.ip())
         {
             Ok(result) => result,
             Err(_) => return plain_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
@@ -1516,14 +1515,14 @@ mod tests {
                 port: 8080,
                 roots: config_roots,
                 guest_access_enabled: true,
-                accounts: vec![model::PersistedFileShareAccount {
-                    id: model::GUEST_ACCOUNT_ID.to_string(),
-                    name: model::GUEST_ACCOUNT_NAME.to_string(),
+                guest_account: model::PersistedFileShareUser {
+                    username: model::DEFAULT_GUEST_USERNAME.to_string(),
                     enabled: true,
                     preset: model::PermissionPreset::ReadWrite,
                     permissions: model::FileSharePermissionSet::read_write(),
                     password_hash: None,
-                }],
+                },
+                accounts: Vec::new(),
                 session_ttl_minutes: 30,
                 ip_filter_mode: model::IpFilterMode::Off,
                 ip_rules: Vec::new(),
@@ -1570,14 +1569,14 @@ mod tests {
                 })
                 .collect(),
             guest_access_enabled: true,
-            accounts: vec![model::PersistedFileShareAccount {
-                id: model::GUEST_ACCOUNT_ID.to_string(),
-                name: model::GUEST_ACCOUNT_NAME.to_string(),
+            guest_account: model::PersistedFileShareUser {
+                username: model::DEFAULT_GUEST_USERNAME.to_string(),
                 enabled: true,
                 preset: model::PermissionPreset::Custom,
                 permissions,
                 password_hash: None,
-            }],
+            },
+            accounts: Vec::new(),
             session_ttl_minutes: 30,
             ip_filter_mode: model::IpFilterMode::Off,
             ip_rules: Vec::new(),
@@ -1706,6 +1705,67 @@ mod tests {
             "unexpected upload response body: {}",
             String::from_utf8_lossy(&body)
         );
+    }
+
+    #[tokio::test]
+    async fn login_accepts_username_payload_and_returns_username_session() {
+        let dir = TestDir::new("login-username");
+        let app = build_router(test_state(dir.path(), 1024));
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json"),
+                Body::from(r#"{"username":"guest","password":"ignored"}"#),
+            ))
+            .await
+            .expect("login request should complete");
+
+        let status = response.status();
+        let set_cookie = response.headers().get(header::SET_COOKIE).cloned();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("login body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("login response should be json");
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected login body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(payload["username"], "guest");
+        assert!(payload.get("account_id").is_none());
+        assert!(payload.get("account_name").is_none());
+        assert!(set_cookie.is_some());
+    }
+
+    #[tokio::test]
+    async fn session_response_uses_username_contract() {
+        let dir = TestDir::new("session-username");
+        let app = build_router(test_state(dir.path(), 1024));
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder().method("GET").uri("/api/session"),
+                Body::empty(),
+            ))
+            .await
+            .expect("session request should complete");
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("session body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("session response should be json");
+
+        assert_eq!(payload["username"], "guest");
+        assert!(payload.get("account_id").is_none());
+        assert!(payload.get("account_name").is_none());
+        assert_eq!(payload["is_guest"], true);
     }
 
     #[tokio::test]

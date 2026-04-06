@@ -763,21 +763,20 @@ export interface FileSharePermissionSet {
   search_global: boolean;
 }
 
-export interface FileShareAccountView {
-  id: string;
-  name: string;
+export interface FileShareUserView {
+  username: string;
   enabled: boolean;
   preset: FileSharePermissionPreset;
   permissions: FileSharePermissionSet;
   password_set: boolean;
 }
 
-export interface FileShareAccountSaveRequest {
-  id: string;
-  name: string;
+export interface FileShareUserSaveRequest {
+  username: string;
   enabled: boolean;
   preset: FileSharePermissionPreset;
   permissions: FileSharePermissionSet;
+  previous_username?: string | null;
   new_password?: string | null;
   clear_password: boolean;
 }
@@ -786,7 +785,8 @@ export interface FileShareSettingsView {
   port: number;
   roots: FileShareRoot[];
   guest_access_enabled: boolean;
-  accounts: FileShareAccountView[];
+  guest_account: FileShareUserView;
+  accounts: FileShareUserView[];
   session_ttl_minutes: number;
   ip_filter_mode: FileShareIpFilterMode;
   ip_rules: string[];
@@ -802,7 +802,8 @@ export interface FileShareSettingsSaveRequest {
   port: number;
   roots: FileShareRoot[];
   guest_access_enabled: boolean;
-  accounts: FileShareAccountSaveRequest[];
+  guest_account: FileShareUserSaveRequest;
+  accounts: FileShareUserSaveRequest[];
   session_ttl_minutes: number;
   ip_filter_mode: FileShareIpFilterMode;
   ip_rules: string[];

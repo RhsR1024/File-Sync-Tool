@@ -52,14 +52,14 @@ export const fileShareApi = {
   getSession() {
     return request<FileShareSession>('/api/session');
   },
-  login(accountId: string, password: string) {
+  login(username: string, password: string) {
     return request<FileShareSession>('/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        account_id: accountId,
+        username,
         password,
       }),
     });

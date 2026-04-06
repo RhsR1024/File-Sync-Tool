@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use tauri::Manager;
 
 use super::model::{
-    default_guest_account, default_persisted_file_share_config, FileShareAccountSaveRequest,
-    FileSharePermissionSet, FileShareSettingsSaveRequest, FileShareSettingsView,
-    PermissionPreset, PersistedFileShareAccount, PersistedFileShareConfig,
-    DEFAULT_SESSION_TTL_MINUTES, FILE_SHARE_CONFIG_VERSION, GUEST_ACCOUNT_ID,
-    GUEST_ACCOUNT_NAME, MAX_SESSION_TTL_MINUTES,
+    default_guest_account, default_persisted_file_share_config, FileSharePermissionSet,
+    FileShareSettingsSaveRequest, FileShareSettingsView, FileShareUserSaveRequest,
+    PermissionPreset, PersistedFileShareConfig, PersistedFileShareUser,
+    DEFAULT_GUEST_USERNAME, DEFAULT_SESSION_TTL_MINUTES, FILE_SHARE_CONFIG_VERSION,
+    MAX_SESSION_TTL_MINUTES,
 };
 
-const FILE_SHARE_SETTINGS_FILE_NAME: &str = "file_share_v2.json";
+const FILE_SHARE_SETTINGS_FILE_NAME: &str = "file_share_v3.json";
 
 #[tauri::command]
 pub fn file_share_load_settings(app_handle: tauri::AppHandle) -> Result<FileShareSettingsView, String> {
@@ -132,13 +132,14 @@ pub fn apply_save_request(
     }
 
     let existing = existing.map(normalize_persisted_file_share_config);
+    let existing_guest = existing.as_ref().map(|config| config.guest_account.clone());
     let existing_accounts = existing
         .as_ref()
         .map(|config| {
             config
                 .accounts
                 .iter()
-                .map(|account| (account.id.clone(), account.clone()))
+                .map(|account| (username_key(&account.username), account.clone()))
                 .collect::<HashMap<_, _>>()
         })
         .unwrap_or_default();
@@ -176,29 +177,30 @@ pub fn apply_save_request(
         }
     }
 
-    let mut seen_account_ids = HashSet::new();
-    let mut accounts = request
+    let guest_account = build_persisted_user(
+        request.guest_account,
+        existing_guest,
+    )?;
+    let mut seen_usernames = HashSet::from([username_key(&guest_account.username)]);
+    let accounts = request
         .accounts
         .into_iter()
         .map(|account| {
-            let account_id = account_id_key(&account);
-            build_persisted_account(
+            let account_username = previous_username_key(&account);
+            build_persisted_user(
                 account,
-                existing_accounts.get(&account_id).cloned(),
+                existing_accounts.get(&account_username).cloned(),
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     for account in &accounts {
-        if !seen_account_ids.insert(account.id.clone()) {
-            return Err(format!("Duplicate file share account id: {}", account.id));
+        if !seen_usernames.insert(username_key(&account.username)) {
+            return Err(format!(
+                "Duplicate file share username: {}",
+                account.username
+            ));
         }
-    }
-
-    if let Some(guest) = accounts.iter_mut().find(|account| account.id == GUEST_ACCOUNT_ID) {
-        guest.name = normalize_name(&guest.name, GUEST_ACCOUNT_NAME);
-    } else {
-        accounts.insert(0, default_guest_account());
     }
 
     let ip_rules = request
@@ -214,6 +216,7 @@ pub fn apply_save_request(
             port: request.port,
             roots,
             guest_access_enabled: request.guest_access_enabled,
+            guest_account,
             accounts,
             session_ttl_minutes: normalize_session_ttl_minutes(request.session_ttl_minutes),
             ip_filter_mode: request.ip_filter_mode,
@@ -228,13 +231,13 @@ pub fn apply_save_request(
     ))
 }
 
-fn build_persisted_account(
-    account: FileShareAccountSaveRequest,
-    existing: Option<PersistedFileShareAccount>,
-) -> Result<PersistedFileShareAccount, String> {
-    let id = account.id.trim().to_string();
-    if id.is_empty() {
-        return Err("File share account id is required".to_string());
+fn build_persisted_user(
+    account: FileShareUserSaveRequest,
+    existing: Option<PersistedFileShareUser>,
+) -> Result<PersistedFileShareUser, String> {
+    let username = normalize_required_username(&account.username)?;
+    if username.is_empty() {
+        return Err("File share username is required".to_string());
     }
 
     let previous_hash = existing.and_then(|value| value.password_hash);
@@ -246,9 +249,8 @@ fn build_persisted_account(
         previous_hash
     };
 
-    Ok(PersistedFileShareAccount {
-        id,
-        name: normalize_name(&account.name, "Account"),
+    Ok(PersistedFileShareUser {
+        username,
         enabled: account.enabled,
         preset: account.preset.clone(),
         permissions: permissions_for_preset(account.preset, account.permissions),
@@ -305,28 +307,16 @@ fn normalize_persisted_file_share_config(
     let mut seen_root_ids = HashSet::new();
     config.roots.retain(|root| seen_root_ids.insert(root.id.clone()));
 
-    for account in &mut config.accounts {
-        account.name = if account.id == GUEST_ACCOUNT_ID {
-            normalize_name(&account.name, GUEST_ACCOUNT_NAME)
-        } else {
-            normalize_name(&account.name, "Account")
-        };
-        account.permissions =
-            permissions_for_preset(account.preset.clone(), account.permissions.clone());
-    }
+    config.guest_account = normalize_persisted_user(config.guest_account, Some(DEFAULT_GUEST_USERNAME))
+        .unwrap_or_else(default_guest_account);
 
-    if config.accounts.iter().all(|account| account.id != GUEST_ACCOUNT_ID) {
-        config.accounts.insert(0, default_guest_account());
-    }
-
-    let mut seen_account_ids = HashSet::new();
-    config
+    let mut seen_usernames = HashSet::from([username_key(&config.guest_account.username)]);
+    config.accounts = config
         .accounts
-        .retain(|account| seen_account_ids.insert(account.id.clone()));
-
-    if config.accounts.is_empty() {
-        config.accounts.push(default_guest_account());
-    }
+        .into_iter()
+        .filter_map(|account| normalize_persisted_user(account, None))
+        .filter(|account| seen_usernames.insert(username_key(&account.username)))
+        .collect();
 
     config
 }
@@ -339,16 +329,25 @@ fn normalize_session_ttl_minutes(value: u32) -> u32 {
     }
 }
 
-fn account_id_key(account: &FileShareAccountSaveRequest) -> String {
-    account.id.trim().to_string()
+fn request_username_key(account: &FileShareUserSaveRequest) -> String {
+    username_key(&account.username)
 }
 
-fn normalize_name(value: &str, fallback: &str) -> String {
+fn previous_username_key(account: &FileShareUserSaveRequest) -> String {
+    account
+        .previous_username
+        .as_deref()
+        .map(username_key)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| request_username_key(account))
+}
+
+fn normalize_required_username(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        fallback.to_string()
+        Err("File share username is required".to_string())
     } else {
-        trimmed.to_string()
+        Ok(trimmed.to_string())
     }
 }
 
@@ -357,6 +356,24 @@ fn normalize_optional_secret(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn normalize_persisted_user(
+    mut user: PersistedFileShareUser,
+    fallback_username: Option<&str>,
+) -> Option<PersistedFileShareUser> {
+    let trimmed_username = user.username.trim();
+    user.username = if trimmed_username.is_empty() {
+        fallback_username?.to_string()
+    } else {
+        trimmed_username.to_string()
+    };
+    user.permissions = permissions_for_preset(user.preset.clone(), user.permissions.clone());
+    Some(user)
+}
+
+fn username_key(username: &str) -> String {
+    username.trim().to_lowercase()
 }
 
 fn sync_file_share_auto_start_from_app_config(
@@ -388,13 +405,13 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use serde_json::json;
     use uuid::Uuid;
 
     use super::*;
     use crate::config::AppConfig;
     use crate::fileshare::model::{
-        DeleteMode, FileShareAccountSaveRequest, FileShareRoot, IpFilterMode,
-        PermissionPreset, MAX_SESSION_TTL_MINUTES,
+        FileShareSettingsSaveRequest, MAX_SESSION_TTL_MINUTES,
     };
 
     struct TestDir(PathBuf);
@@ -421,76 +438,113 @@ mod tests {
         }
     }
 
+    fn test_settings_request_value() -> serde_json::Value {
+        json!({
+            "port": 9800,
+            "roots": [
+                {
+                    "id": "root-1",
+                    "alias": "soft",
+                    "path": "D:/soft",
+                    "enabled": true
+                }
+            ],
+            "guest_access_enabled": true,
+            "guest_account": {
+                "username": "visitor",
+                "enabled": true,
+                "preset": "read_only",
+                "permissions": FileSharePermissionSet::read_only(),
+                "new_password": null,
+                "clear_password": false
+            },
+            "accounts": [
+                {
+                    "username": "operator",
+                    "enabled": true,
+                    "preset": "read_only",
+                    "permissions": FileSharePermissionSet::read_only(),
+                    "new_password": null,
+                    "clear_password": false
+                }
+            ],
+            "session_ttl_minutes": 45,
+            "ip_filter_mode": "off",
+            "ip_rules": ["192.168.0.0/24"],
+            "image_preview_enabled": true,
+            "thumbnail_enabled": false,
+            "delete_mode": "recycle_bin",
+            "remember_settings": true,
+            "auto_start_on_page_open": false,
+            "auto_start_with_windows": false
+        })
+    }
+
     fn test_settings_request() -> FileShareSettingsSaveRequest {
-        FileShareSettingsSaveRequest {
-            port: 9800,
-            roots: vec![FileShareRoot {
-                id: "root-1".to_string(),
-                alias: "soft".to_string(),
-                path: "D:/soft".to_string(),
-                enabled: true,
-            }],
-            guest_access_enabled: true,
-            accounts: vec![FileShareAccountSaveRequest {
-                id: "guest".to_string(),
-                name: "Guest".to_string(),
-                enabled: true,
-                preset: PermissionPreset::ReadOnly,
-                permissions: FileSharePermissionSet::read_only(),
-                new_password: None,
-                clear_password: false,
-            }],
-            session_ttl_minutes: 45,
-            ip_filter_mode: IpFilterMode::Off,
-            ip_rules: vec!["192.168.0.0/24".to_string()],
-            image_preview_enabled: true,
-            thumbnail_enabled: false,
-            delete_mode: DeleteMode::RecycleBin,
-            remember_settings: true,
-            auto_start_on_page_open: false,
-            auto_start_with_windows: false,
-        }
+        serde_json::from_value(test_settings_request_value())
+            .expect("single-username request should deserialize")
     }
 
     #[test]
-    fn returns_default_v2_config_when_no_saved_settings_exist() {
+    fn returns_default_v3_config_when_no_saved_settings_exist() {
         let tempdir = TestDir::new("defaults");
         let loaded = load_persisted_file_share_config_from_path(&tempdir.config_path()).unwrap();
+        let serialized = serde_json::to_value(loaded).expect("defaults should serialize");
 
-        assert_eq!(loaded.port, 8080);
-        assert!(loaded.roots.is_empty());
-        assert!(loaded.guest_access_enabled);
-        assert_eq!(loaded.session_ttl_minutes, 30);
-        assert_eq!(loaded.delete_mode, DeleteMode::RecycleBin);
+        assert_eq!(serialized["version"], 3);
+        assert_eq!(serialized["port"], 8080);
+        assert_eq!(serialized["guest_access_enabled"], true);
+        assert_eq!(serialized["accounts"].as_array().map(Vec::len), Some(0));
+        assert!(!serialized["guest_account"]["username"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty());
+        assert_eq!(serialized["session_ttl_minutes"], 30);
+        assert_eq!(serialized["delete_mode"], "recycle_bin");
     }
 
     #[test]
     fn save_request_hashes_passwords_without_exposing_plaintext() {
+        let mut request_value = test_settings_request_value();
+        request_value["guest_account"]["new_password"] = json!("secret-123");
+
         let saved = apply_save_request(
             None,
-            FileShareSettingsSaveRequest {
-                accounts: vec![FileShareAccountSaveRequest {
-                    new_password: Some("secret-123".to_string()),
-                    ..test_settings_request().accounts.into_iter().next().unwrap()
-                }],
-                ..test_settings_request()
-            },
+            serde_json::from_value(request_value)
+                .expect("single-username request with password should deserialize"),
         )
         .unwrap();
+        let serialized = serde_json::to_value(saved).expect("saved config should serialize");
+        let password_hash = serialized["guest_account"]["password_hash"]
+            .as_str()
+            .expect("guest password hash should be present");
 
-        assert!(saved
-            .accounts
-            .iter()
-            .any(|account| account.id == "guest" && account.password_hash.is_some()));
-        assert!(saved
-            .accounts
-            .iter()
-            .all(|account| account.password_hash.as_deref() != Some("secret-123")));
-        assert!(saved
-            .accounts
-            .iter()
-            .filter_map(|account| account.password_hash.as_deref())
-            .all(|hash| hash.starts_with("$argon2")));
+        assert_ne!(password_hash, "secret-123");
+        assert!(password_hash.starts_with("$argon2"));
+    }
+
+    #[test]
+    fn save_request_preserves_password_hash_when_username_changes_with_previous_username() {
+        let mut initial_request_value = test_settings_request_value();
+        initial_request_value["accounts"][0]["new_password"] = json!("secret-123");
+        let initial_request: FileShareSettingsSaveRequest = serde_json::from_value(initial_request_value)
+            .expect("initial request should deserialize");
+        let saved = apply_save_request(None, initial_request).expect("initial request should save");
+        let original_hash = saved.accounts[0]
+            .password_hash
+            .clone()
+            .expect("initial account password hash should exist");
+
+        let mut rename_request_value = test_settings_request_value();
+        rename_request_value["accounts"][0]["username"] = json!("operator-renamed");
+        rename_request_value["accounts"][0]["previous_username"] = json!("operator");
+        let rename_request: FileShareSettingsSaveRequest = serde_json::from_value(rename_request_value)
+            .expect("rename request should deserialize");
+        let renamed = apply_save_request(Some(saved), rename_request)
+            .expect("rename request should keep the existing password hash");
+
+        assert_eq!(renamed.accounts[0].username, "operator-renamed");
+        assert_eq!(renamed.accounts[0].password_hash.as_deref(), Some(original_hash.as_str()));
     }
 
     #[test]
@@ -500,10 +554,12 @@ mod tests {
 
         save_persisted_file_share_config_to_path(&tempdir.config_path(), &saved).unwrap();
         let loaded = load_persisted_file_share_config_from_path(&tempdir.config_path()).unwrap();
+        let serialized = serde_json::to_value(loaded).expect("loaded config should serialize");
 
-        assert_eq!(loaded.port, 9800);
-        assert_eq!(loaded.roots.len(), 1);
-        assert_eq!(loaded.ip_rules, vec!["192.168.0.0/24".to_string()]);
+        assert_eq!(serialized["port"], 9800);
+        assert_eq!(serialized["guest_account"]["username"], "visitor");
+        assert_eq!(serialized["accounts"][0]["username"], "operator");
+        assert_eq!(serialized["ip_rules"], json!(["192.168.0.0/24"]));
     }
 
     #[test]
@@ -548,5 +604,18 @@ mod tests {
 
         assert!(changed);
         assert!(app_config.launch_and_auto_start_file_share);
+    }
+
+    #[test]
+    fn save_request_rejects_duplicate_usernames_across_guest_and_accounts() {
+        let mut request_value = test_settings_request_value();
+        request_value["accounts"][0]["username"] = json!("visitor");
+        let request: FileShareSettingsSaveRequest = serde_json::from_value(request_value)
+            .expect("single-username request should deserialize");
+
+        let error = apply_save_request(None, request)
+            .expect_err("guest and custom accounts should not share the same username");
+
+        assert!(error.contains("Duplicate file share username"));
     }
 }

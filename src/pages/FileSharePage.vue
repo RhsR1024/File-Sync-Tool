@@ -29,8 +29,6 @@ import {
   getConfig,
   saveConfig,
   type AppConfig,
-  type FileShareAccountSaveRequest,
-  type FileShareAccountView,
   type FileShareDeleteMode,
   type FileShareIpFilterMode,
   type FileSharePermissionPreset,
@@ -39,17 +37,27 @@ import {
   type FileShareSettingsSaveRequest,
   type FileShareSettingsView,
   type FileShareStatus,
+  type FileShareUserSaveRequest,
+  type FileShareUserView,
 } from '../lib/tauri';
 
 defineOptions({ name: 'FileSharePage' });
 
-const GUEST = 'guest';
 const MAX_SESSION_TTL_MINUTES = 7 * 24 * 60;
 type PermKey = keyof FileSharePermissionSet;
-type EditAccount = FileShareAccountView & { new_password: string; clear_password: boolean };
-type Draft = Omit<FileShareSettingsView, 'accounts'> & { accounts: EditAccount[] };
+type EditUser = FileShareUserView & {
+  draft_key: string;
+  previous_username: string | null;
+  new_password: string;
+  clear_password: boolean;
+};
+type Draft = Omit<FileShareSettingsView, 'guest_account' | 'accounts'> & {
+  guest_account: EditUser;
+  accounts: EditUser[];
+};
 
 const { t } = useI18n();
+let draftKeySeed = 0;
 
 const permDefs: PermKey[] = [
   'browse',
@@ -99,15 +107,22 @@ const readWrite = (): FileSharePermissionSet => ({
 const clonePerms = (v: FileSharePermissionSet): FileSharePermissionSet => ({ ...v });
 const permsForPreset = (preset: FileSharePermissionPreset) => (preset === 'read_write' ? readWrite() : readOnly());
 const permissionLabel = (key: PermKey) => t(`tools.fileShare.permissions.${key}`);
-const guestView = (): FileShareAccountView => ({
-  id: GUEST,
-  name: t('tools.fileShare.defaultGuestName'),
+const nextDraftKey = () => `file-share-user-${draftKeySeed++}`;
+const guestView = (): FileShareUserView => ({
+  username: t('tools.fileShare.defaultGuestUsername'),
   enabled: true,
   preset: 'read_only',
   permissions: readOnly(),
   password_set: false,
 });
-const editAccount = (a: FileShareAccountView): EditAccount => ({ ...a, permissions: clonePerms(a.permissions), new_password: '', clear_password: false });
+const editUser = (a: FileShareUserView): EditUser => ({
+  ...a,
+  draft_key: nextDraftKey(),
+  previous_username: a.username,
+  permissions: clonePerms(a.permissions),
+  new_password: '',
+  clear_password: false,
+});
 
 const blankStatus = (): FileShareStatus => ({
   is_active: false,
@@ -123,7 +138,8 @@ const blankDraft = (): Draft => ({
   port: 8080,
   roots: [],
   guest_access_enabled: true,
-  accounts: [editAccount(guestView())],
+  guest_account: editUser(guestView()),
+  accounts: [],
   session_ttl_minutes: 30,
   ip_filter_mode: 'off',
   ip_rules: [],
@@ -136,14 +152,14 @@ const blankDraft = (): Draft => ({
 });
 
 const toDraft = (view: FileShareSettingsView, cfg: AppConfig | null): Draft => {
-  const accounts = view.accounts.map(editAccount);
-  if (!accounts.some((a) => a.id === GUEST)) accounts.unshift(editAccount(guestView()));
-  const guest = accounts.find((a) => a.id === GUEST);
-  if (guest) guest.enabled = view.guest_access_enabled;
   return {
     ...view,
+    guest_account: editUser({
+      ...view.guest_account,
+      enabled: view.guest_access_enabled,
+    }),
     roots: view.roots.map((r) => ({ ...r })),
-    accounts,
+    accounts: view.accounts.map(editUser),
     ip_rules: [...view.ip_rules],
     auto_start_with_windows: cfg?.launch_and_auto_start_file_share ?? view.auto_start_with_windows,
   };
@@ -156,12 +172,21 @@ const buildReq = (d: Draft): FileShareSettingsSaveRequest => ({
   port: d.port,
   roots: d.roots.map((r) => ({ id: r.id.trim(), alias: r.alias.trim(), path: r.path.trim(), enabled: r.enabled })),
   guest_access_enabled: d.guest_access_enabled,
-  accounts: d.accounts.map((a): FileShareAccountSaveRequest => ({
-    id: a.id.trim(),
-    name: a.name.trim(),
-    enabled: a.id === GUEST ? d.guest_access_enabled : a.enabled,
+  guest_account: {
+    username: d.guest_account.username.trim(),
+    enabled: d.guest_access_enabled,
+    preset: d.guest_account.preset,
+    permissions: clonePerms(d.guest_account.permissions),
+    previous_username: d.guest_account.previous_username,
+    new_password: d.guest_account.new_password.trim() || null,
+    clear_password: d.guest_account.clear_password,
+  },
+  accounts: d.accounts.map((a): FileShareUserSaveRequest => ({
+    username: a.username.trim(),
+    enabled: a.enabled,
     preset: a.preset,
     permissions: clonePerms(a.permissions),
+    previous_username: a.previous_username,
     new_password: a.new_password.trim() || null,
     clear_password: a.clear_password,
   })),
@@ -194,8 +219,8 @@ const showConnections = ref(false);
 const qrCanvas = ref<HTMLCanvasElement | null>(null);
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
 
-const guest = computed(() => draft.value.accounts.find((a) => a.id === GUEST) ?? null);
-const customAccounts = computed(() => draft.value.accounts.filter((a) => a.id !== GUEST));
+const guest = computed(() => draft.value.guest_account);
+const customAccounts = computed(() => draft.value.accounts);
 const enabledRoots = computed(() => draft.value.roots.filter((r) => r.enabled));
 const enabledCustomAccounts = computed(() => customAccounts.value.filter((a) => a.enabled));
 const altUrls = computed(() => (status.value.all_urls ?? []).filter((u) => u !== serverUrl.value));
@@ -239,13 +264,17 @@ const errors = computed(() => {
     rootAliases.add(ak);
     rootPaths.add(pk);
   }
-  const ids = new Set<string>();
+  const usernames = new Set<string>();
+  if (!draft.value.guest_account.username.trim()) {
+    out.push(t('tools.fileShare.validation.usernameRequired'));
+  } else {
+    usernames.add(draft.value.guest_account.username.trim().toLowerCase());
+  }
   for (const a of draft.value.accounts) {
-    if (!a.id.trim()) out.push(t('tools.fileShare.validation.accountIdRequired'));
-    if (!a.name.trim()) out.push(t('tools.fileShare.validation.accountNameRequired'));
-    const key = a.id.trim().toLowerCase();
-    if (ids.has(key)) out.push(t('tools.fileShare.validation.duplicateAccountId', { value: a.id }));
-    ids.add(key);
+    if (!a.username.trim()) out.push(t('tools.fileShare.validation.usernameRequired'));
+    const key = a.username.trim().toLowerCase();
+    if (usernames.has(key)) out.push(t('tools.fileShare.validation.duplicateUsername', { value: a.username }));
+    usernames.add(key);
   }
   return [...new Set(out)];
 });
@@ -371,23 +400,33 @@ const addRoot = async (target?: FileShareRoot) => {
 };
 
 const addAccount = () => {
-  const base = slug('account', 'account');
-  const used = new Set(draft.value.accounts.map((a) => a.id.toLowerCase()));
-  let id = base;
+  const base = slug(t('tools.fileShare.newAccountDefaultUsername'), 'user');
+  const used = new Set([
+    draft.value.guest_account.username.trim().toLowerCase(),
+    ...draft.value.accounts.map((a) => a.username.trim().toLowerCase()),
+  ]);
+  let username = base;
   let n = 2;
-  while (used.has(id)) id = `${base}-${n++}`;
-  draft.value.accounts.push({ id, name: t('tools.fileShare.newAccountDefaultName'), enabled: true, preset: 'read_write', permissions: readWrite(), password_set: false, new_password: '', clear_password: false });
+  while (used.has(username)) username = `${base}-${n++}`;
+  draft.value.accounts.push(editUser({
+    username,
+    enabled: true,
+    preset: 'read_write',
+    permissions: readWrite(),
+    password_set: false,
+  }));
+  draft.value.accounts[draft.value.accounts.length - 1].previous_username = null;
 };
 
-const onPreset = (a: EditAccount) => {
+const onPreset = (a: EditUser) => {
   if (a.preset !== 'custom') a.permissions = permsForPreset(a.preset);
 };
 
-const onPassword = (a: EditAccount) => {
+const onPassword = (a: EditUser) => {
   if (a.new_password.trim()) a.clear_password = false;
 };
 
-const onClear = (a: EditAccount) => {
+const onClear = (a: EditUser) => {
   if (a.clear_password) a.new_password = '';
 };
 
@@ -579,7 +618,7 @@ onUnmounted(() => {
               <button type="button" :disabled="formDisabled" @click="addAccount" class="fs-btn fs-btn-soft"><Plus class="h-4 w-4" />{{ t('tools.fileShare.addAccount') }}</button>
             </div>
 
-            <div v-if="guest" class="fs-account">
+            <div class="fs-account">
               <div class="mb-3 flex items-center justify-between gap-3">
                 <div class="font-semibold text-slate-900">{{ t('tools.fileShare.guestAccount') }}</div>
                 <span class="rounded-full border px-2 py-1 text-xs" :class="guest.password_set || guest.new_password ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'">
@@ -587,8 +626,7 @@ onUnmounted(() => {
                 </span>
               </div>
               <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div><label class="fs-label">{{ t('tools.fileShare.displayName') }}</label><input v-model="guest.name" :disabled="formDisabled" class="fs-input w-full" /></div>
-                <div><label class="fs-label">{{ t('tools.fileShare.loginId') }}</label><input :value="guest.id" disabled class="fs-input w-full bg-slate-100" /></div>
+                <div><label class="fs-label">{{ t('tools.fileShare.username') }}</label><input v-model="guest.username" :disabled="formDisabled" class="fs-input w-full" /></div>
                 <div class="md:col-span-2">
                   <label class="fs-label">{{ t('tools.fileShare.guestPassword') }}</label>
                   <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="guest.new_password" type="password" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(guest)" /></div>
@@ -608,14 +646,13 @@ onUnmounted(() => {
               {{ t('tools.fileShare.noCustomAccounts') }}
             </div>
             <div v-else class="mt-4 space-y-4">
-              <div v-for="account in customAccounts" :key="account.id" class="fs-account">
+              <div v-for="account in customAccounts" :key="account.draft_key" class="fs-account">
                 <div class="mb-3 flex items-center justify-between gap-3">
-                  <div class="font-semibold text-slate-900">{{ account.name || account.id }}</div>
-                  <button type="button" :disabled="formDisabled" class="fs-btn fs-btn-danger" @click="draft.accounts = draft.accounts.filter((a) => a.id !== account.id)"><Trash2 class="h-4 w-4" /></button>
+                  <div class="font-semibold text-slate-900">{{ account.username || t('tools.fileShare.newAccountDefaultUsername') }}</div>
+                  <button type="button" :disabled="formDisabled" class="fs-btn fs-btn-danger" @click="draft.accounts = draft.accounts.filter((a) => a.draft_key !== account.draft_key)"><Trash2 class="h-4 w-4" /></button>
                 </div>
                 <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <div><label class="fs-label">{{ t('tools.fileShare.displayName') }}</label><input v-model="account.name" :disabled="formDisabled" class="fs-input w-full" /></div>
-                  <div><label class="fs-label">{{ t('tools.fileShare.loginId') }}</label><input v-model="account.id" :disabled="formDisabled" class="fs-input w-full" /></div>
+                  <div><label class="fs-label">{{ t('tools.fileShare.username') }}</label><input v-model="account.username" :disabled="formDisabled" class="fs-input w-full" /></div>
                   <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="account.enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="account.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="account.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.accountEnabled') }}</span></label>
                   <div><label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label><select v-model="account.preset" :disabled="formDisabled" class="fs-select w-full" @change="onPreset(account)"><option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></div>
                   <div class="md:col-span-2">
@@ -625,7 +662,7 @@ onUnmounted(() => {
                   </div>
                 </div>
                 <div v-if="account.preset === 'custom'" class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                  <label v-for="p in permDefs" :key="`${account.id}-${p}`" class="fs-perm"><input v-model="account.permissions[p]" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="account.preset = 'custom'" /><span>{{ permissionLabel(p) }}</span></label>
+                  <label v-for="p in permDefs" :key="`${account.draft_key}-${p}`" class="fs-perm"><input v-model="account.permissions[p]" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="account.preset = 'custom'" /><span>{{ permissionLabel(p) }}</span></label>
                 </div>
               </div>
             </div>

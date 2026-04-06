@@ -19,8 +19,7 @@ export interface FileShareFeatureFlags {
 }
 
 export interface FileShareSession {
-  account_id: string;
-  account_name: string;
+  username: string;
   is_guest: boolean;
   permissions: FileSharePermissionSet;
   features: FileShareFeatureFlags;

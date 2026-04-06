@@ -15,8 +15,26 @@ pub enum IpRule {
 }
 
 #[derive(Debug, Clone)]
+pub enum SessionSubject {
+    Guest { username: String },
+    Account { username: String },
+}
+
+impl SessionSubject {
+    pub fn username(&self) -> &str {
+        match self {
+            Self::Guest { username } | Self::Account { username } => username,
+        }
+    }
+
+    pub fn is_guest(&self) -> bool {
+        matches!(self, Self::Guest { .. })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionRecord {
-    pub account_id: String,
+    pub subject: SessionSubject,
     pub expires_at: Instant,
     pub client_ip: String,
     pub last_seen_at: Instant,
@@ -25,7 +43,8 @@ pub struct SessionRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPrincipal {
-    pub account_id: String,
+    pub username: String,
+    pub is_guest: bool,
     pub permissions: FileSharePermissionSet,
 }
 
@@ -52,13 +71,13 @@ pub fn is_ip_allowed(mode: IpFilterMode, rules: &[IpRule], ip: IpAddr) -> bool {
 }
 
 impl SessionStore {
-    pub fn create(&mut self, account_id: String, ttl: Duration, client_ip: String) -> String {
+    pub fn create(&mut self, subject: SessionSubject, ttl: Duration, client_ip: String) -> String {
         let now = Instant::now();
         let token = Uuid::new_v4().simple().to_string();
         self.sessions.insert(
             token.clone(),
             SessionRecord {
-                account_id,
+                subject,
                 expires_at: now + ttl,
                 client_ip,
                 last_seen_at: now,
@@ -147,7 +166,13 @@ mod tests {
     #[test]
     fn session_expires_after_ttl() {
         let mut store = SessionStore::default();
-        let token = store.create("guest".into(), Duration::from_secs(1), "192.168.0.8".into());
+        let token = store.create(
+            SessionSubject::Guest {
+                username: "guest".into(),
+            },
+            Duration::from_secs(1),
+            "192.168.0.8".into(),
+        );
         std::thread::sleep(Duration::from_millis(1200));
         assert!(store.validate(&token, "192.168.0.8").is_none());
     }
@@ -155,20 +180,28 @@ mod tests {
     #[test]
     fn session_validates_matching_ip_before_expiry() {
         let mut store = SessionStore::default();
-        let token = store.create("guest".into(), Duration::from_secs(60), "192.168.0.8".into());
+        let token = store.create(
+            SessionSubject::Guest {
+                username: "guest".into(),
+            },
+            Duration::from_secs(60),
+            "192.168.0.8".into(),
+        );
 
         let session = store
             .validate(&token, "192.168.0.8")
             .expect("session should still be active");
 
-        assert_eq!(session.account_id, "guest");
+        assert_eq!(session.subject.username(), "guest");
+        assert!(session.subject.is_guest());
         assert_eq!(session.client_ip, "192.168.0.8");
     }
 
     #[test]
     fn require_permission_rejects_forbidden_actions() {
         let principal = ResolvedPrincipal {
-            account_id: "guest".to_string(),
+            username: "guest".to_string(),
+            is_guest: true,
             permissions: FileSharePermissionSet::read_only(),
         };
 

@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-pub const FILE_SHARE_CONFIG_VERSION: u32 = 2;
-pub const GUEST_ACCOUNT_ID: &str = "guest";
-pub const GUEST_ACCOUNT_NAME: &str = "Guest";
+pub const FILE_SHARE_CONFIG_VERSION: u32 = 3;
+pub const DEFAULT_GUEST_USERNAME: &str = "guest";
 pub const DEFAULT_SESSION_TTL_MINUTES: u32 = 30;
 pub const MAX_SESSION_TTL_MINUTES: u32 = 7 * 24 * 60;
 
@@ -132,9 +131,8 @@ pub enum FileSharePermission {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PersistedFileShareAccount {
-    pub id: String,
-    pub name: String,
+pub struct PersistedFileShareUser {
+    pub username: String,
     pub enabled: bool,
     pub preset: PermissionPreset,
     pub permissions: FileSharePermissionSet,
@@ -147,7 +145,8 @@ pub struct PersistedFileShareConfig {
     pub port: u16,
     pub roots: Vec<FileShareRoot>,
     pub guest_access_enabled: bool,
-    pub accounts: Vec<PersistedFileShareAccount>,
+    pub guest_account: PersistedFileShareUser,
+    pub accounts: Vec<PersistedFileShareUser>,
     pub session_ttl_minutes: u32,
     pub ip_filter_mode: IpFilterMode,
     pub ip_rules: Vec<String>,
@@ -161,9 +160,8 @@ pub struct PersistedFileShareConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FileShareAccountView {
-    pub id: String,
-    pub name: String,
+pub struct FileShareUserView {
+    pub username: String,
     pub enabled: bool,
     pub preset: PermissionPreset,
     pub permissions: FileSharePermissionSet,
@@ -175,7 +173,8 @@ pub struct FileShareSettingsView {
     pub port: u16,
     pub roots: Vec<FileShareRoot>,
     pub guest_access_enabled: bool,
-    pub accounts: Vec<FileShareAccountView>,
+    pub guest_account: FileShareUserView,
+    pub accounts: Vec<FileShareUserView>,
     pub session_ttl_minutes: u32,
     pub ip_filter_mode: IpFilterMode,
     pub ip_rules: Vec<String>,
@@ -200,12 +199,18 @@ impl From<&PersistedFileShareConfig> for FileShareSettingsView {
             port: value.port,
             roots: value.roots.clone(),
             guest_access_enabled: value.guest_access_enabled,
+            guest_account: FileShareUserView {
+                username: value.guest_account.username.clone(),
+                enabled: value.guest_account.enabled,
+                preset: value.guest_account.preset.clone(),
+                permissions: value.guest_account.permissions.clone(),
+                password_set: value.guest_account.password_hash.is_some(),
+            },
             accounts: value
                 .accounts
                 .iter()
-                .map(|account| FileShareAccountView {
-                    id: account.id.clone(),
-                    name: account.name.clone(),
+                .map(|account| FileShareUserView {
+                    username: account.username.clone(),
                     enabled: account.enabled,
                     preset: account.preset.clone(),
                     permissions: account.permissions.clone(),
@@ -226,12 +231,13 @@ impl From<&PersistedFileShareConfig> for FileShareSettingsView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FileShareAccountSaveRequest {
-    pub id: String,
-    pub name: String,
+pub struct FileShareUserSaveRequest {
+    pub username: String,
     pub enabled: bool,
     pub preset: PermissionPreset,
     pub permissions: FileSharePermissionSet,
+    #[serde(default)]
+    pub previous_username: Option<String>,
     #[serde(default)]
     pub new_password: Option<String>,
     #[serde(default)]
@@ -243,7 +249,8 @@ pub struct FileShareSettingsSaveRequest {
     pub port: u16,
     pub roots: Vec<FileShareRoot>,
     pub guest_access_enabled: bool,
-    pub accounts: Vec<FileShareAccountSaveRequest>,
+    pub guest_account: FileShareUserSaveRequest,
+    pub accounts: Vec<FileShareUserSaveRequest>,
     pub session_ttl_minutes: u32,
     pub ip_filter_mode: IpFilterMode,
     pub ip_rules: Vec<String>,
@@ -256,10 +263,9 @@ pub struct FileShareSettingsSaveRequest {
     pub auto_start_with_windows: bool,
 }
 
-pub fn default_guest_account() -> PersistedFileShareAccount {
-    PersistedFileShareAccount {
-        id: GUEST_ACCOUNT_ID.to_string(),
-        name: GUEST_ACCOUNT_NAME.to_string(),
+pub fn default_guest_account() -> PersistedFileShareUser {
+    PersistedFileShareUser {
+        username: DEFAULT_GUEST_USERNAME.to_string(),
         enabled: true,
         preset: PermissionPreset::ReadOnly,
         permissions: FileSharePermissionSet::read_only(),
@@ -273,7 +279,8 @@ pub fn default_persisted_file_share_config() -> PersistedFileShareConfig {
         port: 8080,
         roots: Vec::new(),
         guest_access_enabled: true,
-        accounts: vec![default_guest_account()],
+        guest_account: default_guest_account(),
+        accounts: Vec::new(),
         session_ttl_minutes: DEFAULT_SESSION_TTL_MINUTES,
         ip_filter_mode: IpFilterMode::Off,
         ip_rules: Vec::new(),

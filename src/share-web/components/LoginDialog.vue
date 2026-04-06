@@ -11,10 +11,10 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: [];
-  submit: [payload: { accountId: string; password: string }];
+  submit: [payload: { username: string; password: string }];
 }>();
 
-const accountId = ref('');
+const username = ref('');
 const password = ref('');
 const { t } = useI18n();
 
@@ -29,7 +29,7 @@ watch(
 
 function handleSubmit() {
   emit('submit', {
-    accountId: accountId.value.trim(),
+    username: username.value.trim(),
     password: password.value,
   });
 }
@@ -47,8 +47,8 @@ function handleSubmit() {
 
       <div class="dialog-body">
         <label class="field">
-          <span>{{ t('login.accountId') }}</span>
-          <input v-model="accountId" type="text" :placeholder="t('login.accountPlaceholder')" :disabled="busy" />
+          <span>{{ t('login.username') }}</span>
+          <input v-model="username" type="text" :placeholder="t('login.usernamePlaceholder')" :disabled="busy" />
         </label>
         <label class="field">
           <span>{{ t('login.password') }}</span>
@@ -61,7 +61,7 @@ function handleSubmit() {
         <button type="button" class="ghost-button" :disabled="busy" @click="emit('close')">
           {{ t('login.close') }}
         </button>
-        <button type="button" class="primary-button" :disabled="busy || !accountId.trim() || !password" @click="handleSubmit">
+        <button type="button" class="primary-button" :disabled="busy || !username.trim() || !password" @click="handleSubmit">
           {{ busy ? t('login.submitting') : t('login.submit') }}
         </button>
       </div>
