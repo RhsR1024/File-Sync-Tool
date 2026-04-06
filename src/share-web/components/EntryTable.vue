@@ -78,15 +78,24 @@ function canDownload(entry: FileShareNode): boolean {
       >
         <div class="entry-name">
           <button type="button" class="name-button" @click="emit('open', entry)">
-            <img
+            <span
               v-if="canShowThumbnail(entry)"
-              :src="fileShareApi.previewUrl(entry.node_id)"
-              alt=""
-              class="entry-thumb"
-              loading="lazy"
-              @error="markThumbnailFailed(entry.node_id)"
+              class="entry-visual entry-visual--thumb"
             >
-            <span v-else class="entry-icon" :class="{ folder: entry.is_dir }" aria-hidden="true">
+              <img
+                :src="fileShareApi.previewUrl(entry.node_id)"
+                alt=""
+                class="entry-thumb"
+                loading="lazy"
+                @error="markThumbnailFailed(entry.node_id)"
+              >
+            </span>
+            <span
+              v-else
+              class="entry-visual entry-visual--icon"
+              :class="{ folder: entry.is_dir }"
+              aria-hidden="true"
+            >
               <svg v-if="entry.is_dir" viewBox="0 0 24 24">
                 <path
                   d="M3.5 6.5h6l2 2H20a1.5 1.5 0 0 1 1.5 1.5v7.5A2 2 0 0 1 19.5 19h-15A2 2 0 0 1 2.5 17V8.5a2 2 0 0 1 2-2Z"
@@ -100,14 +109,16 @@ function canDownload(entry: FileShareNode): boolean {
                 />
               </svg>
             </span>
-            <span class="name-text">{{ entry.name }}</span>
+            <span class="entry-copy">
+              <span class="name-text">{{ entry.name }}</span>
+              <span
+                v-if="searchActive && entry.display_path !== entry.name"
+                class="entry-hint"
+              >
+                {{ entry.display_path }}
+              </span>
+            </span>
           </button>
-          <div
-            v-if="searchActive && entry.display_path !== entry.name"
-            class="entry-hint"
-          >
-            {{ entry.display_path }}
-          </div>
         </div>
 
         <span>{{ entry.is_dir ? '-' : formatFileSize(entry.size) }}</span>
@@ -208,18 +219,19 @@ function canDownload(entry: FileShareNode): boolean {
 
 .entry-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) 110px 150px minmax(168px, auto);
+  grid-template-columns: minmax(0, 2fr) 96px 144px minmax(112px, auto);
   align-items: center;
-  gap: 14px;
-  padding: 14px 18px;
-  border-radius: 18px;
-  background: rgba(7, 13, 21, 0.58);
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: rgba(8, 14, 24, 0.62);
   border: 1px solid rgba(148, 163, 184, 0.12);
 }
 
 .entry-head {
-  background: rgba(255, 255, 255, 0.04);
-  color: #88a0b8;
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--fs-muted);
   font-size: 12px;
 }
 
@@ -230,14 +242,48 @@ function canDownload(entry: FileShareNode): boolean {
 .name-button {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
   min-width: 0;
   border: none;
   padding: 0;
   background: transparent;
-  color: #eff7ff;
+  color: var(--fs-text);
   text-align: left;
+}
+
+.entry-visual {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.entry-visual--icon {
+  color: #eef4fb;
+}
+
+.entry-visual--icon.folder {
+  color: #f7c85b;
+}
+
+.entry-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.3);
+}
+
+.entry-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .name-text {
@@ -246,31 +292,9 @@ function canDownload(entry: FileShareNode): boolean {
   white-space: nowrap;
 }
 
-.entry-icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  width: 26px;
-  height: 26px;
-  color: #eef4fb;
-}
-
-.entry-thumb {
-  width: 42px;
-  height: 42px;
-  flex-shrink: 0;
-  border-radius: 12px;
-  object-fit: cover;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(15, 23, 42, 0.3);
-}
-
-.entry-icon.folder {
-  color: #f7c85b;
-}
-
 .entry-hint {
   margin-top: 4px;
-  color: #7e92a7;
+  color: var(--fs-muted);
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -281,19 +305,20 @@ function canDownload(entry: FileShareNode): boolean {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
 }
 
 .icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  height: 38px;
-  border: none;
+  width: 34px;
+  height: 34px;
   border-radius: 10px;
-  color: #eff7ff;
-  transition: transform 0.18s ease, opacity 0.18s ease;
+  border: 1px solid transparent;
+  background: rgba(15, 23, 42, 0.5);
+  color: var(--fs-text);
+  transition: border-color 0.18s ease, opacity 0.18s ease, transform 0.18s ease;
 }
 
 .icon-button svg {
@@ -302,23 +327,31 @@ function canDownload(entry: FileShareNode): boolean {
 }
 
 .icon-button.download {
-  background: linear-gradient(135deg, #67c56d, #4caf50);
-  color: #f6fff6;
+  border-color: rgba(74, 222, 128, 0.18);
+  background: rgba(34, 197, 94, 0.12);
+  color: #dcfce7;
 }
 
 .icon-button.preview {
-  background: linear-gradient(135deg, #5bc0eb, #319ad6);
+  border-color: rgba(56, 189, 248, 0.18);
+  background: rgba(56, 189, 248, 0.12);
+  color: #dbeafe;
 }
 
 .icon-button.rename {
-  background: linear-gradient(135deg, #f6bf63, #f59e0b);
+  border-color: rgba(250, 204, 21, 0.18);
+  background: rgba(245, 158, 11, 0.12);
+  color: #fef3c7;
 }
 
 .icon-button.delete {
-  background: linear-gradient(135deg, #f97373, #ef4444);
+  border-color: rgba(248, 113, 113, 0.18);
+  background: rgba(239, 68, 68, 0.12);
+  color: #fee2e2;
 }
 
 .icon-button:hover {
+  opacity: 0.9;
   transform: translateY(-1px);
 }
 
@@ -351,6 +384,7 @@ function canDownload(entry: FileShareNode): boolean {
   .entry-row {
     grid-template-columns: 1fr;
     justify-items: start;
+    gap: 10px;
   }
 
   .entry-actions {
