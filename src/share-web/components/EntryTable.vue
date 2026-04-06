@@ -111,14 +111,14 @@ function canDownload(entry: FileShareNode): boolean {
             </span>
             <span class="entry-copy">
               <span class="name-text">{{ entry.name }}</span>
-              <span
-                v-if="searchActive && entry.display_path !== entry.name"
-                class="entry-hint"
-              >
-                {{ entry.display_path }}
-              </span>
             </span>
           </button>
+          <span
+            v-if="searchActive && entry.display_path !== entry.name"
+            class="entry-hint"
+          >
+            {{ entry.display_path }}
+          </span>
         </div>
 
         <span>{{ entry.is_dir ? '-' : formatFileSize(entry.size) }}</span>
@@ -236,6 +236,9 @@ function canDownload(entry: FileShareNode): boolean {
 }
 
 .entry-name {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -282,8 +285,6 @@ function canDownload(entry: FileShareNode): boolean {
 
 .entry-copy {
   min-width: 0;
-  display: flex;
-  flex-direction: column;
 }
 
 .name-text {
@@ -293,7 +294,7 @@ function canDownload(entry: FileShareNode): boolean {
 }
 
 .entry-hint {
-  margin-top: 4px;
+  padding-left: 48px;
   color: var(--fs-muted);
   font-size: 12px;
   overflow: hidden;
