@@ -65,6 +65,7 @@ struct RuntimeFileShareConfig {
     ip_filter_mode: model::IpFilterMode,
     ip_rules: Vec<String>,
     image_preview_enabled: bool,
+    thumbnail_enabled: bool,
     delete_mode: model::DeleteMode,
 }
 
@@ -118,12 +119,44 @@ impl FileShareHandle {
 // ─── Internal HTTP State ─────────────────────────────────────
 
 struct HttpState {
+    saved_config_path: Option<PathBuf>,
     config: RuntimeFileShareConfig,
     roots: Vec<ops::ResolvedRoot>,
     sessions: Mutex<auth::SessionStore>,
     ip_rules: Vec<auth::IpRule>,
     upload_body_limit_bytes: usize,
     visitor_ips: Arc<Mutex<HashSet<String>>>,
+}
+
+#[derive(Debug, Clone)]
+struct RequestRuntimeSnapshot {
+    config: RuntimeFileShareConfig,
+    roots: Vec<ops::ResolvedRoot>,
+    ip_rules: Vec<auth::IpRule>,
+}
+
+impl HttpState {
+    fn request_runtime(&self) -> RequestRuntimeSnapshot {
+        if let Some(path) = &self.saved_config_path {
+            if let Ok(saved) = persist::load_persisted_file_share_config_from_path(path) {
+                if let Ok(config) = runtime_config_from_saved(saved) {
+                    let roots = runtime_roots(&config);
+                    let ip_rules = parse_runtime_ip_rules(&config).unwrap_or_else(|_| self.ip_rules.clone());
+                    return RequestRuntimeSnapshot {
+                        config,
+                        roots,
+                        ip_rules,
+                    };
+                }
+            }
+        }
+
+        RequestRuntimeSnapshot {
+            config: self.config.clone(),
+            roots: self.roots.clone(),
+            ip_rules: self.ip_rules.clone(),
+        }
+    }
 }
 
 /// Deletes the temp file when dropped.
@@ -188,6 +221,7 @@ pub async fn file_share_start(
         .collect();
 
     let http_state = Arc::new(HttpState {
+        saved_config_path: None,
         roots: runtime_roots(&runtime_config),
         sessions: Mutex::new(auth::SessionStore::default()),
         ip_rules: parse_runtime_ip_rules(&runtime_config)?,
@@ -344,7 +378,9 @@ pub async fn file_share_start_saved(
         .iter()
         .map(|ip| format!("http://{}:{}", ip, runtime_config.port))
         .collect();
+    let saved_config_path = persist::get_file_share_settings_path(&app_handle)?;
     let http_state = Arc::new(HttpState {
+        saved_config_path: Some(saved_config_path),
         roots: runtime_roots(&runtime_config),
         sessions: Mutex::new(auth::SessionStore::default()),
         ip_rules: parse_runtime_ip_rules(&runtime_config)?,
@@ -576,20 +612,16 @@ async fn status_reporter(
     }
 }
 
-fn split_alias_path(path: &str) -> (&str, &str) {
-    let trimmed = path.trim_matches('/');
-    match trimmed.split_once('/') {
-        Some((alias, rel)) => (alias, rel),
-        None => (trimmed, ""),
-    }
-}
-
-
 const SESSION_COOKIE_NAME: &str = "fs_session";
 
 struct UploadedFilePayload {
     relative_path: String,
     contents: Vec<u8>,
+}
+
+struct UploadRequestPayload {
+    parent_node_id: String,
+    files: Vec<UploadedFilePayload>,
 }
 
 fn runtime_config_from_legacy(config: FileShareConfig) -> Result<RuntimeFileShareConfig, String> {
@@ -627,6 +659,7 @@ fn runtime_config_from_legacy(config: FileShareConfig) -> Result<RuntimeFileShar
         ip_filter_mode: model::IpFilterMode::Off,
         ip_rules: Vec::new(),
         image_preview_enabled: true,
+        thumbnail_enabled: false,
         delete_mode: model::DeleteMode::RecycleBin,
     })
 }
@@ -664,6 +697,7 @@ fn runtime_config_from_saved(
         ip_filter_mode: config.ip_filter_mode,
         ip_rules: config.ip_rules,
         image_preview_enabled: config.image_preview_enabled,
+        thumbnail_enabled: config.thumbnail_enabled,
         delete_mode: config.delete_mode,
     })
 }
@@ -696,11 +730,11 @@ fn parse_runtime_ip_rules(config: &RuntimeFileShareConfig) -> Result<Vec<auth::I
 }
 
 fn find_root(state: &HttpState, key: &str) -> Option<ops::ResolvedRoot> {
-    state
+    let runtime = state.request_runtime();
+    runtime
         .roots
-        .iter()
+        .into_iter()
         .find(|root| root.id == key || root.alias == key)
-        .cloned()
 }
 
 fn find_enabled_account<'a>(
@@ -727,7 +761,8 @@ fn build_session_response(
     state: &HttpState,
     principal: &auth::ResolvedPrincipal,
 ) -> http::ApiSessionResponse {
-    let account = state
+    let runtime = state.request_runtime();
+    let account = runtime
         .config
         .accounts
         .iter()
@@ -739,6 +774,10 @@ fn build_session_response(
             .unwrap_or_else(|| principal.account_id.clone()),
         is_guest: principal.account_id == model::GUEST_ACCOUNT_ID,
         permissions: principal.permissions.clone(),
+        features: http::ApiSessionFeatures {
+            image_preview_enabled: runtime.config.image_preview_enabled,
+            thumbnail_enabled: runtime.config.thumbnail_enabled,
+        },
     }
 }
 
@@ -752,7 +791,8 @@ fn authenticate_account(
     password: &str,
     client_ip: IpAddr,
 ) -> Result<(auth::ResolvedPrincipal, String), String> {
-    let account = find_enabled_account(&state.config, account_id)
+    let runtime = state.request_runtime();
+    let account = find_enabled_account(&runtime.config, account_id)
         .ok_or_else(|| "Account not found".to_string())?;
     if let Some(expected_hash) = &account.password_hash {
         if !verify_password_hash(expected_hash, password) {
@@ -767,7 +807,7 @@ fn authenticate_account(
         .map_err(|_| "Session store unavailable".to_string())?
         .create(
             account.id.clone(),
-            session_ttl(&state.config),
+            session_ttl(&runtime.config),
             client_ip.to_string(),
         );
 
@@ -779,21 +819,23 @@ fn resolve_request_principal(
     headers: &HeaderMap,
     client_ip: IpAddr,
 ) -> Result<auth::ResolvedPrincipal, StatusCode> {
-    if !auth::is_ip_allowed(state.config.ip_filter_mode.clone(), &state.ip_rules, client_ip) {
+    let runtime = state.request_runtime();
+
+    if !auth::is_ip_allowed(runtime.config.ip_filter_mode.clone(), &runtime.ip_rules, client_ip) {
         return Err(StatusCode::FORBIDDEN);
     }
 
     if let Some(token) = find_cookie(headers, SESSION_COOKIE_NAME) {
         if let Ok(mut sessions) = state.sessions.lock() {
             if let Some(record) = sessions.validate(token, &client_ip.to_string()) {
-                if let Some(account) = find_enabled_account(&state.config, &record.account_id) {
+                if let Some(account) = find_enabled_account(&runtime.config, &record.account_id) {
                     return Ok(principal_for_account(account));
                 }
             }
         }
     }
 
-    if let Some(guest) = find_enabled_account(&state.config, model::GUEST_ACCOUNT_ID) {
+    if let Some(guest) = find_enabled_account(&runtime.config, model::GUEST_ACCOUNT_ID) {
         if guest.password_hash.is_none() {
             return Ok(principal_for_account(guest));
         }
@@ -807,7 +849,8 @@ fn reject_blocked_ip_response(
     client_ip: IpAddr,
     _login_redirect: bool,
 ) -> Option<Response> {
-    if auth::is_ip_allowed(state.config.ip_filter_mode.clone(), &state.ip_rules, client_ip) {
+    let runtime = state.request_runtime();
+    if auth::is_ip_allowed(runtime.config.ip_filter_mode.clone(), &runtime.ip_rules, client_ip) {
         None
     } else {
         Some(plain_response(StatusCode::FORBIDDEN, "Forbidden"))
@@ -863,9 +906,8 @@ fn clear_cookie_header(name: &str) -> String {
 async fn read_upload_request(
     mut multipart: Multipart,
     max_total_bytes: usize,
-) -> Result<(String, String, Vec<UploadedFilePayload>), String> {
-    let mut root = None;
-    let mut parent = String::new();
+) -> Result<UploadRequestPayload, String> {
+    let mut parent_node_id = None;
     let mut files = Vec::new();
     let mut total_bytes = 0usize;
 
@@ -891,18 +933,23 @@ async fn read_upload_request(
 
         let text = field.text().await.map_err(|e| e.to_string())?;
         match field_name.as_str() {
-            "root" => root = Some(text),
-            "parent" => parent = text,
+            "parent_node_id" => parent_node_id = Some(text),
             _ => {}
         }
     }
 
-    let root = root.ok_or_else(|| "Root is required".to_string())?;
     if files.is_empty() {
         return Err("At least one file is required".to_string());
     }
 
-    Ok((root, parent, files))
+    let parent_node_id = parent_node_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Parent node id is required".to_string())?;
+
+    Ok(UploadRequestPayload {
+        parent_node_id,
+        files,
+    })
 }
 
 fn remember_connected_ip(visitor_ips: &Arc<Mutex<HashSet<String>>>, ip: impl Into<String>) {

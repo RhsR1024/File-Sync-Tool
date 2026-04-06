@@ -58,7 +58,7 @@ pub fn save_persisted_file_share_config(
     save_persisted_file_share_config_to_path(&path, config)
 }
 
-fn get_file_share_settings_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(super) fn get_file_share_settings_path(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     app_handle
         .path()
         .app_config_dir()

@@ -101,6 +101,29 @@ pub fn create_text_file(
         .map_err(|e| format!("Failed to create text file {}: {}", target.display(), e))
 }
 
+pub fn rename_share_root(root: &ResolvedRoot, to_name: &str) -> Result<PathBuf, String> {
+    let source = canonical_root_path(root)?;
+    let parent = source
+        .parent()
+        .ok_or_else(|| format!("Shared root has no parent directory: {}", source.display()))?;
+    let next_name = normalize_leaf_name(to_name)?;
+    let destination = parent.join(&next_name);
+    if destination.exists() {
+        return Err(format!("Target already exists: {}", destination.display()));
+    }
+
+    fs::rename(&source, &destination).map_err(|e| {
+        format!(
+            "Failed to rename shared root {} to {}: {}",
+            source.display(),
+            destination.display(),
+            e
+        )
+    })?;
+
+    Ok(destination)
+}
+
 pub fn write_uploaded_file(
     root: &ResolvedRoot,
     parent: &str,
@@ -162,6 +185,15 @@ pub fn delete_entry(root: &ResolvedRoot, path: &str, mode: DeleteMode) -> Result
     }
 }
 
+pub fn delete_share_root(root: &ResolvedRoot, mode: DeleteMode) -> Result<(), String> {
+    let target = canonical_root_path(root)?;
+    match mode {
+        DeleteMode::RecycleBin => trash::delete(&target)
+            .map_err(|e| format!("Failed to move {} to recycle bin: {}", target.display(), e)),
+        DeleteMode::Permanent => remove_path_permanently(&target),
+    }
+}
+
 pub fn resolve_relative_path(root: &ResolvedRoot, relative_path: &str) -> Result<PathBuf, String> {
     let root_path = canonical_root_path(root)?;
     let normalized = normalize_relative_path(relative_path)?;
@@ -216,6 +248,19 @@ pub fn list_directory(path: &Path) -> Result<Vec<DirEntry>, String> {
     });
 
     Ok(entries)
+}
+
+pub fn join_relative_path(parent: &str, child: &str) -> String {
+    let left = parent.trim().trim_matches('/');
+    let right = child.trim().trim_matches('/');
+
+    if left.is_empty() {
+        right.to_string()
+    } else if right.is_empty() {
+        left.to_string()
+    } else {
+        format!("{left}/{right}")
+    }
 }
 
 pub fn stream_preview(root: &ResolvedRoot, path: &str) -> Result<FilePreview, String> {
