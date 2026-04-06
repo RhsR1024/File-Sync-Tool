@@ -28,8 +28,9 @@ export const messages = {
       createText: 'New Text',
     },
     search: {
-      current: 'Current Folder',
-      global: 'Global Search',
+      scopeLabel: 'Search scope',
+      current: 'Current Directory',
+      global: 'All Shared Directories',
       placeholder: 'Search by file name',
       submit: 'Search',
       clear: 'Clear',
@@ -133,8 +134,9 @@ export const messages = {
       createText: '\u65b0\u5efa\u6587\u672c',
     },
     search: {
+      scopeLabel: '\u641c\u7d22\u8303\u56f4',
       current: '\u5f53\u524d\u76ee\u5f55',
-      global: '\u5168\u5c40\u641c\u7d22',
+      global: '\u5168\u90e8\u5171\u4eab\u76ee\u5f55',
       placeholder: '\u8f93\u5165\u6587\u4ef6\u540d\u5173\u952e\u5b57',
       submit: '\u641c\u7d22',
       clear: '\u6e05\u7a7a',

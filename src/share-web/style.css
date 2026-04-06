@@ -1,10 +1,20 @@
 :root {
+  --fs-shell-bg: #0b1626;
+  --fs-panel: rgba(8, 14, 24, 0.78);
+  --fs-panel-border: rgba(148, 163, 184, 0.16);
+  --fs-surface: rgba(15, 23, 42, 0.52);
+  --fs-surface-strong: rgba(15, 23, 42, 0.82);
+  --fs-text: #edf6ff;
+  --fs-muted: #8aa2ba;
+  --fs-accent: #20c7b8;
+  --fs-accent-2: #39bdf8;
+  --fs-danger: #f87171;
   font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  color: #dbe7f3;
+  color: var(--fs-text);
   background:
     radial-gradient(circle at top left, rgba(53, 105, 162, 0.28), transparent 30%),
     radial-gradient(circle at top right, rgba(16, 185, 129, 0.18), transparent 32%),
-    linear-gradient(180deg, #09111d 0%, #0f1c2d 50%, #0e1624 100%);
+    linear-gradient(180deg, #09111d 0%, #0f1c2d 50%, var(--fs-shell-bg) 100%);
 }
 
 * {
@@ -20,6 +30,7 @@ body,
 
 body {
   min-height: 100vh;
+  color: var(--fs-text);
 }
 
 button,

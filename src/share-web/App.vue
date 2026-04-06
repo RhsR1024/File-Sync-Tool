@@ -672,7 +672,7 @@ watchEffect(() => {
   position: relative;
   min-height: 100vh;
   overflow: hidden;
-  color: #eaf3fb;
+  color: var(--fs-text);
 }
 
 .backdrop {
@@ -686,37 +686,39 @@ watchEffect(() => {
 
 .page {
   position: relative;
-  max-width: 1240px;
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 28px 20px 48px;
+  padding: 24px 18px 40px;
 }
 
 .panel {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding: 24px;
-  border-radius: 28px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(8, 14, 24, 0.72);
+  gap: 16px;
+  padding: 20px;
+  border-radius: 24px;
+  border: 1px solid var(--fs-panel-border);
+  background: var(--fs-panel);
   backdrop-filter: blur(16px);
-  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.26);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.28);
 }
 
 .flash-banner,
 .error-banner {
   margin: 0;
-  border-radius: 18px;
-  padding: 14px 16px;
+  border-radius: 16px;
+  padding: 12px 14px;
 }
 
 .flash-banner {
-  background: rgba(34, 197, 94, 0.12);
-  color: #baf7d0;
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: rgba(34, 197, 94, 0.1);
+  color: #c9f8da;
 }
 
 .error-banner {
-  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(248, 113, 113, 0.24);
+  background: rgba(239, 68, 68, 0.12);
   color: #fecaca;
 }
 
