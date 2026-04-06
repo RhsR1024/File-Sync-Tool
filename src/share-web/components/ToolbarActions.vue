@@ -57,7 +57,7 @@ function isCurrentCrumb(index: number): boolean {
 <template>
   <div class="toolbar">
     <div class="toolbar-row">
-      <div class="path-strip" role="navigation" :aria-label="t('app.pageTitle')">
+      <div class="path-strip" role="navigation" :aria-label="t('toolbar.breadcrumbsLabel')">
         <div class="breadcrumbs">
           <template v-for="(crumb, index) in breadcrumbs" :key="crumb.node_id ?? `__home__-${index}`">
             <button

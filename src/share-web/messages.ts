@@ -21,6 +21,7 @@ export const messages = {
       deleteSuccess: 'Entry deleted.',
     },
     toolbar: {
+      breadcrumbsLabel: 'Current path',
       refresh: 'Refresh',
       uploadFiles: 'Upload Files',
       uploadDirectory: 'Upload Folder',
@@ -127,6 +128,7 @@ export const messages = {
       deleteSuccess: '\u6761\u76ee\u5df2\u5220\u9664\u3002',
     },
     toolbar: {
+      breadcrumbsLabel: '\u5f53\u524d\u8def\u5f84',
       refresh: '\u5237\u65b0',
       uploadFiles: '\u4e0a\u4f20\u6587\u4ef6',
       uploadDirectory: '\u4e0a\u4f20\u76ee\u5f55',

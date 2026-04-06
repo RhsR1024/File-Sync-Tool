@@ -168,10 +168,43 @@ const { t } = useI18n();
   .scope-segment {
     width: 100%;
     justify-content: space-between;
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .scope-label {
+    width: 100%;
+  }
+
+  .scope-toggle {
+    width: 100%;
   }
 
   .search-box {
     width: 100%;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .search-box {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .search-box input {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+
+  .scope-button {
+    flex: 1 1 0;
+    text-align: center;
+  }
+
+  .search-button,
+  .clear-button {
+    min-height: 40px;
   }
 }
 </style>
