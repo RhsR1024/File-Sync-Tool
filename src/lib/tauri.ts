@@ -35,6 +35,8 @@ export interface DeployServer {
   user: string;
   password: string;
   remote_path: string;
+  /** SSH TCP connect timeout in seconds. Default: 30. */
+  ssh_timeout_secs: number;
 }
 
 export interface MatchRule {
@@ -96,6 +98,9 @@ export interface AppConfig {
 
   /** Maximum number of task records to persist and display. Default: 100. */
   max_task_records: number;
+
+  /** HTTP request timeout in seconds for the appliance SSH API. Default: 5. */
+  appliance_ssh_api_timeout_secs: number;
 }
 
 export type TaskSourceType = 'scheduled' | 'manual';
@@ -394,6 +399,14 @@ export async function startManualDeployTask(request: StartManualDeployTaskReques
 
 export async function getAppPaths(): Promise<[string, string]> {
   return await invoke('get_app_paths');
+}
+
+export async function getCustomDataDir(): Promise<string> {
+  return await invoke('get_custom_data_dir');
+}
+
+export async function setCustomDataDir(path: string): Promise<void> {
+  await invoke('set_custom_data_dir', { path });
 }
 
 export async function openPathParent(path: string): Promise<void> {

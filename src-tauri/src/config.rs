@@ -63,6 +63,13 @@ pub struct DeployServer {
     pub user: String,
     pub password: String,
     pub remote_path: String,
+    /// SSH TCP connect timeout in seconds. Default: 30.
+    #[serde(default = "default_ssh_timeout_secs")]
+    pub ssh_timeout_secs: u64,
+}
+
+fn default_ssh_timeout_secs() -> u64 {
+    5
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -146,6 +153,11 @@ pub struct AppConfig {
     /// Maximum number of task records to persist and display. Default: 100.
     #[serde(default = "default_max_task_records")]
     pub max_task_records: u32,
+
+    /// HTTP request timeout in seconds for the appliance SSH API (/openAPI/system/v1/network/SSH/get).
+    /// Default: 5.
+    #[serde(default = "default_appliance_ssh_api_timeout_secs")]
+    pub appliance_ssh_api_timeout_secs: u64,
 }
 
 fn default_stability_secs() -> u64 {
@@ -162,6 +174,9 @@ fn default_copy_buffer_size_kb() -> u32 {
 }
 fn default_max_task_records() -> u32 {
     100
+}
+fn default_appliance_ssh_api_timeout_secs() -> u64 {
+    5
 }
 
 impl Default for AppConfig {
@@ -185,6 +200,7 @@ impl Default for AppConfig {
             max_log_lines: 200,
             copy_buffer_size_kb: 4096,
             max_task_records: 100,
+            appliance_ssh_api_timeout_secs: 5,
         }
     }
 }
@@ -246,14 +262,69 @@ pub fn save_config(app_handle: &tauri::AppHandle, config: &AppConfig) -> Result<
     Ok(())
 }
 
-pub fn get_log_path(app_handle: &tauri::AppHandle) -> PathBuf {
-    app_handle.path().app_data_dir().unwrap().join("app.log")
+// ── Custom data directory (pivot file) ──────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct Pivot {
+    custom_data_dir: Option<String>,
 }
 
-pub fn get_config_path(app_handle: &tauri::AppHandle) -> PathBuf {
+fn pivot_path<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> PathBuf {
     app_handle
         .path()
         .app_config_dir()
         .unwrap()
-        .join("config.json")
+        .join("pivot.json")
+}
+
+fn read_pivot<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Pivot {
+    let path = pivot_path(app_handle);
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(p) = serde_json::from_str::<Pivot>(&content) {
+            return p;
+        }
+    }
+    Pivot::default()
+}
+
+/// Returns the custom data dir if configured and the directory exists.
+pub fn get_custom_data_dir<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    let pivot = read_pivot(app_handle);
+    pivot.custom_data_dir.and_then(|d| {
+        let path = PathBuf::from(d);
+        if path.is_dir() { Some(path) } else { None }
+    })
+}
+
+/// Saves or clears the custom data dir pivot. Empty string = reset to default.
+pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Result<(), String> {
+    let pivot_file = pivot_path(app_handle);
+    if let Some(parent) = pivot_file.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let pivot = if path.is_empty() {
+        Pivot { custom_data_dir: None }
+    } else {
+        Pivot { custom_data_dir: Some(path) }
+    };
+    let content = serde_json::to_string_pretty(&pivot).map_err(|e| e.to_string())?;
+    fs::write(pivot_file, content).map_err(|e| e.to_string())
+}
+
+pub fn get_log_path(app_handle: &tauri::AppHandle) -> PathBuf {
+    get_custom_data_dir(app_handle)
+        .unwrap_or_else(|| app_handle.path().app_data_dir().unwrap())
+        .join("app.log")
+}
+
+pub fn get_config_path(app_handle: &tauri::AppHandle) -> PathBuf {
+    get_custom_data_dir(app_handle)
+        .map(|d| d.join("config.json"))
+        .unwrap_or_else(|| {
+            app_handle
+                .path()
+                .app_config_dir()
+                .unwrap()
+                .join("config.json")
+        })
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X } from 'lucide-vue-next';
-import { getConfig, saveConfig, testSshConnection, addSystemEvent, getAppPaths, openPathParent, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type LocalScriptBinding, type PostCopyExecutionOrder } from '@/lib/tauri';
+import { getConfig, saveConfig, testSshConnection, addSystemEvent, getAppPaths, openPathParent, getCustomDataDir, setCustomDataDir, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type LocalScriptBinding, type PostCopyExecutionOrder } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { restartSchedulerInterval } from '@/lib/scheduler';
@@ -13,6 +13,10 @@ defineOptions({ name: 'SettingsPage' });
 const { t, locale } = useI18n();
 const configPath = ref('');
 const logPath = ref('');
+const customDataDir = ref('');
+const customDataDirInput = ref('');
+const customDataDirSaving = ref(false);
+const showDirEditor = ref(false);
 const config = ref<AppConfig>({
   tasks: [],
   local_path: '',
@@ -31,7 +35,8 @@ const config = ref<AppConfig>({
   close_to_tray: false,
   max_log_lines: 200,
   copy_buffer_size_kb: 4096,
-  max_task_records: 100
+  max_task_records: 100,
+  appliance_ssh_api_timeout_secs: 5
 });
 
 const newExt = ref('');
@@ -376,10 +381,11 @@ const serverForm = ref({
     enabled: true,
     name: '',
     host: '',
-    port: 22,
+    port: 23333,
     user: 'root',
     password: 'admin_123',
-    remote_path: ''
+    remote_path: '/root',
+    ssh_timeout_secs: 5
 });
 
 function resetServerForm() {
@@ -391,7 +397,8 @@ function resetServerForm() {
         port: 22,
         user: 'root',
         password: 'admin_123',
-        remote_path: ''
+        remote_path: '',
+        ssh_timeout_secs: 5
     };
     isEditingServer.value = false;
     editingServerIndex.value = -1;
@@ -609,9 +616,32 @@ async function load() {
         const [cfg, log] = await getAppPaths();
         configPath.value = cfg;
         logPath.value = log;
+        customDataDir.value = await getCustomDataDir();
+        customDataDirInput.value = customDataDir.value;
     } catch (e) {
         console.error(e);
     }
+}
+
+async function saveCustomDataDir() {
+    customDataDirSaving.value = true;
+    try {
+        await setCustomDataDir(customDataDirInput.value.trim());
+        customDataDir.value = customDataDirInput.value.trim();
+        const [cfg, log] = await getAppPaths();
+        configPath.value = cfg;
+        logPath.value = log;
+        showStatusMsg(t('settings.customDataDirSaved'), 'success', 3000);
+    } catch (e) {
+        showStatusMsg(String(e), 'error', 4000);
+    } finally {
+        customDataDirSaving.value = false;
+    }
+}
+
+function resetCustomDataDir() {
+    customDataDirInput.value = '';
+    showDirEditor.value = false;
 }
 
 async function save() {
@@ -639,6 +669,7 @@ onUnmounted(clearStatusMsg);
 </script>
 
 <template>
+  <div class="h-full overflow-y-auto">
   <div class="p-6 max-w-4xl mx-auto space-y-8 pb-28">
     <div class="flex justify-between items-center">
       <h2 class="text-2xl font-bold text-slate-800">{{ t('settings.title') }}</h2>
@@ -783,6 +814,30 @@ onUnmounted(clearStatusMsg);
                </button>
                <button @click="openParentFolder(logPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.openFolder')">
                   <FolderOpen class="w-4 h-4" />
+               </button>
+            </div>
+         </div>
+
+         <!-- Custom Data Directory inline editor -->
+         <div class="pt-2 flex items-center justify-between gap-2">
+            <span v-if="customDataDir" class="text-xs text-emerald-600 truncate">✓ {{ t('settings.customDataDirActive') }}: <code class="font-mono">{{ customDataDir }}</code></span>
+            <span v-else class="text-xs text-slate-400">{{ t('settings.usingDefaultPaths') }}</span>
+            <button @click="showDirEditor = !showDirEditor"
+              class="shrink-0 text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 transition-colors">
+              <Edit class="w-3 h-3" /> {{ t('settings.customizeLocation') }}
+            </button>
+         </div>
+         <div v-if="showDirEditor" class="mt-2 p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
+            <p class="text-xs text-slate-500">{{ t('settings.customDataDirDesc') }}</p>
+            <div class="flex gap-2">
+               <input v-model="customDataDirInput" class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-xs font-mono" :placeholder="t('settings.customDataDirPlaceholder')" />
+               <button @click="saveCustomDataDir" :disabled="customDataDirSaving"
+                 class="px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-medium transition-colors disabled:opacity-50 whitespace-nowrap">
+                 {{ customDataDirSaving ? t('settings.saving') : t('settings.save') }}
+               </button>
+               <button v-if="customDataDir" @click="customDataDirInput = ''; saveCustomDataDir()"
+                 class="px-3 py-1.5 text-slate-500 hover:bg-slate-100 border border-slate-200 rounded-lg text-xs font-medium transition-colors whitespace-nowrap">
+                 {{ t('settings.resetDefault') }}
                </button>
             </div>
          </div>
@@ -1291,6 +1346,10 @@ onUnmounted(clearStatusMsg);
                   class="text-xs text-slate-600 hover:text-slate-800 flex items-center gap-1 font-medium bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg transition-colors">
                   <Server class="w-3 h-3" /> {{ t('settings.testAll') }}
                 </button>
+                <button @click="addServer"
+                  class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors">
+                  <Plus class="w-3 h-3" /> {{ t('settings.addServer') }}
+                </button>
                 <button @click="closeServerManager" class="px-3 py-1.5 text-slate-500 hover:bg-slate-100 rounded-lg transition-colors">{{ t('settings.close') }}</button>
               </div>
             </div>
@@ -1385,7 +1444,18 @@ onUnmounted(clearStatusMsg);
               </div>
               <div>
                 <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.remoteTargetDir') }}</label>
-                <input v-model="serverForm.remote_path" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="/opt/deploy" />
+                <input v-model="serverForm.remote_path" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="/root" />
+              </div>
+              <div>
+                <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.sshTimeout') }}</label>
+                <select v-model.number="serverForm.ssh_timeout_secs" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+                  <option :value="1">1 {{ t('settings.seconds') }}</option>
+                  <option :value="3">3 {{ t('settings.seconds') }}</option>
+                  <option :value="5">5 {{ t('settings.seconds') }}</option>
+                  <option :value="10">10 {{ t('settings.seconds') }}</option>
+                  <option :value="30">30 {{ t('settings.seconds') }}</option>
+                  <option :value="60">60 {{ t('settings.seconds') }}</option>
+                </select>
               </div>
             </div>
             <div class="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-100">
@@ -1741,5 +1811,6 @@ onUnmounted(clearStatusMsg);
       <Save class="w-4 h-4" />
       {{ t('settings.save') }}
     </button>
+  </div>
   </div>
 </template>

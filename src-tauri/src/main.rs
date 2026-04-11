@@ -1500,6 +1500,25 @@ fn get_app_paths(app_handle: tauri::AppHandle) -> (String, String) {
 }
 
 #[tauri::command]
+fn get_custom_data_dir(app_handle: tauri::AppHandle) -> String {
+    config::get_custom_data_dir(&app_handle)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn set_custom_data_dir(app_handle: tauri::AppHandle, path: String) -> Result<(), String> {
+    // Validate non-empty path is a valid directory
+    if !path.is_empty() {
+        let p = std::path::PathBuf::from(&path);
+        if !p.is_dir() {
+            return Err(format!("Directory does not exist: {}", path));
+        }
+    }
+    config::set_custom_data_dir(&app_handle, path)
+}
+
+#[tauri::command]
 fn open_path_parent(path: String) -> Result<(), String> {
     let raw = PathBuf::from(path);
     let target_dir = if raw.is_dir() {
@@ -1673,9 +1692,13 @@ const DEVICE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const DEVICE_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn build_device_http_client() -> Result<reqwest::Client, String> {
+    build_device_http_client_with_timeout(DEVICE_HTTP_REQUEST_TIMEOUT)
+}
+
+fn build_device_http_client_with_timeout(request_timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(DEVICE_HTTP_CONNECT_TIMEOUT)
-        .timeout(DEVICE_HTTP_REQUEST_TIMEOUT)
+        .timeout(request_timeout)
         .build()
         .map_err(|e| format!("Failed to create device HTTP client: {}", e))
 }
@@ -2295,8 +2318,10 @@ async fn enable_appliance_ssh_for_ip(
 #[tauri::command]
 async fn enable_appliance_ssh(
     request: ApplianceSshRequest,
+    state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ApplianceSshResult>, String> {
-    let client = build_device_http_client()?;
+    let api_timeout_secs = state.config.lock().unwrap().appliance_ssh_api_timeout_secs;
+    let client = build_device_http_client_with_timeout(Duration::from_secs(api_timeout_secs))?;
     let ips = request.ips;
     let ssh_username = request.ssh_username.trim().to_string();
     let ssh_password = request.ssh_password;
@@ -2462,6 +2487,8 @@ fn main() {
             queue_temporary_copy,
             preview_temporary_copy,
             get_app_paths,
+            get_custom_data_dir,
+            set_custom_data_dir,
             open_path_parent,
             open_url,
             open_directory,

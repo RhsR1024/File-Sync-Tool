@@ -72,10 +72,8 @@ pub fn clear_history(app_handle: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn get_history_path<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> PathBuf {
-    app_handle
-        .path()
-        .app_data_dir()
-        .unwrap()
+    crate::config::get_custom_data_dir(app_handle)
+        .unwrap_or_else(|| app_handle.path().app_data_dir().unwrap())
         .join("history.json")
 }
 

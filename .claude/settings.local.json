@@ -26,7 +26,11 @@
       "Bash(npx tauri:*)",
       "Bash(cmd /c \"pnpm tauri:build:versioned-exe\")",
       "Bash(cargo build:*)",
-      "Bash(grep -n \"flex flex-1 flex-col\" c:/WorkSpace/File-Sync-Tool/src/pages/*.vue)"
+      "Bash(grep -n \"flex flex-1 flex-col\" c:/WorkSpace/File-Sync-Tool/src/pages/*.vue)",
+      "Bash(python3 ./.trellis/scripts/get_context.py)",
+      "Bash(python3 ./.trellis/scripts/task.py init-context \".trellis/tasks/04-11-settings-improvements-apr11\" fullstack)",
+      "Bash(python3 ./.trellis/scripts/task.py start \".trellis/tasks/04-11-settings-improvements-apr11\")",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }

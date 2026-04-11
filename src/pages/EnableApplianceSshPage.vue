@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { AlertCircle, CheckCircle2, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe } from 'lucide-vue-next';
-import { enableApplianceSsh, getConfig, type AppConfig, type ApplianceSshResult } from '../lib/tauri';
+import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshResult } from '../lib/tauri';
 
 defineOptions({
   name: 'EnableApplianceSshPage',
@@ -12,7 +12,8 @@ const { t } = useI18n();
 
 const config = ref<AppConfig | null>(null);
 const selectedIps = ref<string[]>([]);
-const manualIp = ref<string>('');
+const manualIpTags = ref<string[]>([]);
+const manualIpInput = ref<string>('');
 const sshUsername = ref<string>('root');
 const sshPassword = ref<string>('admin_123');
 const addWhitelistRule = ref<boolean>(true);
@@ -20,6 +21,7 @@ const isLoading = ref<boolean>(false);
 const results = ref<ApplianceSshResult[]>([]);
 const currentProgress = ref<{ current: number; total: number } | null>(null);
 const showInfoDetail = ref<boolean>(false);
+const apiTimeoutSecs = ref<number>(5);
 
 const serverOptions = computed(() => {
   if (!config.value) return [];
@@ -32,10 +34,64 @@ const serverOptions = computed(() => {
     }));
 });
 
+const SEPARATORS = /[\s,，、;；\n\r]+/;
+
+const addManualIpTag = (raw: string) => {
+  const parts = raw.split(SEPARATORS).map(s => s.trim()).filter(Boolean);
+  for (const ip of parts) {
+    if (!manualIpTags.value.includes(ip)) {
+      manualIpTags.value.push(ip);
+    }
+  }
+};
+
+const removeManualIpTag = (ip: string) => {
+  const idx = manualIpTags.value.indexOf(ip);
+  if (idx > -1) manualIpTags.value.splice(idx, 1);
+};
+
+const handleIpKeydown = (e: KeyboardEvent) => {
+  const triggerKeys = ['Enter', 'Tab', ' '];
+  const raw = manualIpInput.value.trim();
+  if (triggerKeys.includes(e.key)) {
+    if (raw) {
+      e.preventDefault();
+      addManualIpTag(raw);
+      manualIpInput.value = '';
+    }
+  } else if (e.key === 'Backspace' && !raw && manualIpTags.value.length > 0) {
+    manualIpTags.value.pop();
+  }
+};
+
+const handleIpInputChange = () => {
+  // Confirm tag when user types a separator character inline
+  const raw = manualIpInput.value;
+  if (SEPARATORS.test(raw)) {
+    addManualIpTag(raw);
+    manualIpInput.value = '';
+  }
+};
+
+const handleIpPaste = (e: ClipboardEvent) => {
+  e.preventDefault();
+  const text = e.clipboardData?.getData('text') ?? '';
+  addManualIpTag(text);
+  manualIpInput.value = '';
+};
+
+const handleIpBlur = () => {
+  if (manualIpInput.value.trim()) {
+    addManualIpTag(manualIpInput.value);
+    manualIpInput.value = '';
+  }
+};
+
 const allSelectedIps = computed(() => {
-  const ips = new Set<string>([...selectedIps.value]);
-  if (manualIp.value.trim()) {
-    ips.add(manualIp.value.trim());
+  const ips = new Set<string>([...selectedIps.value, ...manualIpTags.value]);
+  // Also include any uncommitted draft in the input box
+  if (manualIpInput.value.trim()) {
+    ips.add(manualIpInput.value.trim());
   }
   return Array.from(ips);
 });
@@ -61,10 +117,21 @@ const isFormValid = computed(() => {
 onMounted(async () => {
   try {
     config.value = await getConfig();
+    apiTimeoutSecs.value = config.value.appliance_ssh_api_timeout_secs ?? 5;
   } catch (e) {
     console.error('Failed to load config:', e);
   }
 });
+
+const saveApiTimeout = async () => {
+  if (!config.value) return;
+  config.value.appliance_ssh_api_timeout_secs = apiTimeoutSecs.value;
+  try {
+    await saveConfig(config.value);
+  } catch (e) {
+    console.error('Failed to save api timeout:', e);
+  }
+};
 
 const handleExecute = async () => {
   if (allSelectedIps.value.length === 0) {
@@ -208,13 +275,38 @@ const enableStateClass = (value?: number) => {
                 <Globe class="w-4 h-4 text-slate-400" />
                 <label class="text-sm font-semibold text-slate-800">{{ t('tools.applianceSsh.manualIp') }}</label>
               </div>
-              <input
-                v-model="manualIp"
-                type="text"
-                :placeholder="t('tools.applianceSsh.manualIpPlaceholder')"
-                :disabled="isLoading"
-                class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
-              />
+              <!-- Tag Input -->
+              <div
+                class="min-h-[2.375rem] w-full flex flex-wrap gap-1.5 px-2.5 py-1.5 border border-slate-200 rounded-lg transition-colors cursor-text"
+                :class="isLoading ? 'bg-slate-50 cursor-not-allowed' : 'bg-white focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-400/20'"
+                @click="($refs.ipInput as HTMLInputElement)?.focus()"
+              >
+                <span
+                  v-for="ip in manualIpTags"
+                  :key="ip"
+                  class="inline-flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-mono px-2 py-0.5 rounded-md"
+                >
+                  {{ ip }}
+                  <button
+                    type="button"
+                    :disabled="isLoading"
+                    class="text-blue-500 hover:text-blue-700 disabled:cursor-not-allowed leading-none"
+                    @click.stop="removeManualIpTag(ip)"
+                  >×</button>
+                </span>
+                <input
+                  ref="ipInput"
+                  v-model="manualIpInput"
+                  type="text"
+                  :placeholder="manualIpTags.length === 0 ? t('tools.applianceSsh.manualIpPlaceholder') : ''"
+                  :disabled="isLoading"
+                  class="flex-1 min-w-[120px] text-sm bg-transparent outline-none disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 py-0.5"
+                  @keydown="handleIpKeydown"
+                  @input="handleIpInputChange"
+                  @paste="handleIpPaste"
+                  @blur="handleIpBlur"
+                />
+              </div>
               <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.manualIpHint') }}</p>
             </div>
           </div>
@@ -288,6 +380,22 @@ const enableStateClass = (value?: number) => {
                 {{ ip }}
               </span>
             </div>
+          </div>
+
+          <!-- API Timeout -->
+          <div class="flex items-center justify-between gap-3 px-4 py-3 bg-slate-50 border border-slate-200/80 rounded-xl">
+            <div>
+              <span class="text-xs font-medium text-slate-600">{{ t('tools.applianceSsh.apiTimeout') }}</span>
+              <p class="text-xs text-slate-400 mt-0.5">{{ t('tools.applianceSsh.apiTimeoutDesc') }}</p>
+            </div>
+            <select v-model.number="apiTimeoutSecs" @change="saveApiTimeout"
+              class="shrink-0 p-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-xs text-slate-700">
+              <option :value="1">1 {{ t('settings.seconds') }}</option>
+              <option :value="3">3 {{ t('settings.seconds') }}</option>
+              <option :value="5">5 {{ t('settings.seconds') }}</option>
+              <option :value="10">10 {{ t('settings.seconds') }}</option>
+              <option :value="30">30 {{ t('settings.seconds') }}</option>
+            </select>
           </div>
 
           <!-- Execute button -->
