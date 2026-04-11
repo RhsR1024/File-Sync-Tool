@@ -36,6 +36,12 @@ const serverOptions = computed(() => {
 
 const SEPARATORS = /[\s,，、;；\n\r]+/;
 
+const isValidIp = (ip: string): boolean => {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return false;
+  return parts.every(p => /^\d+$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
+};
+
 const addManualIpTag = (raw: string) => {
   const parts = raw.split(SEPARATORS).map(s => s.trim()).filter(Boolean);
   for (const ip of parts) {
@@ -284,13 +290,18 @@ const enableStateClass = (value?: number) => {
                 <span
                   v-for="ip in manualIpTags"
                   :key="ip"
-                  class="inline-flex items-center gap-1 bg-blue-100 text-blue-800 text-xs font-mono px-2 py-0.5 rounded-md"
+                  class="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-md"
+                  :class="isValidIp(ip)
+                    ? 'bg-blue-100 text-blue-800'
+                    : 'bg-red-100 text-red-700 border border-red-200'"
+                  :title="isValidIp(ip) ? undefined : t('tools.applianceSsh.invalidIp', { ip })"
                 >
                   {{ ip }}
                   <button
                     type="button"
                     :disabled="isLoading"
-                    class="text-blue-500 hover:text-blue-700 disabled:cursor-not-allowed leading-none"
+                    class="disabled:cursor-not-allowed leading-none"
+                    :class="isValidIp(ip) ? 'text-blue-500 hover:text-blue-700' : 'text-red-400 hover:text-red-600'"
                     @click.stop="removeManualIpTag(ip)"
                   >×</button>
                 </span>

@@ -8,7 +8,8 @@ const { t } = useI18n();
 
 const config = ref<AppConfig | null>(null);
 const selectedIps = ref<string[]>([]);
-const manualIp = ref<string>('');
+const manualIpTags = ref<string[]>([]);
+const manualIpInput = ref<string>('');
 const oldPassword = ref<string>('123456');
 const newPassword = ref<string>('admin_123');
 const isLoading = ref<boolean>(false);
@@ -26,10 +27,66 @@ const serverOptions = computed(() => {
     }));
 });
 
+const SEPARATORS = /[\s,，、;；\n\r]+/;
+
+const isValidIp = (ip: string): boolean => {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return false;
+  return parts.every(p => /^\d+$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
+};
+
+const addManualIpTag = (raw: string) => {
+  const parts = raw.split(SEPARATORS).map(s => s.trim()).filter(Boolean);
+  for (const ip of parts) {
+    if (!manualIpTags.value.includes(ip)) {
+      manualIpTags.value.push(ip);
+    }
+  }
+};
+
+const removeManualIpTag = (ip: string) => {
+  const idx = manualIpTags.value.indexOf(ip);
+  if (idx > -1) manualIpTags.value.splice(idx, 1);
+};
+
+const handleIpKeydown = (e: KeyboardEvent) => {
+  const raw = manualIpInput.value.trim();
+  if (['Enter', 'Tab', ' '].includes(e.key)) {
+    if (raw) {
+      e.preventDefault();
+      addManualIpTag(raw);
+      manualIpInput.value = '';
+    }
+  } else if (e.key === 'Backspace' && !raw && manualIpTags.value.length > 0) {
+    manualIpTags.value.pop();
+  }
+};
+
+const handleIpInputChange = () => {
+  if (SEPARATORS.test(manualIpInput.value)) {
+    addManualIpTag(manualIpInput.value);
+    manualIpInput.value = '';
+  }
+};
+
+const handleIpPaste = (e: ClipboardEvent) => {
+  e.preventDefault();
+  const text = e.clipboardData?.getData('text') ?? '';
+  addManualIpTag(text);
+  manualIpInput.value = '';
+};
+
+const handleIpBlur = () => {
+  if (manualIpInput.value.trim()) {
+    addManualIpTag(manualIpInput.value);
+    manualIpInput.value = '';
+  }
+};
+
 const allSelectedIps = computed(() => {
-  const ips = new Set<string>([...selectedIps.value]);
-  if (manualIp.value.trim()) {
-    ips.add(manualIp.value.trim());
+  const ips = new Set<string>([...selectedIps.value, ...manualIpTags.value]);
+  if (manualIpInput.value.trim()) {
+    ips.add(manualIpInput.value.trim());
   }
   return Array.from(ips);
 });
@@ -193,13 +250,43 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
             <label class="block text-sm font-semibold text-slate-800">{{ t('tools.frameworkPassword.manualIp') }}</label>
           </div>
           <div class="space-y-2">
-            <input
-              v-model="manualIp"
-              type="text"
-              :placeholder="t('tools.frameworkPassword.manualIpPlaceholder')"
-              :disabled="isLoading"
-              class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
-            />
+            <!-- Tag Input -->
+            <div
+              class="min-h-[2.375rem] w-full flex flex-wrap gap-1.5 px-2.5 py-1.5 border border-slate-200 rounded-lg transition-colors cursor-text"
+              :class="isLoading ? 'bg-slate-50 cursor-not-allowed' : 'bg-white focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-400/20'"
+              @click="($refs.fpIpInput as HTMLInputElement)?.focus()"
+            >
+              <span
+                v-for="ip in manualIpTags"
+                :key="ip"
+                class="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-md"
+                :class="isValidIp(ip)
+                  ? 'bg-blue-100 text-blue-800'
+                  : 'bg-red-100 text-red-700 border border-red-200'"
+                :title="isValidIp(ip) ? undefined : t('tools.frameworkPassword.invalidIp', { ip })"
+              >
+                {{ ip }}
+                <button
+                  type="button"
+                  :disabled="isLoading"
+                  class="disabled:cursor-not-allowed leading-none"
+                  :class="isValidIp(ip) ? 'text-blue-500 hover:text-blue-700' : 'text-red-400 hover:text-red-600'"
+                  @click.stop="removeManualIpTag(ip)"
+                >×</button>
+              </span>
+              <input
+                ref="fpIpInput"
+                v-model="manualIpInput"
+                type="text"
+                :placeholder="manualIpTags.length === 0 ? t('tools.frameworkPassword.manualIpPlaceholder') : ''"
+                :disabled="isLoading"
+                class="flex-1 min-w-[120px] text-sm bg-transparent outline-none disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 py-0.5"
+                @keydown="handleIpKeydown"
+                @input="handleIpInputChange"
+                @paste="handleIpPaste"
+                @blur="handleIpBlur"
+              />
+            </div>
             <p class="text-xs text-slate-400">{{ t('tools.frameworkPassword.manualIpHint') }}</p>
           </div>
         </div>
