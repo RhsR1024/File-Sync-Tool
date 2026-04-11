@@ -763,9 +763,7 @@ fn save_config_cmd(
 ) -> Result<(), String> {
     config::validate_config(&config)?;
     let config = config::normalize_config(config);
-    sync_launch_on_startup(
-        config.launch_and_auto_scan || config.launch_and_auto_start_file_share,
-    )?;
+    sync_launch_on_startup(config.launch_and_auto_scan || config.launch_and_auto_start_file_share)?;
     *state.config.lock().unwrap() = config.clone();
     config::save_config(&app_handle, &config)
 }
@@ -1695,7 +1693,9 @@ fn build_device_http_client() -> Result<reqwest::Client, String> {
     build_device_http_client_with_timeout(DEVICE_HTTP_REQUEST_TIMEOUT)
 }
 
-fn build_device_http_client_with_timeout(request_timeout: Duration) -> Result<reqwest::Client, String> {
+fn build_device_http_client_with_timeout(
+    request_timeout: Duration,
+) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(DEVICE_HTTP_CONNECT_TIMEOUT)
         .timeout(request_timeout)
@@ -2173,7 +2173,11 @@ async fn change_framework_password(
 ) -> Result<Vec<PasswordChangeResult>, String> {
     let old_passwd = old_password.unwrap_or_else(|| "123456".to_string());
     let new_passwd = new_password.unwrap_or_else(|| "admin_123".to_string());
-    let api_timeout_secs = state.config.lock().unwrap().framework_password_api_timeout_secs;
+    let api_timeout_secs = state
+        .config
+        .lock()
+        .unwrap()
+        .framework_password_api_timeout_secs;
     let client = build_device_http_client_with_timeout(Duration::from_secs(api_timeout_secs))?;
 
     let results = crate::async_utils::run_ordered_with_limit(

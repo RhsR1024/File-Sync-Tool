@@ -779,19 +779,23 @@ export interface FileSharePermissionSet {
   search_global: boolean;
 }
 
+export interface FileShareUserRootPermissions {
+  root_id: string;
+  preset: FileSharePermissionPreset;
+  permissions: FileSharePermissionSet;
+}
+
 export interface FileShareUserView {
   username: string;
   enabled: boolean;
-  preset: FileSharePermissionPreset;
-  permissions: FileSharePermissionSet;
+  root_permissions: FileShareUserRootPermissions[];
   password_set: boolean;
 }
 
 export interface FileShareUserSaveRequest {
   username: string;
   enabled: boolean;
-  preset: FileSharePermissionPreset;
-  permissions: FileSharePermissionSet;
+  root_permissions: FileShareUserRootPermissions[];
   previous_username?: string | null;
   new_password?: string | null;
   clear_password: boolean;

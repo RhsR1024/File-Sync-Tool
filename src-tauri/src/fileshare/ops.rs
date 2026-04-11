@@ -2,9 +2,9 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::model::DeleteMode;
 use chrono::{DateTime, Local};
 use serde::Serialize;
-use super::model::DeleteMode;
 
 pub const ZIP_DOWNLOAD_MAX_BYTES: u64 = 500 * 1024 * 1024;
 pub const ZIP_DOWNLOAD_MAX_FILES: usize = 20_000;
@@ -139,7 +139,9 @@ pub fn write_uploaded_file(
         return Err("Upload file name cannot be empty".to_string());
     }
 
-    let nested_parent = upload_path.parent().filter(|path| !path.as_os_str().is_empty());
+    let nested_parent = upload_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty());
     if nested_parent.is_some() && !create_parents {
         return Err("nested relative paths are only allowed for directory uploads".to_string());
     }
@@ -266,7 +268,10 @@ pub fn join_relative_path(parent: &str, child: &str) -> String {
 pub fn stream_preview(root: &ResolvedRoot, path: &str) -> Result<FilePreview, String> {
     let target = resolve_relative_path(root, path)?;
     if !target.is_file() {
-        return Err(format!("Preview target is not a file: {}", target.display()));
+        return Err(format!(
+            "Preview target is not a file: {}",
+            target.display()
+        ));
     }
     if !is_previewable_image(&target) {
         return Err("Preview is only available for image files".to_string());
@@ -430,7 +435,11 @@ fn normalize_leaf_name(name: &str) -> Result<String, String> {
     if trimmed == "." || trimmed == ".." {
         return Err("Entry name is invalid".to_string());
     }
-    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains(':') || trimmed.contains('\0') {
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains(':')
+        || trimmed.contains('\0')
+    {
         return Err("Entry name must not contain path separators".to_string());
     }
     Ok(trimmed.to_string())
@@ -442,15 +451,20 @@ fn path_to_relative_string(path: &Path) -> String {
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn find_root<'a>(roots: &'a [ResolvedRoot], root_id: &str) -> Result<&'a ResolvedRoot, String> {
-    roots.iter()
+    roots
+        .iter()
         .find(|root| root.id == root_id || root.alias == root_id)
         .ok_or_else(|| format!("Shared root not found: {}", root_id))
 }
 
 fn canonical_root_path(root: &ResolvedRoot) -> Result<PathBuf, String> {
-    root.path
-        .canonicalize()
-        .map_err(|e| format!("Failed to access shared root {}: {}", root.path.display(), e))
+    root.path.canonicalize().map_err(|e| {
+        format!(
+            "Failed to access shared root {}: {}",
+            root.path.display(),
+            e
+        )
+    })
 }
 
 fn ensure_existing_directory(path: &Path) -> Result<(), String> {
@@ -477,16 +491,11 @@ fn is_previewable_image(path: &Path) -> bool {
             .and_then(OsStr::to_str)
             .map(|value| value.to_ascii_lowercase())
             .as_deref(),
-        Some("png")
-            | Some("jpg")
-            | Some("jpeg")
-            | Some("gif")
-            | Some("webp")
-            | Some("bmp")
+        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("bmp")
     )
 }
 
-fn format_modified_time(time: std::time::SystemTime) -> String {
+pub fn format_modified_time(time: std::time::SystemTime) -> String {
     let date_time: DateTime<Local> = time.into();
     date_time.format("%Y-%m-%d %H:%M").to_string()
 }
@@ -630,8 +639,7 @@ mod tests {
         let target = dir.path().join("remove-me.txt");
         fs::write(&target, b"delete me").expect("target file should exist");
 
-        delete_entry(&root, "remove-me.txt", DeleteMode::Permanent)
-            .expect("delete should succeed");
+        delete_entry(&root, "remove-me.txt", DeleteMode::Permanent).expect("delete should succeed");
 
         assert!(!target.exists());
     }
@@ -675,14 +683,8 @@ mod tests {
             path: dir.path().to_path_buf(),
         };
 
-        write_uploaded_file(
-            &root,
-            "",
-            "photos/2026/april/cover.txt",
-            b"hello",
-            true,
-        )
-        .expect("directory uploads should create nested folders");
+        write_uploaded_file(&root, "", "photos/2026/april/cover.txt", b"hello", true)
+            .expect("directory uploads should create nested folders");
 
         assert!(dir
             .path()

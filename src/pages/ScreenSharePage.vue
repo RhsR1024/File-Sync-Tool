@@ -54,7 +54,8 @@ const serverUrl = ref('');
 const showQr = ref(false);
 const copiedUrl = ref(false);
 const showAltUrls = ref(false);
-const showConnectionDetails = ref(false);
+const showConnectionDetails = ref(true);
+const showAllConnIps = ref(false);
 const errorMsg = ref('');
 
 const status = ref<ScreenShareStatus>({
@@ -98,6 +99,8 @@ const formattedBitrate = computed(() => {
 const altUrls = computed(() => (status.value.all_urls || []).filter((url) => url !== serverUrl.value));
 const connectedIps = computed(() => status.value.connected_ips || []);
 const connectionCount = computed(() => status.value.connection_count ?? connectedIps.value.length);
+const visibleConnIps = computed(() => showAllConnIps.value ? connectedIps.value : connectedIps.value.slice(0, 10));
+const hiddenConnIpCount = computed(() => Math.max(0, connectedIps.value.length - 10));
 
 async function loadMonitors() {
   try {
@@ -198,6 +201,7 @@ async function startShare() {
     serverUrl.value = url;
     isActive.value = true;
     showConnectionDetails.value = false;
+    showAllConnIps.value = false;
     await saveSettings();
   } catch (error) {
     errorMsg.value = t('tools.screenShare.errStartFailed', { error: String(error) });
@@ -216,6 +220,7 @@ async function stopShare() {
   serverUrl.value = '';
   showQr.value = false;
   showConnectionDetails.value = false;
+  showAllConnIps.value = false;
   status.value = {
     is_active: false,
     viewer_count: 0,
@@ -315,6 +320,7 @@ onMounted(async () => {
     }
     if (!event.payload.is_active) {
       showConnectionDetails.value = false;
+      showAllConnIps.value = false;
     }
   });
 
@@ -446,7 +452,7 @@ onUnmounted(() => {
           </div>
 
           <div class="ss-card">
-            <p class="ss-section-label">Performance</p>
+            <p class="ss-section-label">{{ t('tools.screenShare.performance') }}</p>
             <div class="space-y-5">
               <div>
                 <div class="mb-2 flex items-center justify-between">
@@ -659,12 +665,14 @@ onUnmounted(() => {
               </div>
               <div v-if="connectedIps.length > 0" class="space-y-2">
                 <div
-                  v-for="ip in connectedIps"
+                  v-for="ip in visibleConnIps"
                   :key="ip"
                   class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-700"
                 >
                   {{ ip }}
                 </div>
+                <button v-if="hiddenConnIpCount > 0" type="button" class="ss-detail-button" @click="showAllConnIps = true">{{ t('tools.screenShare.showMoreIps', { n: hiddenConnIpCount }) }}<ChevronDown class="h-3.5 w-3.5" /></button>
+                <button v-else-if="connectedIps.length > 10" type="button" class="ss-detail-button" @click="showAllConnIps = false">{{ t('tools.screenShare.collapseIps') }}<ChevronUp class="h-3.5 w-3.5" /></button>
               </div>
               <div v-else class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-400">
                 {{ t('tools.screenShare.noConnections') }}

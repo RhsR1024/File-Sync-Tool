@@ -90,6 +90,48 @@ impl FileSharePermissionSet {
         }
     }
 
+    pub fn deny_all() -> Self {
+        Self {
+            browse: false,
+            download_file: false,
+            download_archive: false,
+            upload_file: false,
+            upload_directory: false,
+            create_directory: false,
+            create_text: false,
+            rename: false,
+            delete: false,
+            preview_image: false,
+            search_current: false,
+            search_global: false,
+        }
+    }
+
+    pub fn or(&self, other: &Self) -> Self {
+        Self {
+            browse: self.browse || other.browse,
+            download_file: self.download_file || other.download_file,
+            download_archive: self.download_archive || other.download_archive,
+            upload_file: self.upload_file || other.upload_file,
+            upload_directory: self.upload_directory || other.upload_directory,
+            create_directory: self.create_directory || other.create_directory,
+            create_text: self.create_text || other.create_text,
+            rename: self.rename || other.rename,
+            delete: self.delete || other.delete,
+            preview_image: self.preview_image || other.preview_image,
+            search_current: self.search_current || other.search_current,
+            search_global: self.search_global || other.search_global,
+        }
+    }
+
+    pub fn merge_or<'a, I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = &'a FileSharePermissionSet>,
+    {
+        iter.into_iter()
+            .fold(Self::deny_all(), |acc, item| acc.or(item))
+    }
+
     pub fn allows(&self, permission: FileSharePermission) -> bool {
         match permission {
             FileSharePermission::Browse => self.browse,
@@ -131,11 +173,18 @@ pub enum FileSharePermission {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserRootPermissions {
+    pub root_id: String,
+    pub preset: PermissionPreset,
+    pub permissions: FileSharePermissionSet,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedFileShareUser {
     pub username: String,
     pub enabled: bool,
-    pub preset: PermissionPreset,
-    pub permissions: FileSharePermissionSet,
+    #[serde(default)]
+    pub root_permissions: Vec<UserRootPermissions>,
     pub password_hash: Option<String>,
 }
 
@@ -163,8 +212,7 @@ pub struct PersistedFileShareConfig {
 pub struct FileShareUserView {
     pub username: String,
     pub enabled: bool,
-    pub preset: PermissionPreset,
-    pub permissions: FileSharePermissionSet,
+    pub root_permissions: Vec<UserRootPermissions>,
     pub password_set: bool,
 }
 
@@ -202,8 +250,7 @@ impl From<&PersistedFileShareConfig> for FileShareSettingsView {
             guest_account: FileShareUserView {
                 username: value.guest_account.username.clone(),
                 enabled: value.guest_account.enabled,
-                preset: value.guest_account.preset.clone(),
-                permissions: value.guest_account.permissions.clone(),
+                root_permissions: value.guest_account.root_permissions.clone(),
                 password_set: value.guest_account.password_hash.is_some(),
             },
             accounts: value
@@ -212,8 +259,7 @@ impl From<&PersistedFileShareConfig> for FileShareSettingsView {
                 .map(|account| FileShareUserView {
                     username: account.username.clone(),
                     enabled: account.enabled,
-                    preset: account.preset.clone(),
-                    permissions: account.permissions.clone(),
+                    root_permissions: account.root_permissions.clone(),
                     password_set: account.password_hash.is_some(),
                 })
                 .collect(),
@@ -234,8 +280,8 @@ impl From<&PersistedFileShareConfig> for FileShareSettingsView {
 pub struct FileShareUserSaveRequest {
     pub username: String,
     pub enabled: bool,
-    pub preset: PermissionPreset,
-    pub permissions: FileSharePermissionSet,
+    #[serde(default)]
+    pub root_permissions: Vec<UserRootPermissions>,
     #[serde(default)]
     pub previous_username: Option<String>,
     #[serde(default)]
@@ -267,8 +313,7 @@ pub fn default_guest_account() -> PersistedFileShareUser {
     PersistedFileShareUser {
         username: DEFAULT_GUEST_USERNAME.to_string(),
         enabled: true,
-        preset: PermissionPreset::ReadOnly,
-        permissions: FileSharePermissionSet::read_only(),
+        root_permissions: Vec::new(),
         password_hash: None,
     }
 }

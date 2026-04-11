@@ -270,10 +270,11 @@ function isCurrentCrumb(index: number): boolean {
 .hint-banner {
   margin: 0;
   border-radius: 14px;
-  border: 1px solid rgba(56, 189, 248, 0.2);
+  border: 1px solid rgba(56, 189, 248, 0.25);
   padding: 12px 14px;
   background: rgba(56, 189, 248, 0.1);
-  color: #c6e6ff;
+  color: #0369a1;
+  font-size: 13px;
 }
 
 @media (max-width: 900px) {

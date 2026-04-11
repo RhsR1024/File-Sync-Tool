@@ -184,6 +184,7 @@ async function loadTree(
         preserveSearch: false,
         allowHomeFallback: false,
       });
+      pageError.value = t('app.directoryNotFound');
       return;
     }
     throw error;
@@ -679,8 +680,8 @@ watchEffect(() => {
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(circle at 18% 18%, rgba(45, 113, 186, 0.22), transparent 0 30%),
-    radial-gradient(circle at 82% 14%, rgba(20, 184, 166, 0.18), transparent 0 32%);
+    radial-gradient(circle at 18% 18%, rgba(147, 197, 253, 0.22), transparent 0 30%),
+    radial-gradient(circle at 82% 14%, rgba(110, 231, 183, 0.16), transparent 0 32%);
   pointer-events: none;
 }
 
@@ -700,7 +701,7 @@ watchEffect(() => {
   border: 1px solid var(--fs-panel-border);
   background: var(--fs-panel);
   backdrop-filter: blur(16px);
-  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.1);
 }
 
 .flash-banner,
@@ -711,15 +712,15 @@ watchEffect(() => {
 }
 
 .flash-banner {
-  border: 1px solid rgba(34, 197, 94, 0.2);
-  background: rgba(34, 197, 94, 0.1);
-  color: #c9f8da;
+  border: 1px solid rgba(21, 128, 61, 0.2);
+  background: rgba(21, 128, 61, 0.07);
+  color: #14532d;
 }
 
 .error-banner {
-  border: 1px solid rgba(248, 113, 113, 0.24);
-  background: rgba(239, 68, 68, 0.12);
-  color: #fecaca;
+  border: 1px solid rgba(185, 28, 28, 0.22);
+  background: rgba(185, 28, 28, 0.07);
+  color: #7f1d1d;
 }
 
 @media (max-width: 880px) {

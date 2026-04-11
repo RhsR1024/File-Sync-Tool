@@ -427,11 +427,10 @@ pub async fn test_ports(request: PortTestRequest) -> Result<PortTestResult, Stri
             let addr = format!("{}:{}", host, port);
             let start = std::time::Instant::now();
 
-            let open =
-                matches!(
-                    tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await,
-                    Ok(Ok(_))
-                );
+            let open = matches!(
+                tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await,
+                Ok(Ok(_))
+            );
 
             let latency_ms = if open {
                 Some(start.elapsed().as_secs_f64() * 1000.0)

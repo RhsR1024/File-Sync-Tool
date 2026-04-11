@@ -1,20 +1,20 @@
 :root {
-  --fs-shell-bg: #0b1626;
-  --fs-panel: rgba(8, 14, 24, 0.78);
-  --fs-panel-border: rgba(148, 163, 184, 0.16);
-  --fs-surface: rgba(15, 23, 42, 0.52);
-  --fs-surface-strong: rgba(15, 23, 42, 0.82);
-  --fs-text: #edf6ff;
-  --fs-muted: #8aa2ba;
-  --fs-accent: #20c7b8;
-  --fs-accent-2: #39bdf8;
-  --fs-danger: #f87171;
+  --fs-shell-bg: #eaf0f7;
+  --fs-panel: rgba(255, 255, 255, 0.9);
+  --fs-panel-border: rgba(99, 119, 150, 0.18);
+  --fs-surface: rgba(241, 245, 250, 0.88);
+  --fs-surface-strong: rgba(226, 232, 242, 0.96);
+  --fs-text: #1a2535;
+  --fs-muted: #5a7194;
+  --fs-accent: #0b9e90;
+  --fs-accent-2: #0284c7;
+  --fs-danger: #dc2626;
   font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   color: var(--fs-text);
   background:
-    radial-gradient(circle at top left, rgba(53, 105, 162, 0.28), transparent 30%),
-    radial-gradient(circle at top right, rgba(16, 185, 129, 0.18), transparent 32%),
-    linear-gradient(180deg, #09111d 0%, #0f1c2d 50%, var(--fs-shell-bg) 100%);
+    radial-gradient(circle at top left, rgba(147, 197, 253, 0.28), transparent 30%),
+    radial-gradient(circle at top right, rgba(110, 231, 183, 0.2), transparent 32%),
+    linear-gradient(180deg, #f8fafc 0%, #f0f4f8 50%, var(--fs-shell-bg) 100%);
 }
 
 * {

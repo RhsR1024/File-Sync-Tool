@@ -1,0 +1,11 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "src-tauri/src/fileshare/model.rs", "reason": "核心数据结构，需改 PersistedFileShareUser"}
+{"file": "src-tauri/src/fileshare/auth.rs", "reason": "ResolvedPrincipal 需加 root_permissions 及辅助方法"}
+{"file": "src-tauri/src/fileshare/mod.rs", "reason": "principal_for_user / find_root / resolve_request_principal"}
+{"file": "src-tauri/src/fileshare/http.rs", "reason": "所有 handler，build_home_tree_response"}
+{"file": "src-tauri/src/fileshare/persist.rs", "reason": "build_persisted_user / normalize"}
+{"file": "src/lib/tauri.ts", "reason": "TS 类型同步"}
+{"file": "src/pages/FileSharePage.vue", "reason": "用户编辑 UI 改版"}
+{"file": "src/locales/messages.ts", "reason": "i18n key"}

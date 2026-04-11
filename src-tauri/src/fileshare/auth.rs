@@ -6,7 +6,9 @@ use axum::http::StatusCode;
 use ipnet::IpNet;
 use uuid::Uuid;
 
-use super::model::{FileSharePermission, FileSharePermissionSet, IpFilterMode};
+use super::model::{
+    FileSharePermission, FileSharePermissionSet, IpFilterMode, UserRootPermissions,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpRule {
@@ -46,6 +48,16 @@ pub struct ResolvedPrincipal {
     pub username: String,
     pub is_guest: bool,
     pub permissions: FileSharePermissionSet,
+    pub root_permissions: Vec<UserRootPermissions>,
+}
+
+impl ResolvedPrincipal {
+    pub fn permissions_for_root(&self, root_id: &str) -> Option<FileSharePermissionSet> {
+        self.root_permissions
+            .iter()
+            .find(|r| r.root_id == root_id)
+            .map(|r| r.permissions.clone())
+    }
 }
 
 #[derive(Default)]
@@ -155,11 +167,7 @@ mod tests {
     #[test]
     fn whitelist_mode_rejects_ip_outside_rules() {
         let rules = parse_ip_rules(&["192.168.0.0/24".into()]).expect("rules should parse");
-        let allowed = is_ip_allowed(
-            IpFilterMode::Whitelist,
-            &rules,
-            "10.0.0.5".parse().unwrap(),
-        );
+        let allowed = is_ip_allowed(IpFilterMode::Whitelist, &rules, "10.0.0.5".parse().unwrap());
         assert!(!allowed);
     }
 
@@ -203,6 +211,7 @@ mod tests {
             username: "guest".to_string(),
             is_guest: true,
             permissions: FileSharePermissionSet::read_only(),
+            root_permissions: Vec::new(),
         };
 
         let result = require_permission(&principal, FileSharePermission::Delete);

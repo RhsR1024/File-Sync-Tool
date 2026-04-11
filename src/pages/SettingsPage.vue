@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X } from 'lucide-vue-next';
+import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw } from 'lucide-vue-next';
 import { getConfig, saveConfig, testSshConnection, addSystemEvent, getAppPaths, openPathParent, getCustomDataDir, setCustomDataDir, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type LocalScriptBinding, type PostCopyExecutionOrder } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
@@ -95,10 +95,47 @@ function showStatusMsg(
 }
 
 // ── Command Group Management ──────────────────────────────────────────────────
+const builtinCommandGroups: CommandGroup[] = [
+    {
+        id: '__builtin_extract__',
+        name: '解压安装包',
+        commands: ['cd ${remote_target} && tar -zxvf ${filename}.tar.gz'],
+    },
+    {
+        id: '__builtin_uninstall__',
+        name: '卸载旧版本',
+        commands: ['cd ${remote_target}/${filename} && echo y | ./integrated_uninstall.sh'],
+    },
+    {
+        id: '__builtin_cleanup__',
+        name: '清理 OMC/HA',
+        commands: ['which omc_uninstall.sh > /dev/null 2>&1 && echo yes | omc_uninstall.sh || true; which hauninstall.sh > /dev/null 2>&1 && printf \'yes\\n\' | hauninstall.sh || true'],
+    },
+    {
+        id: '__builtin_install__',
+        name: '安装新版本',
+        commands: ['cd ${remote_target}/${filename} && printf \'yes\\ny\\n\' | ./update -f'],
+    },
+];
+
 const isEditingCommandGroup = ref(false);
 const editingCommandGroupIndex = ref(-1);
 const commandGroupForm = ref<CommandGroup>({ id: '', name: '', commands: [] });
 const newGroupCommand = ref('');
+
+function restoreBuiltinCommandGroups() {
+    if (!confirm(t('settings.confirmRestoreBuiltin'))) return;
+    const existing = config.value.command_groups;
+    for (const builtin of builtinCommandGroups) {
+        const idx = existing.findIndex(g => g.id === builtin.id);
+        if (idx >= 0) {
+            existing[idx] = { ...builtin, commands: [...builtin.commands] };
+        } else {
+            existing.push({ ...builtin, commands: [...builtin.commands] });
+        }
+    }
+    save();
+}
 
 function resetCommandGroupForm() {
     commandGroupForm.value = { id: crypto.randomUUID(), name: '', commands: [] };
@@ -464,7 +501,7 @@ async function testAllServers() {
 
 // ── Manual Deploy ─────────────────────────────────────────────────────────────
 const manualLocalPath = ref('');
-const manualRemotePath = ref('/tmp/upload');
+const manualRemotePath = ref('/root');
 const manualServerBindings = ref<TaskServerBinding[]>([]);
 const manualDeployMsgType = ref<'success' | 'error' | ''>('');
 
@@ -614,6 +651,10 @@ async function openParentFolder(path: string) {
 async function load() {
     try {
         config.value = await getConfig();
+        // Auto-populate built-in groups when none are configured (e.g. fresh install)
+        if (config.value.command_groups.length === 0) {
+            config.value.command_groups = builtinCommandGroups.map(g => ({ ...g, commands: [...g.commands] }));
+        }
         const [cfg, log] = await getAppPaths();
         configPath.value = cfg;
         logPath.value = log;
@@ -1476,9 +1517,14 @@ onUnmounted(clearStatusMsg);
               </h4>
               <p class="text-xs text-slate-400 mt-1">{{ t('settings.commandGroupsDesc') }}</p>
             </div>
-            <button @click="addCommandGroup" class="text-xs text-sky-600 hover:text-sky-800 flex items-center gap-1 font-medium bg-sky-50 hover:bg-sky-100 px-3 py-1.5 rounded-lg transition-colors">
-              <Plus class="w-3 h-3" /> {{ t('settings.addCommandGroup') }}
-            </button>
+            <div class="flex items-center gap-2 shrink-0">
+              <button @click="restoreBuiltinCommandGroups" class="text-xs text-amber-600 hover:text-amber-800 flex items-center gap-1 font-medium bg-amber-50 hover:bg-amber-100 px-3 py-1.5 rounded-lg transition-colors">
+                <RotateCcw class="w-3 h-3" /> {{ t('settings.restoreBuiltin') }}
+              </button>
+              <button @click="addCommandGroup" class="text-xs text-sky-600 hover:text-sky-800 flex items-center gap-1 font-medium bg-sky-50 hover:bg-sky-100 px-3 py-1.5 rounded-lg transition-colors">
+                <Plus class="w-3 h-3" /> {{ t('settings.addCommandGroup') }}
+              </button>
+            </div>
           </div>
 
           <div v-if="config.command_groups.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
@@ -1493,12 +1539,16 @@ onUnmounted(clearStatusMsg);
                   <Terminal class="w-3.5 h-3.5" />
                 </div>
                 <div class="min-w-0">
-                  <div class="font-medium text-slate-800 text-sm">{{ group.name }}</div>
+                  <div class="font-medium text-slate-800 text-sm flex items-center gap-1.5">
+                    {{ group.name }}
+                    <span v-if="group.id.startsWith('__builtin_')" class="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full font-normal leading-none">{{ t('settings.builtinBadge') }}</span>
+                  </div>
                   <div class="text-xs text-slate-400">{{ group.commands.length }} {{ group.commands.length === 1 ? 'command' : 'commands' }}</div>
                 </div>
                 <div class="flex flex-wrap gap-1 ml-2">
                   <code v-for="(cmd, ci) in group.commands.slice(0, 2)" :key="ci"
-                    class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-mono truncate max-w-[120px]">{{ cmd }}</code>
+                    :title="cmd"
+                    class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-mono truncate max-w-[120px] cursor-default">{{ cmd }}</code>
                   <span v-if="group.commands.length > 2" class="text-[10px] text-slate-400">+{{ group.commands.length - 2 }}</span>
                 </div>
               </div>
@@ -1512,7 +1562,7 @@ onUnmounted(clearStatusMsg);
               </div>
             </div>
           </div>
-          <p class="mt-2 text-xs text-slate-400 leading-relaxed">{{ t('settings.postCommandsHint') }}</p>
+          <p class="mt-2 text-xs text-slate-400 leading-relaxed whitespace-pre-line">{{ t('settings.postCommandsHint') }}</p>
         </div>
 
         <!-- Command Group Edit Modal -->
@@ -1536,11 +1586,18 @@ onUnmounted(clearStatusMsg);
                 </div>
                 <ul class="space-y-1.5 bg-slate-900 rounded-lg p-3 max-h-48 overflow-y-auto">
                   <li v-for="(cmd, i) in commandGroupForm.commands" :key="i"
-                    class="flex justify-between items-center text-sky-300 font-mono text-xs">
-                    <span class="truncate mr-2">$ {{ cmd }}</span>
-                    <button @click="removeGroupCommand(i)" type="button" class="text-slate-500 hover:text-red-400 p-1 shrink-0">
-                      <Trash2 class="w-3 h-3" />
-                    </button>
+                    class="flex justify-between items-center text-sky-300 font-mono text-xs group/cmd">
+                    <span class="truncate mr-2" :title="cmd">$ {{ cmd }}</span>
+                    <div class="flex items-center gap-0.5 shrink-0">
+                      <button @click="copyToClipboard(cmd)" type="button"
+                        class="text-slate-600 hover:text-sky-400 p-1 opacity-0 group-hover/cmd:opacity-100 transition-opacity"
+                        :title="t('settings.copy')">
+                        <Copy class="w-3 h-3" />
+                      </button>
+                      <button @click="removeGroupCommand(i)" type="button" class="text-slate-500 hover:text-red-400 p-1 shrink-0">
+                        <Trash2 class="w-3 h-3" />
+                      </button>
+                    </div>
                   </li>
                   <li v-if="!commandGroupForm.commands.length" class="text-slate-600 text-xs italic text-center">{{ t('settings.commandGroupNoCommands') }}</li>
                 </ul>
@@ -1753,7 +1810,7 @@ onUnmounted(clearStatusMsg);
           </div>
         </div>
 
-        <p class="text-xs text-slate-400 leading-relaxed">{{ t('settings.localScriptVariableHint') }}</p>
+        <p class="text-xs text-slate-400 leading-relaxed whitespace-pre-line">{{ t('settings.localScriptVariableHint') }}</p>
       </div>
     </div>
 

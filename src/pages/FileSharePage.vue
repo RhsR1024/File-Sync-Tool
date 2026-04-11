@@ -37,6 +37,7 @@ import {
   type FileShareSettingsSaveRequest,
   type FileShareSettingsView,
   type FileShareStatus,
+  type FileShareUserRootPermissions,
   type FileShareUserSaveRequest,
   type FileShareUserView,
 } from '../lib/tauri';
@@ -106,23 +107,67 @@ const readWrite = (): FileSharePermissionSet => ({
 
 const clonePerms = (v: FileSharePermissionSet): FileSharePermissionSet => ({ ...v });
 const permsForPreset = (preset: FileSharePermissionPreset) => (preset === 'read_write' ? readWrite() : readOnly());
+const cloneRootPerms = (entry: FileShareUserRootPermissions): FileShareUserRootPermissions => ({
+  root_id: entry.root_id,
+  preset: entry.preset,
+  permissions: clonePerms(entry.permissions),
+});
 const permissionLabel = (key: PermKey) => t(`tools.fileShare.permissions.${key}`);
 const nextDraftKey = () => `file-share-user-${draftKeySeed++}`;
 const guestView = (): FileShareUserView => ({
   username: t('tools.fileShare.defaultGuestUsername'),
   enabled: true,
-  preset: 'read_only',
-  permissions: readOnly(),
+  root_permissions: [],
   password_set: false,
 });
 const editUser = (a: FileShareUserView): EditUser => ({
   ...a,
   draft_key: nextDraftKey(),
   previous_username: a.username,
-  permissions: clonePerms(a.permissions),
+  root_permissions: a.root_permissions.map(cloneRootPerms),
   new_password: '',
   clear_password: false,
 });
+
+const findRootPerm = (user: EditUser, rootId: string): FileShareUserRootPermissions | undefined =>
+  user.root_permissions.find((p) => p.root_id === rootId);
+
+const rootAccessRows = (user: EditUser) =>
+  draft.value.roots.map((root) => ({
+    root,
+    entry: user.root_permissions.find((p) => p.root_id === root.id) ?? null,
+  }));
+
+const toggleRootAccess = (user: EditUser, rootId: string, grant: boolean) => {
+  const existing = findRootPerm(user, rootId);
+  if (grant) {
+    if (existing) return;
+    user.root_permissions.push({
+      root_id: rootId,
+      preset: 'read_only',
+      permissions: readOnly(),
+    });
+  } else if (existing) {
+    user.root_permissions = user.root_permissions.filter((p) => p.root_id !== rootId);
+  }
+};
+
+const onRootPreset = (entry: FileShareUserRootPermissions) => {
+  if (entry.preset !== 'custom') entry.permissions = permsForPreset(entry.preset);
+};
+
+const onRootAccessChange = (user: EditUser, rootId: string, ev: Event) => {
+  const target = ev.target as HTMLInputElement;
+  toggleRootAccess(user, rootId, target.checked);
+};
+
+const onRootPresetChange = (user: EditUser, rootId: string, ev: Event) => {
+  const entry = findRootPerm(user, rootId);
+  if (!entry) return;
+  const target = ev.target as HTMLSelectElement;
+  entry.preset = target.value as FileSharePermissionPreset;
+  onRootPreset(entry);
+};
 
 const blankStatus = (): FileShareStatus => ({
   is_active: false,
@@ -175,8 +220,7 @@ const buildReq = (d: Draft): FileShareSettingsSaveRequest => ({
   guest_account: {
     username: d.guest_account.username.trim(),
     enabled: d.guest_access_enabled,
-    preset: d.guest_account.preset,
-    permissions: clonePerms(d.guest_account.permissions),
+    root_permissions: d.guest_account.root_permissions.map(cloneRootPerms),
     previous_username: d.guest_account.previous_username,
     new_password: d.guest_account.new_password.trim() || null,
     clear_password: d.guest_account.clear_password,
@@ -184,8 +228,7 @@ const buildReq = (d: Draft): FileShareSettingsSaveRequest => ({
   accounts: d.accounts.map((a): FileShareUserSaveRequest => ({
     username: a.username.trim(),
     enabled: a.enabled,
-    preset: a.preset,
-    permissions: clonePerms(a.permissions),
+    root_permissions: a.root_permissions.map(cloneRootPerms),
     previous_username: a.previous_username,
     new_password: a.new_password.trim() || null,
     clear_password: a.clear_password,
@@ -215,7 +258,8 @@ const serverUrl = ref('');
 const copied = ref(false);
 const showQr = ref(false);
 const showAltUrls = ref(false);
-const showConnections = ref(false);
+const showConnections = ref(true);
+const showAllIps = ref(false);
 const qrCanvas = ref<HTMLCanvasElement | null>(null);
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
 
@@ -226,6 +270,8 @@ const enabledCustomAccounts = computed(() => customAccounts.value.filter((a) => 
 const altUrls = computed(() => (status.value.all_urls ?? []).filter((u) => u !== serverUrl.value));
 const connectedIps = computed(() => status.value.connected_ips ?? []);
 const connCount = computed(() => status.value.connection_count ?? connectedIps.value.length);
+const visibleIps = computed(() => showAllIps.value ? connectedIps.value : connectedIps.value.slice(0, 10));
+const hiddenIpCount = computed(() => Math.max(0, connectedIps.value.length - 10));
 const uptime = computed(() => {
   const sec = status.value.uptime_secs;
   return `${String(Math.floor(sec / 3600)).padStart(2, '0')}:${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
@@ -296,6 +342,7 @@ const setStatus = (next: FileShareStatus) => {
   if (!status.value.is_active) {
     showQr.value = false;
     showConnections.value = false;
+    showAllIps.value = false;
   }
 };
 
@@ -411,15 +458,10 @@ const addAccount = () => {
   draft.value.accounts.push(editUser({
     username,
     enabled: true,
-    preset: 'read_write',
-    permissions: readWrite(),
+    root_permissions: [],
     password_set: false,
   }));
   draft.value.accounts[draft.value.accounts.length - 1].previous_username = null;
-};
-
-const onPreset = (a: EditUser) => {
-  if (a.preset !== 'custom') a.permissions = permsForPreset(a.preset);
 };
 
 const onPassword = (a: EditUser) => {
@@ -448,6 +490,18 @@ const openBrowser = async () => {
     /* Opening the system browser is best-effort. */
   }
 };
+
+watch(
+  () => draft.value.roots.map((r) => r.id).join('|'),
+  () => {
+    const validIds = new Set(draft.value.roots.map((r) => r.id));
+    const prune = (user: EditUser) => {
+      user.root_permissions = user.root_permissions.filter((p) => validIds.has(p.root_id));
+    };
+    prune(draft.value.guest_account);
+    draft.value.accounts.forEach(prune);
+  },
+);
 
 watch([showQr, serverUrl], async ([show, url]) => {
   if (!show || !url || !qrCanvas.value) return;
@@ -632,13 +686,52 @@ onUnmounted(() => {
                   <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="guest.new_password" type="password" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(guest)" /></div>
                   <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="guest.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(guest)" />{{ t('tools.fileShare.clearGuestPasswordOnSave') }}</label>
                 </div>
-                <div class="md:col-span-2">
-                  <label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label>
-                  <select v-model="guest.preset" :disabled="formDisabled" class="fs-select w-full" @change="onPreset(guest)"><option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select>
-                </div>
               </div>
-              <div v-if="guest.preset === 'custom'" class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                <label v-for="p in permDefs" :key="`guest-${p}`" class="fs-perm"><input v-model="guest.permissions[p]" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="guest.preset = 'custom'" /><span>{{ permissionLabel(p) }}</span></label>
+              <div class="mt-4">
+                <label class="fs-label">{{ t('tools.fileShare.rootAccess') }}</label>
+                <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-center text-sm text-slate-500">
+                  {{ t('tools.fileShare.noRootsForPermissions') }}
+                </div>
+                <div v-else class="space-y-3">
+                  <div v-for="row in rootAccessRows(guest)" :key="`guest-${row.root.id}`" class="rounded-xl border border-slate-200 bg-white p-3">
+                    <label class="flex items-center justify-between gap-3">
+                      <span class="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                        <input
+                          type="checkbox"
+                          :checked="!!row.entry"
+                          :disabled="formDisabled"
+                          class="rounded border-slate-300"
+                          @change="(e) => onRootAccessChange(guest, row.root.id, e)"
+                        />
+                        <span>{{ row.root.alias || row.root.id }}</span>
+                      </span>
+                    </label>
+                    <template v-if="row.entry">
+                      <div class="mt-3">
+                        <label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label>
+                        <select
+                          :value="row.entry.preset"
+                          :disabled="formDisabled"
+                          class="fs-select w-full"
+                          @change="(e) => onRootPresetChange(guest, row.root.id, e)"
+                        >
+                          <option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                        </select>
+                      </div>
+                      <div v-if="row.entry.preset === 'custom'" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                        <label v-for="p in permDefs" :key="`guest-${row.root.id}-${p}`" class="fs-perm">
+                          <input
+                            v-model="row.entry.permissions[p]"
+                            type="checkbox"
+                            :disabled="formDisabled"
+                            class="rounded border-slate-300"
+                          />
+                          <span>{{ permissionLabel(p) }}</span>
+                        </label>
+                      </div>
+                    </template>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -654,15 +747,57 @@ onUnmounted(() => {
                 <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
                   <div><label class="fs-label">{{ t('tools.fileShare.username') }}</label><input v-model="account.username" :disabled="formDisabled" class="fs-input w-full" /></div>
                   <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="account.enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="account.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="account.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.accountEnabled') }}</span></label>
-                  <div><label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label><select v-model="account.preset" :disabled="formDisabled" class="fs-select w-full" @change="onPreset(account)"><option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></div>
                   <div class="md:col-span-2">
                     <label class="fs-label">{{ t('tools.fileShare.accountPassword') }}</label>
                     <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="account.new_password" type="password" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(account)" /></div>
                     <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="account.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(account)" />{{ t('tools.fileShare.clearAccountPasswordOnSave') }}</label>
                   </div>
                 </div>
-                <div v-if="account.preset === 'custom'" class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                  <label v-for="p in permDefs" :key="`${account.draft_key}-${p}`" class="fs-perm"><input v-model="account.permissions[p]" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="account.preset = 'custom'" /><span>{{ permissionLabel(p) }}</span></label>
+                <div class="mt-4">
+                  <label class="fs-label">{{ t('tools.fileShare.rootAccess') }}</label>
+                  <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-center text-sm text-slate-500">
+                    {{ t('tools.fileShare.noRootsForPermissions') }}
+                  </div>
+                  <div v-else class="space-y-3">
+                    <div v-for="row in rootAccessRows(account)" :key="`${account.draft_key}-${row.root.id}`" class="rounded-xl border border-slate-200 bg-white p-3">
+                      <label class="flex items-center justify-between gap-3">
+                        <span class="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                          <input
+                            type="checkbox"
+                            :checked="!!row.entry"
+                            :disabled="formDisabled"
+                            class="rounded border-slate-300"
+                            @change="(e) => onRootAccessChange(account, row.root.id, e)"
+                          />
+                          <span>{{ row.root.alias || row.root.id }}</span>
+                        </span>
+                      </label>
+                      <template v-if="row.entry">
+                        <div class="mt-3">
+                          <label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label>
+                          <select
+                            :value="row.entry.preset"
+                            :disabled="formDisabled"
+                            class="fs-select w-full"
+                            @change="(e) => onRootPresetChange(account, row.root.id, e)"
+                          >
+                            <option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                          </select>
+                        </div>
+                        <div v-if="row.entry.preset === 'custom'" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                          <label v-for="p in permDefs" :key="`${account.draft_key}-${row.root.id}-${p}`" class="fs-perm">
+                            <input
+                              v-model="row.entry.permissions[p]"
+                              type="checkbox"
+                              :disabled="formDisabled"
+                              class="rounded border-slate-300"
+                            />
+                            <span>{{ permissionLabel(p) }}</span>
+                          </label>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -682,9 +817,8 @@ onUnmounted(() => {
               {{ t('tools.fileShare.lockoutWarning') }}
             </div>
             <div class="grid grid-cols-1 gap-3">
-              <button type="button" :disabled="!canSave" @click="saveSettings()" class="fs-btn fs-btn-main w-full"><Save class="h-4 w-4" />{{ isSaving ? t('tools.fileShare.saving') : t('tools.fileShare.saveSettings') }}</button>
+              <button type="button" :disabled="isActive ? !canStart : !canSave" @click="isActive ? startShare(true, true) : saveSettings()" class="fs-btn fs-btn-main w-full"><component :is="isActive ? RefreshCw : Save" class="h-4 w-4" />{{ isActive && isApplying ? t('tools.fileShare.restarting') : !isActive && isSaving ? t('tools.fileShare.saving') : t('tools.fileShare.saveSettings') }}</button>
               <button v-if="!isActive" type="button" :disabled="!canStart" @click="startShare(false, true)" class="fs-btn fs-btn-start w-full"><Play class="h-4 w-4" />{{ isApplying ? t('tools.fileShare.starting') : t('tools.fileShare.startShare') }}</button>
-              <button v-else type="button" :disabled="!canStart" @click="startShare(true, true)" class="fs-btn fs-btn-start w-full"><RefreshCw class="h-4 w-4" />{{ isApplying ? t('tools.fileShare.restarting') : t('tools.fileShare.saveAndRestart') }}</button>
               <button v-if="isActive" type="button" :disabled="isApplying" @click="stopShare" class="fs-btn fs-btn-danger w-full"><Power class="h-4 w-4" />{{ t('tools.fileShare.stopShare') }}</button>
             </div>
             <div class="mt-4 grid grid-cols-2 gap-3">
@@ -720,14 +854,13 @@ onUnmounted(() => {
             </div>
 
             <div class="fs-card">
-              <div class="mb-3 flex items-center justify-between">
-                <div class="text-sm font-semibold text-slate-900">{{ t('tools.fileShare.connectedIpList') }}</div>
-                <button type="button" class="fs-link" @click="showConnections = !showConnections"><component :is="showConnections ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />{{ t('tools.fileShare.connectionDetails') }}</button>
+              <div class="mb-3 text-sm font-semibold text-slate-900">{{ t('tools.fileShare.connectedIpList') }}</div>
+              <div v-if="connectedIps.length" class="space-y-2">
+                <div v-for="ip in visibleIps" :key="ip" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-700">{{ ip }}</div>
+                <button v-if="hiddenIpCount > 0" type="button" class="fs-link" @click="showAllIps = true"><ChevronDown class="h-3.5 w-3.5" />{{ t('tools.fileShare.showMoreIps', { n: hiddenIpCount }) }}</button>
+                <button v-else-if="connectedIps.length > 10" type="button" class="fs-link" @click="showAllIps = false"><ChevronUp class="h-3.5 w-3.5" />{{ t('tools.fileShare.collapseIps') }}</button>
               </div>
-              <div v-if="showConnections && connectedIps.length" class="space-y-2">
-                <div v-for="ip in connectedIps" :key="ip" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-700">{{ ip }}</div>
-              </div>
-              <div v-else class="text-sm text-slate-500">{{ showConnections ? t('tools.fileShare.noConnections') : t('tools.fileShare.expandConnectionsHint') }}</div>
+              <div v-else class="text-sm text-slate-500">{{ t('tools.fileShare.noConnections') }}</div>
             </div>
           </template>
 

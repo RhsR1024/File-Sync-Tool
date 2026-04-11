@@ -1,4 +1,4 @@
-﻿use std::collections::HashSet;
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,14 +18,13 @@ use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::oneshot;
 
-pub mod model;
 pub mod auth;
-pub mod persist;
+pub mod http;
+pub mod model;
 pub mod ops;
+pub mod persist;
 pub mod search;
 pub mod web_assets;
-pub mod http;
-
 
 // ─── Public Data Types ──────────────────────────────────────
 
@@ -142,7 +141,8 @@ impl HttpState {
             if let Ok(saved) = persist::load_persisted_file_share_config_from_path(path) {
                 if let Ok(config) = runtime_config_from_saved(saved) {
                     let roots = runtime_roots(&config);
-                    let ip_rules = parse_runtime_ip_rules(&config).unwrap_or_else(|_| self.ip_rules.clone());
+                    let ip_rules =
+                        parse_runtime_ip_rules(&config).unwrap_or_else(|_| self.ip_rules.clone());
                     return RequestRuntimeSnapshot {
                         config,
                         roots,
@@ -168,7 +168,6 @@ impl Drop for TempFile {
         let _ = std::fs::remove_file(&self.0);
     }
 }
-
 
 // ─── Tauri Commands ─────────────────────────────────────────
 
@@ -644,6 +643,15 @@ fn runtime_config_from_legacy(config: FileShareConfig) -> Result<RuntimeFileShar
         })
         .collect::<Vec<_>>();
 
+    let guest_root_permissions = roots
+        .iter()
+        .map(|root| model::UserRootPermissions {
+            root_id: root.id.clone(),
+            preset: model::PermissionPreset::ReadOnly,
+            permissions: model::FileSharePermissionSet::read_only(),
+        })
+        .collect::<Vec<_>>();
+
     Ok(RuntimeFileShareConfig {
         port: config.port,
         roots,
@@ -651,8 +659,7 @@ fn runtime_config_from_legacy(config: FileShareConfig) -> Result<RuntimeFileShar
         guest_account: model::PersistedFileShareUser {
             username: model::DEFAULT_GUEST_USERNAME.to_string(),
             enabled: true,
-            preset: model::PermissionPreset::ReadOnly,
-            permissions: model::FileSharePermissionSet::read_only(),
+            root_permissions: guest_root_permissions,
             password_hash: config.password.map(|password| hash_password(&password)),
         },
         accounts: Vec::new(),
@@ -761,10 +768,27 @@ fn principal_for_user(
     account: &model::PersistedFileShareUser,
     is_guest: bool,
 ) -> auth::ResolvedPrincipal {
+    let permissions = model::FileSharePermissionSet::merge_or(
+        account.root_permissions.iter().map(|r| &r.permissions),
+    );
     auth::ResolvedPrincipal {
         username: account.username.clone(),
         is_guest,
-        permissions: account.permissions.clone(),
+        permissions,
+        root_permissions: account.root_permissions.clone(),
+    }
+}
+
+fn find_allowed_root(
+    state: &HttpState,
+    principal: &auth::ResolvedPrincipal,
+    key: &str,
+) -> Option<ops::ResolvedRoot> {
+    let root = find_root(state, key)?;
+    if principal.permissions_for_root(&root.id).is_some() {
+        Some(root)
+    } else {
+        None
     }
 }
 
@@ -832,7 +856,11 @@ fn resolve_request_principal(
 ) -> Result<auth::ResolvedPrincipal, StatusCode> {
     let runtime = state.request_runtime();
 
-    if !auth::is_ip_allowed(runtime.config.ip_filter_mode.clone(), &runtime.ip_rules, client_ip) {
+    if !auth::is_ip_allowed(
+        runtime.config.ip_filter_mode.clone(),
+        &runtime.ip_rules,
+        client_ip,
+    ) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -878,7 +906,11 @@ fn reject_blocked_ip_response(
     _login_redirect: bool,
 ) -> Option<Response> {
     let runtime = state.request_runtime();
-    if auth::is_ip_allowed(runtime.config.ip_filter_mode.clone(), &runtime.ip_rules, client_ip) {
+    if auth::is_ip_allowed(
+        runtime.config.ip_filter_mode.clone(),
+        &runtime.ip_rules,
+        client_ip,
+    ) {
         None
     } else {
         Some(plain_response(StatusCode::FORBIDDEN, "Forbidden"))
@@ -1085,9 +1117,7 @@ fn get_lan_ips() -> Vec<String> {
 
     fn is_common_lan(ip: &Ipv4Addr) -> bool {
         let o = ip.octets();
-        o[0] == 192 && o[1] == 168
-            || o[0] == 10
-            || o[0] == 172 && (16..=31).contains(&o[1])
+        o[0] == 192 && o[1] == 168 || o[0] == 10 || o[0] == 172 && (16..=31).contains(&o[1])
     }
 
     ips.sort_by_key(|ip| if is_common_lan(ip) { 0 } else { 1 });

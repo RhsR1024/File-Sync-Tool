@@ -1066,12 +1066,14 @@ async fn run_http_server(
         .route("/status", get(handler_status))
         .with_state(state);
 
-    if let Err(e) =
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.ok();
-            })
-            .await
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        shutdown_rx.await.ok();
+    })
+    .await
     {
         log::error!("Screen share HTTP server error: {}", e);
     }

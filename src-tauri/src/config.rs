@@ -301,7 +301,11 @@ pub fn get_custom_data_dir<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) 
     let pivot = read_pivot(app_handle);
     pivot.custom_data_dir.and_then(|d| {
         let path = PathBuf::from(d);
-        if path.is_dir() { Some(path) } else { None }
+        if path.is_dir() {
+            Some(path)
+        } else {
+            None
+        }
     })
 }
 
@@ -312,9 +316,13 @@ pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Resul
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let pivot = if path.is_empty() {
-        Pivot { custom_data_dir: None }
+        Pivot {
+            custom_data_dir: None,
+        }
     } else {
-        Pivot { custom_data_dir: Some(path) }
+        Pivot {
+            custom_data_dir: Some(path),
+        }
     };
     let content = serde_json::to_string_pretty(&pivot).map_err(|e| e.to_string())?;
     fs::write(pivot_file, content).map_err(|e| e.to_string())

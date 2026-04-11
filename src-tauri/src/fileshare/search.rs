@@ -203,13 +203,10 @@ fn collect_tree_path_matches(
             .strip_prefix(&root.path)
             .map(|value| value.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| name.clone());
-        let modified = metadata
-            .modified()
-            .ok()
-            .map(|value| {
-                let date_time: chrono::DateTime<chrono::Local> = value.into();
-                date_time.format("%Y-%m-%d %H:%M").to_string()
-            });
+        let modified = metadata.modified().ok().map(|value| {
+            let date_time: chrono::DateTime<chrono::Local> = value.into();
+            date_time.format("%Y-%m-%d %H:%M").to_string()
+        });
 
         if name.to_lowercase().contains(needle) {
             results.push(SearchNodeMatch {
@@ -306,12 +303,8 @@ mod tests {
         )
         .expect("nested file should exist");
 
-        let results = search_current_directory(
-            &nested,
-            "实用工具",
-            "流程图绘制工具Drawio Desktop",
-        )
-        .unwrap();
+        let results =
+            search_current_directory(&nested, "实用工具", "流程图绘制工具Drawio Desktop").unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(

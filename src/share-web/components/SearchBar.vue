@@ -97,7 +97,7 @@ const { t } = useI18n();
   gap: 4px;
   padding: 2px;
   border-radius: 10px;
-  background: rgba(15, 23, 42, 0.78);
+  background: rgba(226, 232, 242, 0.9);
 }
 
 .scope-button {
@@ -111,13 +111,13 @@ const { t } = useI18n();
 }
 
 .scope-button.active {
-  border-color: rgba(32, 199, 184, 0.3);
+  border-color: rgba(11, 158, 144, 0.3);
   border-color: color-mix(in srgb, var(--fs-accent) 30%, transparent);
-  background: rgba(25, 97, 102, 0.32);
+  background: rgba(11, 158, 144, 0.1);
   background: linear-gradient(
     135deg,
-    color-mix(in srgb, var(--fs-accent-2) 22%, transparent),
-    color-mix(in srgb, var(--fs-accent) 22%, transparent)
+    color-mix(in srgb, var(--fs-accent-2) 16%, transparent),
+    color-mix(in srgb, var(--fs-accent) 16%, transparent)
   );
   color: var(--fs-text);
 }

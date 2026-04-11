@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -24,11 +24,14 @@ pub(super) async fn run_http_server(
 ) {
     let app = build_router(state);
 
-    if let Err(e) = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async {
-            shutdown_rx.await.ok();
-        })
-        .await
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        shutdown_rx.await.ok();
+    })
+    .await
     {
         log::error!("File share HTTP server error: {}", e);
     }
@@ -130,9 +133,17 @@ struct ApiTreeSearchResponse {
 
 #[derive(Debug, Clone)]
 enum NodeLocator {
-    ShareRoot { root_id: String },
-    Directory { root_id: String, relative_path: String },
-    File { root_id: String, relative_path: String },
+    ShareRoot {
+        root_id: String,
+    },
+    Directory {
+        root_id: String,
+        relative_path: String,
+    },
+    File {
+        root_id: String,
+        relative_path: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,15 +220,16 @@ async fn handler_session(
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    let principal = match require_request_permission(
-        &state,
-        &headers,
-        addr.ip(),
-        model::FileSharePermission::Browse,
-        false,
-    ) {
+    let principal = match resolve_request_principal(&state, &headers, addr.ip()) {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(status) => {
+            let text = if status == StatusCode::FORBIDDEN {
+                "Forbidden"
+            } else {
+                "Unauthorized"
+            };
+            return plain_response(status, text);
+        }
     };
 
     remember_connected_ip(&state.visitor_ips, addr.ip().to_string());
@@ -233,12 +245,15 @@ async fn handler_login(
         return response;
     }
 
-    let (principal, token) =
-        match authenticate_account(&state, request.username.trim(), &request.password, addr.ip())
-        {
-            Ok(result) => result,
-            Err(_) => return plain_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
-        };
+    let (principal, token) = match authenticate_account(
+        &state,
+        request.username.trim(),
+        &request.password,
+        addr.ip(),
+    ) {
+        Ok(result) => result,
+        Err(_) => return plain_response(StatusCode::UNAUTHORIZED, "Unauthorized"),
+    };
 
     remember_connected_ip(&state.visitor_ips, addr.ip().to_string());
     let mut response = Json(build_session_response(&state, &principal)).into_response();
@@ -280,23 +295,24 @@ async fn handler_tree(
     Query(q): Query<ApiTreeQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    let principal = match require_request_permission(
-        &state,
-        &headers,
-        addr.ip(),
-        model::FileSharePermission::Browse,
-        false,
-    ) {
+    let principal = match resolve_request_principal(&state, &headers, addr.ip()) {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(status) => {
+            let text = if status == StatusCode::FORBIDDEN {
+                "Forbidden"
+            } else {
+                "Unauthorized"
+            };
+            return plain_response(status, text);
+        }
     };
 
     let tree = match q.node_id.as_deref() {
         None => {
             let runtime = state.request_runtime();
-            build_home_tree_response(&runtime.roots, &principal.permissions)
+            build_home_tree_response(&runtime.roots, &principal)
         }
-        Some(node_id) => match load_tree_node_response(&state, node_id, &principal.permissions).await {
+        Some(node_id) => match load_tree_node_response(&state, node_id, &principal).await {
             Ok(response) => response,
             Err(response) => return response,
         },
@@ -317,22 +333,30 @@ async fn handler_tree_search(
     } else {
         model::FileSharePermission::SearchGlobal
     };
-    let principal = match require_request_permission(
-        &state,
-        &headers,
-        addr.ip(),
-        required_permission,
-        false,
-    ) {
-        Ok(principal) => principal,
-        Err(response) => return response,
-    };
+    let principal =
+        match require_request_permission(&state, &headers, addr.ip(), required_permission, false) {
+            Ok(principal) => principal,
+            Err(response) => return response,
+        };
 
     let response = match q.node_id.as_deref() {
         None => {
-            let roots = state.request_runtime().roots;
+            // Only search inside roots the principal has global search on.
+            let all_roots = state.request_runtime().roots;
+            let mut root_perms: std::collections::HashMap<String, model::FileSharePermissionSet> =
+                std::collections::HashMap::new();
+            let roots: Vec<ops::ResolvedRoot> = all_roots
+                .into_iter()
+                .filter_map(|root| {
+                    let perms = principal.permissions_for_root(&root.id)?;
+                    if !perms.search_global {
+                        return None;
+                    }
+                    root_perms.insert(root.id.clone(), perms);
+                    Some(root)
+                })
+                .collect();
             let keyword = q.keyword.clone();
-            let permissions = principal.permissions.clone();
             let results = match tokio::task::spawn_blocking(move || {
                 search::search_tree_globally(&roots, &keyword)
             })
@@ -347,7 +371,13 @@ async fn handler_tree_search(
                 scope: "global".to_string(),
                 results: results
                     .into_iter()
-                    .map(|result| search_match_to_tree_node(result, &permissions))
+                    .map(|result| {
+                        let perms = root_perms
+                            .get(&result.root_id)
+                            .cloned()
+                            .unwrap_or_else(model::FileSharePermissionSet::deny_all);
+                        search_match_to_tree_node(result, &perms)
+                    })
                     .collect(),
             }
         }
@@ -356,14 +386,23 @@ async fn handler_tree_search(
                 Ok(locator) => locator,
                 Err(_) => return plain_response(StatusCode::BAD_REQUEST, "Invalid Node Id"),
             };
-            let (root, relative_path) = match locate_search_scope(&state, &locator) {
+            let (root, relative_path) = match locate_search_scope(&state, &principal, &locator) {
                 Ok(value) => value,
                 Err(response) => return response,
             };
+            let perms = match principal.permissions_for_root(&root.id) {
+                Some(perms) if perms.search_current => perms,
+                Some(_) => return plain_response(StatusCode::FORBIDDEN, "Forbidden"),
+                None => return plain_response(StatusCode::NOT_FOUND, "Root Not Found"),
+            };
             let keyword = q.keyword.clone();
-            let permissions = principal.permissions.clone();
             let results = match tokio::task::spawn_blocking(move || {
-                search::search_tree_subtree(&root, relative_path.as_deref(), &keyword, search::GLOBAL_SEARCH_MAX_RESULTS)
+                search::search_tree_subtree(
+                    &root,
+                    relative_path.as_deref(),
+                    &keyword,
+                    search::GLOBAL_SEARCH_MAX_RESULTS,
+                )
             })
             .await
             {
@@ -376,7 +415,7 @@ async fn handler_tree_search(
                 scope: "subtree".to_string(),
                 results: results
                     .into_iter()
-                    .map(|result| search_match_to_tree_node(result, &permissions))
+                    .map(|result| search_match_to_tree_node(result, &perms))
                     .collect(),
             }
         }
@@ -392,20 +431,29 @@ async fn handler_node_create_directory(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(request): Json<ApiNodeCreateDirectoryRequest>,
 ) -> Response {
-    if let Err(response) = require_request_permission(
+    let principal = match require_request_permission(
         &state,
         &headers,
         addr.ip(),
         model::FileSharePermission::CreateDirectory,
         false,
     ) {
-        return response;
-    }
-
-    let (root, parent) = match resolve_parent_directory_node(&state, &request.parent_node_id) {
-        Ok(value) => value,
+        Ok(principal) => principal,
         Err(response) => return response,
     };
+
+    let (root, parent) =
+        match resolve_parent_directory_node(&state, &principal, &request.parent_node_id) {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+    if let Err(response) = require_root_permission(
+        &principal,
+        &root.id,
+        model::FileSharePermission::CreateDirectory,
+    ) {
+        return response;
+    }
     let result =
         tokio::task::spawn_blocking(move || ops::create_directory(&root, &parent, &request.name))
             .await;
@@ -425,20 +473,27 @@ async fn handler_node_create_text(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(request): Json<ApiNodeCreateTextRequest>,
 ) -> Response {
-    if let Err(response) = require_request_permission(
+    let principal = match require_request_permission(
         &state,
         &headers,
         addr.ip(),
         model::FileSharePermission::CreateText,
         false,
     ) {
-        return response;
-    }
-
-    let (root, parent) = match resolve_parent_directory_node(&state, &request.parent_node_id) {
-        Ok(value) => value,
+        Ok(principal) => principal,
         Err(response) => return response,
     };
+
+    let (root, parent) =
+        match resolve_parent_directory_node(&state, &principal, &request.parent_node_id) {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+    if let Err(response) =
+        require_root_permission(&principal, &root.id, model::FileSharePermission::CreateText)
+    {
+        return response;
+    }
     let result = tokio::task::spawn_blocking(move || {
         ops::create_text_file(&root, &parent, &request.name, &request.content)
     })
@@ -459,35 +514,52 @@ async fn handler_node_rename(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(request): Json<ApiNodeRenameRequest>,
 ) -> Response {
-    if let Err(response) = require_request_permission(
+    let principal = match require_request_permission(
         &state,
         &headers,
         addr.ip(),
         model::FileSharePermission::Rename,
         false,
     ) {
-        return response;
-    }
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
 
-    let node = match resolve_node(&state, &request.node_id) {
+    let node = match resolve_node(&state, &principal, &request.node_id) {
         Ok(node) => node,
         Err(response) => return response,
     };
+    if let Err(response) = require_root_permission(
+        &principal,
+        &node.root.id,
+        model::FileSharePermission::Rename,
+    ) {
+        return response;
+    }
 
     let result = match node.kind {
         ResolvedNodeKind::ShareRoot => {
             let Some(config_path) = state.saved_config_path.clone() else {
-                return plain_response(StatusCode::BAD_REQUEST, "Root Rename Requires Saved Settings");
+                return plain_response(
+                    StatusCode::BAD_REQUEST,
+                    "Root Rename Requires Saved Settings",
+                );
             };
             let root_id = node.root.id.clone();
             let to_name = request.to_name.clone();
-            tokio::task::spawn_blocking(move || rename_saved_share_root(&config_path, &root_id, &to_name)).await
+            tokio::task::spawn_blocking(move || {
+                rename_saved_share_root(&config_path, &root_id, &to_name)
+            })
+            .await
         }
         ResolvedNodeKind::Directory | ResolvedNodeKind::File => {
             let root = node.root.clone();
             let relative_path = node.relative_path.clone();
             let to_name = request.to_name.clone();
-            tokio::task::spawn_blocking(move || ops::rename_entry_in_place(&root, &relative_path, &to_name)).await
+            tokio::task::spawn_blocking(move || {
+                ops::rename_entry_in_place(&root, &relative_path, &to_name)
+            })
+            .await
         }
     };
 
@@ -506,26 +578,37 @@ async fn handler_node_delete(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(request): Json<ApiNodeDeleteRequest>,
 ) -> Response {
-    if let Err(response) = require_request_permission(
+    let principal = match require_request_permission(
         &state,
         &headers,
         addr.ip(),
         model::FileSharePermission::Delete,
         false,
     ) {
-        return response;
-    }
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
 
-    let node = match resolve_node(&state, &request.node_id) {
+    let node = match resolve_node(&state, &principal, &request.node_id) {
         Ok(node) => node,
         Err(response) => return response,
     };
+    if let Err(response) = require_root_permission(
+        &principal,
+        &node.root.id,
+        model::FileSharePermission::Delete,
+    ) {
+        return response;
+    }
     let delete_mode = state.request_runtime().config.delete_mode.clone();
 
     let result = match node.kind {
         ResolvedNodeKind::ShareRoot => {
             let Some(config_path) = state.saved_config_path.clone() else {
-                return plain_response(StatusCode::BAD_REQUEST, "Root Delete Requires Saved Settings");
+                return plain_response(
+                    StatusCode::BAD_REQUEST,
+                    "Root Delete Requires Saved Settings",
+                );
             };
             let root_id = node.root.id.clone();
             tokio::task::spawn_blocking(move || {
@@ -536,7 +619,10 @@ async fn handler_node_delete(
         ResolvedNodeKind::Directory | ResolvedNodeKind::File => {
             let root = node.root.clone();
             let relative_path = node.relative_path.clone();
-            tokio::task::spawn_blocking(move || ops::delete_entry(&root, &relative_path, delete_mode)).await
+            tokio::task::spawn_blocking(move || {
+                ops::delete_entry(&root, &relative_path, delete_mode)
+            })
+            .await
         }
     };
 
@@ -558,15 +644,16 @@ async fn handler_upload_files(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Response {
-    if let Err(response) = require_request_permission(
+    let principal = match require_request_permission(
         &state,
         &headers,
         addr.ip(),
         model::FileSharePermission::UploadFile,
         false,
     ) {
-        return response;
-    }
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
 
     let multipart = match multipart {
         Ok(multipart) => multipart,
@@ -577,10 +664,16 @@ async fn handler_upload_files(
         Ok(request) => request,
         Err(message) => return upload_read_error_response(&message),
     };
-    let (root, parent) = match resolve_parent_directory_node(&state, &request.parent_node_id) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
+    let (root, parent) =
+        match resolve_parent_directory_node(&state, &principal, &request.parent_node_id) {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+    if let Err(response) =
+        require_root_permission(&principal, &root.id, model::FileSharePermission::UploadFile)
+    {
+        return response;
+    }
     let files = request.files;
 
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -606,15 +699,16 @@ async fn handler_upload_directory(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Response {
-    if let Err(response) = require_request_permission(
+    let principal = match require_request_permission(
         &state,
         &headers,
         addr.ip(),
         model::FileSharePermission::UploadDirectory,
         false,
     ) {
-        return response;
-    }
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
 
     let multipart = match multipart {
         Ok(multipart) => multipart,
@@ -625,10 +719,18 @@ async fn handler_upload_directory(
         Ok(request) => request,
         Err(message) => return upload_read_error_response(&message),
     };
-    let (root, parent) = match resolve_parent_directory_node(&state, &request.parent_node_id) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
+    let (root, parent) =
+        match resolve_parent_directory_node(&state, &principal, &request.parent_node_id) {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+    if let Err(response) = require_root_permission(
+        &principal,
+        &root.id,
+        model::FileSharePermission::UploadDirectory,
+    ) {
+        return response;
+    }
     let files = request.files;
 
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -657,22 +759,34 @@ async fn handler_preview(
     if !state.request_runtime().config.image_preview_enabled {
         return plain_response(StatusCode::FORBIDDEN, "Preview Disabled");
     }
-    if let Err(response) = require_request_permission(
+    let principal = match require_request_permission(
         &state,
         &headers,
         addr.ip(),
         model::FileSharePermission::PreviewImage,
         false,
     ) {
-        return response;
-    }
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
 
-    let node = match resolve_node(&state, &query.node_id) {
+    let node = match resolve_node(&state, &principal, &query.node_id) {
         Ok(node) if node.kind == ResolvedNodeKind::File => node,
         Ok(_) => return plain_response(StatusCode::BAD_REQUEST, "Preview Requires File Node"),
         Err(response) => return response,
     };
-    let preview = match tokio::task::spawn_blocking(move || ops::stream_preview(&node.root, &node.relative_path)).await {
+    if let Err(response) = require_root_permission(
+        &principal,
+        &node.root.id,
+        model::FileSharePermission::PreviewImage,
+    ) {
+        return response;
+    }
+    let preview = match tokio::task::spawn_blocking(move || {
+        ops::stream_preview(&node.root, &node.relative_path)
+    })
+    .await
+    {
         Ok(Ok(preview)) => preview,
         _ => return plain_response(StatusCode::NOT_FOUND, "Preview Not Found"),
     };
@@ -712,21 +826,31 @@ async fn handler_node_file(
     Query(query): Query<ApiNodeQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    if let Err(response) = require_request_permission(
+    let principal = match require_request_permission(
         &state,
         &headers,
         addr.ip(),
         model::FileSharePermission::DownloadFile,
         false,
     ) {
-        return response;
-    }
-
-    let node = match resolve_node(&state, &query.node_id) {
-        Ok(node) if node.kind == ResolvedNodeKind::File => node,
-        Ok(_) => return plain_response(StatusCode::BAD_REQUEST, "File Download Requires File Node"),
+        Ok(principal) => principal,
         Err(response) => return response,
     };
+
+    let node = match resolve_node(&state, &principal, &query.node_id) {
+        Ok(node) if node.kind == ResolvedNodeKind::File => node,
+        Ok(_) => {
+            return plain_response(StatusCode::BAD_REQUEST, "File Download Requires File Node")
+        }
+        Err(response) => return response,
+    };
+    if let Err(response) = require_root_permission(
+        &principal,
+        &node.root.id,
+        model::FileSharePermission::DownloadFile,
+    ) {
+        return response;
+    }
 
     let file = match tokio::fs::File::open(&node.path).await {
         Ok(file) => file,
@@ -770,18 +894,24 @@ async fn handler_node_archive(
     Query(query): Query<ApiNodeQuery>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    if let Err(response) = require_request_permission(
+    let principal = match require_request_permission(
         &state,
         &headers,
         addr.ip(),
         model::FileSharePermission::DownloadArchive,
         false,
     ) {
-        return response;
-    }
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
 
-    let node = match resolve_node(&state, &query.node_id) {
-        Ok(node) if node.kind == ResolvedNodeKind::ShareRoot || node.kind == ResolvedNodeKind::Directory => node,
+    let node = match resolve_node(&state, &principal, &query.node_id) {
+        Ok(node)
+            if node.kind == ResolvedNodeKind::ShareRoot
+                || node.kind == ResolvedNodeKind::Directory =>
+        {
+            node
+        }
         Ok(_) => {
             return plain_response(
                 StatusCode::BAD_REQUEST,
@@ -790,6 +920,13 @@ async fn handler_node_archive(
         }
         Err(response) => return response,
     };
+    if let Err(response) = require_root_permission(
+        &principal,
+        &node.root.id,
+        model::FileSharePermission::DownloadArchive,
+    ) {
+        return response;
+    }
 
     let limit_target = node.path.clone();
     match tokio::task::spawn_blocking(move || ops::validate_zip_source(&limit_target)).await {
@@ -896,7 +1033,7 @@ async fn handler_web_asset(
 
 fn build_home_tree_response(
     roots: &[ops::ResolvedRoot],
-    permissions: &model::FileSharePermissionSet,
+    principal: &auth::ResolvedPrincipal,
 ) -> ApiTreeResponse {
     ApiTreeResponse {
         current: ApiTreeCurrent {
@@ -910,7 +1047,11 @@ fn build_home_tree_response(
         }],
         children: roots
             .iter()
-            .map(|root| share_root_to_tree_node(root, permissions))
+            .filter_map(|root| {
+                principal
+                    .permissions_for_root(&root.id)
+                    .map(|perms| share_root_to_tree_node(root, &perms))
+            })
             .collect(),
     }
 }
@@ -918,23 +1059,37 @@ fn build_home_tree_response(
 async fn load_tree_node_response(
     state: &Arc<HttpState>,
     node_id: &str,
-    permissions: &model::FileSharePermissionSet,
+    principal: &auth::ResolvedPrincipal,
 ) -> Result<ApiTreeResponse, Response> {
     let locator = decode_node_id(node_id)
         .map_err(|_| plain_response(StatusCode::BAD_REQUEST, "Invalid Node Id"))?;
     match locator {
         NodeLocator::ShareRoot { root_id } => {
-            let root = find_root(state, &root_id)
+            let root = find_allowed_root(state, principal, &root_id)
                 .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
-            load_directory_tree_response(root, String::new(), ApiTreeCurrentKind::ShareRoot, permissions).await
+            let perms = principal
+                .permissions_for_root(&root.id)
+                .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
+            if !perms.browse {
+                return Err(plain_response(StatusCode::FORBIDDEN, "Forbidden"));
+            }
+            load_directory_tree_response(root, String::new(), ApiTreeCurrentKind::ShareRoot, &perms)
+                .await
         }
         NodeLocator::Directory {
             root_id,
             relative_path,
         } => {
-            let root = find_root(state, &root_id)
+            let root = find_allowed_root(state, principal, &root_id)
                 .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
-            load_directory_tree_response(root, relative_path, ApiTreeCurrentKind::Directory, permissions).await
+            let perms = principal
+                .permissions_for_root(&root.id)
+                .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
+            if !perms.browse {
+                return Err(plain_response(StatusCode::FORBIDDEN, "Forbidden"));
+            }
+            load_directory_tree_response(root, relative_path, ApiTreeCurrentKind::Directory, &perms)
+                .await
         }
         NodeLocator::File { .. } => Err(plain_response(
             StatusCode::BAD_REQUEST,
@@ -966,7 +1121,8 @@ async fn load_directory_tree_response(
     let children = entries
         .into_iter()
         .map(|mut entry| {
-            entry.relative_path = ops::join_relative_path(&current_relative_path, &entry.relative_path);
+            entry.relative_path =
+                ops::join_relative_path(&current_relative_path, &entry.relative_path);
             dir_entry_to_tree_node(&root, entry, permissions)
         })
         .collect::<Vec<_>>();
@@ -1000,11 +1156,12 @@ async fn load_directory_tree_response(
 
 fn locate_search_scope(
     state: &HttpState,
+    principal: &auth::ResolvedPrincipal,
     locator: &NodeLocator,
 ) -> Result<(ops::ResolvedRoot, Option<String>), Response> {
     match locator {
         NodeLocator::ShareRoot { root_id } => {
-            let root = find_root(state, root_id)
+            let root = find_allowed_root(state, principal, root_id)
                 .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
             Ok((root, Some(String::new())))
         }
@@ -1012,7 +1169,7 @@ fn locate_search_scope(
             root_id,
             relative_path,
         } => {
-            let root = find_root(state, root_id)
+            let root = find_allowed_root(state, principal, root_id)
                 .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
             let target = ops::resolve_relative_path(&root, relative_path)
                 .map_err(|_| plain_response(StatusCode::NOT_FOUND, "Directory Not Found"))?;
@@ -1032,6 +1189,10 @@ fn share_root_to_tree_node(
     root: &ops::ResolvedRoot,
     permissions: &model::FileSharePermissionSet,
 ) -> ApiTreeNode {
+    let modified = std::fs::metadata(&root.path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(ops::format_modified_time);
     ApiTreeNode {
         node_id: encode_node_id(&NodeLocator::ShareRoot {
             root_id: root.id.clone(),
@@ -1045,7 +1206,7 @@ fn share_root_to_tree_node(
         display_path: root.alias.clone(),
         is_dir: true,
         size: None,
-        modified: None,
+        modified,
         permissions: permissions.clone(),
     }
 }
@@ -1292,9 +1453,10 @@ fn decode_node_id_part(value: &str) -> Result<String, String> {
 
 fn resolve_parent_directory_node(
     state: &HttpState,
+    principal: &auth::ResolvedPrincipal,
     node_id: &str,
 ) -> Result<(ops::ResolvedRoot, String), Response> {
-    let node = resolve_node(state, node_id)?;
+    let node = resolve_node(state, principal, node_id)?;
     match node.kind {
         ResolvedNodeKind::ShareRoot | ResolvedNodeKind::Directory => {
             Ok((node.root, node.relative_path))
@@ -1306,12 +1468,16 @@ fn resolve_parent_directory_node(
     }
 }
 
-fn resolve_node(state: &HttpState, node_id: &str) -> Result<ResolvedNode, Response> {
+fn resolve_node(
+    state: &HttpState,
+    principal: &auth::ResolvedPrincipal,
+    node_id: &str,
+) -> Result<ResolvedNode, Response> {
     let locator = decode_node_id(node_id)
         .map_err(|_| plain_response(StatusCode::BAD_REQUEST, "Invalid Node Id"))?;
     match locator {
         NodeLocator::ShareRoot { root_id } => {
-            let root = find_root(state, &root_id)
+            let root = find_allowed_root(state, principal, &root_id)
                 .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
             let path = ops::resolve_relative_path(&root, "")
                 .map_err(|_| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
@@ -1326,7 +1492,7 @@ fn resolve_node(state: &HttpState, node_id: &str) -> Result<ResolvedNode, Respon
             root_id,
             relative_path,
         } => {
-            let root = find_root(state, &root_id)
+            let root = find_allowed_root(state, principal, &root_id)
                 .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
             let path = ops::resolve_relative_path(&root, &relative_path)
                 .map_err(|_| plain_response(StatusCode::NOT_FOUND, "Directory Not Found"))?;
@@ -1344,7 +1510,7 @@ fn resolve_node(state: &HttpState, node_id: &str) -> Result<ResolvedNode, Respon
             root_id,
             relative_path,
         } => {
-            let root = find_root(state, &root_id)
+            let root = find_allowed_root(state, principal, &root_id)
                 .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
             let path = ops::resolve_relative_path(&root, &relative_path)
                 .map_err(|_| plain_response(StatusCode::NOT_FOUND, "File Not Found"))?;
@@ -1361,7 +1527,27 @@ fn resolve_node(state: &HttpState, node_id: &str) -> Result<ResolvedNode, Respon
     }
 }
 
-fn rename_saved_share_root(config_path: &PathBuf, root_id: &str, to_name: &str) -> Result<(), String> {
+#[allow(clippy::result_large_err)]
+fn require_root_permission(
+    principal: &auth::ResolvedPrincipal,
+    root_id: &str,
+    permission: model::FileSharePermission,
+) -> Result<model::FileSharePermissionSet, Response> {
+    let perms = principal
+        .permissions_for_root(root_id)
+        .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
+    if perms.allows(permission) {
+        Ok(perms)
+    } else {
+        Err(plain_response(StatusCode::FORBIDDEN, "Forbidden"))
+    }
+}
+
+fn rename_saved_share_root(
+    config_path: &PathBuf,
+    root_id: &str,
+    to_name: &str,
+) -> Result<(), String> {
     let mut saved = persist::load_persisted_file_share_config_from_path(config_path)?;
     let Some(root) = saved.roots.iter_mut().find(|root| root.id == root_id) else {
         return Err(format!("Root not found: {root_id}"));
@@ -1414,7 +1600,10 @@ fn delete_saved_share_root(
 fn user_visible_path_string(path: &PathBuf) -> String {
     let display = path.to_string_lossy().to_string();
     if cfg!(windows) {
-        display.strip_prefix(r"\\?\").unwrap_or(&display).to_string()
+        display
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&display)
+            .to_string()
     } else {
         display
     }
@@ -1430,7 +1619,9 @@ fn multipart_rejection_response(err: MultipartRejection) -> Response {
     };
 
     match status {
-        StatusCode::PAYLOAD_TOO_LARGE => plain_response(StatusCode::PAYLOAD_TOO_LARGE, "Upload Too Large"),
+        StatusCode::PAYLOAD_TOO_LARGE => {
+            plain_response(StatusCode::PAYLOAD_TOO_LARGE, "Upload Too Large")
+        }
         StatusCode::BAD_REQUEST => plain_response(StatusCode::BAD_REQUEST, "Invalid Upload"),
         _ => plain_response(StatusCode::INTERNAL_SERVER_ERROR, "Invalid Upload"),
     }
@@ -1448,8 +1639,8 @@ fn upload_read_error_response(message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::connect_info::ConnectInfo;
     use axum::body::{to_bytes, Body};
+    use axum::extract::connect_info::ConnectInfo;
     use axum::http::{header, Request, StatusCode};
     use std::collections::HashSet;
     use std::fs;
@@ -1508,6 +1699,14 @@ mod tests {
                 path: (*path).to_path_buf(),
             })
             .collect::<Vec<_>>();
+        let guest_root_perms = config_roots
+            .iter()
+            .map(|root| model::UserRootPermissions {
+                root_id: root.id.clone(),
+                preset: model::PermissionPreset::ReadWrite,
+                permissions: model::FileSharePermissionSet::read_write(),
+            })
+            .collect::<Vec<_>>();
 
         Arc::new(HttpState {
             saved_config_path: None,
@@ -1518,8 +1717,7 @@ mod tests {
                 guest_account: model::PersistedFileShareUser {
                     username: model::DEFAULT_GUEST_USERNAME.to_string(),
                     enabled: true,
-                    preset: model::PermissionPreset::ReadWrite,
-                    permissions: model::FileSharePermissionSet::read_write(),
+                    root_permissions: guest_root_perms,
                     password_hash: None,
                 },
                 accounts: Vec::new(),
@@ -1555,25 +1753,33 @@ mod tests {
         delete_mode: model::DeleteMode,
         config_path: &Path,
     ) {
+        let config_roots: Vec<model::FileShareRoot> = roots
+            .iter()
+            .enumerate()
+            .map(|(index, (alias, path))| model::FileShareRoot {
+                id: format!("root-{}", index + 1),
+                alias: (*alias).to_string(),
+                path: path.to_string_lossy().to_string(),
+                enabled: true,
+            })
+            .collect();
+        let guest_root_perms: Vec<model::UserRootPermissions> = config_roots
+            .iter()
+            .map(|root| model::UserRootPermissions {
+                root_id: root.id.clone(),
+                preset: model::PermissionPreset::Custom,
+                permissions: permissions.clone(),
+            })
+            .collect();
         let saved = model::PersistedFileShareConfig {
             version: model::FILE_SHARE_CONFIG_VERSION,
             port: 8080,
-            roots: roots
-                .iter()
-                .enumerate()
-                .map(|(index, (alias, path))| model::FileShareRoot {
-                    id: format!("root-{}", index + 1),
-                    alias: (*alias).to_string(),
-                    path: path.to_string_lossy().to_string(),
-                    enabled: true,
-                })
-                .collect(),
+            roots: config_roots,
             guest_access_enabled: true,
             guest_account: model::PersistedFileShareUser {
                 username: model::DEFAULT_GUEST_USERNAME.to_string(),
                 enabled: true,
-                preset: model::PermissionPreset::Custom,
-                permissions,
+                root_permissions: guest_root_perms,
                 password_hash: None,
             },
             accounts: Vec::new(),
@@ -1624,10 +1830,8 @@ mod tests {
             .as_bytes(),
         );
         body.extend_from_slice(
-            format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"parent\"\r\n\r\n\r\n"
-            )
-            .as_bytes(),
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"parent\"\r\n\r\n\r\n")
+                .as_bytes(),
         );
         body.extend_from_slice(
             format!(
@@ -1641,7 +1845,10 @@ mod tests {
         (format!("multipart/form-data; boundary={boundary}"), body)
     }
 
-    fn request_with_connect_info(builder: axum::http::request::Builder, body: Body) -> Request<Body> {
+    fn request_with_connect_info(
+        builder: axum::http::request::Builder,
+        body: Body,
+    ) -> Request<Body> {
         builder
             .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 34567))))
             .body(body)
@@ -1662,16 +1869,18 @@ mod tests {
         ] {
             let response = app
                 .clone()
-                .oneshot(
-                    request_with_connect_info(
-                        Request::builder().method(method).uri(path),
-                        Body::empty(),
-                    ),
-                )
+                .oneshot(request_with_connect_info(
+                    Request::builder().method(method).uri(path),
+                    Body::empty(),
+                ))
                 .await
                 .expect("request should complete");
 
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} should be removed");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} should be removed"
+            );
         }
     }
 
@@ -1682,15 +1891,13 @@ mod tests {
         let (content_type, body) = multipart_body(1024);
 
         let response = app
-            .oneshot(
-                request_with_connect_info(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/upload/files")
-                        .header(header::CONTENT_TYPE, content_type),
-                    Body::from(body),
-                ),
-            )
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/upload/files")
+                    .header(header::CONTENT_TYPE, content_type),
+                Body::from(body),
+            ))
             .await
             .expect("request should complete");
 
@@ -1772,7 +1979,8 @@ mod tests {
     async fn web_asset_route_serves_embedded_assets() {
         let dir = TestDir::new("web-assets");
         let app = build_router(test_state(dir.path(), 1024));
-        let asset_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dist/file-share-web/assets");
+        let asset_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dist/file-share-web/assets");
         let asset_path = fs::read_dir(&asset_dir)
             .expect("built asset directory should exist")
             .filter_map(|entry| entry.ok())
@@ -1789,7 +1997,11 @@ mod tests {
             .await
             .expect("request should complete");
 
-        assert_eq!(response.status(), StatusCode::OK, "{request_path} should be served");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{request_path} should be served"
+        );
     }
 
     #[tokio::test]
@@ -1828,7 +2040,10 @@ mod tests {
 
         assert_eq!(home_status, StatusCode::OK);
         assert_eq!(home_payload["current"]["kind"].as_str(), Some("home"));
-        assert_eq!(home_payload["breadcrumbs"][0]["label"].as_str(), Some("首页"));
+        assert_eq!(
+            home_payload["breadcrumbs"][0]["label"].as_str(),
+            Some("首页")
+        );
 
         let soft_node_id = home_payload["children"]
             .as_array()
@@ -1856,12 +2071,15 @@ mod tests {
         let root_body = to_bytes(root_response.into_body(), usize::MAX)
             .await
             .expect("share root tree response body should be readable");
-        let root_payload: serde_json::Value =
-            serde_json::from_slice(&root_body).expect("share root tree response should be valid json");
+        let root_payload: serde_json::Value = serde_json::from_slice(&root_body)
+            .expect("share root tree response should be valid json");
 
         assert_eq!(root_status, StatusCode::OK);
         assert_eq!(root_payload["current"]["kind"].as_str(), Some("share_root"));
-        assert_eq!(root_payload["breadcrumbs"][1]["label"].as_str(), Some("soft"));
+        assert_eq!(
+            root_payload["breadcrumbs"][1]["label"].as_str(),
+            Some("soft")
+        );
 
         let tools_node_id = root_payload["children"]
             .as_array()
@@ -1888,11 +2106,14 @@ mod tests {
         let nested_body = to_bytes(nested_response.into_body(), usize::MAX)
             .await
             .expect("nested directory tree response body should be readable");
-        let nested_payload: serde_json::Value =
-            serde_json::from_slice(&nested_body).expect("nested directory tree response should be valid json");
+        let nested_payload: serde_json::Value = serde_json::from_slice(&nested_body)
+            .expect("nested directory tree response should be valid json");
 
         assert_eq!(nested_status, StatusCode::OK);
-        assert_eq!(nested_payload["current"]["kind"].as_str(), Some("directory"));
+        assert_eq!(
+            nested_payload["current"]["kind"].as_str(),
+            Some("directory")
+        );
         assert_eq!(
             nested_payload["children"][0]["name"].as_str(),
             Some("流程图绘制工具Drawio Desktop v13.9.9")
@@ -1906,12 +2127,10 @@ mod tests {
     #[tokio::test]
     async fn tree_search_returns_share_root_hits_and_scoped_results() {
         let soft = TestDir::new("tree-search-soft");
-        fs::create_dir_all(soft.path().join("实用工具")).expect("soft tools directory should exist");
-        fs::write(
-            soft.path().join("实用工具").join("drawio-notes.txt"),
-            b"ok",
-        )
-        .expect("soft drawio file should exist");
+        fs::create_dir_all(soft.path().join("实用工具"))
+            .expect("soft tools directory should exist");
+        fs::write(soft.path().join("实用工具").join("drawio-notes.txt"), b"ok")
+            .expect("soft drawio file should exist");
 
         let docs = TestDir::new("tree-search-docs");
         fs::write(docs.path().join("drawio-manual.txt"), b"ok")
@@ -1937,8 +2156,8 @@ mod tests {
         let global_body = to_bytes(global_response.into_body(), usize::MAX)
             .await
             .expect("global tree search body should be readable");
-        let global_payload: serde_json::Value =
-            serde_json::from_slice(&global_body).expect("global search response should be valid json");
+        let global_payload: serde_json::Value = serde_json::from_slice(&global_body)
+            .expect("global search response should be valid json");
 
         assert_eq!(global_status, StatusCode::OK);
         assert_eq!(global_payload["scope"].as_str(), Some("global"));
@@ -1976,9 +2195,9 @@ mod tests {
 
         let scoped_response = app
             .oneshot(request_with_connect_info(
-                Request::builder()
-                    .method("GET")
-                    .uri(&format!("/api/tree/search?keyword=drawio&node_id={soft_node_id}")),
+                Request::builder().method("GET").uri(&format!(
+                    "/api/tree/search?keyword=drawio&node_id={soft_node_id}"
+                )),
                 Body::empty(),
             ))
             .await
@@ -1988,8 +2207,8 @@ mod tests {
         let scoped_body = to_bytes(scoped_response.into_body(), usize::MAX)
             .await
             .expect("scoped tree search body should be readable");
-        let scoped_payload: serde_json::Value =
-            serde_json::from_slice(&scoped_body).expect("scoped search response should be valid json");
+        let scoped_payload: serde_json::Value = serde_json::from_slice(&scoped_body)
+            .expect("scoped search response should be valid json");
 
         assert_eq!(scoped_status, StatusCode::OK);
         assert_eq!(scoped_payload["scope"].as_str(), Some("subtree"));
@@ -2163,11 +2382,17 @@ mod tests {
             .expect("delete request should complete");
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert!(!soft_path.exists(), "share root directory should be deleted");
+        assert!(
+            !soft_path.exists(),
+            "share root directory should be deleted"
+        );
 
         let saved = persist::load_persisted_file_share_config_from_path(&config_path)
             .expect("saved config should reload");
-        assert!(saved.roots.is_empty(), "deleted share root should be removed from config");
+        assert!(
+            saved.roots.is_empty(),
+            "deleted share root should be removed from config"
+        );
     }
 
     #[tokio::test]
@@ -2245,4 +2470,3 @@ mod tests {
         assert_eq!(session_payload["features"]["thumbnail_enabled"], false);
     }
 }
-

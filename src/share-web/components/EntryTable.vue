@@ -30,6 +30,96 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const failedThumbnails = ref<Record<string, boolean>>({});
 
+interface FileExtStyle {
+  label: string;
+  color: string;
+  bg: string;
+}
+
+const extStyleMap: Record<string, { color: string; bg: string }> = {
+  exe:  { color: '#9f1239', bg: 'rgba(159,18,57,0.12)' },
+  msi:  { color: '#9f1239', bg: 'rgba(159,18,57,0.12)' },
+  bat:  { color: '#9f1239', bg: 'rgba(159,18,57,0.12)' },
+  sh:   { color: '#9f1239', bg: 'rgba(159,18,57,0.12)' },
+  pdf:  { color: '#b91c1c', bg: 'rgba(185,28,28,0.12)' },
+  doc:  { color: '#1d4ed8', bg: 'rgba(29,78,216,0.12)' },
+  docx: { color: '#1d4ed8', bg: 'rgba(29,78,216,0.12)' },
+  xls:  { color: '#15803d', bg: 'rgba(21,128,61,0.12)' },
+  xlsx: { color: '#15803d', bg: 'rgba(21,128,61,0.12)' },
+  csv:  { color: '#15803d', bg: 'rgba(21,128,61,0.12)' },
+  ppt:  { color: '#c2410c', bg: 'rgba(194,65,12,0.12)' },
+  pptx: { color: '#c2410c', bg: 'rgba(194,65,12,0.12)' },
+  zip:  { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  rar:  { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  '7z': { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  gz:   { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  tar:  { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  bz2:  { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  xz:   { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  txt:  { color: '#475569', bg: 'rgba(71,85,105,0.10)' },
+  log:  { color: '#475569', bg: 'rgba(71,85,105,0.10)' },
+  md:   { color: '#475569', bg: 'rgba(71,85,105,0.10)' },
+  json: { color: '#0d9488', bg: 'rgba(13,148,136,0.12)' },
+  xml:  { color: '#0d9488', bg: 'rgba(13,148,136,0.12)' },
+  yml:  { color: '#0d9488', bg: 'rgba(13,148,136,0.12)' },
+  yaml: { color: '#0d9488', bg: 'rgba(13,148,136,0.12)' },
+  toml: { color: '#0d9488', bg: 'rgba(13,148,136,0.12)' },
+  ini:  { color: '#0d9488', bg: 'rgba(13,148,136,0.12)' },
+  conf: { color: '#0d9488', bg: 'rgba(13,148,136,0.12)' },
+  html: { color: '#ea580c', bg: 'rgba(234,88,12,0.12)' },
+  css:  { color: '#2563eb', bg: 'rgba(37,99,235,0.12)' },
+  js:   { color: '#ca8a04', bg: 'rgba(202,138,4,0.12)' },
+  ts:   { color: '#2563eb', bg: 'rgba(37,99,235,0.12)' },
+  vue:  { color: '#059669', bg: 'rgba(5,150,105,0.12)' },
+  py:   { color: '#2563eb', bg: 'rgba(37,99,235,0.12)' },
+  rs:   { color: '#c2410c', bg: 'rgba(194,65,12,0.12)' },
+  go:   { color: '#0891b2', bg: 'rgba(8,145,178,0.12)' },
+  java: { color: '#b91c1c', bg: 'rgba(185,28,28,0.12)' },
+  jar:  { color: '#b91c1c', bg: 'rgba(185,28,28,0.12)' },
+  png:  { color: '#0284c7', bg: 'rgba(2,132,199,0.12)' },
+  jpg:  { color: '#0284c7', bg: 'rgba(2,132,199,0.12)' },
+  jpeg: { color: '#0284c7', bg: 'rgba(2,132,199,0.12)' },
+  gif:  { color: '#0284c7', bg: 'rgba(2,132,199,0.12)' },
+  svg:  { color: '#0284c7', bg: 'rgba(2,132,199,0.12)' },
+  webp: { color: '#0284c7', bg: 'rgba(2,132,199,0.12)' },
+  ico:  { color: '#0284c7', bg: 'rgba(2,132,199,0.12)' },
+  mp4:  { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  mkv:  { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  avi:  { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  mov:  { color: '#7c3aed', bg: 'rgba(124,58,237,0.12)' },
+  mp3:  { color: '#e11d48', bg: 'rgba(225,29,72,0.12)' },
+  wav:  { color: '#e11d48', bg: 'rgba(225,29,72,0.12)' },
+  flac: { color: '#e11d48', bg: 'rgba(225,29,72,0.12)' },
+  iso:  { color: '#64748b', bg: 'rgba(100,116,139,0.12)' },
+  dmg:  { color: '#64748b', bg: 'rgba(100,116,139,0.12)' },
+  sql:  { color: '#0d9488', bg: 'rgba(13,148,136,0.12)' },
+};
+
+function getFileExtStyle(name: string): FileExtStyle {
+  const lower = name.toLowerCase();
+  // Handle compound extensions like .tar.gz, .tar.bz2, .tar.xz
+  const compoundMatch = lower.match(/\.(tar\.(?:gz|bz2|xz))$/);
+  if (compoundMatch) {
+    const ext = compoundMatch[1].replace('.', '');
+    const style = extStyleMap[ext] ?? extStyleMap['tar'];
+    return { label: 'TGZ', color: style!.color, bg: style!.bg };
+  }
+
+  const dotIndex = lower.lastIndexOf('.');
+  if (dotIndex < 0 || dotIndex === lower.length - 1) {
+    return { label: 'F', color: '#64748b', bg: 'rgba(100,116,139,0.10)' };
+  }
+
+  const ext = lower.slice(dotIndex + 1);
+  const style = extStyleMap[ext];
+  const label = ext.length <= 4 ? ext.toUpperCase() : ext.slice(0, 3).toUpperCase();
+
+  if (style) {
+    return { label, color: style.color, bg: style.bg };
+  }
+  return { label, color: '#64748b', bg: 'rgba(100,116,139,0.10)' };
+}
+
 function canPreview(entry: FileShareNode): boolean {
   return canPreviewEntry(props.session ?? null, entry);
 }
@@ -91,23 +181,24 @@ function canDownload(entry: FileShareNode): boolean {
               >
             </span>
             <span
-              v-else
-              class="entry-visual entry-visual--icon"
-              :class="{ folder: entry.is_dir }"
+              v-else-if="entry.is_dir"
+              class="entry-visual entry-visual--icon folder"
               aria-hidden="true"
             >
-              <svg v-if="entry.is_dir" viewBox="0 0 24 24">
+              <svg viewBox="0 0 24 24">
                 <path
                   d="M3.5 6.5h6l2 2H20a1.5 1.5 0 0 1 1.5 1.5v7.5A2 2 0 0 1 19.5 19h-15A2 2 0 0 1 2.5 17V8.5a2 2 0 0 1 2-2Z"
                   fill="currentColor"
                 />
               </svg>
-              <svg v-else viewBox="0 0 24 24">
-                <path
-                  d="M7 3.5h7.5L19.5 8v12A1.5 1.5 0 0 1 18 21.5H7A2.5 2.5 0 0 1 4.5 19V6A2.5 2.5 0 0 1 7 3.5Z"
-                  fill="currentColor"
-                />
-              </svg>
+            </span>
+            <span
+              v-else
+              class="entry-visual entry-visual--ext"
+              :style="{ color: getFileExtStyle(entry.name).color, background: getFileExtStyle(entry.name).bg }"
+              aria-hidden="true"
+            >
+              {{ getFileExtStyle(entry.name).label }}
             </span>
             <span class="entry-copy">
               <span class="name-text">{{ entry.name }}</span>
@@ -224,13 +315,13 @@ function canDownload(entry: FileShareNode): boolean {
   gap: 12px;
   padding: 12px 16px;
   border-radius: 16px;
-  background: rgba(8, 14, 24, 0.62);
-  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(99, 119, 150, 0.14);
 }
 
 .entry-head {
   padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(0, 0, 0, 0.03);
   color: var(--fs-muted);
   font-size: 12px;
 }
@@ -263,15 +354,19 @@ function canDownload(entry: FileShareNode): boolean {
   height: 36px;
   flex-shrink: 0;
   border-radius: 12px;
-  background: rgba(148, 163, 184, 0.08);
-}
-
-.entry-visual--icon {
-  color: #eef4fb;
+  background: rgba(99, 119, 150, 0.1);
 }
 
 .entry-visual--icon.folder {
-  color: #f7c85b;
+  color: #d97706;
+}
+
+.entry-visual--ext {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  user-select: none;
 }
 
 .entry-thumb {
@@ -317,7 +412,7 @@ function canDownload(entry: FileShareNode): boolean {
   height: 34px;
   border-radius: 10px;
   border: 1px solid transparent;
-  background: rgba(15, 23, 42, 0.5);
+  background: rgba(241, 245, 249, 0.9);
   color: var(--fs-text);
   transition: border-color 0.18s ease, opacity 0.18s ease, transform 0.18s ease;
 }
@@ -328,27 +423,27 @@ function canDownload(entry: FileShareNode): boolean {
 }
 
 .icon-button.download {
-  border-color: rgba(74, 222, 128, 0.18);
-  background: rgba(34, 197, 94, 0.12);
-  color: #dcfce7;
+  border-color: rgba(21, 128, 61, 0.2);
+  background: rgba(21, 128, 61, 0.08);
+  color: #14532d;
 }
 
 .icon-button.preview {
-  border-color: rgba(56, 189, 248, 0.18);
-  background: rgba(56, 189, 248, 0.12);
-  color: #dbeafe;
+  border-color: rgba(2, 132, 199, 0.2);
+  background: rgba(2, 132, 199, 0.08);
+  color: #0c4a6e;
 }
 
 .icon-button.rename {
-  border-color: rgba(250, 204, 21, 0.18);
-  background: rgba(245, 158, 11, 0.12);
-  color: #fef3c7;
+  border-color: rgba(161, 98, 7, 0.2);
+  background: rgba(161, 98, 7, 0.08);
+  color: #78350f;
 }
 
 .icon-button.delete {
-  border-color: rgba(248, 113, 113, 0.18);
-  background: rgba(239, 68, 68, 0.12);
-  color: #fee2e2;
+  border-color: rgba(185, 28, 28, 0.2);
+  background: rgba(185, 28, 28, 0.08);
+  color: #7f1d1d;
 }
 
 .icon-button:hover {
@@ -359,10 +454,10 @@ function canDownload(entry: FileShareNode): boolean {
 .entry-empty {
   padding: 56px 24px;
   text-align: center;
-  color: #91a7bc;
+  color: var(--fs-muted);
   border-radius: 20px;
-  background: rgba(7, 13, 21, 0.5);
-  border: 1px dashed rgba(148, 163, 184, 0.2);
+  background: rgba(248, 250, 252, 0.8);
+  border: 1px dashed rgba(99, 119, 150, 0.24);
 }
 
 .sr-only {

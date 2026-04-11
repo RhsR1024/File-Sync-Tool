@@ -77,16 +77,16 @@ function handleSubmit() {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(3, 8, 15, 0.72);
+  background: rgba(180, 195, 215, 0.45);
   backdrop-filter: blur(10px);
 }
 
 .dialog-card {
   width: min(100%, 420px);
   border-radius: 24px;
-  background: linear-gradient(180deg, rgba(9, 18, 30, 0.98), rgba(9, 17, 28, 0.96));
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  box-shadow: 0 28px 60px rgba(0, 0, 0, 0.42);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 255, 0.97));
+  border: 1px solid rgba(99, 119, 150, 0.2);
+  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.14);
 }
 
 .dialog-header,
@@ -101,7 +101,7 @@ function handleSubmit() {
 
 .dialog-header p {
   margin: 0;
-  color: #95abc0;
+  color: var(--fs-muted);
 }
 
 .dialog-body {
@@ -114,14 +114,14 @@ function handleSubmit() {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  color: #c5d7e8;
+  color: var(--fs-text);
 }
 
 .field input {
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  border: 1px solid rgba(99, 119, 150, 0.22);
   border-radius: 14px;
-  background: rgba(4, 9, 16, 0.72);
-  color: #eff7ff;
+  background: rgba(241, 245, 250, 0.9);
+  color: var(--fs-text);
   padding: 12px 14px;
 }
 
@@ -139,18 +139,18 @@ function handleSubmit() {
 }
 
 .primary-button {
-  background: linear-gradient(135deg, #38bdf8, #14b8a6);
-  color: #031018;
+  background: linear-gradient(135deg, #0284c7, #0b9e90);
+  color: #fff;
   font-weight: 700;
 }
 
 .ghost-button {
-  background: rgba(148, 163, 184, 0.12);
-  color: #dbe7f3;
+  background: rgba(99, 119, 150, 0.1);
+  color: var(--fs-text);
 }
 
 .error-text {
   margin: 0;
-  color: #fda4af;
+  color: #b91c1c;
 }
 </style>

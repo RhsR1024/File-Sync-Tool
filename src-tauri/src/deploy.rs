@@ -7,8 +7,8 @@ use ssh2::Session;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
 use std::path::Path;
+use std::time::Duration;
 use std::time::Instant;
 use tauri::Emitter;
 
@@ -362,15 +362,16 @@ fn deploy_single_server<R: tauri::Runtime>(
                     format!("Address resolution failed for {}", server.host),
                 )
             })?;
-        TcpStream::connect_timeout(&addr, Duration::from_secs(server.ssh_timeout_secs))
-            .map_err(|e| {
+        TcpStream::connect_timeout(&addr, Duration::from_secs(server.ssh_timeout_secs)).map_err(
+            |e| {
                 report_stage_failure(
                     tracking.as_ref(),
                     &server.id,
                     DeployStage::Connecting,
                     format!("TCP Connect failed to {}: {}", server.host, e),
                 )
-            })?
+            },
+        )?
     };
     let mut sess = Session::new().map_err(|e| {
         report_stage_failure(
@@ -804,15 +805,16 @@ pub fn deploy_manual<R: tauri::Runtime>(
                     format!("Address resolution failed for {}", server.host),
                 )
             })?;
-        TcpStream::connect_timeout(&addr, Duration::from_secs(server.ssh_timeout_secs))
-            .map_err(|e| {
+        TcpStream::connect_timeout(&addr, Duration::from_secs(server.ssh_timeout_secs)).map_err(
+            |e| {
                 report_stage_failure(
                     tracking.as_ref(),
                     &server.id,
                     DeployStage::Connecting,
                     e.to_string(),
                 )
-            })?
+            },
+        )?
     };
     let mut sess = Session::new().map_err(|e| {
         report_stage_failure(
