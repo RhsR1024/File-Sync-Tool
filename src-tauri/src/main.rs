@@ -2169,10 +2169,12 @@ async fn change_framework_password(
     ips: Vec<String>,
     old_password: Option<String>,
     new_password: Option<String>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<Vec<PasswordChangeResult>, String> {
     let old_passwd = old_password.unwrap_or_else(|| "123456".to_string());
     let new_passwd = new_password.unwrap_or_else(|| "admin_123".to_string());
-    let client = build_device_http_client()?;
+    let api_timeout_secs = state.config.lock().unwrap().framework_password_api_timeout_secs;
+    let client = build_device_http_client_with_timeout(Duration::from_secs(api_timeout_secs))?;
 
     let results = crate::async_utils::run_ordered_with_limit(
         ips,

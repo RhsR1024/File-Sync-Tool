@@ -158,6 +158,11 @@ pub struct AppConfig {
     /// Default: 5.
     #[serde(default = "default_appliance_ssh_api_timeout_secs")]
     pub appliance_ssh_api_timeout_secs: u64,
+
+    /// HTTP request timeout in seconds for the framework password API.
+    /// Default: 5.
+    #[serde(default = "default_framework_password_api_timeout_secs")]
+    pub framework_password_api_timeout_secs: u64,
 }
 
 fn default_stability_secs() -> u64 {
@@ -176,6 +181,9 @@ fn default_max_task_records() -> u32 {
     100
 }
 fn default_appliance_ssh_api_timeout_secs() -> u64 {
+    5
+}
+fn default_framework_password_api_timeout_secs() -> u64 {
     5
 }
 
@@ -201,6 +209,7 @@ impl Default for AppConfig {
             copy_buffer_size_kb: 4096,
             max_task_records: 100,
             appliance_ssh_api_timeout_secs: 5,
+            framework_password_api_timeout_secs: 5,
         }
     }
 }

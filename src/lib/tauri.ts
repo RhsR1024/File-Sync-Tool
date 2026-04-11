@@ -101,6 +101,9 @@ export interface AppConfig {
 
   /** HTTP request timeout in seconds for the appliance SSH API. Default: 5. */
   appliance_ssh_api_timeout_secs: number;
+
+  /** HTTP request timeout in seconds for the framework password API. Default: 5. */
+  framework_password_api_timeout_secs: number;
 }
 
 export type TaskSourceType = 'scheduled' | 'manual';

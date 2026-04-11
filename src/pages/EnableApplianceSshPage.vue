@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { AlertCircle, CheckCircle2, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe } from 'lucide-vue-next';
 import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshResult } from '../lib/tauri';
@@ -14,6 +14,7 @@ const config = ref<AppConfig | null>(null);
 const selectedIps = ref<string[]>([]);
 const manualIpTags = ref<string[]>([]);
 const manualIpInput = ref<string>('');
+const ipInputRef = ref<HTMLInputElement | null>(null);
 const sshUsername = ref<string>('root');
 const sshPassword = ref<string>('admin_123');
 const addWhitelistRule = ref<boolean>(true);
@@ -54,6 +55,14 @@ const addManualIpTag = (raw: string) => {
 const removeManualIpTag = (ip: string) => {
   const idx = manualIpTags.value.indexOf(ip);
   if (idx > -1) manualIpTags.value.splice(idx, 1);
+};
+
+const restoreOrRemoveTag = (ip: string) => {
+  removeManualIpTag(ip);
+  if (!isValidIp(ip)) {
+    manualIpInput.value = ip;
+    nextTick(() => ipInputRef.value?.focus());
+  }
 };
 
 const handleIpKeydown = (e: KeyboardEvent) => {
@@ -285,7 +294,7 @@ const enableStateClass = (value?: number) => {
               <div
                 class="min-h-[2.375rem] w-full flex flex-wrap gap-1.5 px-2.5 py-1.5 border border-slate-200 rounded-lg transition-colors cursor-text"
                 :class="isLoading ? 'bg-slate-50 cursor-not-allowed' : 'bg-white focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-400/20'"
-                @click="($refs.ipInput as HTMLInputElement)?.focus()"
+                @click="ipInputRef?.focus()"
               >
                 <span
                   v-for="ip in manualIpTags"
@@ -302,11 +311,11 @@ const enableStateClass = (value?: number) => {
                     :disabled="isLoading"
                     class="disabled:cursor-not-allowed leading-none"
                     :class="isValidIp(ip) ? 'text-blue-500 hover:text-blue-700' : 'text-red-400 hover:text-red-600'"
-                    @click.stop="removeManualIpTag(ip)"
+                    @click.stop="restoreOrRemoveTag(ip)"
                   >×</button>
                 </span>
                 <input
-                  ref="ipInput"
+                  ref="ipInputRef"
                   v-model="manualIpInput"
                   type="text"
                   :placeholder="manualIpTags.length === 0 ? t('tools.applianceSsh.manualIpPlaceholder') : ''"

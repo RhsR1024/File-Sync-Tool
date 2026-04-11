@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { AlertCircle, CheckCircle2, Globe, KeyRound, Loader, Server } from 'lucide-vue-next';
-import { changeFrameworkPassword, getConfig, type AppConfig, type FrameworkPasswordResult } from '../lib/tauri';
+import { changeFrameworkPassword, getConfig, saveConfig, type AppConfig, type FrameworkPasswordResult } from '../lib/tauri';
 
 const { t } = useI18n();
 
@@ -10,8 +10,10 @@ const config = ref<AppConfig | null>(null);
 const selectedIps = ref<string[]>([]);
 const manualIpTags = ref<string[]>([]);
 const manualIpInput = ref<string>('');
+const fpIpInputRef = ref<HTMLInputElement | null>(null);
 const oldPassword = ref<string>('123456');
 const newPassword = ref<string>('admin_123');
+const apiTimeoutSecs = ref<number>(5);
 const isLoading = ref<boolean>(false);
 const results = ref<FrameworkPasswordResult[]>([]);
 const currentProgress = ref<{ current: number; total: number } | null>(null);
@@ -47,6 +49,14 @@ const addManualIpTag = (raw: string) => {
 const removeManualIpTag = (ip: string) => {
   const idx = manualIpTags.value.indexOf(ip);
   if (idx > -1) manualIpTags.value.splice(idx, 1);
+};
+
+const restoreOrRemoveTag = (ip: string) => {
+  removeManualIpTag(ip);
+  if (!isValidIp(ip)) {
+    manualIpInput.value = ip;
+    nextTick(() => fpIpInputRef.value?.focus());
+  }
 };
 
 const handleIpKeydown = (e: KeyboardEvent) => {
@@ -98,10 +108,21 @@ const isFormValid = computed(() => {
 onMounted(async () => {
   try {
     config.value = await getConfig();
+    apiTimeoutSecs.value = config.value.framework_password_api_timeout_secs ?? 5;
   } catch (e) {
     console.error('Failed to load config:', e);
   }
 });
+
+const saveApiTimeout = async () => {
+  if (!config.value) return;
+  config.value.framework_password_api_timeout_secs = apiTimeoutSecs.value;
+  try {
+    await saveConfig(config.value);
+  } catch (e) {
+    console.error('Failed to save api timeout:', e);
+  }
+};
 
 const handleExecute = async () => {
   if (allSelectedIps.value.length === 0) {
@@ -254,7 +275,7 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
             <div
               class="min-h-[2.375rem] w-full flex flex-wrap gap-1.5 px-2.5 py-1.5 border border-slate-200 rounded-lg transition-colors cursor-text"
               :class="isLoading ? 'bg-slate-50 cursor-not-allowed' : 'bg-white focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-400/20'"
-              @click="($refs.fpIpInput as HTMLInputElement)?.focus()"
+              @click="fpIpInputRef?.focus()"
             >
               <span
                 v-for="ip in manualIpTags"
@@ -271,11 +292,11 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
                   :disabled="isLoading"
                   class="disabled:cursor-not-allowed leading-none"
                   :class="isValidIp(ip) ? 'text-blue-500 hover:text-blue-700' : 'text-red-400 hover:text-red-600'"
-                  @click.stop="removeManualIpTag(ip)"
+                  @click.stop="restoreOrRemoveTag(ip)"
                 >×</button>
               </span>
               <input
-                ref="fpIpInput"
+                ref="fpIpInputRef"
                 v-model="manualIpInput"
                 type="text"
                 :placeholder="manualIpTags.length === 0 ? t('tools.frameworkPassword.manualIpPlaceholder') : ''"
@@ -299,6 +320,22 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
               <span class="font-mono">{{ ip }}</span>
             </div>
           </div>
+        </div>
+
+        <!-- API Timeout -->
+        <div class="flex items-center justify-between gap-3 px-4 py-3 bg-slate-50 border border-slate-200/80 rounded-xl">
+          <div>
+            <span class="text-xs font-medium text-slate-600">{{ t('tools.frameworkPassword.apiTimeout') }}</span>
+            <p class="text-xs text-slate-400 mt-0.5">{{ t('tools.frameworkPassword.apiTimeoutDesc') }}</p>
+          </div>
+          <select v-model.number="apiTimeoutSecs" @change="saveApiTimeout"
+            class="shrink-0 p-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-xs text-slate-700">
+            <option :value="1">1 {{ t('settings.seconds') }}</option>
+            <option :value="3">3 {{ t('settings.seconds') }}</option>
+            <option :value="5">5 {{ t('settings.seconds') }}</option>
+            <option :value="10">10 {{ t('settings.seconds') }}</option>
+            <option :value="30">30 {{ t('settings.seconds') }}</option>
+          </select>
         </div>
 
         <!-- Execute Button -->

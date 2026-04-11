@@ -36,7 +36,8 @@ const config = ref<AppConfig>({
   max_log_lines: 200,
   copy_buffer_size_kb: 4096,
   max_task_records: 100,
-  appliance_ssh_api_timeout_secs: 5
+  appliance_ssh_api_timeout_secs: 5,
+  framework_password_api_timeout_secs: 5
 });
 
 const newExt = ref('');
