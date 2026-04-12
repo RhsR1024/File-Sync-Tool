@@ -30,7 +30,26 @@
       "Bash(python3 ./.trellis/scripts/get_context.py)",
       "Bash(python3 ./.trellis/scripts/task.py init-context \".trellis/tasks/04-11-settings-improvements-apr11\" fullstack)",
       "Bash(python3 ./.trellis/scripts/task.py start \".trellis/tasks/04-11-settings-improvements-apr11\")",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(grep -n \"rgba\\\\|#[0-9a-f]\\\\{3,6\\\\}\\\\|background\\\\|color\\\\|border\" d:/WorkSpace/File-Sync-Tool/src/share-web/components/SearchBar.vue)",
+      "Bash(pnpm typecheck:*)",
+      "Bash(pnpm check:*)",
+      "Bash(python3 ./.trellis/scripts/task.py create \"brainstorm: per-user root permissions for file share\" --slug per-user-root-perms)",
+      "Bash(python3 ./.trellis/scripts/task.py init-context .trellis/tasks/04-11-per-user-root-perms fullstack)",
+      "Bash(python3 ./.trellis/scripts/task.py add-context .trellis/tasks/04-11-per-user-root-perms implement src-tauri/src/fileshare/model.rs '核心数据结构，需改 PersistedFileShareUser')",
+      "Bash(python3 ./.trellis/scripts/task.py add-context .trellis/tasks/04-11-per-user-root-perms implement src-tauri/src/fileshare/auth.rs 'ResolvedPrincipal 需加 root_permissions 及辅助方法')",
+      "Bash(python3 ./.trellis/scripts/task.py add-context .trellis/tasks/04-11-per-user-root-perms implement src-tauri/src/fileshare/mod.rs 'principal_for_user / find_root / resolve_request_principal')",
+      "Bash(python3 ./.trellis/scripts/task.py add-context .trellis/tasks/04-11-per-user-root-perms implement src-tauri/src/fileshare/http.rs '所有 handler，build_home_tree_response')",
+      "Bash(python3 ./.trellis/scripts/task.py add-context .trellis/tasks/04-11-per-user-root-perms implement src-tauri/src/fileshare/persist.rs 'build_persisted_user / normalize')",
+      "Bash(pnpm vue-tsc:*)",
+      "Bash(pnpm exec:*)",
+      "Bash(pnpm lint:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(pnpm type-check:*)",
+      "Bash(grep -A 5 \"fileshare\\\\\\\\\\\\\\\\\\\\\\(model\\\\|persist\\\\|auth\\\\|http\\\\|mod\\\\\\)\")",
+      "Bash(git add:*)",
+      "Bash(git push:*)"
     ]
   }
 }

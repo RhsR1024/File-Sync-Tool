@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw } from 'lucide-vue-next';
-import { getConfig, saveConfig, testSshConnection, addSystemEvent, getAppPaths, openPathParent, getCustomDataDir, setCustomDataDir, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type LocalScriptBinding, type PostCopyExecutionOrder } from '@/lib/tauri';
+import { getConfig, saveConfig, testSshConnection, addSystemEvent, getAppPaths, openPathParent, getCustomDataDir, setCustomDataDir, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { restartSchedulerInterval } from '@/lib/scheduler';
+import DirectoryPathInput from '@/components/settings/DirectoryPathInput.vue';
+import { getDirectoryInputValue, getTaskLocalPathHint, getTaskLocalPathPlaceholder, toOptionalDirectoryValue } from '@/lib/settingsDirectoryPathState';
 import { useI18n } from 'vue-i18n';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -274,6 +276,16 @@ const taskForm = ref<ScanTask>({
     post_copy_execution_order: 'local_first',
 });
 
+const taskLocalPathInput = computed({
+    get: () => getDirectoryInputValue(taskForm.value.local_path),
+    set: (value: string) => {
+        taskForm.value.local_path = toOptionalDirectoryValue(value);
+    },
+});
+
+const taskLocalPathPlaceholder = computed(() => getTaskLocalPathPlaceholder(config.value.local_path || ''));
+const taskLocalPathHint = computed(() => getTaskLocalPathHint(t('settings.taskLocalPathHint')));
+
 function resetTaskForm() {
     taskForm.value = {
         id: crypto.randomUUID(),
@@ -314,6 +326,7 @@ function saveTask() {
     // Trim rule value to remove any leading/trailing whitespace
     const trimmedTask = JSON.parse(JSON.stringify(taskForm.value));
     trimmedTask.rule.value = trimmedTask.rule.value.trim();
+    trimmedTask.local_path = toOptionalDirectoryValue(getDirectoryInputValue(trimmedTask.local_path));
 
     if (editingTaskIndex.value > -1) {
         config.value.tasks[editingTaskIndex.value] = trimmedTask;
@@ -648,6 +661,10 @@ async function openParentFolder(path: string) {
     }
 }
 
+function handleDirectoryPickError(error: string) {
+    showStatusMsg(t('settings.selectDirectoryFailed', { error }), 'error', 4000);
+}
+
 async function load() {
     try {
         config.value = await getConfig();
@@ -679,11 +696,6 @@ async function saveCustomDataDir() {
     } finally {
         customDataDirSaving.value = false;
     }
-}
-
-function resetCustomDataDir() {
-    customDataDirInput.value = '';
-    showDirEditor.value = false;
 }
 
 async function save() {
@@ -898,8 +910,11 @@ onUnmounted(clearStatusMsg);
       <div class="p-6 space-y-4">
       <div>
         <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.localPath') }}</label>
-        <input v-model="config.local_path" type="text"
-          class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all" />
+        <DirectoryPathInput
+          v-model="config.local_path"
+          :title="t('settings.selectDirectory')"
+          @pick-error="handleDirectoryPickError"
+        />
         <p class="text-xs text-slate-400 mt-1">{{ t('settings.localPathDesc') }}</p>
       </div>
       </div>
@@ -985,8 +1000,14 @@ onUnmounted(clearStatusMsg);
             <input v-model="taskForm.remote_path" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="\\server\share\path" />
           </div>
           <div>
-            <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.localPathOverride') }}</label>
-            <input v-model="taskForm.local_path" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" :placeholder="t('settings.localPathDesc')" />
+            <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskLocalPath') }}</label>
+            <DirectoryPathInput
+              v-model="taskLocalPathInput"
+              :placeholder="taskLocalPathPlaceholder"
+              :title="t('settings.selectDirectory')"
+              @pick-error="handleDirectoryPickError"
+            />
+            <p class="text-xs text-slate-400 mt-1">{{ taskLocalPathHint }}</p>
           </div>
 
           <div class="grid grid-cols-2 gap-4">
@@ -1622,7 +1643,12 @@ onUnmounted(clearStatusMsg);
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.localPath') }}</label>
-              <input v-model="manualLocalPath" type="text" :placeholder="t('settings.manualLocalPlaceholder')" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
+              <DirectoryPathInput
+                v-model="manualLocalPath"
+                :placeholder="t('settings.manualLocalPlaceholder')"
+                :title="t('settings.selectDirectory')"
+                @pick-error="handleDirectoryPickError"
+              />
             </div>
             <div>
               <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.remotePath') }}</label>
