@@ -179,6 +179,8 @@ const blankStatus = (): FileShareStatus => ({
   connected_ips: [],
 });
 
+let lastUptimeUpdate = 0;
+
 const blankDraft = (): Draft => ({
   port: 8080,
   roots: [],
@@ -336,6 +338,12 @@ const stamp = () => {
 };
 
 const setStatus = (next: FileShareStatus) => {
+  if (next.is_active && next.uptime_secs < lastUptimeUpdate && lastUptimeUpdate - next.uptime_secs > 1) {
+    return;
+  }
+  if (next.is_active) {
+    lastUptimeUpdate = next.uptime_secs;
+  }
   status.value = { ...blankStatus(), ...next, all_urls: next.all_urls ?? [], shared_dirs: next.shared_dirs ?? [], connected_ips: next.connected_ips ?? [] };
   isActive.value = status.value.is_active;
   serverUrl.value = status.value.server_url;
@@ -343,6 +351,7 @@ const setStatus = (next: FileShareStatus) => {
     showQr.value = false;
     showConnections.value = false;
     showAllIps.value = false;
+    lastUptimeUpdate = 0;
   }
 };
 

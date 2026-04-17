@@ -542,6 +542,8 @@ pub async fn file_share_stop(
         },
     );
 
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
     Ok(())
 }
 

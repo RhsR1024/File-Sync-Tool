@@ -218,7 +218,7 @@ const hasAnyTerminal = computed(() => props.rows.some(r => isTerminal(r.summary_
             <th class="text-right py-2.5 px-2">{{ t('console.eta') }}</th>
             <th class="text-center py-2.5 px-2">{{ t('console.elapsed') }}</th>
             <th class="text-center py-2.5 px-2">{{ t('console.filterRules') }}</th>
-            <th class="text-center py-2.5 px-2">{{ t('console.pathInfo') }}</th>
+            <th class="text-center py-2.5 px-2">{{ t('console.taskDetail') }}</th>
             <th class="text-center py-2.5 px-2">{{ t('console.actions') }}</th>
           </tr>
         </thead>
@@ -227,13 +227,12 @@ const hasAnyTerminal = computed(() => props.rows.some(r => isTerminal(r.summary_
           <tr
             v-for="row in rows"
             :key="row.task_group_id"
-            class="group transition-colors cursor-pointer relative"
+            class="group transition-colors relative"
             :class="[
               row.task_group_id === selectedTaskGroupId
                 ? 'bg-blue-50/50'
                 : 'hover:bg-slate-50/50',
             ]"
-            @click="emit('select', row.task_group_id)"
           >
             <!-- Start Time -->
             <td class="py-2.5 px-3 align-middle">
@@ -371,7 +370,7 @@ const hasAnyTerminal = computed(() => props.rows.some(r => isTerminal(r.summary_
                   <button
                     v-if="row.summary_status === 'cancelled'"
                     @click.stop="emit('retryRun', row.task_group_id)"
-                    class="p-1.5 rounded-md text-blue-500 hover:text-blue-700 hover:bg-blue-50 transition-colors"
+                    class="p-1.5 rounded-md bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 border border-emerald-200 transition-colors"
                     :title="t('console.retryRun')"
                   >
                     <RefreshCw class="w-3.5 h-3.5" />
@@ -379,7 +378,7 @@ const hasAnyTerminal = computed(() => props.rows.some(r => isTerminal(r.summary_
                   <button
                     v-else-if="row.had_failures"
                     @click.stop="emit('retryDeploy', row.task_group_id)"
-                    class="p-1.5 rounded-md text-amber-500 hover:text-amber-700 hover:bg-amber-50 transition-colors"
+                    class="p-1.5 rounded-md bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700 border border-amber-200 transition-colors"
                     :title="t('console.retryDeploy')"
                   >
                     <RotateCcw class="w-3.5 h-3.5" />

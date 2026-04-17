@@ -467,6 +467,8 @@ pub async fn screen_share_stop(
         },
     );
 
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
     Ok(())
 }
 

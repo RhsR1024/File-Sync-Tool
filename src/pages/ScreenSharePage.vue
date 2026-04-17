@@ -72,6 +72,7 @@ const status = ref<ScreenShareStatus>({
 
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
 const qrCanvas = ref<HTMLCanvasElement | null>(null);
+let lastUptimeUpdate = 0;
 
 const monitorOptions = computed(() =>
   monitors.value.map((monitor) => ({
@@ -313,14 +314,22 @@ onMounted(async () => {
   }
 
   unlistenStatus = await listen<ScreenShareStatus>('screen-share-status', (event) => {
-    status.value = event.payload;
-    if (event.payload.is_active && !isActive.value) {
-      isActive.value = true;
-      serverUrl.value = event.payload.server_url;
+    const payload = event.payload;
+    if (payload.is_active && payload.uptime_secs < lastUptimeUpdate && lastUptimeUpdate - payload.uptime_secs > 1) {
+      return;
     }
-    if (!event.payload.is_active) {
+    if (payload.is_active) {
+      lastUptimeUpdate = payload.uptime_secs;
+    }
+    status.value = payload;
+    if (payload.is_active && !isActive.value) {
+      isActive.value = true;
+      serverUrl.value = payload.server_url;
+    }
+    if (!payload.is_active) {
       showConnectionDetails.value = false;
       showAllConnIps.value = false;
+      lastUptimeUpdate = 0;
     }
   });
 
