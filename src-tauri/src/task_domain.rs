@@ -26,6 +26,8 @@ impl TaskMergeKey {
 pub enum TaskSummaryStatus {
     Queued,
     Copying,
+    Paused,
+    Cancelling,
     CopyCompleted,
     LocalExecuting,
     Deploying,
@@ -185,6 +187,14 @@ pub struct TaskGroup {
     pub had_failures: bool,
     pub server_rollups: Vec<ServerRollup>,
     pub runs: Vec<TaskRun>,
+    #[serde(default, skip_serializing)]
+    pub paused: bool,
+    #[serde(default, skip_serializing)]
+    pub cancel_requested: bool,
+    #[serde(default, skip_serializing)]
+    pub paused_at: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub accumulated_paused_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +238,10 @@ impl TaskState {
                 latest_run_id: Some("run-1".to_string()),
                 had_failures: false,
                 server_rollups: vec![],
+                paused: false,
+                cancel_requested: false,
+                paused_at: None,
+                accumulated_paused_seconds: 0,
                 runs: vec![TaskRun {
                     run_id: "run-1".to_string(),
                     task_group_id: "group-1".to_string(),
@@ -272,11 +286,17 @@ impl TaskGroup {
             changed |= run.mark_in_progress_as_interrupted(finished_at);
         }
 
+        // In-flight pause/cancel intent does not survive an app restart.
+        self.paused = false;
+        self.cancel_requested = false;
+
         if changed
             || matches!(
                 self.summary_status,
                 TaskSummaryStatus::Queued
                     | TaskSummaryStatus::Copying
+                    | TaskSummaryStatus::Paused
+                    | TaskSummaryStatus::Cancelling
                     | TaskSummaryStatus::CopyCompleted
                     | TaskSummaryStatus::LocalExecuting
                     | TaskSummaryStatus::Deploying
@@ -290,8 +310,14 @@ impl TaskGroup {
         if self.finished_at.is_none() && self.summary_status == TaskSummaryStatus::Interrupted {
             self.finished_at = Some(finished_at.to_string());
         }
-        self.elapsed_seconds =
+        let total_elapsed =
             compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
+        // Subtract any time the task was paused (including current pause if ongoing)
+        let mut paused_duration = self.accumulated_paused_seconds;
+        if let Some(paused_at_str) = &self.paused_at {
+            paused_duration += compute_elapsed_seconds(paused_at_str, None);
+        }
+        self.elapsed_seconds = total_elapsed.saturating_sub(paused_duration);
     }
 
     pub fn next_attempt_no_for_server(&self, server_id: &str) -> u32 {
@@ -317,11 +343,34 @@ impl TaskGroup {
         self.copy_status = latest_run.copy_phase.clone();
         self.local_exec_status = latest_run.local_exec_phase.clone();
         self.deploy_status = latest_run.deploy_phase.clone();
-        self.summary_status = summarize_group(
+        let base_summary = summarize_group(
             &latest_run.copy_phase,
             &latest_run.local_exec_phase,
             &latest_run.deploy_phase,
         );
+
+        // Clear pause/cancel overrides once the copy phase reaches a terminal state,
+        // so post-copy phases (e.g. Deploying) surface normally.
+        let copy_terminal = matches!(
+            latest_run.copy_phase,
+            CopyState::Completed
+                | CopyState::Failed
+                | CopyState::Cancelled
+                | CopyState::Interrupted
+        );
+        if copy_terminal {
+            self.paused = false;
+            self.cancel_requested = false;
+        }
+
+        self.summary_status = if self.cancel_requested && base_summary == TaskSummaryStatus::Copying
+        {
+            TaskSummaryStatus::Cancelling
+        } else if self.paused && base_summary == TaskSummaryStatus::Copying {
+            TaskSummaryStatus::Paused
+        } else {
+            base_summary
+        };
         self.server_rollups = build_server_rollups(&self.runs);
         self.had_failures = self.runs.iter().any(|run| {
             run.copy_phase == CopyState::Failed
@@ -330,8 +379,14 @@ impl TaskGroup {
                     .iter()
                     .any(|attempt| attempt.status == AttemptStatus::Failed)
         });
-        self.elapsed_seconds =
+        let total_elapsed =
             compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
+        // Subtract any time the task was paused (including current pause if ongoing)
+        let mut paused_duration = self.accumulated_paused_seconds;
+        if let Some(paused_at_str) = &self.paused_at {
+            paused_duration += compute_elapsed_seconds(paused_at_str, None);
+        }
+        self.elapsed_seconds = total_elapsed.saturating_sub(paused_duration);
     }
 }
 

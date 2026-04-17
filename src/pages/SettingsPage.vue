@@ -445,7 +445,7 @@ function resetServerForm() {
         enabled: true,
         name: '',
         host: '',
-        port: 22,
+        port: 23333,
         user: 'root',
         password: 'admin_123',
         remote_path: '',
@@ -469,6 +469,10 @@ function editServer(index: number) {
 }
 
 function saveServer() {
+    if (!serverForm.value.host.trim()) {
+        alert(t('settings.hostRequired'));
+        return;
+    }
     if (editingServerIndex.value > -1) {
         config.value.servers[editingServerIndex.value] = { ...serverForm.value };
     } else {
@@ -687,10 +691,12 @@ async function saveCustomDataDir() {
     try {
         await setCustomDataDir(customDataDirInput.value.trim());
         customDataDir.value = customDataDirInput.value.trim();
+        // Reload config from the new directory (files have been migrated by backend)
+        config.value = await getConfig();
         const [cfg, log] = await getAppPaths();
         configPath.value = cfg;
         logPath.value = log;
-        showStatusMsg(t('settings.customDataDirSaved'), 'success', 3000);
+        showStatusMsg(t('settings.customDataDirMigrated'), 'success', 4000);
     } catch (e) {
         showStatusMsg(String(e), 'error', 4000);
     } finally {
@@ -1481,19 +1487,19 @@ onUnmounted(clearStatusMsg);
           <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all">
             <h3 class="text-lg font-bold mb-6 text-slate-800">{{ editingServerIndex > -1 ? t('settings.editServer') : t('settings.addServer') }}</h3>
             <div class="space-y-4">
-              <div>
-                <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.nameAlias') }}</label>
-                <input v-model="serverForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" :placeholder="t('settings.serverNamePlaceholder')" />
-              </div>
               <div class="grid grid-cols-3 gap-4">
                 <div class="col-span-2">
-                  <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.host') }}</label>
+                  <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.host') }} <span class="text-red-500">*</span></label>
                   <input v-model="serverForm.host" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="192.168.1.100" />
                 </div>
                 <div>
                   <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.port') }}</label>
                   <input v-model.number="serverForm.port" type="number" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
                 </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.serverName') }}</label>
+                <input v-model="serverForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" :placeholder="serverForm.host || t('settings.serverNamePlaceholder')" />
               </div>
               <div class="grid grid-cols-2 gap-4">
                 <div>

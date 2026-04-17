@@ -826,7 +826,11 @@ fn cancel_task_run(
         Some(true),
         Some(false),
         None,
-    )
+    )?;
+    let _ = state
+        .task_manager
+        .request_run_cancel(&task_group_id, &run_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -842,7 +846,11 @@ fn pause_task_run(
         None,
         Some(true),
         None,
-    )
+    )?;
+    let _ = state
+        .task_manager
+        .set_run_paused(&task_group_id, &run_id, true);
+    Ok(())
 }
 
 #[tauri::command]
@@ -858,7 +866,11 @@ fn resume_task_run(
         Some(false),
         Some(false),
         Some(false),
-    )
+    )?;
+    let _ = state
+        .task_manager
+        .set_run_paused(&task_group_id, &run_id, false);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1505,7 +1517,11 @@ fn get_custom_data_dir(app_handle: tauri::AppHandle) -> String {
 }
 
 #[tauri::command]
-fn set_custom_data_dir(app_handle: tauri::AppHandle, path: String) -> Result<(), String> {
+fn set_custom_data_dir(
+    app_handle: tauri::AppHandle,
+    state: State<AppState>,
+    path: String,
+) -> Result<(), String> {
     // Validate non-empty path is a valid directory
     if !path.is_empty() {
         let p = std::path::PathBuf::from(&path);
@@ -1513,7 +1529,13 @@ fn set_custom_data_dir(app_handle: tauri::AppHandle, path: String) -> Result<(),
             return Err(format!("Directory does not exist: {}", path));
         }
     }
-    config::set_custom_data_dir(&app_handle, path)
+    config::set_custom_data_dir(&app_handle, path)?;
+
+    // Hot-reload config from the new location into AppState
+    let new_config = config::load_config(&app_handle);
+    *state.config.lock().unwrap() = new_config;
+
+    Ok(())
 }
 
 #[tauri::command]

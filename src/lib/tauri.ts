@@ -115,6 +115,8 @@ export type TaskRunType = 'copy_and_deploy' | 'deploy_retry' | 'manual_deploy';
 export type TaskSummaryStatus =
   | 'queued'
   | 'copying'
+  | 'paused'
+  | 'cancelling'
   | 'copy_completed'
   | 'local_executing'
   | 'deploying'

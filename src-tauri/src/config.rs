@@ -310,7 +310,20 @@ pub fn get_custom_data_dir<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) 
 }
 
 /// Saves or clears the custom data dir pivot. Empty string = reset to default.
+/// Migrates existing data files from the current directory to the new directory.
 pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Result<(), String> {
+    // Collect current paths BEFORE changing the pivot
+    let old_data_dir = get_data_dir(app_handle);
+    let old_config_path = get_config_path(app_handle);
+
+    // Determine the new target directory
+    let new_dir = if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(&path))
+    };
+
+    // Write the pivot file
     let pivot_file = pivot_path(app_handle);
     if let Some(parent) = pivot_file.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -325,23 +338,94 @@ pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Resul
         }
     };
     let content = serde_json::to_string_pretty(&pivot).map_err(|e| e.to_string())?;
-    fs::write(pivot_file, content).map_err(|e| e.to_string())
+    fs::write(pivot_file, content).map_err(|e| e.to_string())?;
+
+    // Determine the effective new data dir and config path AFTER pivot change
+    let new_data_dir = get_data_dir(app_handle);
+    let new_config_path = get_config_path(app_handle);
+
+    // Skip migration if directories are the same
+    if old_data_dir == new_data_dir {
+        return Ok(());
+    }
+
+    // Ensure new directory exists
+    fs::create_dir_all(&new_data_dir).map_err(|e| e.to_string())?;
+
+    // Migrate config file
+    migrate_file(&old_config_path, &new_config_path);
+
+    // Migrate data files
+    let data_files = [
+        "app.log",
+        "history.json",
+        "ui_state.json",
+        "task_state.json",
+    ];
+    for name in &data_files {
+        let src = old_data_dir.join(name);
+        let dst = new_data_dir.join(name);
+        migrate_file(&src, &dst);
+    }
+
+    // Migrate kv/ directory
+    let old_kv = old_data_dir.join("kv");
+    let new_kv = new_data_dir.join("kv");
+    if old_kv.is_dir() {
+        let _ = fs::create_dir_all(&new_kv);
+        if let Ok(entries) = fs::read_dir(&old_kv) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                if src.is_file() {
+                    if let Some(fname) = src.file_name() {
+                        let dst = new_kv.join(fname);
+                        migrate_file(&src, &dst);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy a file from src to dst if src exists and dst does not (no overwrite).
+fn migrate_file(src: &PathBuf, dst: &PathBuf) {
+    if src.exists() && !dst.exists() {
+        if let Some(parent) = dst.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::copy(src, dst);
+    }
+}
+
+/// Returns the effective data directory: custom_data_dir if set, otherwise app_data_dir.
+pub fn get_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
+    get_custom_data_dir(app_handle)
+        .unwrap_or_else(|| app_handle.path().app_data_dir().unwrap())
 }
 
 pub fn get_log_path(app_handle: &tauri::AppHandle) -> PathBuf {
-    get_custom_data_dir(app_handle)
-        .unwrap_or_else(|| app_handle.path().app_data_dir().unwrap())
-        .join("app.log")
+    get_data_dir(app_handle).join("app.log")
 }
 
 pub fn get_config_path(app_handle: &tauri::AppHandle) -> PathBuf {
-    get_custom_data_dir(app_handle)
-        .map(|d| d.join("config.json"))
-        .unwrap_or_else(|| {
-            app_handle
-                .path()
-                .app_config_dir()
-                .unwrap()
-                .join("config.json")
-        })
+    match get_custom_data_dir(app_handle) {
+        Some(d) => d.join("config.json"),
+        None => app_handle
+            .path()
+            .app_config_dir()
+            .unwrap()
+            .join("config.json"),
+    }
+}
+
+/// Returns the default (non-custom) data directory.
+pub fn get_default_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
+    app_handle.path().app_data_dir().unwrap()
+}
+
+/// Returns the default (non-custom) config directory.
+pub fn get_default_config_dir(app_handle: &tauri::AppHandle) -> PathBuf {
+    app_handle.path().app_config_dir().unwrap()
 }

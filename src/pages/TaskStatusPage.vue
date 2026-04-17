@@ -28,6 +28,20 @@ const { t } = useI18n();
 const config = ref<AppConfig | null>(null);
 const isManualCopyModalOpen = ref(false);
 
+const toastMessage = ref('');
+const toastTone = ref<'success' | 'error' | 'info'>('info');
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showToast(message: string, tone: 'success' | 'error' | 'info' = 'info') {
+  toastMessage.value = message;
+  toastTone.value = tone;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toastMessage.value = '';
+    toastTimer = null;
+  }, 2400);
+}
+
 const rows = computed(() => buildTaskRows(taskStateStore.groups));
 
 async function handleSelect(taskGroupId: string) {
@@ -37,43 +51,56 @@ async function handleSelect(taskGroupId: string) {
 async function handleClearGroup(taskGroupId: string) {
   try {
     await clearTaskGroup(taskGroupId);
+    showToast(t('console.clearGroup'), 'success');
   } catch (e) {
     addLog(`Clear failed: ${e}`, 'error');
+    showToast(`${t('console.clearGroup')} - ${e}`, 'error');
   }
 }
 
 async function handleClearAll() {
   try {
     await clearTaskGroups();
+    showToast(t('console.clearAllGroups'), 'success');
   } catch (e) {
     addLog(`Clear all failed: ${e}`, 'error');
+    showToast(`${t('console.clearAllGroups')} - ${e}`, 'error');
   }
 }
 
 async function handlePause(taskGroupId: string, runId: string) {
+  console.log('[TaskStatusPage] pause clicked', { taskGroupId, runId });
   try {
     await pauseTaskRun(taskGroupId, runId);
     addLog(t('console.paused'), 'info');
+    showToast(t('console.paused'), 'success');
   } catch (e) {
     addLog(`Pause failed: ${e}`, 'error');
+    showToast(`${t('console.pause')} - ${e}`, 'error');
   }
 }
 
 async function handleResume(taskGroupId: string, runId: string) {
+  console.log('[TaskStatusPage] resume clicked', { taskGroupId, runId });
   try {
     await resumeTaskRun(taskGroupId, runId);
     addLog(t('console.resumed'), 'info');
+    showToast(t('console.resumed'), 'success');
   } catch (e) {
     addLog(`Resume failed: ${e}`, 'error');
+    showToast(`${t('console.resume')} - ${e}`, 'error');
   }
 }
 
 async function handleCancel(taskGroupId: string, runId: string) {
+  console.log('[TaskStatusPage] cancel clicked', { taskGroupId, runId });
   try {
     await cancelTaskRun(taskGroupId, runId);
     addLog(t('console.cancelling'), 'info');
+    showToast(t('console.cancelling'), 'info');
   } catch (e) {
     addLog(`Cancel failed: ${e}`, 'error');
+    showToast(`${t('console.cancel')} - ${e}`, 'error');
   }
 }
 
@@ -81,8 +108,10 @@ async function handleRetryDeploy(taskGroupId: string) {
   try {
     await retryTaskGroupDeploy(taskGroupId);
     addLog(t('console.retryDeploy'), 'info');
+    showToast(t('console.retryDeploy'), 'success');
   } catch (e) {
     addLog(`Retry deploy failed: ${e}`, 'error');
+    showToast(`${t('console.retryDeploy')} - ${e}`, 'error');
   }
 }
 
@@ -200,6 +229,10 @@ onMounted(async () => {
           @select="handleSelect"
           @clear="handleClearGroup"
           @clear-all="handleClearAll"
+          @pause-run="handlePause"
+          @resume-run="handleResume"
+          @cancel-run="handleCancel"
+          @retry-deploy="handleRetryDeploy"
         />
       </div>
     </div>
@@ -222,5 +255,30 @@ onMounted(async () => {
       @close="isManualCopyModalOpen = false"
       @success="() => {}"
     />
+
+    <!-- Action feedback toast -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition-all duration-200 ease-out"
+        leave-active-class="transition-all duration-200 ease-in"
+        enter-from-class="opacity-0 translate-y-2"
+        leave-to-class="opacity-0 translate-y-2"
+      >
+        <div
+          v-if="toastMessage"
+          class="fixed bottom-6 right-6 z-[200] px-4 py-2.5 rounded-lg shadow-lg font-medium text-sm border flex items-center gap-2 max-w-md"
+          :class="toastTone === 'success'
+            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+            : toastTone === 'error'
+              ? 'bg-rose-50 text-rose-700 border-rose-200'
+              : 'bg-blue-50 text-blue-700 border-blue-200'"
+        >
+          <span class="w-2 h-2 rounded-full shrink-0"
+            :class="toastTone === 'success' ? 'bg-emerald-500' : toastTone === 'error' ? 'bg-rose-500' : 'bg-blue-500'">
+          </span>
+          <span class="break-all">{{ toastMessage }}</span>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>

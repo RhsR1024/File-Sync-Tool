@@ -38,11 +38,7 @@ pub fn load_ui_state(app_handle: tauri::AppHandle) -> UiState {
 }
 
 fn get_ui_state_path(app_handle: &tauri::AppHandle) -> PathBuf {
-    app_handle
-        .path()
-        .app_data_dir()
-        .unwrap()
-        .join("ui_state.json")
+    crate::config::get_data_dir(app_handle).join("ui_state.json")
 }
 
 #[tauri::command]
@@ -71,10 +67,7 @@ pub fn load_kv(app_handle: tauri::AppHandle, key: String) -> Option<Value> {
 
 fn get_kv_path(app_handle: &tauri::AppHandle, key: &str) -> PathBuf {
     let safe_key = key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-    app_handle
-        .path()
-        .app_data_dir()
-        .unwrap()
+    crate::config::get_data_dir(&app_handle)
         .join("kv")
         .join(format!("{}.json", safe_key))
 }

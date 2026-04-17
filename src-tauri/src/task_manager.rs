@@ -145,6 +145,10 @@ impl TaskManager {
                         had_failures: false,
                         server_rollups: vec![],
                         runs: vec![],
+                        paused: false,
+                        cancel_requested: false,
+                        paused_at: None,
+                        accumulated_paused_seconds: 0,
                     });
                     state.groups.len() - 1
                 });
@@ -242,6 +246,10 @@ impl TaskManager {
                     had_failures: false,
                     server_rollups: vec![],
                     runs: vec![],
+                    paused: false,
+                    cancel_requested: false,
+                    paused_at: None,
+                    accumulated_paused_seconds: 0,
                 });
                 state.groups.len() - 1
             };
@@ -270,6 +278,58 @@ impl TaskManager {
             task_group_id: actual_group_id,
             run_id,
         })
+    }
+
+    pub fn set_run_paused(
+        &self,
+        task_group_id: &str,
+        run_id: &str,
+        paused: bool,
+    ) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            if group.latest_run_id.as_deref() != Some(run_id) {
+                return Ok(());
+            }
+            if matches!(group.copy_status, CopyState::Pending | CopyState::Running) {
+                let was_paused = group.paused;
+                group.paused = paused;
+                if paused && !was_paused {
+                    // Starting pause: record the pause start time
+                    group.paused_at = Some(current_timestamp());
+                    group.cancel_requested = false;
+                } else if !paused && was_paused {
+                    // Resuming: calculate pause duration and accumulate it
+                    if let Some(paused_at_str) = &group.paused_at {
+                        let paused_duration =
+                            compute_elapsed_seconds(paused_at_str, None);
+                        group.accumulated_paused_seconds += paused_duration;
+                    }
+                    group.paused_at = None;
+                }
+                group.refresh_from_runs();
+            }
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
+    }
+
+    pub fn request_run_cancel(&self, task_group_id: &str, run_id: &str) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            if group.latest_run_id.as_deref() != Some(run_id) {
+                return Ok(());
+            }
+            if matches!(group.copy_status, CopyState::Pending | CopyState::Running) {
+                group.cancel_requested = true;
+                group.paused = false;
+                group.refresh_from_runs();
+            }
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
     }
 
     pub fn mark_copy_completed(

@@ -49,7 +49,20 @@
       "Bash(pnpm type-check:*)",
       "Bash(grep -A 5 \"fileshare\\\\\\\\\\\\\\\\\\\\\\(model\\\\|persist\\\\|auth\\\\|http\\\\|mod\\\\\\)\")",
       "Bash(git add:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(pnpm tauri:build:versioned-exe)",
+      "Bash(cmd /c \"cd /d C:\\\\WorkSpace\\\\File-Sync-Tool\\\\src-tauri && cargo check\")",
+      "Bash(cmd /c \"cd /d C:\\\\WorkSpace\\\\File-Sync-Tool\\\\src-tauri && cargo check 2>&1\")",
+      "Bash(cmd /c \"cd /d C:\\\\WorkSpace\\\\File-Sync-Tool && pnpm tauri:build:versioned-exe 2>&1\")",
+      "Bash(/c/Users/Admin/.cargo/bin/cargo check *)",
+      "Read(//c/Users/Admin/AppData/Local/Temp/claude/c--WorkSpace-File-Sync-Tool/ca66e9c6-ed15-4a2f-a0a7-43c582a38b2f/tasks/**)",
+      "Bash(export PATH=\"$HOME/.cargo/bin:$PATH\")",
+      "Bash(where cargo *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(pnpm build *)",
+      "Bash(cmd /c pnpm tauri:build:versioned-exe)",
+      "Bash(tee /tmp/build.log)",
+      "Bash(cd c:\\\\\\\\WorkSpace\\\\\\\\File-Sync-Tool)"
     ]
   }
 }

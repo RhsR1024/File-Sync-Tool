@@ -119,8 +119,13 @@ struct PersistedTaskRecord {
 fn load_persisted_task_records<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> Vec<PersistedTaskRecord> {
-    let Ok(app_dir) = app_handle.path().app_data_dir() else {
-        return Vec::new();
+    let app_dir = if let Some(d) = crate::config::get_custom_data_dir(app_handle) {
+        d
+    } else {
+        match app_handle.path().app_data_dir() {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        }
     };
     let ui_state_path = app_dir.join("ui_state.json");
     let Ok(content) = std::fs::read_to_string(ui_state_path) else {
@@ -244,7 +249,9 @@ pub fn write_log_to_file<R: tauri::Runtime>(
     msg: &str,
     level: &str,
 ) {
-    if let Ok(app_dir) = app_handle.path().app_data_dir() {
+    let app_dir = crate::config::get_custom_data_dir(app_handle)
+        .or_else(|| app_handle.path().app_data_dir().ok());
+    if let Some(app_dir) = app_dir {
         if std::fs::create_dir_all(&app_dir).is_ok() {
             let log_path = app_dir.join("app.log");
             let _guard = get_log_mutex().lock().unwrap();

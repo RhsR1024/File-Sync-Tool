@@ -34,9 +34,5 @@ pub fn save_task_state(app_handle: &tauri::AppHandle, state: &TaskState) -> Resu
 }
 
 fn task_state_path(app_handle: &tauri::AppHandle) -> PathBuf {
-    app_handle
-        .path()
-        .app_data_dir()
-        .unwrap()
-        .join(TASK_STATE_FILE_NAME)
+    crate::config::get_data_dir(app_handle).join(TASK_STATE_FILE_NAME)
 }
