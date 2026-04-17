@@ -62,7 +62,8 @@
       "Bash(pnpm build *)",
       "Bash(cmd /c pnpm tauri:build:versioned-exe)",
       "Bash(tee /tmp/build.log)",
-      "Bash(cd c:\\\\\\\\WorkSpace\\\\\\\\File-Sync-Tool)"
+      "Bash(cd c:\\\\\\\\WorkSpace\\\\\\\\File-Sync-Tool)",
+      "Bash(xargs grep *)"
     ]
   }
 }

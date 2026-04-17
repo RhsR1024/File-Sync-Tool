@@ -5,7 +5,7 @@ import Empty from '@/components/Empty.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
 import TaskGroupsTable from '@/components/tasks/TaskGroupsTable.vue';
 import TaskGroupDetailPanel from '@/components/tasks/TaskGroupDetailPanel.vue';
-import { getConfig, type AppConfig } from '@/lib/tauri';
+import { getConfig, type AppConfig, previewTemporaryCopy, queueTemporaryCopy, type ManualCopyPreview } from '@/lib/tauri';
 import {
   clearTaskGroup,
   clearTaskGroups,
@@ -31,6 +31,10 @@ const isManualCopyModalOpen = ref(false);
 const toastMessage = ref('');
 const toastTone = ref<'success' | 'error' | 'info'>('info');
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+// For retry run with target existence check
+const retryTargetPreview = ref<ManualCopyPreview | null>(null);
+const pendingRetryRequest = ref<{ taskGroupId: string; source: string; target: string } | null>(null);
 
 function showToast(message: string, tone: 'success' | 'error' | 'info' = 'info') {
   toastMessage.value = message;
@@ -112,6 +116,62 @@ async function handleRetryDeploy(taskGroupId: string) {
   } catch (e) {
     addLog(`Retry deploy failed: ${e}`, 'error');
     showToast(`${t('console.retryDeploy')} - ${e}`, 'error');
+  }
+}
+
+async function handleRetryRun(taskGroupId: string) {
+  // Find the task group from the rows
+  const taskRow = rows.value.find(r => r.task_group_id === taskGroupId);
+  if (!taskRow) {
+    showToast('Task not found', 'error');
+    return;
+  }
+
+  try {
+    // Preview the copy to check if target exists
+    const preview = await previewTemporaryCopy(taskRow.source_path, taskRow.local_target_path);
+
+    if (preview.target_exists) {
+      // Target exists, show dialog for user to choose
+      retryTargetPreview.value = preview;
+      pendingRetryRequest.value = {
+        taskGroupId,
+        source: taskRow.source_path,
+        target: taskRow.local_target_path,
+      };
+    } else {
+      // Target doesn't exist, queue directly
+      await retryConfirmQueue(taskRow.source_path, taskRow.local_target_path, false);
+    }
+  } catch (e) {
+    addLog(`Retry run preview failed: ${e}`, 'error');
+    showToast(`Failed to preview: ${e}`, 'error');
+  }
+}
+
+function clearRetryTargetDecision() {
+  retryTargetPreview.value = null;
+  pendingRetryRequest.value = null;
+}
+
+async function retryConfirmQueue(source: string, target: string, overwriteExisting: boolean) {
+  try {
+    const ack = await queueTemporaryCopy(source, target, overwriteExisting);
+
+    addLog(t('manualCopy.addedToQueue'), 'success');
+    showToast(
+      ack.queued_ahead > 0
+        ? t('manualCopy.addedToQueueWithAhead', { count: ack.queued_ahead })
+        : t('manualCopy.addedToQueue'),
+      'success'
+    );
+
+    clearRetryTargetDecision();
+    // Refresh task list
+    await taskStateStore.hydrateTaskState();
+  } catch (e) {
+    addLog(`Queue copy failed: ${e}`, 'error');
+    showToast(`Failed to queue: ${e}`, 'error');
   }
 }
 
@@ -233,6 +293,7 @@ onMounted(async () => {
           @resume-run="handleResume"
           @cancel-run="handleCancel"
           @retry-deploy="handleRetryDeploy"
+          @retry-run="handleRetryRun"
         />
       </div>
     </div>
@@ -255,6 +316,61 @@ onMounted(async () => {
       @close="isManualCopyModalOpen = false"
       @success="() => {}"
     />
+
+    <!-- Retry target exists dialog -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition-opacity duration-200"
+        leave-active-class="transition-opacity duration-150"
+        enter-from-class="opacity-0"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="retryTargetPreview"
+          class="fixed inset-0 z-[100] flex items-center justify-center p-6"
+        >
+          <!-- Backdrop -->
+          <div
+            class="absolute inset-0 bg-slate-950/40 backdrop-blur-[2px]"
+            @click="clearRetryTargetDecision"
+          ></div>
+
+          <!-- Modal -->
+          <div class="relative z-10 bg-white rounded-2xl shadow-2xl shadow-slate-900/10 border border-slate-200/80 w-full max-w-md p-6">
+            <h3 class="text-base font-bold text-slate-800 mb-2">{{ t('manualCopy.targetExistsDecisionTitle') }}</h3>
+            <p class="text-sm text-slate-600 mb-1">{{ retryTargetPreview.resolved_target_path }}</p>
+            <p class="text-sm text-slate-500 mb-6">
+              {{
+                retryTargetPreview.source_kind === 'file'
+                  ? t('manualCopy.targetExistsFileDecision', { path: retryTargetPreview.resolved_target_path })
+                  : t('manualCopy.targetExistsDirectoryDecision', { path: retryTargetPreview.resolved_target_path })
+              }}
+            </p>
+
+            <div class="flex gap-3">
+              <button
+                @click="clearRetryTargetDecision"
+                class="flex-1 px-4 py-2 rounded-lg font-bold border border-slate-200 text-slate-600 hover:bg-slate-50 transition-all active:scale-95"
+              >
+                {{ t('console.cancel') }}
+              </button>
+              <button
+                @click="retryConfirmQueue(pendingRetryRequest!.source, pendingRetryRequest!.target, false)"
+                class="flex-1 px-4 py-2 rounded-lg font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-all active:scale-95"
+              >
+                {{ t('manualCopy.skipAndQueue') }}
+              </button>
+              <button
+                @click="retryConfirmQueue(pendingRetryRequest!.source, pendingRetryRequest!.target, true)"
+                class="flex-1 px-4 py-2 rounded-lg font-bold bg-blue-600 text-white hover:bg-blue-700 transition-all active:scale-95"
+              >
+                {{ t('manualCopy.overwriteAndQueue') }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- Action feedback toast -->
     <Teleport to="body">

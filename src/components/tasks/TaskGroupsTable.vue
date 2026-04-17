@@ -20,6 +20,7 @@ const emit = defineEmits<{
   resumeRun: [taskGroupId: string, runId: string];
   cancelRun: [taskGroupId: string, runId: string];
   retryDeploy: [taskGroupId: string];
+  retryRun: [taskGroupId: string];
 }>();
 
 const { t } = useI18n();
@@ -365,10 +366,18 @@ const hasAnyTerminal = computed(() => props.rows.some(r => isTerminal(r.summary_
                     <XCircle class="w-3.5 h-3.5" />
                   </button>
                 </template>
-                <!-- Terminal: retry deploy (if had_failures) + clear -->
+                <!-- Terminal: retry deploy (if had_failures) / retry run (if cancelled) + clear -->
                 <template v-else-if="isTerminal(row.summary_status)">
                   <button
-                    v-if="row.had_failures"
+                    v-if="row.summary_status === 'cancelled'"
+                    @click.stop="emit('retryRun', row.task_group_id)"
+                    class="p-1.5 rounded-md text-blue-500 hover:text-blue-700 hover:bg-blue-50 transition-colors"
+                    :title="t('console.retryRun')"
+                  >
+                    <RefreshCw class="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    v-else-if="row.had_failures"
                     @click.stop="emit('retryDeploy', row.task_group_id)"
                     class="p-1.5 rounded-md text-amber-500 hover:text-amber-700 hover:bg-amber-50 transition-colors"
                     :title="t('console.retryDeploy')"
