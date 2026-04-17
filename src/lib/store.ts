@@ -37,11 +37,29 @@ export const appStore = reactive({
     isManualDeploying: false,
     manualDeployMsg: '',
     maxLogLines: 200,
+    nowTick: Date.now(),
     toolRuntime: {
         screenShare: false,
         fileShare: false,
     } as ToolRuntimeState,
 });
+
+let liveTickTimer: ReturnType<typeof setInterval> | null = null;
+
+export function startLiveTicker() {
+    if (liveTickTimer) return;
+    appStore.nowTick = Date.now();
+    liveTickTimer = setInterval(() => {
+        appStore.nowTick = Date.now();
+    }, 1000);
+}
+
+export function stopLiveTicker() {
+    if (liveTickTimer) {
+        clearInterval(liveTickTimer);
+        liveTickTimer = null;
+    }
+}
 
 export function setToolRuntime<K extends keyof ToolRuntimeState>(tool: K, active: boolean) {
     appStore.toolRuntime[tool] = active;

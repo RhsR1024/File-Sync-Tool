@@ -2,12 +2,13 @@
 import { computed, ref } from 'vue';
 import {
   X, RotateCcw, Pause, PlayCircle, XCircle, Server, Clock,
-  FolderOpen, HardDrive, AlertTriangle, ClipboardCopy, Check,
+  FolderOpen, HardDrive, AlertTriangle, ClipboardCopy, Check, ExternalLink,
 } from 'lucide-vue-next';
 import type {
   TaskGroup, TaskLogEntry, TaskRun, ServerRollup,
   TaskSummaryStatus, AttemptStatus, DeployState,
 } from '@/lib/tauri';
+import { openPathParent } from '@/lib/tauri';
 import { buildTaskDetailSections } from '@/lib/taskStatusView';
 import { useI18n } from 'vue-i18n';
 
@@ -38,6 +39,15 @@ async function copyToClipboard(text: string, field: string) {
     }, 1500);
   } catch {
     // fallback
+  }
+}
+
+async function openFolder(path: string) {
+  if (!path) return;
+  try {
+    await openPathParent(path);
+  } catch {
+    // silently ignore; user can still copy the path
   }
 }
 
@@ -178,9 +188,9 @@ function formatDuration(seconds: number): string {
 
 function runTypeLabel(runType: string): string {
   const map: Record<string, string> = {
-    copy_and_deploy: 'Copy & Deploy',
-    deploy_retry: 'Deploy Retry',
-    manual_deploy: 'Manual Deploy',
+    copy_and_deploy: t('console.runTypeCopyAndDeploy'),
+    deploy_retry: t('console.runTypeDeployRetry'),
+    manual_deploy: t('console.runTypeManualDeploy'),
   };
   return map[runType] ?? runType;
 }
@@ -261,18 +271,27 @@ function logLevelClass(level: string): string {
                       <FolderOpen class="w-3 h-3 text-orange-500" />
                       {{ t('console.sourcePath') }}
                     </span>
-                    <button
-                      v-if="group.source_path"
-                      @click="copyToClipboard(group.source_path, 'source')"
-                      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all"
-                      :class="copiedField === 'source'
-                        ? 'text-emerald-600 bg-emerald-50'
-                        : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'"
-                    >
-                      <Check v-if="copiedField === 'source'" class="w-3 h-3" />
-                      <ClipboardCopy v-else class="w-3 h-3" />
-                      {{ copiedField === 'source' ? t('console.copiedPath') : t('console.copyPath') }}
-                    </button>
+                    <div v-if="group.source_path" class="flex items-center gap-1">
+                      <button
+                        @click="openFolder(group.source_path)"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all text-slate-400 hover:text-blue-600 hover:bg-blue-50"
+                        :title="t('settings.openFolder')"
+                      >
+                        <ExternalLink class="w-3 h-3" />
+                        {{ t('settings.openFolder') }}
+                      </button>
+                      <button
+                        @click="copyToClipboard(group.source_path, 'source')"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all"
+                        :class="copiedField === 'source'
+                          ? 'text-emerald-600 bg-emerald-50'
+                          : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'"
+                      >
+                        <Check v-if="copiedField === 'source'" class="w-3 h-3" />
+                        <ClipboardCopy v-else class="w-3 h-3" />
+                        {{ copiedField === 'source' ? t('console.copiedPath') : t('console.copyPath') }}
+                      </button>
+                    </div>
                   </div>
                   <div class="break-all font-mono text-[11px] leading-5 text-slate-600">
                     {{ group.source_path || '-' }}
@@ -284,18 +303,27 @@ function logLevelClass(level: string): string {
                       <HardDrive class="w-3 h-3 text-blue-500" />
                       {{ t('console.localCopyPath') }}
                     </span>
-                    <button
-                      v-if="group.local_target_path"
-                      @click="copyToClipboard(group.local_target_path, 'local')"
-                      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all"
-                      :class="copiedField === 'local'
-                        ? 'text-emerald-600 bg-emerald-50'
-                        : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'"
-                    >
-                      <Check v-if="copiedField === 'local'" class="w-3 h-3" />
-                      <ClipboardCopy v-else class="w-3 h-3" />
-                      {{ copiedField === 'local' ? t('console.copiedPath') : t('console.copyPath') }}
-                    </button>
+                    <div v-if="group.local_target_path" class="flex items-center gap-1">
+                      <button
+                        @click="openFolder(group.local_target_path)"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all text-slate-400 hover:text-blue-600 hover:bg-blue-50"
+                        :title="t('settings.openFolder')"
+                      >
+                        <ExternalLink class="w-3 h-3" />
+                        {{ t('settings.openFolder') }}
+                      </button>
+                      <button
+                        @click="copyToClipboard(group.local_target_path, 'local')"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all"
+                        :class="copiedField === 'local'
+                          ? 'text-emerald-600 bg-emerald-50'
+                          : 'text-slate-400 hover:text-blue-600 hover:bg-blue-50'"
+                      >
+                        <Check v-if="copiedField === 'local'" class="w-3 h-3" />
+                        <ClipboardCopy v-else class="w-3 h-3" />
+                        {{ copiedField === 'local' ? t('console.copiedPath') : t('console.copyPath') }}
+                      </button>
+                    </div>
                   </div>
                   <div class="break-all font-mono text-[11px] leading-5 text-slate-600">
                     {{ group.local_target_path || '-' }}
@@ -303,17 +331,17 @@ function logLevelClass(level: string): string {
                 </div>
               </div>
 
-              <!-- Copy & Local Exec & Deploy Status Cards -->
-              <div class="grid gap-3 sm:grid-cols-3">
-                <div class="rounded-lg border border-slate-200 p-3">
-                  <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">{{ t('console.copyStatus') }}</div>
-                  <div class="text-sm font-medium text-slate-700">{{ copyStatusLabel(group.copy_status) }}</div>
-                </div>
+              <!-- Local Exec & Deploy Status Cards (copy status removed — already shown in header badge) -->
+              <div
+                v-if="group.local_exec_status !== 'not_started' || group.deploy_status !== 'not_started'"
+                class="grid gap-3"
+                :class="group.local_exec_status !== 'not_started' ? 'sm:grid-cols-2' : 'sm:grid-cols-1'"
+              >
                 <div v-if="group.local_exec_status !== 'not_started'" class="rounded-lg border border-slate-200 p-3">
                   <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">{{ t('console.phaseLocalScripts') }}</div>
                   <div class="text-sm font-medium text-slate-700">{{ localExecStatusLabel(group.local_exec_status) }}</div>
                 </div>
-                <div class="rounded-lg border border-slate-200 p-3">
+                <div v-if="group.deploy_status !== 'not_started'" class="rounded-lg border border-slate-200 p-3">
                   <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">{{ t('console.deployStatus') }}</div>
                   <div class="text-sm font-medium text-slate-700">{{ deployStatusLabel(group.deploy_status) }}</div>
                 </div>
@@ -418,12 +446,12 @@ function logLevelClass(level: string): string {
                   <table class="w-full text-xs">
                     <thead>
                       <tr class="text-slate-500 border-b border-slate-200">
-                        <th class="text-left py-2 px-2 font-semibold">Type</th>
-                        <th class="text-left py-2 px-2 font-semibold">Copy</th>
+                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.runType') }}</th>
+                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.copyStatus') }}</th>
                         <th class="text-left py-2 px-2 font-semibold">{{ t('console.phaseLocalScripts') }}</th>
-                        <th class="text-left py-2 px-2 font-semibold">Deploy</th>
+                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.deployStatus') }}</th>
                         <th class="text-left py-2 px-2 font-semibold">{{ t('console.startTime') }}</th>
-                        <th class="text-left py-2 px-2 font-semibold">End</th>
+                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.endTime') }}</th>
                       </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-100">

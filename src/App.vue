@@ -5,7 +5,7 @@ import { onMounted, onUnmounted, watch } from 'vue';
 import { RouterView } from 'vue-router';
 
 import { startScheduler } from '@/lib/scheduler';
-import { appStore, addLog, setToolRuntime } from '@/lib/store';
+import { appStore, addLog, setToolRuntime, startLiveTicker, stopLiveTicker } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import {
   confirmQuit,
@@ -59,6 +59,7 @@ async function hydrateToolRuntime() {
 }
 
 onMounted(async () => {
+  startLiveTicker();
   let cfg = null;
   try {
     cfg = await getConfig();
@@ -174,6 +175,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  stopLiveTicker();
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;

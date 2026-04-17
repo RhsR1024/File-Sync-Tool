@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import {
-  Trash2, Activity, Eye, Pause, PlayCircle, XCircle, RotateCcw,
+  Trash2, Activity, Eye, Pause, PlayCircle, XCircle, RotateCcw, RefreshCw,
 } from 'lucide-vue-next';
 import type { TaskGroupListItem, TaskSummaryStatus } from '@/lib/tauri';
 import { appStore, type ProgressState } from '@/lib/store';
@@ -149,6 +149,27 @@ function getRowProgress(row: TaskGroupListItem): ProgressState | null {
   if (!showsProgress || !appStore.progress) return null;
   if (appStore.progress.folder === row.folder_name) return appStore.progress;
   return null;
+}
+
+function getLiveElapsed(row: TaskGroupListItem): number {
+  const s = row.summary_status;
+  // Terminal / paused: freeze on backend-reported elapsed
+  if (s === 'completed' || s === 'failed' || s === 'cancelled' || s === 'interrupted'
+      || s === 'partial_failed' || s === 'paused') {
+    return row.elapsed_seconds;
+  }
+  // Actively copying: backend emits live elapsed every 500ms via copy-progress event
+  if (s === 'copying' && appStore.progress && appStore.progress.folder === row.folder_name) {
+    // Read nowTick so Vue tracks it as a reactivity dep (updates 1/sec even if no new progress yet)
+    void appStore.nowTick;
+    return Math.max(row.elapsed_seconds, Math.round(appStore.progress.elapsed));
+  }
+  // Other active phases (cancelling, copy_completed, local_executing, deploying, queued):
+  // derive from started_at against the 1Hz live ticker
+  const start = Date.parse(row.started_at);
+  if (isNaN(start)) return row.elapsed_seconds;
+  const liveDelta = Math.max(0, Math.floor((appStore.nowTick - start) / 1000));
+  return Math.max(row.elapsed_seconds, liveDelta);
 }
 
 function isLiveCopying(row: TaskGroupListItem): boolean {
@@ -315,7 +336,7 @@ const hasAnyTerminal = computed(() => props.rows.some(r => isTerminal(r.summary_
             <!-- Elapsed -->
             <td class="py-2.5 px-2 align-middle text-center">
               <span class="text-[12px] font-mono tabular-nums text-slate-500 whitespace-nowrap">
-                {{ formatDuration(row.elapsed_seconds) }}
+                {{ formatDuration(getLiveElapsed(row)) }}
               </span>
             </td>
 

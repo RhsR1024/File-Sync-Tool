@@ -164,6 +164,11 @@ impl TaskManager {
             group.source_path = request.source_path;
             group.local_target_path = request.local_target_path;
             group.finished_at = None;
+            // Reset pause/cancel state so elapsed_seconds is computed cleanly for the new run
+            group.paused = false;
+            group.cancel_requested = false;
+            group.paused_at = None;
+            group.accumulated_paused_seconds = 0;
 
             group.runs.push(TaskRun {
                 run_id: run_id.clone(),
