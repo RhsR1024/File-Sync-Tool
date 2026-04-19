@@ -103,11 +103,16 @@ watch(
 
 let unlistenShown: UnlistenFn | null = null;
 let unlistenItemAdded: UnlistenFn | null = null;
+// Increments when the panel becomes visible so DynamicScroller re-mounts and
+// measures its container (the virtual scroller doesn't compute visible rows
+// while the window is hidden, which produced an empty "All" view on first open).
+const showCounter = ref(0);
 
 onMounted(async () => {
   unlistenShown = await listen('clipboard-panel-shown', async () => {
     store.search.value = '';
     selectedIndex.value = 0;
+    showCounter.value += 1;
     await store.reload();
     await nextTick();
     searchInput.value?.focus();
@@ -123,9 +128,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex h-screen w-screen flex-col overflow-hidden rounded-2xl bg-white/85 shadow-2xl backdrop-blur-xl">
-    <header class="flex items-center justify-between border-b border-slate-200/60 px-4 py-3">
-      <span class="text-sm font-semibold text-slate-700">{{ t('clipboard.tool.title') }}</span>
+  <div class="flex h-screen w-screen flex-col overflow-hidden bg-white/90 backdrop-blur-xl">
+    <header
+      class="flex items-center justify-between border-b border-slate-200/60 px-4 py-3"
+      data-tauri-drag-region
+    >
+      <span class="pointer-events-none text-sm font-semibold text-slate-700">{{ t('clipboard.tool.title') }}</span>
       <button
         type="button"
         class="text-xs text-slate-400 transition-colors hover:text-slate-700"
@@ -172,6 +180,7 @@ onBeforeUnmount(() => {
       </div>
       <ClipboardList
         v-else
+        :key="`${store.filter.value}-${showCounter}`"
         :items="store.items.value"
         :selected-id="selectedId"
         :compact="true"

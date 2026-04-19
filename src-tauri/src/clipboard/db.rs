@@ -119,17 +119,23 @@ pub fn list_items(conn: &Connection, q: &ClipboardListQuery) -> SqlResult<Clipbo
     // List: filter params + limit + offset
     let limit_placeholder = filter_params.len() + 1;
     let offset_placeholder = filter_params.len() + 2;
+    // When viewing ONLY favorites, respect user-defined drag order
+    // (favorite_sort_index). Otherwise (All/Text/Image/File), sort purely by
+    // recency so favoriting an item doesn't change its position in the list.
+    let order_sql = if matches!(q.filter, ClipboardFilter::Favorite) || q.op_fav_only {
+        "COALESCE(favorite_sort_index, 9999999) ASC,
+         COALESCE(updated_at, created_at) DESC,
+         id DESC"
+    } else {
+        "COALESCE(updated_at, created_at) DESC, id DESC"
+    };
     let list_sql = format!(
         "SELECT id, kind, content_preview, content_full, html, image_path, image_width,
                 image_height, file_paths_json, byte_size, hash, source_app,
                 is_favorite, favorite_sort_index, created_at, updated_at
          FROM clipboard_items
          WHERE {where_sql}
-         ORDER BY
-           is_favorite DESC,
-           CASE WHEN is_favorite=1 THEN COALESCE(favorite_sort_index, 9999999) ELSE 0 END ASC,
-           COALESCE(updated_at, created_at) DESC,
-           id DESC
+         ORDER BY {order_sql}
          LIMIT ?{limit_placeholder} OFFSET ?{offset_placeholder}"
     );
 
@@ -448,9 +454,9 @@ mod tests {
     }
 
     #[test]
-    fn favorites_sort_above_non_favorites() {
-        // Regression: after toggle_favorite, the item should move to the top of
-        // the list (favorites group), not the bottom.
+    fn favoriting_preserves_time_order_in_all_filter() {
+        // Favoriting an item must NOT move it in the "All" view — list stays
+        // purely time-ordered; is_favorite is only a flag.
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
 
@@ -491,14 +497,11 @@ mod tests {
         };
         let items = list_items(&conn, &q).unwrap().items;
         assert_eq!(items.len(), 3);
-        assert_eq!(
-            items[0].content_preview, "old",
-            "favorited item should appear at top"
-        );
-        assert!(items[0].is_favorite);
-        // Non-favorites below, newest first.
-        assert_eq!(items[1].content_preview, "new");
-        assert_eq!(items[2].content_preview, "middle");
+        // Newest first; favorited "old" stays at bottom (its original position).
+        assert_eq!(items[0].content_preview, "new");
+        assert_eq!(items[1].content_preview, "middle");
+        assert_eq!(items[2].content_preview, "old");
+        assert!(items[2].is_favorite);
     }
 
     #[test]

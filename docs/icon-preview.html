@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>File Sync Tool · 图标候选预览</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #3b82f6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 32px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-weight: 700;
+      font-size: 22px;
+    }
+    p.subtitle {
+      color: var(--muted);
+      margin: 0 0 24px;
+      font-size: 14px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      transition: transform 120ms ease, border-color 120ms ease;
+      cursor: pointer;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: var(--accent);
+    }
+    .card.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.4);
+    }
+    .icon-box {
+      width: 128px;
+      height: 128px;
+      border-radius: 22px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .name {
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+    }
+    .tag {
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .chosen-note {
+      margin-top: 24px;
+      padding: 12px 16px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--muted);
+      min-height: 48px;
+    }
+    .chosen-note strong {
+      color: var(--text);
+    }
+  </style>
+</head>
+<body>
+  <h1>File Sync Tool · 图标候选预览</h1>
+  <p class="subtitle">点击任意一个图标即可选中。选中后把候选名称告诉我，我会把对应 SVG 导出为 PNG/ICO 替换项目图标。</p>
+
+  <div class="grid" id="grid"></div>
+
+  <div class="chosen-note" id="chosen">尚未选择。</div>
+
+  <script>
+    const ICONS = [
+      {
+        name: "A. Cloud Sync",
+        tag: "云同步 · 双向箭头",
+        bg: "linear-gradient(135deg,#3b82f6,#06b6d4)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M17 40h30a8 8 0 0 0 0-16c-.3-7.5-6.4-13-13.7-13A14 14 0 0 0 20 22a10 10 0 0 0-3 18z" fill="white" fill-opacity=".95"/>
+          <path d="M26 46l6-6 6 6" stroke="#2563eb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M38 52l-6 6-6-6" stroke="#2563eb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <line x1="32" y1="40" x2="32" y2="58" stroke="#2563eb" stroke-width="3" stroke-linecap="round"/>
+        </svg>`
+      },
+      {
+        name: "B. Folder Arrow",
+        tag: "文件夹 + 箭头",
+        bg: "linear-gradient(135deg,#8b5cf6,#6366f1)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M10 20a4 4 0 0 1 4-4h10l4 4h22a4 4 0 0 1 4 4v22a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4z" fill="white" fill-opacity=".95"/>
+          <path d="M24 36h14m0 0l-5-5m5 5l-5 5" stroke="#4f46e5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>`
+      },
+      {
+        name: "C. Clipboard Layers",
+        tag: "剪贴板 + 多层",
+        bg: "linear-gradient(135deg,#10b981,#14b8a6)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="14" y="12" width="36" height="42" rx="5" fill="white" fill-opacity=".95"/>
+          <rect x="24" y="8" width="16" height="8" rx="2" fill="#0d9488"/>
+          <line x1="22" y1="26" x2="42" y2="26" stroke="#0d9488" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="22" y1="34" x2="42" y2="34" stroke="#0d9488" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="22" y1="42" x2="34" y2="42" stroke="#0d9488" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>`
+      },
+      {
+        name: "D. Sync Circle",
+        tag: "双圆箭头 · 同步",
+        bg: "linear-gradient(135deg,#f59e0b,#ef4444)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 32a20 20 0 0 1 33-15l4-3v12H37l5-4a14 14 0 0 0-24 10" fill="white" fill-opacity=".95"/>
+          <path d="M52 32a20 20 0 0 1-33 15l-4 3V38h12l-5 4a14 14 0 0 0 24-10" fill="white" fill-opacity=".95"/>
+        </svg>`
+      },
+      {
+        name: "E. Dual Arrows",
+        tag: "上下箭头 · 传输",
+        bg: "linear-gradient(135deg,#0ea5e9,#22d3ee)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M20 12v28m0 0l-8-8m8 8l8-8" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M44 52V24m0 0l8 8m-8-8l-8 8" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>`
+      },
+      {
+        name: "F. Server Stack",
+        tag: "服务器堆栈",
+        bg: "linear-gradient(135deg,#1e293b,#475569)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="10" y="12" width="44" height="12" rx="3" fill="white" fill-opacity=".95"/>
+          <rect x="10" y="26" width="44" height="12" rx="3" fill="white" fill-opacity=".8"/>
+          <rect x="10" y="40" width="44" height="12" rx="3" fill="white" fill-opacity=".65"/>
+          <circle cx="18" cy="18" r="2" fill="#22c55e"/>
+          <circle cx="18" cy="32" r="2" fill="#22c55e"/>
+          <circle cx="18" cy="46" r="2" fill="#22c55e"/>
+        </svg>`
+      },
+      {
+        name: "G. Folder Check",
+        tag: "文件夹 · 同步完成",
+        bg: "linear-gradient(135deg,#22c55e,#16a34a)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M10 20a4 4 0 0 1 4-4h10l4 4h22a4 4 0 0 1 4 4v22a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4z" fill="white" fill-opacity=".95"/>
+          <path d="M22 38l7 7 13-14" stroke="#16a34a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>`
+      },
+      {
+        name: "H. Flow Network",
+        tag: "流向 · 网络节点",
+        bg: "linear-gradient(135deg,#ec4899,#a855f7)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="16" cy="16" r="6" fill="white"/>
+          <circle cx="48" cy="16" r="6" fill="white"/>
+          <circle cx="32" cy="48" r="6" fill="white"/>
+          <path d="M20 20l10 24M44 20L34 44M22 16h20" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>`
+      },
+      {
+        name: "I. Hex Chip",
+        tag: "六边形 · 模块",
+        bg: "linear-gradient(135deg,#0f172a,#1e40af)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M32 8l20 12v24L32 56 12 44V20z" fill="white" fill-opacity=".95"/>
+          <path d="M32 20l10 6v12l-10 6-10-6V26z" stroke="#1e40af" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="32" cy="32" r="3" fill="#1e40af"/>
+        </svg>`
+      },
+      {
+        name: "J. Stacked Docs",
+        tag: "多文档 · 版本",
+        bg: "linear-gradient(135deg,#6366f1,#8b5cf6)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="14" y="16" width="28" height="36" rx="3" fill="white" fill-opacity=".7"/>
+          <rect x="20" y="12" width="28" height="36" rx="3" fill="white" fill-opacity=".9"/>
+          <line x1="26" y1="22" x2="42" y2="22" stroke="#6366f1" stroke-width="2" stroke-linecap="round"/>
+          <line x1="26" y1="28" x2="42" y2="28" stroke="#6366f1" stroke-width="2" stroke-linecap="round"/>
+          <line x1="26" y1="34" x2="36" y2="34" stroke="#6366f1" stroke-width="2" stroke-linecap="round"/>
+        </svg>`
+      },
+      {
+        name: "K. Bolt Transfer",
+        tag: "闪电 · 极速",
+        bg: "linear-gradient(135deg,#eab308,#f97316)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M36 6L14 36h14L20 58l28-32H34z" fill="white" fill-opacity=".95"/>
+        </svg>`
+      },
+      {
+        name: "L. Shield Sync",
+        tag: "盾牌 · 安全同步",
+        bg: "linear-gradient(135deg,#059669,#0891b2)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M32 6l20 8v14c0 14-8 24-20 30-12-6-20-16-20-30V14z" fill="white" fill-opacity=".95"/>
+          <path d="M22 34a10 10 0 1 0 2.5-7l-3.5-3v10h10" stroke="#0891b2" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>`
+      },
+      {
+        name: "M. Terminal Arrow",
+        tag: "命令行 · 脚本",
+        bg: "linear-gradient(135deg,#1f2937,#3b82f6)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="8" y="14" width="48" height="36" rx="4" fill="white" fill-opacity=".95"/>
+          <path d="M18 26l7 6-7 6" stroke="#1f2937" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <line x1="30" y1="40" x2="44" y2="40" stroke="#1f2937" stroke-width="3" stroke-linecap="round"/>
+        </svg>`
+      },
+      {
+        name: "N. Layered Chip",
+        tag: "层叠方块 · 极简",
+        bg: "linear-gradient(135deg,#111827,#6b7280)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="12" y="28" width="22" height="22" rx="4" fill="white" fill-opacity=".7"/>
+          <rect x="24" y="18" width="22" height="22" rx="4" fill="white" fill-opacity=".85"/>
+          <rect x="36" y="8" width="16" height="16" rx="4" fill="white"/>
+        </svg>`
+      },
+      {
+        name: "O. Infinity Loop",
+        tag: "无限 · 持续同步",
+        bg: "linear-gradient(135deg,#f43f5e,#fb923c)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M16 32a8 8 0 0 1 14-5l4 5 4-5a8 8 0 1 1 0 10l-4-5-4 5a8 8 0 0 1-14-5z" stroke="white" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>`
+      },
+      {
+        name: "P. Squircle Link",
+        tag: "圆角方块 · 链接",
+        bg: "linear-gradient(135deg,#0ea5e9,#6366f1)",
+        svg: `<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="10" y="10" width="22" height="22" rx="6" fill="white" fill-opacity=".9"/>
+          <rect x="32" y="32" width="22" height="22" rx="6" fill="white" fill-opacity=".9"/>
+          <path d="M22 32V22m10 10H22m10 10v10m10-10h10" stroke="white" stroke-width="3" stroke-linecap="round"/>
+        </svg>`
+      }
+    ];
+
+    const grid = document.getElementById("grid");
+    const chosen = document.getElementById("chosen");
+    let selectedEl = null;
+
+    for (const icon of ICONS) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `
+        <div class="icon-box" style="background:${icon.bg}">${icon.svg}</div>
+        <div class="name">${icon.name}</div>
+        <div class="tag">${icon.tag}</div>
+      `;
+      card.addEventListener("click", () => {
+        if (selectedEl) selectedEl.classList.remove("selected");
+        card.classList.add("selected");
+        selectedEl = card;
+        chosen.innerHTML = `已选择：<strong>${icon.name}</strong> · ${icon.tag}<br><span style="font-size:12px">把这个名称告诉 Claude，即可导出为 PNG/ICO 替换项目图标。</span>`;
+      });
+      grid.appendChild(card);
+    }
+  </script>
+</body>
+</html>

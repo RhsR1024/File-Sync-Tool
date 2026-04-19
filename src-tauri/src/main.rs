@@ -2579,6 +2579,17 @@ async fn enable_appliance_ssh(
 }
 
 fn main() {
+    // Register an explicit AppUserModelID so Windows notifications show the app
+    // name ("File Sync Tool") rather than the launching shell ("PowerShell").
+    // Must run before any notification or WinRT call. Failures are non-fatal.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        let aumid: Vec<u16> = "com.filesync.tool\0".encode_utf16().collect();
+        let _ = SetCurrentProcessExplicitAppUserModelID(PCWSTR(aumid.as_ptr()));
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);

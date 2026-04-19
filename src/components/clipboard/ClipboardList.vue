@@ -34,6 +34,31 @@ function assetUrl(path: string): string {
   return convertFileSrc(path);
 }
 
+function formatTime(tsMs: number): string {
+  const d = new Date(tsMs);
+  const now = new Date();
+  const diffSec = Math.floor((now.getTime() - tsMs) / 1000);
+  if (diffSec < 60) return '刚刚';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  if (sameDay) return `今天 ${hh}:${mm}`;
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday =
+    d.getFullYear() === yesterday.getFullYear() &&
+    d.getMonth() === yesterday.getMonth() &&
+    d.getDate() === yesterday.getDate();
+  if (isYesterday) return `昨天 ${hh}:${mm}`;
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${mo}-${dd} ${hh}:${mm}`;
+}
+
 const itemsWithHeight = computed(() =>
   props.items.map((it) => ({
     ...it,
@@ -97,6 +122,9 @@ function onReorderEnd() {
       <div v-else class="flex-1 truncate text-sm text-slate-700">
         {{ it.content_preview }}
       </div>
+      <span class="shrink-0 self-center text-[10px] tabular-nums text-slate-400">
+        {{ formatTime(it.updated_at ?? it.created_at) }}
+      </span>
     </button>
   </VueDraggable>
   <DynamicScroller
@@ -144,6 +172,9 @@ function onReorderEnd() {
           <div v-else class="flex-1 truncate text-sm text-slate-700">
             {{ item.content_preview }}
           </div>
+          <span class="shrink-0 self-center text-[10px] tabular-nums text-slate-400">
+            {{ formatTime(item.updated_at ?? item.created_at) }}
+          </span>
         </button>
       </DynamicScrollerItem>
     </template>
