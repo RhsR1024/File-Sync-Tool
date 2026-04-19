@@ -28,6 +28,8 @@ const saving = ref(false);
 const error = ref<string | null>(null);
 const winVEnabled = ref(false);
 const winVDialogOpen = ref(false);
+const isElevated = ref(false);
+const runAsAdminEnabled = ref(false);
 
 async function refreshWinV() {
   try {
@@ -37,12 +39,22 @@ async function refreshWinV() {
   }
 }
 
+async function refreshAdmin() {
+  try {
+    isElevated.value = await clipboardApi.isElevated();
+    runAsAdminEnabled.value = await clipboardApi.isRunAsAdminEnabled();
+  } catch {
+    // non-fatal
+  }
+}
+
 async function load() {
   loading.value = true;
   try {
     const got = await clipboardApi.getSettings();
     Object.assign(model, got);
     await refreshWinV();
+    await refreshAdmin();
     error.value = null;
   } catch (e) {
     error.value = String(e);
@@ -101,6 +113,19 @@ async function onWinVConfirm() {
 
 function onWinVCancel() {
   winVDialogOpen.value = false;
+}
+
+async function onRunAsAdminToggle(e: Event) {
+  const target = e.target as HTMLInputElement;
+  const next = target.checked;
+  try {
+    await clipboardApi.setRunAsAdmin(next);
+    runAsAdminEnabled.value = next;
+    model.run_as_admin = next;
+  } catch (err) {
+    error.value = String(err);
+    target.checked = runAsAdminEnabled.value;
+  }
 }
 
 onMounted(load);
@@ -215,6 +240,23 @@ onMounted(load);
               @change="onWinVToggle($event)"
             />
           </label>
+        </div>
+
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <div class="text-sm font-medium text-slate-800">{{ t('clipboard.settings.adminLabel') }}</div>
+            <div class="mt-1">
+              <span
+                class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em]"
+                :class="isElevated
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : 'bg-slate-100 text-slate-600'"
+              >
+                {{ isElevated ? t('clipboard.settings.adminCurrentStatusElevated') : t('clipboard.settings.adminCurrentStatusNormal') }}
+              </span>
+            </div>
+          </div>
+          <input type="checkbox" :checked="runAsAdminEnabled" @change="onRunAsAdminToggle($event)" />
         </div>
       </div>
     </div>

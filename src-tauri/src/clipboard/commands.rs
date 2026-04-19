@@ -277,3 +277,22 @@ pub async fn cb_disable_win_v(
     state.clipboard.settings.write().use_win_v_replacement = false;
     Ok(())
 }
+
+#[tauri::command]
+pub fn cb_is_elevated() -> bool {
+    crate::clipboard::admin::is_elevated()
+}
+
+#[tauri::command]
+pub fn cb_is_run_as_admin_enabled() -> bool {
+    crate::clipboard::admin::is_autostart_as_admin_enabled()
+}
+
+#[tauri::command]
+pub fn cb_set_run_as_admin(state: State<'_, AppState>, enable: bool) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe_path = exe.to_string_lossy().to_string();
+    crate::clipboard::admin::set_autostart_as_admin(&exe_path, enable)?;
+    state.clipboard.settings.write().run_as_admin = enable;
+    Ok(())
+}

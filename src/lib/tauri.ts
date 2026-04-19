@@ -926,4 +926,8 @@ export const clipboardApi = {
   enableWinV: () => invoke<void>('cb_enable_win_v'),
   disableWinV: () => invoke<void>('cb_disable_win_v'),
   isWinVEnabled: () => invoke<boolean>('cb_is_win_v_enabled'),
+  isElevated: () => invoke<boolean>('cb_is_elevated'),
+  isRunAsAdminEnabled: () => invoke<boolean>('cb_is_run_as_admin_enabled'),
+  setRunAsAdmin: (enable: boolean) =>
+    invoke<void>('cb_set_run_as_admin', { enable }),
 };
