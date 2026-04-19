@@ -3,6 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
 
+use crate::clipboard::models::ClipboardSettings;
+
 pub const MIN_SCAN_INTERVAL_MINS: u64 = 5;
 pub const MIN_STABILITY_CHECK_SECS: u64 = 60;
 pub const MIN_RECENT_FILE_GUARD_MINS: u64 = 3;
@@ -163,6 +165,10 @@ pub struct AppConfig {
     /// Default: 5.
     #[serde(default = "default_framework_password_api_timeout_secs")]
     pub framework_password_api_timeout_secs: u64,
+
+    /// Clipboard manager settings (spec §2026-04-19-clipboard-manager §7.1).
+    #[serde(default)]
+    pub clipboard: ClipboardSettings,
 }
 
 fn default_stability_secs() -> u64 {
@@ -210,6 +216,7 @@ impl Default for AppConfig {
             max_task_records: 100,
             appliance_ssh_api_timeout_secs: 5,
             framework_password_api_timeout_secs: 5,
+            clipboard: ClipboardSettings::default(),
         }
     }
 }
