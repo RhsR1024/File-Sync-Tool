@@ -2756,11 +2756,21 @@ fn main() {
                 }
             }
 
-            // Auto-hide on focus loss.
+            // Auto-hide on focus loss. We debounce by 150ms and re-check
+            // `is_focused()` because calling `startDragging()` from the header
+            // causes a transient Focused(false) -> Focused(true) flicker
+            // during the WM_NCLBUTTONDOWN drag modal loop. Without this guard
+            // the panel would hide the instant the user pressed the header.
             let panel_clone = panel.clone();
             panel.on_window_event(move |ev| {
                 if let tauri::WindowEvent::Focused(false) = ev {
-                    let _ = panel_clone.hide();
+                    let panel = panel_clone.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                        if !panel.is_focused().unwrap_or(false) {
+                            let _ = panel.hide();
+                        }
+                    });
                 }
             });
 
