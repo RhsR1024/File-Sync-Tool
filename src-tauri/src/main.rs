@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod async_utils;
+mod clipboard;
 mod code_count;
 mod config;
 mod deploy;
