@@ -192,7 +192,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex h-screen bg-slate-50 font-sans text-slate-900">
+  <router-view v-if="$route.meta?.noLayout" />
+  <div v-else class="flex h-screen bg-slate-50 font-sans text-slate-900">
     <Sidebar />
     <main class="flex flex-1 flex-col overflow-hidden">
       <router-view v-slot="{ Component }">

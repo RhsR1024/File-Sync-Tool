@@ -58,6 +58,15 @@ const routes: RouteRecordRaw[] = [
     path: '/tools/file-share',
     component: () => import('../pages/FileSharePage.vue'),
   },
+  {
+    path: '/tools/clipboard',
+    component: () => import('../pages/ClipboardManagerPage.vue'),
+  },
+  {
+    path: '/clipboard-panel',
+    component: () => import('../pages/ClipboardPanelPage.vue'),
+    meta: { noLayout: true },
+  },
 ]
 
 const router = createRouter({
