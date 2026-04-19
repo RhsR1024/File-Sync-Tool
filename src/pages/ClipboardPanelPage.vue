@@ -50,6 +50,17 @@ function close() {
   void getCurrentWindow().hide();
 }
 
+// Explicit drag handler. `data-tauri-drag-region` alone is unreliable on
+// transparent undecorated windows in Tauri 2.10, so we also start dragging
+// directly on left-button mousedown in the header (skipping interactive
+// children like the close button).
+function onHeaderMouseDown(e: MouseEvent) {
+  if (e.button !== 0) return;
+  const target = e.target as HTMLElement | null;
+  if (target && target.closest('button, input, a, [data-no-drag]')) return;
+  void getCurrentWindow().startDragging();
+}
+
 function changeFilter(dir: 1 | -1) {
   const cur = store.filter.value;
   const curIdx = filters.indexOf(cur);
@@ -140,12 +151,14 @@ onBeforeUnmount(() => {
 <template>
   <div class="flex h-screen w-screen flex-col overflow-hidden bg-white/90 backdrop-blur-xl">
     <header
-      class="flex items-center justify-between border-b border-slate-200/60 px-4 py-3"
+      class="flex select-none items-center justify-between border-b border-slate-200/60 px-4 py-3"
       data-tauri-drag-region
+      @mousedown="onHeaderMouseDown"
     >
       <span class="pointer-events-none text-sm font-semibold text-slate-700">{{ t('clipboard.tool.title') }}</span>
       <button
         type="button"
+        data-no-drag
         class="text-xs text-slate-400 transition-colors hover:text-slate-700"
         :title="t('clipboard.actions.close')"
         @click="close"
