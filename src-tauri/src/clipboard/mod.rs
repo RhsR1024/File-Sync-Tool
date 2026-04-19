@@ -3,6 +3,7 @@
 
 pub mod models;
 pub mod db;
+pub mod retention;
 pub mod watcher;
 pub mod image_store;
 pub mod hotkey;

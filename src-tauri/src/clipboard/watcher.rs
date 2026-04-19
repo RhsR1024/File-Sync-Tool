@@ -160,9 +160,14 @@ fn insert_or_touch(state: &ClipboardState, item: NewItem) -> Result<(), String> 
     if db::touch_item_by_hash(&conn, &item.hash).map_err(|e| e.to_string())? {
         return Ok(());
     }
-    db::insert_item(&conn, &item)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    db::insert_item(&conn, &item).map_err(|e| e.to_string())?;
+
+    // Run retention cleanup on the inserted row's path. Non-fatal if it fails.
+    let settings = state.settings.read().clone();
+    if let Err(e) = crate::clipboard::retention::run_cleanup(&conn, &settings) {
+        eprintln!("[clipboard] retention cleanup failed: {e}");
+    }
+    Ok(())
 }
 
 fn notify_added(app: &AppHandle) {
