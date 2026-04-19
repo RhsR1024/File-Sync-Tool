@@ -29,6 +29,28 @@ pub struct ClipboardState {
 }
 
 impl ClipboardState {
+    pub fn init(
+        app_data_dir: &std::path::Path,
+        settings: ClipboardSettings,
+    ) -> Result<std::sync::Arc<Self>, String> {
+        let db_path = app_data_dir.join("clipboard.db");
+        let image_dir = app_data_dir.join("clipboard_images");
+        std::fs::create_dir_all(&image_dir)
+            .map_err(|e| format!("create image dir: {e}"))?;
+
+        let conn = db::open(&db_path).map_err(|e| format!("open db: {e}"))?;
+
+        Ok(std::sync::Arc::new(Self {
+            db: std::sync::Arc::new(parking_lot::Mutex::new(conn)),
+            image_dir,
+            is_enabled: std::sync::atomic::AtomicBool::new(settings.enabled),
+            last_hash: parking_lot::Mutex::new(None),
+            settings: std::sync::Arc::new(parking_lot::RwLock::new(settings)),
+            watcher_handle: parking_lot::Mutex::new(None),
+            hotkey_handle: parking_lot::Mutex::new(None),
+        }))
+    }
+
     pub fn shutdown(&self) {
         if let Some(h) = self.watcher_handle.lock().take() {
             h.stop();

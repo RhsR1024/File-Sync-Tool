@@ -60,6 +60,7 @@ struct AppState {
     code_count_should_cancel: Arc<AtomicBool>,
     screen_share: Arc<screenshare::ScreenShareHandle>,
     file_share: Arc<fileshare::FileShareHandle>,
+    clipboard: Arc<clipboard::ClipboardState>,
 }
 
 #[allow(dead_code)]
@@ -2664,6 +2665,16 @@ fn main() {
             let _ = sync_launch_on_startup(
                 config.launch_and_auto_scan || config.launch_and_auto_start_file_share,
             );
+
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("app_data_dir: {e}"))?;
+            let clipboard_state = clipboard::ClipboardState::init(
+                &app_data_dir,
+                config.clipboard.clone(),
+            )?;
+
             app.manage(network::NetworkState::default());
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
@@ -2685,6 +2696,7 @@ fn main() {
                 code_count_should_cancel: Arc::new(AtomicBool::new(false)),
                 screen_share: Arc::new(screenshare::ScreenShareHandle::new()),
                 file_share: Arc::new(fileshare::FileShareHandle::new()),
+                clipboard: clipboard_state,
             });
             Ok(())
         })
