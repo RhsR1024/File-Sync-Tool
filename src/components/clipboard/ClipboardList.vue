@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 
 import type { ClipboardItem } from '@/lib/clipboardTypes';
@@ -27,9 +28,7 @@ function heightOf(it: ClipboardItem): number {
 }
 
 function assetUrl(path: string): string {
-  // Convert Windows backslashes to forward slashes and prepend the asset:// scheme.
-  const normalized = path.replace(/\\/g, '/');
-  return `asset://localhost/${encodeURI(normalized)}`;
+  return convertFileSrc(path);
 }
 
 const itemsWithHeight = computed(() =>
