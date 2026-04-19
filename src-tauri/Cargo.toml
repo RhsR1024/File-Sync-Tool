@@ -72,6 +72,7 @@ rayon = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
