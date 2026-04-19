@@ -6,7 +6,9 @@ import { useI18n } from 'vue-i18n';
 
 import { useClipboardStore } from '@/composables/useClipboardStore';
 import { useClipboardHotkey } from '@/composables/useClipboardHotkey';
+import { useHoverPreview } from '@/composables/useHoverPreview';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
+import ClipboardHoverPreview from '@/components/clipboard/ClipboardHoverPreview.vue';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter } from '@/lib/clipboardTypes';
 
@@ -55,6 +57,14 @@ function setFilter(f: ClipboardFilter) {
 function selectById(id: number) {
   const idx = store.items.value.findIndex((it) => it.id === id);
   if (idx >= 0) selectedIndex.value = idx;
+}
+
+const preview = useHoverPreview();
+
+function onListSelect(id: number) {
+  selectById(id);
+  const item = store.items.value.find((it) => it.id === id);
+  if (item && item.kind === 'image') preview.onEnter(item);
 }
 
 useClipboardHotkey({
@@ -141,7 +151,11 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <div class="flex-1 overflow-hidden px-2 pb-2">
+    <div
+      class="flex-1 overflow-hidden px-2 pb-2"
+      @mouseleave="preview.onLeave()"
+      @wheel="preview.onWheelZoom($event)"
+    >
       <div v-if="store.items.value.length === 0" class="flex h-full items-center justify-center p-6 text-center text-sm text-slate-400">
         {{ t('clipboard.panel.empty') }}
       </div>
@@ -150,9 +164,15 @@ onBeforeUnmount(() => {
         :items="store.items.value"
         :selected-id="selectedId"
         :compact="true"
-        @select="selectById"
+        @select="onListSelect"
         @activate="(id) => paste(id, false)"
       />
     </div>
   </div>
+
+  <ClipboardHoverPreview
+    v-if="preview.activeItem.value"
+    :item="preview.activeItem.value"
+    :scale="preview.scale.value"
+  />
 </template>
