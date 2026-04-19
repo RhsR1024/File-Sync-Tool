@@ -126,8 +126,10 @@ pub fn list_items(conn: &Connection, q: &ClipboardListQuery) -> SqlResult<Clipbo
          FROM clipboard_items
          WHERE {where_sql}
          ORDER BY
-           CASE WHEN is_favorite=1 THEN COALESCE(favorite_sort_index, 9999999) END ASC,
-           COALESCE(updated_at, created_at) DESC
+           is_favorite DESC,
+           CASE WHEN is_favorite=1 THEN COALESCE(favorite_sort_index, 9999999) ELSE 0 END ASC,
+           COALESCE(updated_at, created_at) DESC,
+           id DESC
          LIMIT ?{limit_placeholder} OFFSET ?{offset_placeholder}"
     );
 
@@ -443,6 +445,60 @@ mod tests {
         assert!(item.is_favorite);
         let item = toggle_favorite(&conn, id).unwrap();
         assert!(!item.is_favorite);
+    }
+
+    #[test]
+    fn favorites_sort_above_non_favorites() {
+        // Regression: after toggle_favorite, the item should move to the top of
+        // the list (favorites group), not the bottom.
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        for (i, text) in ["old", "middle", "new"].iter().enumerate() {
+            insert_item(
+                &conn,
+                &NewItem {
+                    kind: ContentKind::Text,
+                    content_preview: (*text).to_string(),
+                    content_full: None,
+                    html: None,
+                    image_path: None,
+                    image_width: None,
+                    image_height: None,
+                    file_paths: None,
+                    byte_size: 0,
+                    hash: format!("h_{i}"),
+                    source_app: None,
+                },
+            )
+            .unwrap();
+        }
+        // Favorite the "old" (id=1, oldest) item.
+        toggle_favorite(&conn, 1).unwrap();
+
+        let q = ClipboardListQuery {
+            filter: ClipboardFilter::All,
+            search: String::new(),
+            op_type: None,
+            op_from_ms: None,
+            op_to_ms: None,
+            op_app: None,
+            op_fav_only: false,
+            op_size_gt: None,
+            op_size_lt: None,
+            offset: 0,
+            limit: 10,
+        };
+        let items = list_items(&conn, &q).unwrap().items;
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[0].content_preview, "old",
+            "favorited item should appear at top"
+        );
+        assert!(items[0].is_favorite);
+        // Non-favorites below, newest first.
+        assert_eq!(items[1].content_preview, "new");
+        assert_eq!(items[2].content_preview, "middle");
     }
 
     #[test]

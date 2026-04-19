@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 import MainConsole from '@/pages/MainConsole.vue'
 import TaskStatusPage from '@/pages/TaskStatusPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
@@ -70,7 +70,7 @@ const routes: RouteRecordRaw[] = [
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHashHistory(),
   routes,
 })
 

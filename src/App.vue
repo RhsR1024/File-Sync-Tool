@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import Sidebar from '@/components/Sidebar.vue';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { onMounted, onUnmounted, watch } from 'vue';
 import { RouterView } from 'vue-router';
 
@@ -59,6 +60,12 @@ async function hydrateToolRuntime() {
 }
 
 onMounted(async () => {
+  // Skip main-window init in auxiliary windows (e.g. clipboard-panel):
+  // those windows only render their own page and must not duplicate event
+  // listeners, scheduler auto-start, or before-quit handling.
+  const label = getCurrentWindow().label;
+  if (label !== 'main') return;
+
   startLiveTicker();
   let cfg = null;
   try {
