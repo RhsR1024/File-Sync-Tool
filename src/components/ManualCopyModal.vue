@@ -309,11 +309,10 @@ watch(() => props.isOpen, (open) => {
 
 <template>
   <Transition name="modal-fade">
-    <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @click="closeModal">
+    <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <!-- Modal Container -->
       <div
         class="relative bg-white rounded-2xl shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto"
-        @click.stop
       >
         <!-- Modal Header -->
         <div class="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
@@ -516,7 +515,7 @@ watch(() => props.isOpen, (open) => {
               @click="!isSubmitting && cancelExistingTargetDecision()"
             >
               <div
-                class="w-full max-w-md rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-400/20 overflow-hidden"
+                class="w-full max-w-xl rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-400/20 overflow-hidden"
                 @click.stop
               >
                 <!-- Dialog header -->
@@ -525,10 +524,10 @@ watch(() => props.isOpen, (open) => {
                     <AlertTriangle class="w-5 h-5 text-amber-600" />
                   </div>
                   <div class="min-w-0 pt-0.5">
-                    <div class="text-base font-bold text-slate-800">
+                    <div class="text-base font-semibold text-slate-800">
                       {{ t('manualCopy.targetExistsDecisionTitle') }}
                     </div>
-                    <p class="text-xs leading-5 text-slate-500 mt-1">
+                    <p class="text-sm leading-6 text-slate-500 mt-1.5 break-all">
                       {{ existingTargetSummary(existingTargetPreview) }}
                     </p>
                   </div>
@@ -545,11 +544,11 @@ watch(() => props.isOpen, (open) => {
                     <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center mt-0.5">
                       <RefreshCw class="w-3.5 h-3.5 text-white" />
                     </div>
-                    <div>
-                      <div class="text-sm font-bold text-blue-800">
+                    <div class="min-w-0 flex-1">
+                      <div class="text-sm font-semibold text-blue-800">
                         {{ t('manualCopy.overwriteAndQueue') }}
                       </div>
-                      <div class="text-xs text-slate-600 mt-1 leading-5">
+                      <div class="text-xs text-slate-600 mt-1 leading-5 break-words">
                         {{ overwriteActionHint(existingTargetPreview) }}
                       </div>
                     </div>
@@ -564,11 +563,11 @@ watch(() => props.isOpen, (open) => {
                     <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center mt-0.5">
                       <FilePlus2 class="w-3.5 h-3.5 text-white" />
                     </div>
-                    <div>
-                      <div class="text-sm font-bold text-emerald-800">
+                    <div class="min-w-0 flex-1">
+                      <div class="text-sm font-semibold text-emerald-800">
                         {{ t('manualCopy.skipAndQueue') }}
                       </div>
-                      <div class="text-xs text-slate-600 mt-1 leading-5">
+                      <div class="text-xs text-slate-600 mt-1 leading-5 break-words">
                         {{ skipActionHint(existingTargetPreview) }}
                       </div>
                     </div>

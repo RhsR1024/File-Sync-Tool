@@ -454,13 +454,23 @@ export interface ApplianceSshResult {
   port?: number;
   whitelistSourceIp?: string;
   whitelistApplied?: boolean;
+  jumpHost?: string;
+}
+
+export interface ApplianceSshTarget {
+  ip: string;
+  jumpHost?: string;
 }
 
 export interface EnableApplianceSshRequest {
-  ips: string[];
+  targets: ApplianceSshTarget[];
   sshUsername?: string;
   sshPassword?: string;
   addWhitelistRule: boolean;
+  whitelistCidr?: string;
+  jumpHostUseSeparateCreds?: boolean;
+  jumpHostUsername?: string;
+  jumpHostPassword?: string;
 }
 
 // Internal: Login API response (used by backend)

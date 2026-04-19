@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from 'vue';
 import {
   Trash2, Activity, Eye, Pause, PlayCircle, XCircle, RotateCcw, RefreshCw,
 } from 'lucide-vue-next';
@@ -7,7 +6,7 @@ import type { TaskGroupListItem, TaskSummaryStatus } from '@/lib/tauri';
 import { appStore, type ProgressState } from '@/lib/store';
 import { useI18n } from 'vue-i18n';
 
-const props = defineProps<{
+defineProps<{
   rows: TaskGroupListItem[];
   selectedTaskGroupId: string | null;
 }>();
@@ -15,7 +14,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   select: [taskGroupId: string];
   clear: [taskGroupId: string];
-  clearAll: [];
   pauseRun: [taskGroupId: string, runId: string];
   resumeRun: [taskGroupId: string, runId: string];
   cancelRun: [taskGroupId: string, runId: string];
@@ -195,26 +193,10 @@ function progressSizeText(row: TaskGroupListItem): string {
   if (!p) return '';
   return formatSizePair(p.copied, p.total);
 }
-
-const hasAnyTerminal = computed(() => props.rows.some(r => isTerminal(r.summary_status)));
 </script>
 
 <template>
   <div class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-    <!-- Clear-all toolbar (only when there are terminal rows) -->
-    <div
-      v-if="hasAnyTerminal"
-      class="px-4 py-2 flex justify-end border-b border-slate-100 bg-slate-50/40"
-    >
-      <button
-        @click.stop="emit('clearAll')"
-        class="text-slate-400 hover:text-red-500 px-2 py-1 rounded hover:bg-red-50 transition-colors inline-flex items-center gap-1 text-[12px]"
-      >
-        <Trash2 class="w-3.5 h-3.5" />
-        {{ t('console.clearAllGroups') }}
-      </button>
-    </div>
-
     <div class="overflow-x-auto">
       <table class="w-full table-fixed" style="min-width: 1240px">
         <colgroup>
@@ -361,29 +343,31 @@ const hasAnyTerminal = computed(() => props.rows.some(r => isTerminal(r.summary_
 
             <!-- Actions -->
             <td class="py-2.5 px-2 align-middle">
-              <div class="flex items-center justify-center gap-1">
-                <!-- Active task: pause / resume / cancel -->
+              <div class="flex items-center justify-center gap-1.5">
+                <!-- Active task: pause⇄resume toggle + cancel -->
                 <template v-if="isActive(row.summary_status) && row.latest_run_id">
                   <button
-                    @click.stop="emit('pauseRun', row.task_group_id, row.latest_run_id!)"
-                    class="p-1.5 rounded-md text-amber-500 hover:text-amber-700 hover:bg-amber-50 transition-colors"
-                    :title="t('console.pause')"
-                  >
-                    <Pause class="w-3.5 h-3.5" />
-                  </button>
-                  <button
+                    v-if="row.summary_status === 'paused'"
                     @click.stop="emit('resumeRun', row.task_group_id, row.latest_run_id!)"
-                    class="p-1.5 rounded-md text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
+                    class="p-2 rounded-md text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
                     :title="t('console.resume')"
                   >
-                    <PlayCircle class="w-3.5 h-3.5" />
+                    <PlayCircle class="w-4 h-4" />
+                  </button>
+                  <button
+                    v-else
+                    @click.stop="emit('pauseRun', row.task_group_id, row.latest_run_id!)"
+                    class="p-2 rounded-md text-amber-500 hover:text-amber-700 hover:bg-amber-50 transition-colors"
+                    :title="t('console.pause')"
+                  >
+                    <Pause class="w-4 h-4" />
                   </button>
                   <button
                     @click.stop="emit('cancelRun', row.task_group_id, row.latest_run_id!)"
-                    class="p-1.5 rounded-md text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                    class="p-2 rounded-md text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors"
                     :title="t('console.cancel')"
                   >
-                    <XCircle class="w-3.5 h-3.5" />
+                    <XCircle class="w-4 h-4" />
                   </button>
                 </template>
                 <!-- Terminal: retry deploy (if had_failures) / retry run (if cancelled) + clear -->
@@ -391,25 +375,26 @@ const hasAnyTerminal = computed(() => props.rows.some(r => isTerminal(r.summary_
                   <button
                     v-if="row.summary_status === 'cancelled'"
                     @click.stop="emit('retryRun', row.task_group_id)"
-                    class="p-1.5 rounded-md bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 border border-emerald-200 transition-colors"
+                    class="p-2 rounded-md bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 border border-emerald-200 transition-colors"
                     :title="t('console.retryRun')"
                   >
-                    <RefreshCw class="w-3.5 h-3.5" />
+                    <RefreshCw class="w-4 h-4" />
                   </button>
                   <button
                     v-else-if="row.had_failures"
                     @click.stop="emit('retryDeploy', row.task_group_id)"
-                    class="p-1.5 rounded-md bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700 border border-amber-200 transition-colors"
+                    class="p-2 rounded-md bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700 border border-amber-200 transition-colors"
                     :title="t('console.retryDeploy')"
                   >
-                    <RotateCcw class="w-3.5 h-3.5" />
+                    <RotateCcw class="w-4 h-4" />
                   </button>
+                  <span v-else class="inline-block w-8 h-8 shrink-0" aria-hidden="true"></span>
                   <button
                     @click.stop="emit('clear', row.task_group_id)"
-                    class="p-1.5 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                    class="p-2 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
                     :title="t('console.clearGroup')"
                   >
-                    <Trash2 class="w-3.5 h-3.5" />
+                    <Trash2 class="w-4 h-4" />
                   </button>
                 </template>
                 <span v-else class="text-[11px] text-slate-300">-</span>

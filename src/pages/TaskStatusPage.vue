@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onActivated } from 'vue';
-import { Play, Square, RefreshCw, Clock, Activity, Copy } from 'lucide-vue-next';
+import { Play, Square, RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, Trash2 } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
 import TaskGroupsTable from '@/components/tasks/TaskGroupsTable.vue';
@@ -47,6 +47,12 @@ function showToast(message: string, tone: 'success' | 'error' | 'info' = 'info')
 }
 
 const rows = computed(() => buildTaskRows(taskStateStore.groups));
+
+const hasAnyTerminal = computed(() => rows.value.some(r => {
+  const s = r.summary_status;
+  return s === 'completed' || s === 'failed' || s === 'cancelled'
+    || s === 'interrupted' || s === 'partial_failed';
+}));
 
 async function handleSelect(taskGroupId: string) {
   await taskStateStore.selectTaskGroup(taskGroupId);
@@ -127,9 +133,16 @@ async function handleRetryRun(taskGroupId: string) {
     return;
   }
 
+  // Derive original target_root_path from the persisted local_target_path.
+  // local_target_path is always target_root + folder_name, so its parent is the
+  // original target_root — passing that back lets the backend merge the retry
+  // into the existing task group (via matching merge_key) instead of nesting
+  // folder_name again and creating a fresh group each time.
+  const targetRoot = deriveTargetRootPath(taskRow.local_target_path);
+
   try {
     // Preview the copy to check if target exists
-    const preview = await previewTemporaryCopy(taskRow.source_path, taskRow.local_target_path);
+    const preview = await previewTemporaryCopy(taskRow.source_path, targetRoot);
 
     if (preview.target_exists) {
       // Target exists, show dialog for user to choose
@@ -137,11 +150,11 @@ async function handleRetryRun(taskGroupId: string) {
       pendingRetryRequest.value = {
         taskGroupId,
         source: taskRow.source_path,
-        target: taskRow.local_target_path,
+        target: targetRoot,
       };
     } else {
       // Target doesn't exist, queue directly
-      await retryConfirmQueue(taskRow.source_path, taskRow.local_target_path, false);
+      await retryConfirmQueue(taskRow.source_path, targetRoot, false);
     }
   } catch (e) {
     addLog(`Retry run preview failed: ${e}`, 'error');
@@ -149,9 +162,39 @@ async function handleRetryRun(taskGroupId: string) {
   }
 }
 
+function deriveTargetRootPath(localTargetPath: string): string {
+  const trimmed = localTargetPath.trim().replace(/[\\/]+$/, '');
+  const lastSep = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'));
+  if (lastSep <= 0) return trimmed;
+  // Preserve drive root form like "C:\" instead of collapsing to "C:"
+  if (lastSep === 2 && trimmed.charAt(1) === ':') {
+    return trimmed.substring(0, 3);
+  }
+  return trimmed.substring(0, lastSep);
+}
+
 function clearRetryTargetDecision() {
   retryTargetPreview.value = null;
   pendingRetryRequest.value = null;
+}
+
+function retryDialogSummary(preview: ManualCopyPreview): string {
+  if (preview.source_kind === 'file') {
+    return t('manualCopy.targetExistsFileDecision', { path: preview.resolved_target_path });
+  }
+  return t('manualCopy.targetExistsDirectoryDecision', { path: preview.resolved_target_path });
+}
+
+function retryOverwriteHint(preview: ManualCopyPreview): string {
+  return preview.source_kind === 'file'
+    ? t('manualCopy.overwriteFileHint')
+    : t('manualCopy.overwriteDirectoryHint');
+}
+
+function retrySkipHint(preview: ManualCopyPreview): string {
+  return preview.source_kind === 'file'
+    ? t('manualCopy.skipFileHint')
+    : t('manualCopy.skipDirectoryHint');
 }
 
 async function retryConfirmQueue(source: string, target: string, overwriteExisting: boolean) {
@@ -270,6 +313,15 @@ onMounted(async () => {
             <Copy class="w-4 h-4" />
             {{ t('manualCopy.title') }}
           </button>
+
+          <button
+            v-if="hasAnyTerminal"
+            @click="handleClearAll"
+            class="px-4 py-2 rounded-lg font-bold bg-white text-slate-500 border border-slate-200 hover:bg-red-50 hover:border-red-200 hover:text-red-600 transition-all flex items-center gap-2 shadow-sm active:scale-95"
+          >
+            <Trash2 class="w-4 h-4" />
+            {{ t('console.clearAllGroups') }}
+          </button>
         </div>
       </div>
 
@@ -288,7 +340,6 @@ onMounted(async () => {
           :selected-task-group-id="taskStateStore.selectedTaskGroupId"
           @select="handleSelect"
           @clear="handleClearGroup"
-          @clear-all="handleClearAll"
           @pause-run="handlePause"
           @resume-run="handleResume"
           @cancel-run="handleCancel"
@@ -304,9 +355,6 @@ onMounted(async () => {
       :task-logs="taskStateStore.taskLogs"
       :is-loading="taskStateStore.isLoadingDetail"
       @retry-deploy="handleRetryDeploy"
-      @pause-run="handlePause"
-      @resume-run="handleResume"
-      @cancel-run="handleCancel"
       @close="handleCloseDetail"
     />
 
@@ -319,52 +367,80 @@ onMounted(async () => {
 
     <!-- Retry target exists dialog -->
     <Teleport to="body">
-      <Transition
-        enter-active-class="transition-opacity duration-200"
-        leave-active-class="transition-opacity duration-150"
-        enter-from-class="opacity-0"
-        leave-to-class="opacity-0"
-      >
+      <Transition name="retry-confirm-fade">
         <div
           v-if="retryTargetPreview"
-          class="fixed inset-0 z-[100] flex items-center justify-center p-6"
+          class="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 backdrop-blur-sm px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="retry-dialog-title"
+          @click="clearRetryTargetDecision"
         >
-          <!-- Backdrop -->
           <div
-            class="absolute inset-0 bg-slate-950/40 backdrop-blur-[2px]"
-            @click="clearRetryTargetDecision"
-          ></div>
+            class="w-full max-w-xl rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/20 overflow-hidden"
+            @click.stop
+          >
+            <!-- Header -->
+            <div class="flex items-start gap-4 px-6 pt-6 pb-5 border-b border-slate-100">
+              <div class="flex-shrink-0 w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center">
+                <AlertTriangle class="w-5 h-5 text-amber-600" />
+              </div>
+              <div class="min-w-0 pt-0.5 flex-1">
+                <div id="retry-dialog-title" class="text-base font-semibold text-slate-800">
+                  {{ t('manualCopy.targetExistsDecisionTitle') }}
+                </div>
+                <p class="text-sm leading-6 text-slate-500 mt-1.5 break-all">
+                  {{ retryDialogSummary(retryTargetPreview) }}
+                </p>
+              </div>
+            </div>
 
-          <!-- Modal -->
-          <div class="relative z-10 bg-white rounded-2xl shadow-2xl shadow-slate-900/10 border border-slate-200/80 w-full max-w-md p-6">
-            <h3 class="text-base font-bold text-slate-800 mb-2">{{ t('manualCopy.targetExistsDecisionTitle') }}</h3>
-            <p class="text-sm text-slate-600 mb-1">{{ retryTargetPreview.resolved_target_path }}</p>
-            <p class="text-sm text-slate-500 mb-6">
-              {{
-                retryTargetPreview.source_kind === 'file'
-                  ? t('manualCopy.targetExistsFileDecision', { path: retryTargetPreview.resolved_target_path })
-                  : t('manualCopy.targetExistsDirectoryDecision', { path: retryTargetPreview.resolved_target_path })
-              }}
-            </p>
-
-            <div class="flex gap-3">
-              <button
-                @click="clearRetryTargetDecision"
-                class="flex-1 px-4 py-2 rounded-lg font-bold border border-slate-200 text-slate-600 hover:bg-slate-50 transition-all active:scale-95"
-              >
-                {{ t('console.cancel') }}
-              </button>
-              <button
-                @click="retryConfirmQueue(pendingRetryRequest!.source, pendingRetryRequest!.target, false)"
-                class="flex-1 px-4 py-2 rounded-lg font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-all active:scale-95"
-              >
-                {{ t('manualCopy.skipAndQueue') }}
-              </button>
+            <!-- Option cards -->
+            <div class="p-4 space-y-2.5">
+              <!-- Overwrite -->
               <button
                 @click="retryConfirmQueue(pendingRetryRequest!.source, pendingRetryRequest!.target, true)"
-                class="flex-1 px-4 py-2 rounded-lg font-bold bg-blue-600 text-white hover:bg-blue-700 transition-all active:scale-95"
+                class="w-full flex items-start gap-3.5 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3.5 text-left transition-all hover:border-blue-300 hover:bg-blue-100 hover:shadow-sm active:scale-[0.99]"
               >
-                {{ t('manualCopy.overwriteAndQueue') }}
+                <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center mt-0.5">
+                  <RefreshCw class="w-3.5 h-3.5 text-white" />
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-semibold text-blue-800">
+                    {{ t('manualCopy.overwriteAndQueue') }}
+                  </div>
+                  <div class="text-xs text-slate-600 mt-1 leading-5 break-words">
+                    {{ retryOverwriteHint(retryTargetPreview) }}
+                  </div>
+                </div>
+              </button>
+
+              <!-- Skip -->
+              <button
+                @click="retryConfirmQueue(pendingRetryRequest!.source, pendingRetryRequest!.target, false)"
+                class="w-full flex items-start gap-3.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3.5 text-left transition-all hover:border-emerald-300 hover:bg-emerald-100 hover:shadow-sm active:scale-[0.99]"
+              >
+                <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center mt-0.5">
+                  <FilePlus2 class="w-3.5 h-3.5 text-white" />
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-semibold text-emerald-800">
+                    {{ t('manualCopy.skipAndQueue') }}
+                  </div>
+                  <div class="text-xs text-slate-600 mt-1 leading-5 break-words">
+                    {{ retrySkipHint(retryTargetPreview) }}
+                  </div>
+                </div>
+              </button>
+            </div>
+
+            <!-- Footer cancel -->
+            <div class="px-4 pb-4 flex justify-end border-t border-slate-100 pt-3">
+              <button
+                @click="clearRetryTargetDecision"
+                class="px-4 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors"
+              >
+                {{ t('manualCopy.cancelConflictDecision') }}
               </button>
             </div>
           </div>
@@ -398,3 +474,25 @@ onMounted(async () => {
     </Teleport>
   </div>
 </template>
+
+<style scoped>
+.retry-confirm-fade-enter-active {
+  transition: opacity 0.2s ease;
+}
+.retry-confirm-fade-leave-active {
+  transition: opacity 0.15s ease;
+}
+.retry-confirm-fade-enter-from,
+.retry-confirm-fade-leave-to {
+  opacity: 0;
+}
+.retry-confirm-fade-enter-active > div,
+.retry-confirm-fade-leave-active > div {
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.retry-confirm-fade-enter-from > div,
+.retry-confirm-fade-leave-to > div {
+  opacity: 0;
+  transform: scale(0.96);
+}
+</style>

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { AlertCircle, CheckCircle2, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe } from 'lucide-vue-next';
-import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshResult } from '../lib/tauri';
+import { AlertCircle, CheckCircle2, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, X as XIcon } from 'lucide-vue-next';
+import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshResult, type ApplianceSshTarget } from '../lib/tauri';
 
 defineOptions({
   name: 'EnableApplianceSshPage',
@@ -24,6 +24,25 @@ const currentProgress = ref<{ current: number; total: number } | null>(null);
 const showInfoDetail = ref<boolean>(false);
 const apiTimeoutSecs = ref<number>(5);
 
+// Jump-host targets: each row is a pair of (jumpHost, target) where the jump
+// host A has the management API and the target B sits behind it.
+interface JumpHostPair {
+  jump: string;
+  target: string;
+}
+const jumpHostPairs = ref<JumpHostPair[]>([]);
+
+// Whitelist source: 'local' auto-detects the local IP; 'cidr' uses a
+// user-provided network range (replaces local IP, not additive).
+const whitelistSourceMode = ref<'local' | 'cidr'>('local');
+const whitelistCidr = ref<string>('');
+
+// When at least one jump-host pair is configured, allow using separate SSH
+// credentials for the jump host (common credentials by default).
+const useSeparateJumpHostCreds = ref<boolean>(false);
+const jumpHostUsername = ref<string>('');
+const jumpHostPassword = ref<string>('');
+
 const serverOptions = computed(() => {
   if (!config.value) return [];
   return config.value.servers
@@ -41,6 +60,15 @@ const isValidIp = (ip: string): boolean => {
   const parts = ip.split('.');
   if (parts.length !== 4) return false;
   return parts.every(p => /^\d+$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
+};
+
+const isValidCidr = (cidr: string): boolean => {
+  const [addr, prefix] = cidr.split('/');
+  if (!addr || prefix === undefined) return false;
+  if (!isValidIp(addr)) return false;
+  if (!/^\d+$/.test(prefix)) return false;
+  const p = Number(prefix);
+  return p >= 0 && p <= 32;
 };
 
 const addManualIpTag = (raw: string) => {
@@ -102,32 +130,56 @@ const handleIpBlur = () => {
   }
 };
 
-const allSelectedIps = computed(() => {
+const directTargetIps = computed(() => {
   const ips = new Set<string>([...selectedIps.value, ...manualIpTags.value]);
-  // Also include any uncommitted draft in the input box
   if (manualIpInput.value.trim()) {
     ips.add(manualIpInput.value.trim());
   }
   return Array.from(ips);
 });
 
+const validJumpHostPairs = computed(() =>
+  jumpHostPairs.value
+    .map(p => ({ jump: p.jump.trim(), target: p.target.trim() }))
+    .filter(p => p.jump && p.target)
+);
+
+const allTargetsSummary = computed(() => {
+  const direct = directTargetIps.value.map(ip => ({ ip, jump: null as string | null }));
+  const viaJump = validJumpHostPairs.value.map(p => ({ ip: p.target, jump: p.jump }));
+  return [...direct, ...viaJump];
+});
+
+const hasAnyJumpHost = computed(() => validJumpHostPairs.value.length > 0);
+
 const needsSshCredentials = computed(() => addWhitelistRule.value);
 
 const hasWhitelistConfigError = computed(() => {
-  return needsSshCredentials.value && (!sshUsername.value.trim() || !sshPassword.value);
+  if (!needsSshCredentials.value) return false;
+  if (!sshUsername.value.trim() || !sshPassword.value) return true;
+  if (whitelistSourceMode.value === 'cidr' && !isValidCidr(whitelistCidr.value.trim())) return true;
+  if (hasAnyJumpHost.value && useSeparateJumpHostCreds.value) {
+    if (!jumpHostUsername.value.trim() || !jumpHostPassword.value) return true;
+  }
+  return false;
 });
 
 const isFormValid = computed(() => {
-  if (isLoading.value || allSelectedIps.value.length === 0) {
+  if (isLoading.value || allTargetsSummary.value.length === 0) {
     return false;
   }
-
-  if (needsSshCredentials.value) {
-    return !!sshUsername.value.trim() && !!sshPassword.value;
+  if (needsSshCredentials.value && hasWhitelistConfigError.value) {
+    return false;
   }
-
   return true;
 });
+
+const addJumpHostPair = () => {
+  jumpHostPairs.value.push({ jump: '', target: '' });
+};
+const removeJumpHostPair = (index: number) => {
+  jumpHostPairs.value.splice(index, 1);
+};
 
 onMounted(async () => {
   try {
@@ -149,7 +201,7 @@ const saveApiTimeout = async () => {
 };
 
 const handleExecute = async () => {
-  if (allSelectedIps.value.length === 0) {
+  if (allTargetsSummary.value.length === 0) {
     alert(t('tools.applianceSsh.noIps'));
     return;
   }
@@ -162,24 +214,35 @@ const handleExecute = async () => {
   isLoading.value = true;
   results.value = [];
 
+  const targets: ApplianceSshTarget[] = [
+    ...directTargetIps.value.map(ip => ({ ip })),
+    ...validJumpHostPairs.value.map(p => ({ ip: p.target, jumpHost: p.jump })),
+  ];
+
   try {
-    const ipList = allSelectedIps.value;
-    currentProgress.value = { current: 0, total: ipList.length };
+    currentProgress.value = { current: 0, total: targets.length };
 
     const response = await enableApplianceSsh({
-      ips: ipList,
+      targets,
       sshUsername: sshUsername.value.trim(),
       sshPassword: sshPassword.value,
       addWhitelistRule: addWhitelistRule.value,
+      whitelistCidr: whitelistSourceMode.value === 'cidr'
+        ? whitelistCidr.value.trim()
+        : undefined,
+      jumpHostUseSeparateCreds: hasAnyJumpHost.value && useSeparateJumpHostCreds.value,
+      jumpHostUsername: useSeparateJumpHostCreds.value ? jumpHostUsername.value.trim() : undefined,
+      jumpHostPassword: useSeparateJumpHostCreds.value ? jumpHostPassword.value : undefined,
     });
     results.value = response;
-    currentProgress.value = { current: ipList.length, total: ipList.length };
+    currentProgress.value = { current: targets.length, total: targets.length };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    results.value = allSelectedIps.value.map(ip => ({
-      ip,
+    results.value = targets.map(target => ({
+      ip: target.ip,
       success: false,
       message: `Error: ${errorMessage}`,
+      jumpHost: target.jumpHost,
     }));
   } finally {
     isLoading.value = false;
@@ -331,6 +394,64 @@ const enableStateClass = (value?: number) => {
             </div>
           </div>
 
+          <!-- Jump host targets card (collapsed by default) -->
+          <div class="bg-white border border-slate-200/80 rounded-xl shadow-sm overflow-hidden">
+            <div class="flex items-center justify-between gap-3 px-5 py-4">
+              <div class="flex items-center gap-2">
+                <Network class="w-4 h-4 text-slate-400" />
+                <h3 class="text-sm font-semibold text-slate-800">{{ t('tools.applianceSsh.jumpHostSection') }}</h3>
+                <span class="text-xs text-slate-400">({{ t('tools.applianceSsh.optional') }})</span>
+              </div>
+              <button
+                type="button"
+                @click="addJumpHostPair"
+                :disabled="isLoading"
+                class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Plus class="w-3.5 h-3.5" />
+                {{ t('tools.applianceSsh.jumpHostAdd') }}
+              </button>
+            </div>
+            <div v-if="jumpHostPairs.length === 0" class="px-5 pb-4 pt-0">
+              <p class="text-xs text-slate-400 leading-relaxed">{{ t('tools.applianceSsh.jumpHostEmptyHint') }}</p>
+            </div>
+            <div v-else class="px-5 pb-4 space-y-2">
+              <div
+                v-for="(pair, idx) in jumpHostPairs"
+                :key="idx"
+                class="flex items-center gap-2"
+              >
+                <input
+                  v-model="pair.jump"
+                  type="text"
+                  :placeholder="t('tools.applianceSsh.jumpHostIpPlaceholder')"
+                  :disabled="isLoading"
+                  class="flex-1 min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                  :class="pair.jump.trim() && !isValidIp(pair.jump.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
+                />
+                <span class="text-slate-400 text-sm shrink-0">→</span>
+                <input
+                  v-model="pair.target"
+                  type="text"
+                  :placeholder="t('tools.applianceSsh.jumpHostTargetPlaceholder')"
+                  :disabled="isLoading"
+                  class="flex-1 min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                  :class="pair.target.trim() && !isValidIp(pair.target.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
+                />
+                <button
+                  type="button"
+                  @click="removeJumpHostPair(idx)"
+                  :disabled="isLoading"
+                  class="shrink-0 p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  :title="t('tools.applianceSsh.jumpHostRemove')"
+                >
+                  <XIcon class="w-4 h-4" />
+                </button>
+              </div>
+              <p class="text-xs text-slate-400 mt-2">{{ t('tools.applianceSsh.jumpHostRowHint') }}</p>
+            </div>
+          </div>
+
           <!-- Whitelist rule card -->
           <div class="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm">
             <div class="flex items-start justify-between gap-4">
@@ -352,13 +473,13 @@ const enableStateClass = (value?: number) => {
               </label>
             </div>
 
-            <!-- SSH credentials - conditionally shown -->
+            <!-- SSH credentials + source options - conditionally shown -->
             <Transition
               enter-active-class="transition-all duration-200 ease-out"
               enter-from-class="opacity-0 -translate-y-2 max-h-0"
-              enter-to-class="opacity-100 translate-y-0 max-h-60"
+              enter-to-class="opacity-100 translate-y-0 max-h-[48rem]"
               leave-active-class="transition-all duration-150 ease-in"
-              leave-from-class="opacity-100 translate-y-0 max-h-60"
+              leave-from-class="opacity-100 translate-y-0 max-h-[48rem]"
               leave-to-class="opacity-0 -translate-y-2 max-h-0"
             >
               <div v-if="addWhitelistRule" class="overflow-hidden">
@@ -386,6 +507,112 @@ const enableStateClass = (value?: number) => {
                   </div>
                 </div>
 
+                <!-- Whitelist source (local IP auto / custom CIDR) -->
+                <div class="mt-4 pt-4 border-t border-slate-100">
+                  <div class="text-xs font-medium text-slate-600 mb-2">{{ t('tools.applianceSsh.whitelistSourceLabel') }}</div>
+                  <div class="flex flex-wrap items-center gap-x-5 gap-y-2">
+                    <label class="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                      <input
+                        v-model="whitelistSourceMode"
+                        type="radio"
+                        value="local"
+                        :disabled="isLoading"
+                        class="text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                      />
+                      <span>{{ t('tools.applianceSsh.whitelistSourceLocal') }}</span>
+                    </label>
+                    <label class="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                      <input
+                        v-model="whitelistSourceMode"
+                        type="radio"
+                        value="cidr"
+                        :disabled="isLoading"
+                        class="text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                      />
+                      <span>{{ t('tools.applianceSsh.whitelistSourceCidr') }}</span>
+                    </label>
+                  </div>
+                  <Transition
+                    enter-active-class="transition-all duration-200 ease-out"
+                    enter-from-class="opacity-0 -translate-y-1 max-h-0"
+                    enter-to-class="opacity-100 translate-y-0 max-h-32"
+                    leave-active-class="transition-all duration-150 ease-in"
+                    leave-from-class="opacity-100 translate-y-0 max-h-32"
+                    leave-to-class="opacity-0 -translate-y-1 max-h-0"
+                  >
+                    <div v-if="whitelistSourceMode === 'cidr'" class="overflow-hidden">
+                      <div class="mt-2">
+                        <input
+                          v-model="whitelistCidr"
+                          type="text"
+                          :placeholder="t('tools.applianceSsh.whitelistCidrPlaceholder')"
+                          :disabled="isLoading"
+                          class="w-full sm:w-64 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                          :class="whitelistCidr.trim() && !isValidCidr(whitelistCidr.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
+                        />
+                        <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.whitelistCidrHint') }}</p>
+                      </div>
+                    </div>
+                  </Transition>
+                </div>
+
+                <!-- Jump-host credentials (only when any jump-host pair is configured) -->
+                <Transition
+                  enter-active-class="transition-all duration-200 ease-out"
+                  enter-from-class="opacity-0 -translate-y-1 max-h-0"
+                  enter-to-class="opacity-100 translate-y-0 max-h-80"
+                  leave-active-class="transition-all duration-150 ease-in"
+                  leave-from-class="opacity-100 translate-y-0 max-h-80"
+                  leave-to-class="opacity-0 -translate-y-1 max-h-0"
+                >
+                  <div v-if="hasAnyJumpHost" class="overflow-hidden">
+                    <div class="mt-4 pt-4 border-t border-slate-100">
+                      <label class="inline-flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
+                        <input
+                          v-model="useSeparateJumpHostCreds"
+                          type="checkbox"
+                          :disabled="isLoading"
+                          class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                        />
+                        <span>{{ t('tools.applianceSsh.jumpHostSeparateCreds') }}</span>
+                      </label>
+                      <Transition
+                        enter-active-class="transition-all duration-200 ease-out"
+                        enter-from-class="opacity-0 -translate-y-1 max-h-0"
+                        enter-to-class="opacity-100 translate-y-0 max-h-60"
+                        leave-active-class="transition-all duration-150 ease-in"
+                        leave-from-class="opacity-100 translate-y-0 max-h-60"
+                        leave-to-class="opacity-0 -translate-y-1 max-h-0"
+                      >
+                        <div v-if="useSeparateJumpHostCreds" class="overflow-hidden">
+                          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                            <div>
+                              <label class="block text-xs font-medium text-slate-600 mb-1.5">{{ t('tools.applianceSsh.jumpHostUsername') }}</label>
+                              <input
+                                v-model="jumpHostUsername"
+                                type="text"
+                                :placeholder="t('tools.applianceSsh.sshUsernamePlaceholder')"
+                                :disabled="isLoading"
+                                class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                              />
+                            </div>
+                            <div>
+                              <label class="block text-xs font-medium text-slate-600 mb-1.5">{{ t('tools.applianceSsh.jumpHostPassword') }}</label>
+                              <input
+                                v-model="jumpHostPassword"
+                                type="password"
+                                :placeholder="t('tools.applianceSsh.sshPasswordPlaceholder')"
+                                :disabled="isLoading"
+                                class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </Transition>
+                    </div>
+                  </div>
+                </Transition>
+
                 <p class="mt-3 text-xs text-slate-400 leading-relaxed">{{ t('tools.applianceSsh.whitelistHint') }}</p>
                 <p v-if="hasWhitelistConfigError" class="mt-1.5 text-xs text-red-500 font-medium">{{ t('tools.applianceSsh.sshCredentialsRequired') }}</p>
               </div>
@@ -393,11 +620,19 @@ const enableStateClass = (value?: number) => {
           </div>
 
           <!-- Selected IPs summary -->
-          <div v-if="allSelectedIps.length > 0" class="bg-slate-50 border border-slate-200/80 rounded-xl px-4 py-3">
-            <p class="text-xs font-medium text-slate-500 mb-2">{{ t('tools.applianceSsh.selectedIps', { count: allSelectedIps.length }) }}</p>
+          <div v-if="allTargetsSummary.length > 0" class="bg-slate-50 border border-slate-200/80 rounded-xl px-4 py-3">
+            <p class="text-xs font-medium text-slate-500 mb-2">{{ t('tools.applianceSsh.selectedIps', { count: allTargetsSummary.length }) }}</p>
             <div class="flex flex-wrap gap-1.5">
-              <span v-for="ip in allSelectedIps" :key="ip" class="inline-flex items-center bg-blue-100/80 text-blue-800 px-2.5 py-0.5 rounded-md text-xs font-mono">
-                {{ ip }}
+              <span
+                v-for="item in allTargetsSummary"
+                :key="`${item.jump ?? ''}->${item.ip}`"
+                class="inline-flex items-center bg-blue-100/80 text-blue-800 px-2.5 py-0.5 rounded-md text-xs font-mono"
+              >
+                <template v-if="item.jump">
+                  <span class="text-blue-500">{{ item.jump }}</span>
+                  <span class="text-blue-400 mx-1">→</span>
+                </template>
+                {{ item.ip }}
               </span>
             </div>
           </div>
@@ -481,8 +716,16 @@ const enableStateClass = (value?: number) => {
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100">
-                <tr v-for="result in results" :key="result.ip" class="hover:bg-slate-50/60 transition-colors">
-                  <td class="px-5 py-3 text-sm font-mono text-slate-800">{{ result.ip }}</td>
+                <tr v-for="result in results" :key="`${result.jumpHost ?? ''}->${result.ip}`" class="hover:bg-slate-50/60 transition-colors">
+                  <td class="px-5 py-3 text-sm font-mono text-slate-800">
+                    <div class="flex flex-col gap-0.5">
+                      <span>{{ result.ip }}</span>
+                      <span v-if="result.jumpHost" class="text-xs text-slate-500 font-normal">
+                        {{ t('tools.applianceSsh.viaJumpHost') }}
+                        <span class="font-mono">{{ result.jumpHost }}</span>
+                      </span>
+                    </div>
+                  </td>
                   <td class="px-5 py-3">
                     <div class="flex items-center gap-1.5">
                       <component

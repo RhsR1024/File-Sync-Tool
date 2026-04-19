@@ -307,10 +307,25 @@ fn emit_runtime_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: St
 }
 
 fn normalize_existing_path(path: &Path) -> Result<String, String> {
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|e| format!("Cannot access path {}: {}", path.display(), e))?;
-    let mut normalized = canonical.to_string_lossy().replace('/', "\\");
+    // Prefer canonicalize to resolve symlinks and relative paths. On Windows,
+    // some volumes (NAS mounts, external drives with filesystems the OS can't
+    // fully introspect) make canonicalize fail with OS error 1005. The purpose
+    // here is only to build a stable dedup key for the manual-copy queue, so
+    // fall back to the input path — existence is already validated upstream.
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let raw = resolved.to_string_lossy().replace('/', "\\");
 
+    // Strip Windows extended-length prefixes so canonical and fallback forms
+    // produce identical dedup keys.
+    let stripped = if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        raw
+    };
+
+    let mut normalized = stripped;
     while normalized.len() > 3 && normalized.ends_with('\\') {
         normalized.pop();
     }
@@ -1662,7 +1677,20 @@ pub struct PasswordChangeResult {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct ApplianceSshTarget {
+    pub ip: String,
+    #[serde(default)]
+    pub jump_host: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplianceSshRequest {
+    /// Preferred path: explicit list of targets with optional per-target jump host.
+    /// `ips` is accepted for backward compatibility and merged into `targets`.
+    #[serde(default)]
+    pub targets: Vec<ApplianceSshTarget>,
+    #[serde(default)]
     pub ips: Vec<String>,
     #[serde(default)]
     pub ssh_username: String,
@@ -1670,6 +1698,18 @@ pub struct ApplianceSshRequest {
     pub ssh_password: String,
     #[serde(default)]
     pub add_whitelist_rule: bool,
+    /// When Some, use this CIDR (e.g., "10.0.0.0/24") as the whitelist source
+    /// instead of auto-detecting the local IP.
+    #[serde(default)]
+    pub whitelist_cidr: Option<String>,
+    /// When true, `jump_host_username` / `jump_host_password` are used for SSH
+    /// to the jump host instead of the main `ssh_username` / `ssh_password`.
+    #[serde(default)]
+    pub jump_host_use_separate_creds: bool,
+    #[serde(default)]
+    pub jump_host_username: Option<String>,
+    #[serde(default)]
+    pub jump_host_password: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -1683,6 +1723,8 @@ pub struct ApplianceSshResult {
     pub port: Option<u16>,
     pub whitelist_source_ip: Option<String>,
     pub whitelist_applied: Option<bool>,
+    #[serde(default)]
+    pub jump_host: Option<String>,
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -1705,6 +1747,17 @@ fn validate_ip(ip: &str) -> bool {
         return false;
     }
     parts.iter().all(|part| part.parse::<u8>().is_ok())
+}
+
+// Validate an IPv4 CIDR like "192.168.1.0/24". Prefix must be 0-32.
+fn validate_cidr(value: &str) -> bool {
+    let Some((addr, prefix)) = value.split_once('/') else {
+        return false;
+    };
+    if !validate_ip(addr) {
+        return false;
+    }
+    matches!(prefix.parse::<u8>(), Ok(p) if p <= 32)
 }
 
 const DEVICE_BATCH_CONCURRENCY_LIMIT: usize = 4;
@@ -1875,6 +1928,30 @@ fn detect_local_source_ip(ip: &str, port: u16) -> Result<String, String> {
 fn build_iptables_whitelist_command(source_ip: &str, port: u16) -> String {
     format!(
         "sh -lc 'iptables -C INPUT -p tcp -s {source_ip} --dport {port} -j ACCEPT || iptables -I INPUT 1 -p tcp -s {source_ip} --dport {port} -j ACCEPT'"
+    )
+}
+
+/// Default SSH port assumed for targets reached via jump host (the REST API
+/// that reports the real port is only available on direct targets).
+const JUMP_HOST_DEFAULT_TARGET_SSH_PORT: u16 = 23333;
+
+/// Build a command to be executed on the jump host that SSHes into the target
+/// and runs the idempotent iptables whitelist insert on the target. Appliance
+/// master/backup pairs come pre-provisioned with passwordless SSH (key-based
+/// or host-based auth) between each other, so no password is passed here;
+/// `BatchMode=yes` makes ssh fail fast if interactive auth would be required
+/// instead of hanging. `source` may be a single IPv4 address or a CIDR.
+fn build_nested_iptables_whitelist_command(
+    target_user: &str,
+    target_ip: &str,
+    target_port: u16,
+    iptables_source: &str,
+    iptables_port: u16,
+) -> String {
+    format!(
+        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+-p {target_port} {target_user}@{target_ip} \
+'iptables -C INPUT -p tcp -s {iptables_source} --dport {iptables_port} -j ACCEPT || iptables -I INPUT 1 -p tcp -s {iptables_source} --dport {iptables_port} -j ACCEPT'"
     )
 }
 
@@ -2217,14 +2294,23 @@ async fn change_framework_password(
     Ok(results.into_iter().flatten().collect())
 }
 
-async fn enable_appliance_ssh_for_ip(
+async fn enable_appliance_ssh_for_target(
     client: reqwest::Client,
-    ip_input: String,
+    target: ApplianceSshTarget,
     ssh_username: String,
     ssh_password: String,
     add_whitelist_rule: bool,
+    whitelist_cidr: Option<String>,
+    jump_host_username: Option<String>,
+    jump_host_password: Option<String>,
 ) -> Option<ApplianceSshResult> {
-    let ip = ip_input.trim().to_string();
+    let ip = target.ip.trim().to_string();
+    let jump_host = target
+        .jump_host
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     if ip.is_empty() {
         return None;
     }
@@ -2238,14 +2324,25 @@ async fn enable_appliance_ssh_for_ip(
         port: None,
         whitelist_source_ip: None,
         whitelist_applied: None,
+        jump_host: jump_host.clone(),
     };
 
     if !validate_ip(&ip) {
         result.message = format!("Invalid IP address: {}", ip);
         return Some(result);
     }
+    if let Some(jh) = &jump_host {
+        if !validate_ip(jh) {
+            result.message = format!("Invalid jump host IP: {}", jh);
+            return Some(result);
+        }
+    }
 
-    let initial_status = match get_appliance_ssh_status(&client, &ip).await {
+    // API ip and SSH ip differ when a jump host is present: the REST API lives
+    // on the jump host (A); the target (B) is reached via SSH through A.
+    let api_ip = jump_host.as_deref().unwrap_or(&ip).to_string();
+
+    let initial_status = match get_appliance_ssh_status(&client, &api_ip).await {
         Ok(status) => status,
         Err(e) => {
             result.message = format!("Failed to get SSH status: {}", e);
@@ -2259,11 +2356,11 @@ async fn enable_appliance_ssh_for_ip(
     let current_status = if initial_status.enable == Some(1) {
         initial_status
     } else {
-        if let Err(e) = enable_appliance_ssh_via_api(&client, &ip).await {
+        if let Err(e) = enable_appliance_ssh_via_api(&client, &api_ip).await {
             result.message = format!("Failed to enable SSH: {}", e);
             return Some(result);
         }
-        match wait_for_appliance_ssh_enabled(&client, &ip, 10, Duration::from_secs(1)).await {
+        match wait_for_appliance_ssh_enabled(&client, &api_ip, 10, Duration::from_secs(1)).await {
             Ok(status) => status,
             Err(e) => {
                 result.message = format!("SSH status verification failed: {}", e);
@@ -2274,10 +2371,28 @@ async fn enable_appliance_ssh_for_ip(
 
     result.current_enable = current_status.enable;
     result.port = current_status.port.or(result.port).or(Some(23333));
-    let ssh_port = result.port.unwrap_or(23333);
+    let api_ssh_port = result.port.unwrap_or(23333);
 
     if add_whitelist_rule {
-        if ssh_username.is_empty() || ssh_password.is_empty() {
+        // Resolve credentials for SSH to jump host (or direct target).
+        let (ssh_user, ssh_pass) = if jump_host.is_some() {
+            let user = jump_host_username
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| ssh_username.clone());
+            let pass = jump_host_password
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| ssh_password.clone());
+            (user, pass)
+        } else {
+            (ssh_username.clone(), ssh_password.clone())
+        };
+
+        if ssh_user.is_empty() || ssh_pass.is_empty() {
             result.whitelist_applied = Some(false);
             result.message =
                 "SSH username and password are required when adding an iptables whitelist rule"
@@ -2285,28 +2400,65 @@ async fn enable_appliance_ssh_for_ip(
             return Some(result);
         }
 
-        let source_ip = match detect_local_source_ip(&ip, ssh_port) {
-            Ok(source_ip) => source_ip,
-            Err(e) => {
-                result.whitelist_applied = Some(false);
-                result.message = format!("Failed to determine local source IP: {}", e);
-                return Some(result);
+        // Resolve whitelist source: user-supplied CIDR replaces auto-detected local IP.
+        let source = match whitelist_cidr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(cidr) => {
+                if !validate_cidr(cidr) {
+                    result.whitelist_applied = Some(false);
+                    result.message = format!("Invalid CIDR for whitelist source: {}", cidr);
+                    return Some(result);
+                }
+                cidr.to_string()
             }
+            None => match detect_local_source_ip(&api_ip, api_ssh_port) {
+                Ok(ip) => ip,
+                Err(e) => {
+                    result.whitelist_applied = Some(false);
+                    result.message = format!("Failed to determine local source IP: {}", e);
+                    return Some(result);
+                }
+            },
+        };
+        result.whitelist_source_ip = Some(source.clone());
+
+        // Build the command that will run via SSH on `api_ip` (jump host or direct).
+        let (ssh_host, command) = if jump_host.is_some() {
+            // Nested: run on A a command that SSHes to B (default port) and
+            // applies the iptables rule. Relies on passwordless SSH between A
+            // and B (pre-shared keys), which is the appliance HA convention.
+            // B's SSH username defaults to the main SSH username (typically
+            // `root` — same across the master/backup pair).
+            let target_port = JUMP_HOST_DEFAULT_TARGET_SSH_PORT;
+            let cmd = build_nested_iptables_whitelist_command(
+                &ssh_username,
+                &ip,
+                target_port,
+                &source,
+                target_port,
+            );
+            (api_ip.clone(), cmd)
+        } else {
+            // Direct: run iptables locally on the target.
+            let cmd = build_iptables_whitelist_command(&source, api_ssh_port);
+            (api_ip.clone(), cmd)
         };
 
-        result.whitelist_source_ip = Some(source_ip.clone());
-
-        let ip_owned = ip.clone();
-        let user_owned = ssh_username.clone();
-        let password_owned = ssh_password.clone();
-        let command = build_iptables_whitelist_command(&source_ip, ssh_port);
-
+        let host_owned = ssh_host.clone();
+        let user_owned = ssh_user.clone();
+        let password_owned = ssh_pass.clone();
+        let command_owned = command.clone();
         let whitelist_result = match tauri::async_runtime::spawn_blocking(move || {
-            run_remote_command_over_ssh(&ip_owned, ssh_port, &user_owned, &password_owned, &command)
+            run_remote_command_over_ssh(
+                &host_owned,
+                api_ssh_port,
+                &user_owned,
+                &password_owned,
+                &command_owned,
+            )
         })
         .await
         {
-            Ok(result) => result,
+            Ok(r) => r,
             Err(e) => {
                 result.whitelist_applied = Some(false);
                 result.message = format!("Failed to run the SSH whitelist task: {}", e);
@@ -2318,25 +2470,45 @@ async fn enable_appliance_ssh_for_ip(
             Ok(_) => {
                 result.success = true;
                 result.whitelist_applied = Some(true);
-                result.message = format!(
-                    "SSH is enabled. Added an iptables whitelist rule for {}:{}",
-                    source_ip, ssh_port
-                );
+                result.message = if jump_host.is_some() {
+                    format!(
+                        "SSH is enabled on jump host {}. Added an iptables whitelist rule on {} for {}:{}",
+                        api_ip, ip, source, JUMP_HOST_DEFAULT_TARGET_SSH_PORT
+                    )
+                } else {
+                    format!(
+                        "SSH is enabled. Added an iptables whitelist rule for {}:{}",
+                        source, api_ssh_port
+                    )
+                };
             }
             Err(e) => {
                 result.whitelist_applied = Some(false);
-                result.message = format!(
-                    "SSH is enabled, but failed to add the iptables whitelist rule for {}:{}: {}",
-                    source_ip, ssh_port, e
-                );
+                result.message = if jump_host.is_some() {
+                    format!(
+                        "SSH is enabled on jump host {}, but failed to apply the iptables rule on {}: {}",
+                        api_ip, ip, e
+                    )
+                } else {
+                    format!(
+                        "SSH is enabled, but failed to add the iptables whitelist rule for {}:{}: {}",
+                        source, api_ssh_port, e
+                    )
+                };
             }
         }
     } else {
         result.success = true;
-        result.message = if result.previous_enable == Some(1) {
-            format!("SSH is already enabled. Port: {}", ssh_port)
+        result.message = if jump_host.is_some() {
+            if result.previous_enable == Some(1) {
+                format!("Jump host SSH is already enabled. Port: {}", api_ssh_port)
+            } else {
+                format!("Jump host SSH enabled successfully. Port: {}", api_ssh_port)
+            }
+        } else if result.previous_enable == Some(1) {
+            format!("SSH is already enabled. Port: {}", api_ssh_port)
         } else {
-            format!("SSH enabled successfully. Port: {}", ssh_port)
+            format!("SSH enabled successfully. Port: {}", api_ssh_port)
         };
     }
 
@@ -2350,25 +2522,46 @@ async fn enable_appliance_ssh(
 ) -> Result<Vec<ApplianceSshResult>, String> {
     let api_timeout_secs = state.config.lock().unwrap().appliance_ssh_api_timeout_secs;
     let client = build_device_http_client_with_timeout(Duration::from_secs(api_timeout_secs))?;
-    let ips = request.ips;
+
+    // Merge legacy `ips` into `targets` so older callers keep working.
+    let mut targets: Vec<ApplianceSshTarget> = request.targets;
+    for ip in request.ips {
+        targets.push(ApplianceSshTarget {
+            ip,
+            jump_host: None,
+        });
+    }
+
     let ssh_username = request.ssh_username.trim().to_string();
     let ssh_password = request.ssh_password;
     let add_whitelist_rule = request.add_whitelist_rule;
+    let whitelist_cidr = request.whitelist_cidr;
+    let (jump_user, jump_pass) = if request.jump_host_use_separate_creds {
+        (request.jump_host_username, request.jump_host_password)
+    } else {
+        (None, None)
+    };
 
     let results = crate::async_utils::run_ordered_with_limit(
-        ips,
+        targets,
         DEVICE_BATCH_CONCURRENCY_LIMIT,
-        move |ip| {
+        move |target| {
             let client = client.clone();
             let ssh_username = ssh_username.clone();
             let ssh_password = ssh_password.clone();
+            let whitelist_cidr = whitelist_cidr.clone();
+            let jump_user = jump_user.clone();
+            let jump_pass = jump_pass.clone();
             async move {
-                enable_appliance_ssh_for_ip(
+                enable_appliance_ssh_for_target(
                     client,
-                    ip,
+                    target,
                     ssh_username,
                     ssh_password,
                     add_whitelist_rule,
+                    whitelist_cidr,
+                    jump_user,
+                    jump_pass,
                 )
                 .await
             }

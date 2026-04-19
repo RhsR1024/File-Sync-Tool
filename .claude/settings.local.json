@@ -63,7 +63,18 @@
       "Bash(cmd /c pnpm tauri:build:versioned-exe)",
       "Bash(tee /tmp/build.log)",
       "Bash(cd c:\\\\\\\\WorkSpace\\\\\\\\File-Sync-Tool)",
-      "Bash(xargs grep *)"
+      "Bash(xargs grep *)",
+      "Bash(git fetch *)",
+      "Bash(git pull *)",
+      "Bash(ssh -T git@github.com)",
+      "Bash(git stash *)",
+      "Bash(tasklist)",
+      "WebFetch(domain:github.com)",
+      "Bash(gh api *)",
+      "Bash(gh repo *)",
+      "Bash(curl -s -H \"Accept: application/vnd.github.v3+json\" https://api.github.com/repos/Y-ASLant/ElegantClipboard)",
+      "Bash(curl -s https://api.github.com/repos/Y-ASLant/ElegantClipboard/languages)",
+      "Bash(curl -s https://raw.githubusercontent.com/Y-ASLant/ElegantClipboard/main/README.md)"
     ]
   }
 }
