@@ -92,7 +92,7 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
                 file_paths: None,
                 byte_size: img.bytes.len() as i64,
                 hash: hex_str,
-                source_app: None,
+                source_app: crate::clipboard::source::foreground_process_name(),
             },
         )?;
         notify_added(app);
@@ -122,7 +122,7 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
                 file_paths: None,
                 byte_size,
                 hash: hex(&hash),
-                source_app: None,
+                source_app: crate::clipboard::source::foreground_process_name(),
             },
         )?;
         notify_added(app);

@@ -3,6 +3,14 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useI18n } from 'vue-i18n';
+import {
+  Trash2,
+  CheckSquare,
+  Lock,
+  LockOpen,
+  Settings,
+  X,
+} from 'lucide-vue-next';
 
 import { useClipboardStore } from '@/composables/useClipboardStore';
 import { useClipboardHotkey } from '@/composables/useClipboardHotkey';
@@ -25,6 +33,71 @@ const filters: ClipboardFilter[] = ['all', 'text', 'image', 'file', 'favorite'];
 const selectedId = computed<number | null>(
   () => store.items.value[selectedIndex.value]?.id ?? null,
 );
+
+// Toolbar state ----------------------------------------------------------
+const pinned = ref(false);
+const batchMode = ref(false);
+const selectedIds = ref<Set<number>>(new Set());
+const clearDialogOpen = ref(false);
+
+async function togglePinned() {
+  const next = !pinned.value;
+  try {
+    await clipboardApi.setPanelPinned(next);
+    pinned.value = next;
+  } catch (e) {
+    console.error('[clipboard] setPanelPinned failed:', e);
+  }
+}
+
+function toggleBatchMode() {
+  batchMode.value = !batchMode.value;
+  if (!batchMode.value) selectedIds.value = new Set();
+}
+
+function onToggleSelect(id: number) {
+  const s = new Set(selectedIds.value);
+  if (s.has(id)) s.delete(id);
+  else s.add(id);
+  selectedIds.value = s;
+}
+
+async function onBatchDelete() {
+  if (selectedIds.value.size === 0) return;
+  const ids = Array.from(selectedIds.value);
+  try {
+    await clipboardApi.deleteBatch(ids);
+    selectedIds.value = new Set();
+    batchMode.value = false;
+    await store.reload();
+  } catch (e) {
+    console.error('[clipboard] batch delete failed:', e);
+    store.error.value = `${t('clipboard.errors.loadFailed')} — ${e}`;
+  }
+}
+
+async function onConfirmClear() {
+  try {
+    await clipboardApi.clear(true); // keep_favorites = true
+    clearDialogOpen.value = false;
+    selectedIndex.value = 0;
+    await store.reload();
+  } catch (e) {
+    console.error('[clipboard] clear failed:', e);
+    store.error.value = `${t('clipboard.errors.loadFailed')} — ${e}`;
+    clearDialogOpen.value = false;
+  }
+}
+
+async function openSettings() {
+  try {
+    await clipboardApi.openSettings();
+  } catch (e) {
+    console.error('[clipboard] openSettings failed:', e);
+  }
+}
+
+// ------------------------------------------------------------------------
 
 async function paste(id: number, plain: boolean) {
   try {
@@ -50,10 +123,7 @@ function close() {
   void getCurrentWindow().hide();
 }
 
-// Explicit drag handler. `data-tauri-drag-region` alone is unreliable on
-// transparent undecorated windows in Tauri 2.10, so we also start dragging
-// directly on left-button mousedown in the header (skipping interactive
-// children like the close button).
+// Explicit drag handler (stable on opaque undecorated windows).
 function onHeaderMouseDown(e: MouseEvent) {
   if (e.button !== 0) return;
   const target = e.target as HTMLElement | null;
@@ -102,7 +172,6 @@ useClipboardHotkey({
   onFilterChange: changeFilter,
 });
 
-// Keep selection in-bounds when the list shrinks.
 watch(
   () => store.items.value.length,
   (len) => {
@@ -114,21 +183,24 @@ watch(
 
 let unlistenShown: UnlistenFn | null = null;
 let unlistenItemAdded: UnlistenFn | null = null;
-// Bump whenever the panel becomes visible so DynamicScroller remounts and
-// measures its container in a visible window. The virtual scroller doesn't
-// compute visible rows while the window is hidden, which produced an empty
-// "All" view on first open.
 const showCounter = ref(0);
 const listKey = computed(() => `${store.filter.value}-${showCounter.value}`);
 
 onMounted(async () => {
+  // Read initial pinned state from backend so the toolbar reflects reality.
+  clipboardApi
+    .isPanelPinned()
+    .then((p) => {
+      pinned.value = p;
+    })
+    .catch(() => {});
+
   unlistenShown = await listen('clipboard-panel-shown', async () => {
     store.search.value = '';
     selectedIndex.value = 0;
+    batchMode.value = false;
+    selectedIds.value = new Set();
     await store.reload();
-    // Wait two frames so the webview finishes its first paint after show()
-    // before we force-remount the list, otherwise the virtual scroller can
-    // still measure a zero-height container.
     await nextTick();
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
@@ -137,9 +209,6 @@ onMounted(async () => {
     searchInput.value?.focus();
   });
   unlistenItemAdded = await store.startListening();
-  // Defer the first reload until the panel is actually shown. Mounting the
-  // virtual scroller while the window is hidden leaves it stuck at 0 visible
-  // rows on first open.
 });
 
 onBeforeUnmount(() => {
@@ -151,29 +220,102 @@ onBeforeUnmount(() => {
 <template>
   <div class="flex h-screen w-screen flex-col overflow-hidden bg-white">
     <header
-      class="flex select-none items-center justify-between border-b border-slate-200 px-4 py-3"
+      class="flex select-none items-center justify-between border-b border-slate-200 px-3 py-2.5"
       data-tauri-drag-region
       @mousedown="onHeaderMouseDown"
     >
-      <span class="pointer-events-none text-sm font-semibold text-slate-700">{{ t('clipboard.tool.title') }}</span>
-      <button
-        type="button"
-        data-no-drag
-        class="text-xs text-slate-400 transition-colors hover:text-slate-700"
-        :title="t('clipboard.actions.close')"
-        @click="close"
-      >
-        ✕
-      </button>
+      <span class="pointer-events-none truncate text-sm font-semibold text-slate-700">
+        {{ t('clipboard.tool.title') }}
+      </span>
+
+      <div class="flex items-center gap-0.5" data-no-drag>
+        <button
+          type="button"
+          data-no-drag
+          class="inline-flex h-7 w-7 items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800"
+          :title="t('clipboard.actions.clearHistory')"
+          @click="clearDialogOpen = true"
+        >
+          <Trash2 class="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          data-no-drag
+          class="inline-flex h-7 w-7 items-center justify-center rounded transition-colors"
+          :class="batchMode
+            ? 'bg-blue-50 text-blue-600'
+            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'"
+          :title="batchMode ? t('clipboard.actions.exitBatch') : t('clipboard.actions.batchSelect')"
+          @click="toggleBatchMode"
+        >
+          <CheckSquare class="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          data-no-drag
+          class="inline-flex h-7 w-7 items-center justify-center rounded transition-colors"
+          :class="pinned
+            ? 'bg-amber-50 text-amber-600'
+            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'"
+          :title="pinned ? t('clipboard.actions.unlockWindow') : t('clipboard.actions.lockWindow')"
+          @click="togglePinned"
+        >
+          <Lock v-if="pinned" class="h-4 w-4" />
+          <LockOpen v-else class="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          data-no-drag
+          class="inline-flex h-7 w-7 items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800"
+          :title="t('clipboard.actions.openSettings')"
+          @click="openSettings"
+        >
+          <Settings class="h-4 w-4" />
+        </button>
+        <span class="mx-0.5 h-5 w-px bg-slate-200" aria-hidden />
+        <button
+          type="button"
+          data-no-drag
+          class="inline-flex h-7 w-7 items-center justify-center rounded text-slate-500 transition-colors hover:bg-red-50 hover:text-red-600"
+          :title="t('clipboard.actions.close')"
+          @click="close"
+        >
+          <X class="h-4 w-4" />
+        </button>
+      </div>
     </header>
 
-    <div class="px-3 pt-3 pb-2">
+    <div v-if="batchMode" class="flex items-center justify-between gap-2 border-b border-blue-200 bg-blue-50/80 px-3 py-1.5">
+      <span class="text-xs text-slate-600">
+        {{ t('clipboard.batchBar.selected', { n: selectedIds.size }) }}
+        <span class="ml-1.5 text-slate-400">{{ t('clipboard.batchBar.shiftHint') }}</span>
+      </span>
+      <div class="flex items-center gap-1">
+        <button
+          type="button"
+          class="rounded bg-red-500/10 px-2 py-1 text-xs text-red-600 transition-colors hover:bg-red-500/20 disabled:opacity-40"
+          :disabled="selectedIds.size === 0"
+          @click="onBatchDelete"
+        >
+          {{ t('clipboard.actions.batchDelete') }}
+        </button>
+        <button
+          type="button"
+          class="rounded px-2 py-1 text-xs text-slate-600 transition-colors hover:bg-slate-100"
+          @click="toggleBatchMode"
+        >
+          {{ t('clipboard.confirm.cancel') }}
+        </button>
+      </div>
+    </div>
+
+    <div class="px-3 pt-2.5 pb-2">
       <input
         ref="searchInput"
         v-model="store.search.value"
         type="search"
         :placeholder="t('clipboard.search.placeholder')"
-        class="w-full rounded-lg border border-slate-200/70 bg-white/60 px-3 py-1.5 text-sm outline-none focus:border-slate-400"
+        class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm outline-none focus:border-slate-400 focus:bg-white"
         @input="store.reload()"
       />
     </div>
@@ -186,7 +328,7 @@ onBeforeUnmount(() => {
         class="rounded-full px-2.5 py-0.5 text-xs transition-colors"
         :class="store.filter.value === f
           ? 'bg-slate-900 text-white shadow-sm'
-          : 'bg-slate-200/60 text-slate-600 hover:bg-slate-200'"
+          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
         @click="setFilter(f)"
       >
         {{ t(`clipboard.filter.${f}`) }}
@@ -194,7 +336,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div
-      class="flex-1 overflow-hidden px-2 pb-2"
+      class="flex-1 overflow-hidden px-1 pb-2"
       @mouseleave="preview.onLeave()"
       @wheel="preview.onWheelZoom($event)"
     >
@@ -208,10 +350,49 @@ onBeforeUnmount(() => {
         :selected-id="selectedId"
         :compact="true"
         :draggable="store.filter.value === 'favorite'"
+        :batch-mode="batchMode"
+        :selected-ids="selectedIds"
+        :show-delete-button="!batchMode"
+        :show-favorite-button="!batchMode"
         @select="onListSelect"
-        @activate="(id) => paste(id, false)"
+        @activate="(id: number) => paste(id, false)"
+        @toggle="onToggleSelect"
+        @favorite="(id: number) => store.toggleFavorite(id)"
+        @remove="(id: number) => store.remove(id)"
         @reorder="onReorder"
       />
+    </div>
+
+    <!-- Clear-history confirmation dialog -->
+    <div
+      v-if="clearDialogOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+      @click.self="clearDialogOpen = false"
+    >
+      <div class="w-[320px] rounded-xl bg-white p-4 shadow-2xl">
+        <h3 class="text-sm font-semibold text-slate-800">
+          {{ t('clipboard.confirm.clearTitle') }}
+        </h3>
+        <p class="mt-2 text-xs leading-relaxed text-slate-500">
+          {{ t('clipboard.confirm.clearBody') }}
+        </p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md px-3 py-1.5 text-xs text-slate-600 transition-colors hover:bg-slate-100"
+            @click="clearDialogOpen = false"
+          >
+            {{ t('clipboard.confirm.cancel') }}
+          </button>
+          <button
+            type="button"
+            class="rounded-md bg-red-500 px-3 py-1.5 text-xs text-white transition-colors hover:bg-red-600"
+            @click="onConfirmClear"
+          >
+            {{ t('clipboard.confirm.clearConfirm') }}
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 

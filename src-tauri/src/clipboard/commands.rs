@@ -287,3 +287,33 @@ pub fn cb_set_run_as_admin(state: State<'_, AppState>, enable: bool) -> Result<(
     state.clipboard.settings.write().run_as_admin = enable;
     Ok(())
 }
+
+#[tauri::command]
+pub fn cb_set_panel_pinned(state: State<'_, AppState>, pinned: bool) {
+    state
+        .clipboard
+        .panel_pinned
+        .store(pinned, Ordering::Release);
+}
+
+#[tauri::command]
+pub fn cb_is_panel_pinned(state: State<'_, AppState>) -> bool {
+    state.clipboard.panel_pinned.load(Ordering::Acquire)
+}
+
+/// Hide the popup panel and bring the main window forward on the clipboard
+/// settings route. Emits `clipboard-open-settings` for the frontend to drive
+/// the navigation; if the main window is closed-to-tray it will reappear.
+#[tauri::command]
+pub fn cb_open_settings(app: AppHandle) -> Result<(), String> {
+    if let Some(panel) = app.get_webview_window("clipboard-panel") {
+        let _ = panel.hide();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+        let _ = main.emit("clipboard-open-settings", ());
+    }
+    Ok(())
+}

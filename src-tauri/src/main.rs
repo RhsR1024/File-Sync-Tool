@@ -2749,9 +2749,17 @@ fn main() {
             // causes a transient Focused(false) -> Focused(true) flicker
             // during the WM_NCLBUTTONDOWN drag modal loop. Without this guard
             // the panel would hide the instant the user pressed the header.
+            // Skip auto-hide entirely when the user pinned the panel.
             let panel_clone = panel.clone();
+            let pinned_flag = clipboard_state_for_startup.clone();
             panel.on_window_event(move |ev| {
                 if let tauri::WindowEvent::Focused(false) = ev {
+                    if pinned_flag
+                        .panel_pinned
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return;
+                    }
                     let panel = panel_clone.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(150));
@@ -2875,7 +2883,10 @@ fn main() {
             clipboard::commands::cb_is_win_v_enabled,
             clipboard::commands::cb_is_elevated,
             clipboard::commands::cb_is_run_as_admin_enabled,
-            clipboard::commands::cb_set_run_as_admin
+            clipboard::commands::cb_set_run_as_admin,
+            clipboard::commands::cb_set_panel_pinned,
+            clipboard::commands::cb_is_panel_pinned,
+            clipboard::commands::cb_open_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -931,4 +931,8 @@ export const clipboardApi = {
   isRunAsAdminEnabled: () => invoke<boolean>('cb_is_run_as_admin_enabled'),
   setRunAsAdmin: (enable: boolean) =>
     invoke<void>('cb_set_run_as_admin', { enable }),
+  setPanelPinned: (pinned: boolean) =>
+    invoke<void>('cb_set_panel_pinned', { pinned }),
+  isPanelPinned: () => invoke<boolean>('cb_is_panel_pinned'),
+  openSettings: () => invoke<void>('cb_open_settings'),
 };

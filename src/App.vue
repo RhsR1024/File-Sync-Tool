@@ -3,7 +3,7 @@ import Sidebar from '@/components/Sidebar.vue';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { onMounted, onUnmounted, watch } from 'vue';
-import { RouterView } from 'vue-router';
+import { RouterView, useRouter } from 'vue-router';
 
 import { startScheduler } from '@/lib/scheduler';
 import { appStore, addLog, setToolRuntime, startLiveTicker, stopLiveTicker } from '@/lib/store';
@@ -31,7 +31,10 @@ let unlistenTaskLog: (() => void) | null = null;
 let unlistenBeforeQuit: (() => void) | null = null;
 let unlistenScreenShareStatus: (() => void) | null = null;
 let unlistenFileShareStatus: (() => void) | null = null;
+let unlistenOpenClipboardSettings: (() => void) | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+const router = useRouter();
 
 function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
@@ -164,6 +167,12 @@ onMounted(async () => {
     setToolRuntime('fileShare', event.payload.is_active);
   });
 
+  unlistenOpenClipboardSettings = await listen('clipboard-open-settings', () => {
+    if (router.currentRoute.value.path !== '/tools/clipboard') {
+      void router.push('/tools/clipboard');
+    }
+  });
+
   if (cfg?.launch_and_auto_scan && !appStore.isRunning) {
     try {
       await startScheduler();
@@ -195,6 +204,7 @@ onUnmounted(() => {
   if (unlistenBeforeQuit) unlistenBeforeQuit();
   if (unlistenScreenShareStatus) unlistenScreenShareStatus();
   if (unlistenFileShareStatus) unlistenFileShareStatus();
+  if (unlistenOpenClipboardSettings) unlistenOpenClipboardSettings();
 });
 </script>
 

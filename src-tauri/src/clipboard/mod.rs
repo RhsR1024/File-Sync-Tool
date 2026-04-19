@@ -9,6 +9,7 @@ pub mod image_store;
 pub mod models;
 pub mod paste;
 pub mod retention;
+pub mod source;
 pub mod watcher;
 pub mod win_v;
 
@@ -24,6 +25,9 @@ pub struct ClipboardState {
     pub db_path: PathBuf,
     pub image_dir: PathBuf,
     pub is_enabled: AtomicBool,
+    /// When true the popup panel does NOT auto-hide on focus loss. Toggled by
+    /// the lock-window toolbar button on the panel.
+    pub panel_pinned: AtomicBool,
     pub last_hash: Mutex<Option<[u8; 32]>>,
     pub settings: Arc<RwLock<ClipboardSettings>>,
     pub watcher_handle: Mutex<Option<watcher::WatcherHandle>>,
@@ -46,6 +50,7 @@ impl ClipboardState {
             db_path,
             image_dir,
             is_enabled: std::sync::atomic::AtomicBool::new(settings.enabled),
+            panel_pinned: std::sync::atomic::AtomicBool::new(false),
             last_hash: parking_lot::Mutex::new(None),
             settings: std::sync::Arc::new(parking_lot::RwLock::new(settings)),
             watcher_handle: parking_lot::Mutex::new(None),
