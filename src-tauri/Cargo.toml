@@ -43,7 +43,7 @@ rand = "0.8"
 
 # Screen sharing
 scrap = "0.5"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 axum = { version = "0.7", features = ["multipart"] }
 async-stream = "0.3"
 bytes = "1"
@@ -58,6 +58,18 @@ ipnet = "2"
 trash = "5"
 rust-embed = "8"
 
+# Clipboard manager tool (spec §14.1)
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
+clipboard-master = "4"
+arboard = "3"
+enigo = "0.2"
+parking_lot = "0.12"
+blake3 = "1"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+window-vibrancy = "0.5"
+rayon = "1"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 
@@ -66,6 +78,11 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 [profile.release]
