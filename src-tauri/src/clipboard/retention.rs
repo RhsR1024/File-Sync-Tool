@@ -6,14 +6,11 @@ use crate::clipboard::models::ClipboardSettings;
 
 /// Apply `retain_days` and `max_items` limits. Favorites are always exempt.
 /// Returns `(deleted_by_age, deleted_by_cap)`.
-pub fn run_cleanup(
-    conn: &Connection,
-    settings: &ClipboardSettings,
-) -> SqlResult<(u64, u64)> {
+pub fn run_cleanup(conn: &Connection, settings: &ClipboardSettings) -> SqlResult<(u64, u64)> {
     let mut deleted_by_age = 0u64;
     if settings.retain_days > 0 {
-        let cutoff = chrono::Utc::now().timestamp_millis()
-            - (settings.retain_days as i64) * 86_400_000;
+        let cutoff =
+            chrono::Utc::now().timestamp_millis() - (settings.retain_days as i64) * 86_400_000;
         deleted_by_age = conn.execute(
             "DELETE FROM clipboard_items
              WHERE is_favorite = 0

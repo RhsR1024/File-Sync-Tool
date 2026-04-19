@@ -20,6 +20,7 @@ pub use stub::*;
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{
         GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
@@ -30,7 +31,6 @@ mod windows_impl {
         REG_OPTION_NON_VOLATILE, REG_SZ,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::core::PCWSTR;
 
     const RUN_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
     const RUN_VALUE_NAME: &str = "FileSyncToolClipboardAdmin";
@@ -94,13 +94,8 @@ mod windows_impl {
                     wide.as_ptr() as *const u8,
                     wide.len() * std::mem::size_of::<u16>(),
                 );
-                let set_status = RegSetValueExW(
-                    key,
-                    PCWSTR(value_name.as_ptr()),
-                    0,
-                    REG_SZ,
-                    Some(bytes),
-                );
+                let set_status =
+                    RegSetValueExW(key, PCWSTR(value_name.as_ptr()), 0, REG_SZ, Some(bytes));
                 let _ = RegCloseKey(key);
                 if set_status.is_err() {
                     return Err(format!("RegSetValueExW: {:?}", set_status));

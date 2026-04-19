@@ -4,11 +4,11 @@ use std::sync::atomic::Ordering;
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
-use crate::AppState;
 use crate::clipboard::db;
 use crate::clipboard::models::{
     ClipboardItem, ClipboardListQuery, ClipboardListResult, ClipboardSettings, ClipboardStats,
 };
+use crate::AppState;
 
 #[tauri::command]
 pub fn cb_is_enabled(state: State<'_, AppState>) -> bool {
@@ -59,10 +59,7 @@ pub fn cb_clear(state: State<'_, AppState>, keep_favorites: bool) -> Result<u64,
 }
 
 #[tauri::command]
-pub fn cb_toggle_favorite(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<ClipboardItem, String> {
+pub fn cb_toggle_favorite(state: State<'_, AppState>, id: i64) -> Result<ClipboardItem, String> {
     let conn = state.clipboard.db.lock();
     db::toggle_favorite(&conn, id).map_err(|e| e.to_string())
 }
@@ -180,11 +177,7 @@ pub fn cb_paste(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(
 }
 
 #[tauri::command]
-pub fn cb_paste_plain(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<(), String> {
+pub fn cb_paste_plain(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let item = {
         let conn = state.clipboard.db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
@@ -193,10 +186,7 @@ pub fn cb_paste_plain(
 }
 
 #[tauri::command]
-pub fn cb_reorder_favorites(
-    state: State<'_, AppState>,
-    ids: Vec<i64>,
-) -> Result<(), String> {
+pub fn cb_reorder_favorites(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
     let mut conn = state.clipboard.db.lock();
     db::reorder_favorites(&mut conn, &ids).map_err(|e| e.to_string())
 }
@@ -242,18 +232,13 @@ pub fn cb_is_win_v_enabled() -> bool {
 }
 
 #[tauri::command]
-pub async fn cb_enable_win_v(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn cb_enable_win_v(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     crate::clipboard::win_v::enable_win_v_replacement()?;
     // Re-register the clipboard panel hotkey as Super+V (the Win key).
     // Roll back the registry change if hotkey registration fails.
-    if let Err(e) = crate::clipboard::hotkey::change(
-        app.clone(),
-        &state.clipboard.hotkey_handle,
-        "Super+V",
-    ) {
+    if let Err(e) =
+        crate::clipboard::hotkey::change(app.clone(), &state.clipboard.hotkey_handle, "Super+V")
+    {
         let _ = crate::clipboard::win_v::disable_win_v_replacement();
         return Err(format!("register Super+V failed, rolled back: {e}"));
     }
@@ -262,16 +247,11 @@ pub async fn cb_enable_win_v(
 }
 
 #[tauri::command]
-pub async fn cb_disable_win_v(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn cb_disable_win_v(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     crate::clipboard::win_v::disable_win_v_replacement()?;
     // Restore the configured hotkey (default Alt+C).
     let hotkey = state.clipboard.settings.read().hotkey.clone();
-    if let Err(e) =
-        crate::clipboard::hotkey::change(app, &state.clipboard.hotkey_handle, &hotkey)
-    {
+    if let Err(e) = crate::clipboard::hotkey::change(app, &state.clipboard.hotkey_handle, &hotkey) {
         return Err(format!("restore hotkey failed: {e}"));
     }
     state.clipboard.settings.write().use_win_v_replacement = false;

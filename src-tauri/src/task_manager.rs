@@ -307,8 +307,7 @@ impl TaskManager {
                 } else if !paused && was_paused {
                     // Resuming: calculate pause duration and accumulate it
                     if let Some(paused_at_str) = &group.paused_at {
-                        let paused_duration =
-                            compute_elapsed_seconds(paused_at_str, None);
+                        let paused_duration = compute_elapsed_seconds(paused_at_str, None);
                         group.accumulated_paused_seconds += paused_duration;
                     }
                     group.paused_at = None;

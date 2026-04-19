@@ -27,8 +27,8 @@ mod windows_impl {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
-        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE,
-        REG_OPTION_NON_VOLATILE, REG_DWORD, REG_VALUE_TYPE,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD,
+        REG_OPTION_NON_VOLATILE, REG_VALUE_TYPE,
     };
 
     const EXPLORER_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer";
@@ -58,8 +58,7 @@ mod windows_impl {
             }
             let name = to_wide(ALLOW_CLIPBOARD_HISTORY);
             let bytes = value.to_le_bytes();
-            let set_status =
-                RegSetValueExW(key, PCWSTR(name.as_ptr()), 0, REG_DWORD, Some(&bytes));
+            let set_status = RegSetValueExW(key, PCWSTR(name.as_ptr()), 0, REG_DWORD, Some(&bytes));
             let _ = RegCloseKey(key);
             if set_status.is_err() {
                 return Err(format!("RegSetValueExW: {:?}", set_status));

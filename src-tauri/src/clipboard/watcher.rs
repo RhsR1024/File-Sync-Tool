@@ -4,9 +4,9 @@
 //! `arboard`. Each captured payload is hashed with BLAKE3; duplicates are treated as "updated_at"
 //! touches (no new row). New items trigger a Tauri event `clipboard-item-added`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 
 use arboard::Clipboard;
@@ -14,10 +14,10 @@ use clipboard_master::{CallbackResult, ClipboardHandler, Master, Shutdown};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
 
-use crate::clipboard::ClipboardState;
 use crate::clipboard::db::{self, NewItem};
 use crate::clipboard::image_store;
 use crate::clipboard::models::ContentKind;
+use crate::clipboard::ClipboardState;
 
 pub struct WatcherHandle {
     stop_flag: Arc<AtomicBool>,

@@ -33,6 +33,7 @@ pub fn save_image_png(
 
 /// Delete all `.png` files in `image_dir` whose absolute string path is NOT in `referenced_paths`.
 /// Uses rayon for parallel deletion. Returns the number of files deleted.
+#[allow(dead_code)] // reserved: orphan image GC, invoked from future retention hook
 pub fn gc_orphan_images(
     image_dir: &Path,
     referenced_paths: &std::collections::HashSet<String>,
@@ -51,7 +52,13 @@ pub fn gc_orphan_images(
             let s = p.to_string_lossy().to_string();
             !referenced_paths.contains(&s)
         })
-        .map(|p| if std::fs::remove_file(p).is_ok() { 1u64 } else { 0 })
+        .map(|p| {
+            if std::fs::remove_file(p).is_ok() {
+                1u64
+            } else {
+                0
+            }
+        })
         .sum();
 
     Ok(deleted)
@@ -69,7 +76,11 @@ mod tests {
         let rgba = vec![255u8; 4 * 2 * 2];
         let path = save_image_png(dir.path(), "deadbeef1234567890abcdef", 2, 2, &rgba).unwrap();
         assert!(path.exists());
-        assert!(path.file_name().unwrap().to_string_lossy().ends_with(".png"));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".png"));
     }
 
     #[test]

@@ -21,8 +21,8 @@ impl HotkeyHandle {
 
 /// Register `hotkey_str` (e.g. `"Alt+C"`, `"Ctrl+Shift+V"`). On press, toggles the clipboard panel.
 pub fn register(app: AppHandle, hotkey_str: &str) -> Result<HotkeyHandle, String> {
-    let shortcut = Shortcut::from_str(hotkey_str)
-        .map_err(|e| format!("parse hotkey '{hotkey_str}': {e}"))?;
+    let shortcut =
+        Shortcut::from_str(hotkey_str).map_err(|e| format!("parse hotkey '{hotkey_str}': {e}"))?;
 
     app.global_shortcut()
         .on_shortcut(shortcut, move |app, _shortcut, event| {
@@ -47,8 +47,8 @@ pub fn change(
     new_hotkey: &str,
 ) -> Result<(), String> {
     // Parse the new hotkey first so we don't unregister on a bogus input.
-    let _ = Shortcut::from_str(new_hotkey)
-        .map_err(|e| format!("parse hotkey '{new_hotkey}': {e}"))?;
+    let _ =
+        Shortcut::from_str(new_hotkey).map_err(|e| format!("parse hotkey '{new_hotkey}': {e}"))?;
 
     // Unregister old.
     if let Some(old) = current.lock().take() {

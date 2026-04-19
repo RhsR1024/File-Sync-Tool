@@ -2403,7 +2403,11 @@ async fn enable_appliance_ssh_for_target(
         }
 
         // Resolve whitelist source: user-supplied CIDR replaces auto-detected local IP.
-        let source = match whitelist_cidr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let source = match whitelist_cidr
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(cidr) => {
                 if !validate_cidr(cidr) {
                     result.whitelist_applied = Some(false);
@@ -2672,10 +2676,8 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("app_data_dir: {e}"))?;
-            let clipboard_state = clipboard::ClipboardState::init(
-                &app_data_dir,
-                config.clipboard.clone(),
-            )?;
+            let clipboard_state =
+                clipboard::ClipboardState::init(&app_data_dir, config.clipboard.clone())?;
             let clipboard_state_for_startup = clipboard_state.clone();
             let clipboard_enabled_at_start = config.clipboard.enabled;
             let clipboard_hotkey_at_start = config.clipboard.hotkey.clone();
@@ -2750,10 +2752,8 @@ fn main() {
 
             // Register the clipboard global shortcut (default Alt+C) when the feature is on.
             if clipboard_enabled_at_start {
-                match clipboard::hotkey::register(
-                    app.handle().clone(),
-                    &clipboard_hotkey_at_start,
-                ) {
+                match clipboard::hotkey::register(app.handle().clone(), &clipboard_hotkey_at_start)
+                {
                     Ok(handle) => {
                         *clipboard_state_for_startup.hotkey_handle.lock() = Some(handle);
                     }

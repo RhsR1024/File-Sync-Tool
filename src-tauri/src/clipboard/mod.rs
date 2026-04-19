@@ -1,21 +1,21 @@
 //! Clipboard manager module (spec §5).
 //! See docs/superpowers/specs/2026-04-19-clipboard-manager-design.md
 
-pub mod models;
-pub mod db;
-pub mod retention;
-pub mod watcher;
-pub mod image_store;
-pub mod hotkey;
-pub mod paste;
-pub mod win_v;
 pub mod admin;
 pub mod commands;
+pub mod db;
+pub mod hotkey;
+pub mod image_store;
+pub mod models;
+pub mod paste;
+pub mod retention;
+pub mod watcher;
+pub mod win_v;
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use parking_lot::{Mutex, RwLock};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use models::ClipboardSettings;
 
@@ -37,8 +37,7 @@ impl ClipboardState {
     ) -> Result<std::sync::Arc<Self>, String> {
         let db_path = app_data_dir.join("clipboard.db");
         let image_dir = app_data_dir.join("clipboard_images");
-        std::fs::create_dir_all(&image_dir)
-            .map_err(|e| format!("create image dir: {e}"))?;
+        std::fs::create_dir_all(&image_dir).map_err(|e| format!("create image dir: {e}"))?;
 
         let conn = db::open(&db_path).map_err(|e| format!("open db: {e}"))?;
 
@@ -54,6 +53,7 @@ impl ClipboardState {
         }))
     }
 
+    #[allow(dead_code)] // reserved for explicit shutdown; Tauri exit handler lets OS reclaim
     pub fn shutdown(&self) {
         if let Some(h) = self.watcher_handle.lock().take() {
             h.stop();
@@ -64,7 +64,10 @@ impl ClipboardState {
     }
 
     pub fn enable(self: &std::sync::Arc<Self>, app: tauri::AppHandle) {
-        if self.is_enabled.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if self
+            .is_enabled
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
             return;
         }
         let handle = crate::clipboard::watcher::start(app, self.clone());

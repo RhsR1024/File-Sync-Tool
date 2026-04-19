@@ -20,11 +20,7 @@ use crate::clipboard::models::{ClipboardItem, ContentKind};
 
 /// Paste an item. If `plain_text` is true, HTML items are written as plain text (no rich
 /// formatting) and will paste as plain text in the target app.
-pub fn paste_item(
-    app: &AppHandle,
-    item: &ClipboardItem,
-    plain_text: bool,
-) -> Result<(), String> {
+pub fn paste_item(app: &AppHandle, item: &ClipboardItem, plain_text: bool) -> Result<(), String> {
     write_to_clipboard(item, plain_text)?;
 
     if let Some(panel) = app.get_webview_window("clipboard-panel") {
@@ -41,11 +37,17 @@ fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), Stri
 
     match item.kind {
         ContentKind::Text => {
-            let text = item.content_full.as_deref().unwrap_or(&item.content_preview);
+            let text = item
+                .content_full
+                .as_deref()
+                .unwrap_or(&item.content_preview);
             cb.set_text(text).map_err(|e| format!("set text: {e}"))?;
         }
         ContentKind::Html => {
-            let text = item.content_full.as_deref().unwrap_or(&item.content_preview);
+            let text = item
+                .content_full
+                .as_deref()
+                .unwrap_or(&item.content_preview);
             if plain_text {
                 cb.set_text(text).map_err(|e| format!("set text: {e}"))?;
             } else {
@@ -85,8 +87,7 @@ fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), Stri
 }
 
 fn simulate_paste() -> Result<(), String> {
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("enigo init: {e}"))?;
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("enigo init: {e}"))?;
     enigo
         .key(Key::Control, Press)
         .map_err(|e| format!("ctrl press: {e}"))?;

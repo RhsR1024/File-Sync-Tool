@@ -1,7 +1,7 @@
 //! Clipboard SQLite database layer (spec §7.2).
 
-use std::path::Path;
 use rusqlite::{params, params_from_iter, Connection, Result as SqlResult, ToSql};
+use std::path::Path;
 
 use crate::clipboard::models::{
     ClipboardFilter, ClipboardItem, ClipboardListQuery, ClipboardListResult, ContentKind,
@@ -162,7 +162,10 @@ fn build_where(q: &ClipboardListQuery) -> (String, Vec<Box<dyn ToSql>>) {
     if !trimmed.is_empty() {
         let like = format!(
             "%{}%",
-            trimmed.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"),
+            trimmed
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_"),
         );
         let p1 = values.len() + 1;
         let p2 = values.len() + 2;
@@ -192,7 +195,9 @@ fn build_where(q: &ClipboardListQuery) -> (String, Vec<Box<dyn ToSql>>) {
     if let Some(ref app) = q.op_app {
         let like = format!(
             "%{}%",
-            app.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"),
+            app.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_"),
         );
         let p = values.len() + 1;
         clauses.push(format!("source_app LIKE ?{p} ESCAPE '\\'"));
@@ -445,35 +450,63 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
 
-        let a = insert_item(&conn, &NewItem {
-            kind: ContentKind::Text,
-            content_preview: "a".into(),
-            content_full: None, html: None,
-            image_path: None, image_width: None, image_height: None,
-            file_paths: None, byte_size: 0,
-            hash: "ha".into(), source_app: None,
-        }).unwrap();
-        let b = insert_item(&conn, &NewItem {
-            kind: ContentKind::Text,
-            content_preview: "b".into(),
-            content_full: None, html: None,
-            image_path: None, image_width: None, image_height: None,
-            file_paths: None, byte_size: 0,
-            hash: "hb".into(), source_app: None,
-        }).unwrap();
+        let a = insert_item(
+            &conn,
+            &NewItem {
+                kind: ContentKind::Text,
+                content_preview: "a".into(),
+                content_full: None,
+                html: None,
+                image_path: None,
+                image_width: None,
+                image_height: None,
+                file_paths: None,
+                byte_size: 0,
+                hash: "ha".into(),
+                source_app: None,
+            },
+        )
+        .unwrap();
+        let b = insert_item(
+            &conn,
+            &NewItem {
+                kind: ContentKind::Text,
+                content_preview: "b".into(),
+                content_full: None,
+                html: None,
+                image_path: None,
+                image_width: None,
+                image_height: None,
+                file_paths: None,
+                byte_size: 0,
+                hash: "hb".into(),
+                source_app: None,
+            },
+        )
+        .unwrap();
         // Mark both as favorites
-        conn.execute("UPDATE clipboard_items SET is_favorite = 1 WHERE id IN (?1, ?2)", params![a, b]).unwrap();
+        conn.execute(
+            "UPDATE clipboard_items SET is_favorite = 1 WHERE id IN (?1, ?2)",
+            params![a, b],
+        )
+        .unwrap();
 
         reorder_favorites(&mut conn, &[b, a]).unwrap();
 
-        let idx_b: i64 = conn.query_row(
-            "SELECT favorite_sort_index FROM clipboard_items WHERE id = ?1",
-            params![b], |r| r.get(0),
-        ).unwrap();
-        let idx_a: i64 = conn.query_row(
-            "SELECT favorite_sort_index FROM clipboard_items WHERE id = ?1",
-            params![a], |r| r.get(0),
-        ).unwrap();
+        let idx_b: i64 = conn
+            .query_row(
+                "SELECT favorite_sort_index FROM clipboard_items WHERE id = ?1",
+                params![b],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let idx_a: i64 = conn
+            .query_row(
+                "SELECT favorite_sort_index FROM clipboard_items WHERE id = ?1",
+                params![a],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(idx_b, 0);
         assert_eq!(idx_a, 1);
     }
@@ -482,21 +515,36 @@ mod tests {
     fn reorder_favorites_skips_non_favorites() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
-        let non_fav = insert_item(&conn, &NewItem {
-            kind: ContentKind::Text,
-            content_preview: "x".into(),
-            content_full: None, html: None,
-            image_path: None, image_width: None, image_height: None,
-            file_paths: None, byte_size: 0,
-            hash: "hx".into(), source_app: None,
-        }).unwrap();
+        let non_fav = insert_item(
+            &conn,
+            &NewItem {
+                kind: ContentKind::Text,
+                content_preview: "x".into(),
+                content_full: None,
+                html: None,
+                image_path: None,
+                image_width: None,
+                image_height: None,
+                file_paths: None,
+                byte_size: 0,
+                hash: "hx".into(),
+                source_app: None,
+            },
+        )
+        .unwrap();
         // is_favorite stays 0
         reorder_favorites(&mut conn, &[non_fav]).unwrap();
-        let idx: Option<i64> = conn.query_row(
-            "SELECT favorite_sort_index FROM clipboard_items WHERE id = ?1",
-            params![non_fav], |r| r.get(0),
-        ).unwrap();
-        assert!(idx.is_none(), "non-favorite should not receive a sort index");
+        let idx: Option<i64> = conn
+            .query_row(
+                "SELECT favorite_sort_index FROM clipboard_items WHERE id = ?1",
+                params![non_fav],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            idx.is_none(),
+            "non-favorite should not receive a sort index"
+        );
     }
 
     #[test]
@@ -504,22 +552,34 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         let mk = |kind: ContentKind, hash: &str, bytes: i64| NewItem {
-            kind, content_preview: "x".into(),
-            content_full: None, html: None,
-            image_path: None, image_width: None, image_height: None,
-            file_paths: None, byte_size: bytes,
-            hash: hash.into(), source_app: None,
+            kind,
+            content_preview: "x".into(),
+            content_full: None,
+            html: None,
+            image_path: None,
+            image_width: None,
+            image_height: None,
+            file_paths: None,
+            byte_size: bytes,
+            hash: hash.into(),
+            source_app: None,
         };
-        insert_item(&conn, &mk(ContentKind::Text,  "t1", 100)).unwrap();
+        insert_item(&conn, &mk(ContentKind::Text, "t1", 100)).unwrap();
         insert_item(&conn, &mk(ContentKind::Image, "i1", 5_000)).unwrap();
         insert_item(&conn, &mk(ContentKind::Image, "i2", 50_000)).unwrap();
 
         let q = ClipboardListQuery {
-            filter: ClipboardFilter::All, search: String::new(),
+            filter: ClipboardFilter::All,
+            search: String::new(),
             op_type: Some("image".into()),
-            op_size_gt: Some(10_000), op_size_lt: None,
-            op_from_ms: None, op_to_ms: None, op_app: None, op_fav_only: false,
-            offset: 0, limit: 10,
+            op_size_gt: Some(10_000),
+            op_size_lt: None,
+            op_from_ms: None,
+            op_to_ms: None,
+            op_app: None,
+            op_fav_only: false,
+            offset: 0,
+            limit: 10,
         };
         let result = list_items(&conn, &q).unwrap();
         assert_eq!(result.total, 1);

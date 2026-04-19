@@ -408,8 +408,7 @@ fn migrate_file(src: &PathBuf, dst: &PathBuf) {
 
 /// Returns the effective data directory: custom_data_dir if set, otherwise app_data_dir.
 pub fn get_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
-    get_custom_data_dir(app_handle)
-        .unwrap_or_else(|| app_handle.path().app_data_dir().unwrap())
+    get_custom_data_dir(app_handle).unwrap_or_else(|| app_handle.path().app_data_dir().unwrap())
 }
 
 pub fn get_log_path(app_handle: &tauri::AppHandle) -> PathBuf {
