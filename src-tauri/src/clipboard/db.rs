@@ -248,6 +248,18 @@ pub fn toggle_favorite(conn: &Connection, id: i64) -> SqlResult<ClipboardItem> {
     get_item(conn, id)
 }
 
+pub fn reorder_favorites(conn: &mut Connection, ids: &[i64]) -> SqlResult<()> {
+    let tx = conn.transaction()?;
+    for (idx, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE clipboard_items SET favorite_sort_index = ?1 WHERE id = ?2 AND is_favorite = 1",
+            params![idx as i64, id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +385,64 @@ mod tests {
         assert!(item.is_favorite);
         let item = toggle_favorite(&conn, id).unwrap();
         assert!(!item.is_favorite);
+    }
+
+    #[test]
+    fn reorder_favorites_updates_sort_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        let a = insert_item(&conn, &NewItem {
+            kind: ContentKind::Text,
+            content_preview: "a".into(),
+            content_full: None, html: None,
+            image_path: None, image_width: None, image_height: None,
+            file_paths: None, byte_size: 0,
+            hash: "ha".into(), source_app: None,
+        }).unwrap();
+        let b = insert_item(&conn, &NewItem {
+            kind: ContentKind::Text,
+            content_preview: "b".into(),
+            content_full: None, html: None,
+            image_path: None, image_width: None, image_height: None,
+            file_paths: None, byte_size: 0,
+            hash: "hb".into(), source_app: None,
+        }).unwrap();
+        // Mark both as favorites
+        conn.execute("UPDATE clipboard_items SET is_favorite = 1 WHERE id IN (?1, ?2)", params![a, b]).unwrap();
+
+        reorder_favorites(&mut conn, &[b, a]).unwrap();
+
+        let idx_b: i64 = conn.query_row(
+            "SELECT favorite_sort_index FROM clipboard_items WHERE id = ?1",
+            params![b], |r| r.get(0),
+        ).unwrap();
+        let idx_a: i64 = conn.query_row(
+            "SELECT favorite_sort_index FROM clipboard_items WHERE id = ?1",
+            params![a], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(idx_b, 0);
+        assert_eq!(idx_a, 1);
+    }
+
+    #[test]
+    fn reorder_favorites_skips_non_favorites() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let non_fav = insert_item(&conn, &NewItem {
+            kind: ContentKind::Text,
+            content_preview: "x".into(),
+            content_full: None, html: None,
+            image_path: None, image_width: None, image_height: None,
+            file_paths: None, byte_size: 0,
+            hash: "hx".into(), source_app: None,
+        }).unwrap();
+        // is_favorite stays 0
+        reorder_favorites(&mut conn, &[non_fav]).unwrap();
+        let idx: Option<i64> = conn.query_row(
+            "SELECT favorite_sort_index FROM clipboard_items WHERE id = ?1",
+            params![non_fav], |r| r.get(0),
+        ).unwrap();
+        assert!(idx.is_none(), "non-favorite should not receive a sort index");
     }
 }

@@ -912,6 +912,7 @@ export const clipboardApi = {
     invoke<number>('cb_clear', { keepFavorites }),
   toggleFavorite: (id: number) =>
     invoke<ClipboardItem>('cb_toggle_favorite', { id }),
+  reorderFavorites: (ids: number[]) => invoke<void>('cb_reorder_favorites', { ids }),
   paste: (id: number) => invoke<void>('cb_paste', { id }),
   pastePlain: (id: number) => invoke<void>('cb_paste_plain', { id }),
   togglePanel: () => invoke<void>('cb_toggle_panel'),

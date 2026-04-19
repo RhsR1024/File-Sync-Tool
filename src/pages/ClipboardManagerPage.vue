@@ -5,6 +5,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 
 import { useClipboardStore } from '@/composables/useClipboardStore';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
+import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter } from '@/lib/clipboardTypes';
 
 defineOptions({ name: 'ClipboardManagerPage' });
@@ -35,6 +36,15 @@ function setFilter(f: ClipboardFilter) {
 function onSearchInput(e: Event) {
   store.search.value = (e.target as HTMLInputElement).value;
   void store.reload();
+}
+
+async function onReorder(ids: number[]) {
+  try {
+    await clipboardApi.reorderFavorites(ids);
+    await store.reload();
+  } catch (e) {
+    store.error.value = String(e);
+  }
 }
 </script>
 
@@ -87,8 +97,10 @@ function onSearchInput(e: Event) {
           v-else
           :items="store.items.value"
           :selected-id="selectedId"
+          :draggable="store.filter.value === 'favorite'"
           @select="(id) => (selectedId = id)"
           @activate="(id) => store.toggleFavorite(id)"
+          @reorder="onReorder"
         />
       </section>
     </div>

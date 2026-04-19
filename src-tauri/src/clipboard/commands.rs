@@ -137,3 +137,12 @@ pub fn cb_paste_plain(
     };
     crate::clipboard::paste::paste_item(&app, &item, true)
 }
+
+#[tauri::command]
+pub fn cb_reorder_favorites(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> Result<(), String> {
+    let mut conn = state.clipboard.db.lock();
+    db::reorder_favorites(&mut conn, &ids).map_err(|e| e.to_string())
+}

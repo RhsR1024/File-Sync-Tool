@@ -35,6 +35,15 @@ async function paste(id: number, plain: boolean) {
   }
 }
 
+async function onReorder(ids: number[]) {
+  try {
+    await clipboardApi.reorderFavorites(ids);
+    await store.reload();
+  } catch (e) {
+    store.error.value = String(e);
+  }
+}
+
 function close() {
   void getCurrentWindow().hide();
 }
@@ -164,8 +173,10 @@ onBeforeUnmount(() => {
         :items="store.items.value"
         :selected-id="selectedId"
         :compact="true"
+        :draggable="store.filter.value === 'favorite'"
         @select="onListSelect"
         @activate="(id) => paste(id, false)"
+        @reorder="onReorder"
       />
     </div>
   </div>
