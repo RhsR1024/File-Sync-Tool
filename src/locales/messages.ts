@@ -949,6 +949,10 @@ export const messages = {
       actions: { favorite: 'Favorite', unfavorite: 'Unfavorite', delete: 'Delete', close: 'Close' },
       loading: 'Loading...',
       totalSuffix: 'items',
+      notification: {
+        title: 'File-Sync-Tool Clipboard',
+        body: 'Clipboard watcher started. Press {hotkey} to open the panel.',
+      },
     },
   },
   zh: {
@@ -1901,6 +1905,10 @@ export const messages = {
       actions: { favorite: '收藏', unfavorite: '取消收藏', delete: '删除', close: '关闭' },
       loading: '加载中…',
       totalSuffix: '条',
+      notification: {
+        title: 'File-Sync-Tool 剪贴板',
+        body: '剪贴板监听已启动，按 {hotkey} 呼出面板',
+      },
     },
   },
 };

@@ -2583,6 +2583,7 @@ fn main() {
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -2678,6 +2679,7 @@ fn main() {
             let clipboard_state_for_startup = clipboard_state.clone();
             let clipboard_enabled_at_start = config.clipboard.enabled;
             let clipboard_hotkey_at_start = config.clipboard.hotkey.clone();
+            let config_show_startup_notification = config.clipboard.show_startup_notification;
 
             app.manage(network::NetworkState::default());
             app.manage(AppState {
@@ -2759,6 +2761,23 @@ fn main() {
                         eprintln!("[clipboard] hotkey register failed: {e}");
                     }
                 }
+            }
+
+            // Fire a startup toast so users know the watcher is live and how to open the panel.
+            // Delayed 500ms so the notification plugin + tray finish initializing first.
+            if clipboard_enabled_at_start && config_show_startup_notification {
+                use tauri_plugin_notification::NotificationExt;
+                let handle = app.handle().clone();
+                let hotkey_display = clipboard_hotkey_at_start.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let _ = handle
+                        .notification()
+                        .builder()
+                        .title("File-Sync-Tool 剪贴板")
+                        .body(format!("剪贴板监听已启动，按 {hotkey_display} 呼出面板"))
+                        .show();
+                });
             }
 
             Ok(())
