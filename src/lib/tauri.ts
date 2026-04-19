@@ -4,6 +4,7 @@ import type {
   ClipboardItem,
   ClipboardListQuery,
   ClipboardListResult,
+  ClipboardStats,
 } from './clipboardTypes';
 
 export interface CommandGroup {
@@ -916,4 +917,5 @@ export const clipboardApi = {
   paste: (id: number) => invoke<void>('cb_paste', { id }),
   pastePlain: (id: number) => invoke<void>('cb_paste_plain', { id }),
   togglePanel: () => invoke<void>('cb_toggle_panel'),
+  stats: () => invoke<ClipboardStats>('cb_stats'),
 };

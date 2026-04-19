@@ -21,6 +21,7 @@ use models::ClipboardSettings;
 
 pub struct ClipboardState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
+    pub db_path: PathBuf,
     pub image_dir: PathBuf,
     pub is_enabled: AtomicBool,
     pub last_hash: Mutex<Option<[u8; 32]>>,
@@ -43,6 +44,7 @@ impl ClipboardState {
 
         Ok(std::sync::Arc::new(Self {
             db: std::sync::Arc::new(parking_lot::Mutex::new(conn)),
+            db_path,
             image_dir,
             is_enabled: std::sync::atomic::AtomicBool::new(settings.enabled),
             last_hash: parking_lot::Mutex::new(None),

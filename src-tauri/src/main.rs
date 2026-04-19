@@ -2853,7 +2853,8 @@ fn main() {
             clipboard::commands::cb_set_hotkey,
             clipboard::commands::cb_paste,
             clipboard::commands::cb_paste_plain,
-            clipboard::commands::cb_reorder_favorites
+            clipboard::commands::cb_reorder_favorites,
+            clipboard::commands::cb_stats
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

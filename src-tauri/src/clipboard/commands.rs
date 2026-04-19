@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 use crate::AppState;
 use crate::clipboard::db;
-use crate::clipboard::models::{ClipboardItem, ClipboardListQuery, ClipboardListResult};
+use crate::clipboard::models::{ClipboardItem, ClipboardListQuery, ClipboardListResult, ClipboardStats};
 
 #[tauri::command]
 pub fn cb_is_enabled(state: State<'_, AppState>) -> bool {
@@ -145,4 +145,39 @@ pub fn cb_reorder_favorites(
 ) -> Result<(), String> {
     let mut conn = state.clipboard.db.lock();
     db::reorder_favorites(&mut conn, &ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cb_stats(state: State<'_, AppState>) -> Result<ClipboardStats, String> {
+    let conn = state.clipboard.db.lock();
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM clipboard_items", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let image_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM clipboard_items WHERE kind = 'image'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    drop(conn);
+
+    let db_bytes = std::fs::metadata(&state.clipboard.db_path)
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+
+    let images_bytes: i64 = std::fs::read_dir(&state.clipboard.image_dir)
+        .map(|rd| {
+            rd.filter_map(|r| r.ok())
+                .filter_map(|d| d.metadata().ok().map(|m| m.len() as i64))
+                .sum::<i64>()
+        })
+        .unwrap_or(0);
+
+    Ok(ClipboardStats {
+        total,
+        db_bytes,
+        image_count,
+        images_bytes,
+    })
 }
