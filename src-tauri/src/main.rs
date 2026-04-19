@@ -2743,6 +2743,9 @@ fn main() {
             .always_on_top(true)
             .visible(false)
             .transparent(true)
+            // Disable the DWM drop-shadow that Windows paints around undecorated windows.
+            // Without this, the transparent panel shows a thick shadow on left/right/bottom.
+            .shadow(false)
             .build()?;
 
             #[cfg(target_os = "windows")]
@@ -2864,6 +2867,7 @@ fn main() {
             clipboard::commands::cb_set_hotkey,
             clipboard::commands::cb_paste,
             clipboard::commands::cb_paste_plain,
+            clipboard::commands::cb_copy,
             clipboard::commands::cb_reorder_favorites,
             clipboard::commands::cb_stats,
             clipboard::commands::cb_get_settings,

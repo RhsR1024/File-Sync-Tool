@@ -103,22 +103,32 @@ watch(
 
 let unlistenShown: UnlistenFn | null = null;
 let unlistenItemAdded: UnlistenFn | null = null;
-// Increments when the panel becomes visible so DynamicScroller re-mounts and
-// measures its container (the virtual scroller doesn't compute visible rows
-// while the window is hidden, which produced an empty "All" view on first open).
+// Bump whenever the panel becomes visible so DynamicScroller remounts and
+// measures its container in a visible window. The virtual scroller doesn't
+// compute visible rows while the window is hidden, which produced an empty
+// "All" view on first open.
 const showCounter = ref(0);
+const listKey = computed(() => `${store.filter.value}-${showCounter.value}`);
 
 onMounted(async () => {
   unlistenShown = await listen('clipboard-panel-shown', async () => {
     store.search.value = '';
     selectedIndex.value = 0;
-    showCounter.value += 1;
     await store.reload();
+    // Wait two frames so the webview finishes its first paint after show()
+    // before we force-remount the list, otherwise the virtual scroller can
+    // still measure a zero-height container.
     await nextTick();
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+    showCounter.value += 1;
     searchInput.value?.focus();
   });
   unlistenItemAdded = await store.startListening();
-  await store.reload();
+  // Defer the first reload until the panel is actually shown. Mounting the
+  // virtual scroller while the window is hidden leaves it stuck at 0 visible
+  // rows on first open.
 });
 
 onBeforeUnmount(() => {
@@ -180,7 +190,7 @@ onBeforeUnmount(() => {
       </div>
       <ClipboardList
         v-else
-        :key="`${store.filter.value}-${showCounter}`"
+        :key="listKey"
         :items="store.items.value"
         :selected-id="selectedId"
         :compact="true"

@@ -185,6 +185,17 @@ pub fn cb_paste_plain(app: AppHandle, state: State<'_, AppState>, id: i64) -> Re
     crate::clipboard::paste::paste_item(&app, &item, true)
 }
 
+/// Copy an item to the system clipboard without simulating Ctrl+V. Used by the manager
+/// page so clicking an entry places it on the clipboard for the user to paste manually.
+#[tauri::command]
+pub fn cb_copy(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let item = {
+        let conn = state.clipboard.db.lock();
+        db::get_item(&conn, id).map_err(|e| e.to_string())?
+    };
+    crate::clipboard::paste::copy_item(&item)
+}
+
 #[tauri::command]
 pub fn cb_reorder_favorites(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
     let mut conn = state.clipboard.db.lock();

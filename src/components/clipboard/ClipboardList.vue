@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller';
 import { VueDraggable } from 'vue-draggable-plus';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { useI18n } from 'vue-i18n';
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 
 import type { ClipboardItem } from '@/lib/clipboardTypes';
@@ -12,6 +13,8 @@ interface Props {
   selectedId: number | null;
   compact?: boolean;
   draggable?: boolean;
+  /** When true, render a visible favorite toggle button on each row. */
+  showFavoriteButton?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -23,6 +26,15 @@ const emit = defineEmits<{
   remove: [id: number];
   reorder: [ids: number[]];
 }>();
+
+const { t } = useI18n();
+
+function onRowKeydown(e: KeyboardEvent, id: number) {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    emit('activate', id);
+  }
+}
 
 function heightOf(it: ClipboardItem): number {
   if (it.kind === 'image') return props.compact ? 120 : 140;
@@ -88,10 +100,11 @@ function onReorderEnd() {
     class="flex h-full w-full flex-col gap-1 overflow-y-auto"
     @end="onReorderEnd"
   >
-    <button
+    <div
       v-for="it in draggableItems"
       :key="it.id"
-      type="button"
+      role="button"
+      tabindex="0"
       class="flex w-full cursor-move items-start gap-2 rounded-lg px-3 py-2 text-left transition-colors"
       :class="it.id === props.selectedId
         ? 'bg-slate-100 ring-1 ring-slate-300'
@@ -99,11 +112,11 @@ function onReorderEnd() {
       :style="{ minHeight: `${heightOf(it)}px` }"
       @mouseenter="emit('select', it.id)"
       @click="emit('activate', it.id)"
+      @keydown="onRowKeydown($event, it.id)"
     >
       <span class="inline-flex shrink-0 rounded bg-slate-200/60 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-slate-600">
         {{ it.kind }}
       </span>
-      <span v-if="it.is_favorite" class="shrink-0 text-xs text-amber-500">★</span>
 
       <div v-if="it.kind === 'image' && it.image_path" class="flex flex-1 items-center gap-3">
         <img
@@ -125,7 +138,21 @@ function onReorderEnd() {
       <span class="shrink-0 self-center text-[10px] tabular-nums text-slate-400">
         {{ formatTime(it.updated_at ?? it.created_at) }}
       </span>
-    </button>
+      <button
+        v-if="props.showFavoriteButton"
+        type="button"
+        class="shrink-0 self-center rounded-full p-1 text-base leading-none transition-colors"
+        :class="it.is_favorite ? 'text-amber-500 hover:bg-amber-50' : 'text-slate-300 hover:bg-slate-100 hover:text-amber-400'"
+        :title="it.is_favorite ? t('clipboard.actions.unfavorite') : t('clipboard.actions.favorite')"
+        @click.stop="emit('favorite', it.id)"
+      >
+        {{ it.is_favorite ? '★' : '☆' }}
+      </button>
+      <span
+        v-else-if="it.is_favorite"
+        class="shrink-0 self-center text-xs text-amber-500"
+      >★</span>
+    </div>
   </VueDraggable>
   <DynamicScroller
     v-else
@@ -140,20 +167,21 @@ function onReorderEnd() {
         :active="active"
         :size-dependencies="[item.content_preview, item.kind, item.image_path]"
       >
-        <button
-          type="button"
-          class="flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left transition-colors"
+        <div
+          role="button"
+          tabindex="0"
+          class="flex w-full cursor-pointer items-start gap-2 rounded-lg px-3 py-2 text-left transition-colors"
           :class="item.id === props.selectedId
             ? 'bg-slate-100 ring-1 ring-slate-300'
             : 'hover:bg-slate-50'"
           :style="{ minHeight: `${item._height}px` }"
           @mouseenter="emit('select', item.id)"
           @click="emit('activate', item.id)"
+          @keydown="onRowKeydown($event, item.id)"
         >
           <span class="inline-flex shrink-0 rounded bg-slate-200/60 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-slate-600">
             {{ item.kind }}
           </span>
-          <span v-if="item.is_favorite" class="shrink-0 text-xs text-amber-500">★</span>
 
           <div v-if="item.kind === 'image' && item.image_path" class="flex flex-1 items-center gap-3">
             <img
@@ -175,7 +203,21 @@ function onReorderEnd() {
           <span class="shrink-0 self-center text-[10px] tabular-nums text-slate-400">
             {{ formatTime(item.updated_at ?? item.created_at) }}
           </span>
-        </button>
+          <button
+            v-if="props.showFavoriteButton"
+            type="button"
+            class="shrink-0 self-center rounded-full p-1 text-base leading-none transition-colors"
+            :class="item.is_favorite ? 'text-amber-500 hover:bg-amber-50' : 'text-slate-300 hover:bg-slate-100 hover:text-amber-400'"
+            :title="item.is_favorite ? t('clipboard.actions.unfavorite') : t('clipboard.actions.favorite')"
+            @click.stop="emit('favorite', item.id)"
+          >
+            {{ item.is_favorite ? '★' : '☆' }}
+          </button>
+          <span
+            v-else-if="item.is_favorite"
+            class="shrink-0 self-center text-xs text-amber-500"
+          >★</span>
+        </div>
       </DynamicScrollerItem>
     </template>
   </DynamicScroller>

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "clipboard-panel",
+  "description": "Permissions for the clipboard-panel popup window (Alt+C).",
+  "windows": [
+    "clipboard-panel"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
+}

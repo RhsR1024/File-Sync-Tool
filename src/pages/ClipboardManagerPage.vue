@@ -19,6 +19,27 @@ const selectedId = ref<number | null>(null);
 const batchMode = ref(false);
 const selectedIds = ref<Set<number>>(new Set());
 const reloadCounter = ref(0);
+const copyToast = ref<string | null>(null);
+let copyToastTimer: number | null = null;
+
+function flashCopyToast(message: string) {
+  copyToast.value = message;
+  if (copyToastTimer !== null) window.clearTimeout(copyToastTimer);
+  copyToastTimer = window.setTimeout(() => {
+    copyToast.value = null;
+    copyToastTimer = null;
+  }, 1600);
+}
+
+async function copyToClipboard(id: number) {
+  try {
+    await clipboardApi.copy(id);
+    flashCopyToast(t('clipboard.actions.copied'));
+  } catch (e) {
+    console.error('[clipboard] copy failed:', e);
+    store.error.value = `${t('clipboard.errors.saveFailed')} — ${e}`;
+  }
+}
 
 const filters: ClipboardFilter[] = ['all', 'text', 'image', 'file', 'favorite'];
 
@@ -31,6 +52,10 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlisten?.();
+  if (copyToastTimer !== null) {
+    window.clearTimeout(copyToastTimer);
+    copyToastTimer = null;
+  }
 });
 
 function setFilter(f: ClipboardFilter) {
@@ -220,11 +245,30 @@ const selectionCount = computed(() => selectedIds.value.size);
           :items="store.items.value"
           :selected-id="selectedId"
           :draggable="store.filter.value === 'favorite'"
+          :show-favorite-button="true"
           @select="(id) => (selectedId = id)"
-          @activate="(id) => store.toggleFavorite(id)"
+          @activate="(id) => copyToClipboard(id)"
+          @favorite="(id) => store.toggleFavorite(id)"
           @reorder="onReorder"
         />
       </section>
     </div>
+
+    <transition
+      enter-active-class="transition-all duration-200 ease-out"
+      enter-from-class="opacity-0 translate-y-2"
+      enter-to-class="opacity-100 translate-y-0"
+      leave-active-class="transition-all duration-150 ease-in"
+      leave-from-class="opacity-100 translate-y-0"
+      leave-to-class="opacity-0 translate-y-2"
+    >
+      <div
+        v-if="copyToast"
+        class="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-slate-900/90 px-4 py-2 text-sm font-medium text-white shadow-lg"
+        role="status"
+      >
+        {{ copyToast }}
+      </div>
+    </transition>
   </div>
 </template>

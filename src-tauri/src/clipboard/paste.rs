@@ -32,6 +32,13 @@ pub fn paste_item(app: &AppHandle, item: &ClipboardItem, plain_text: bool) -> Re
     simulate_paste()
 }
 
+/// Copy an item into the system clipboard without simulating paste. Used by the manager
+/// page where the user wants to place content on the clipboard and paste it elsewhere
+/// manually.
+pub fn copy_item(item: &ClipboardItem) -> Result<(), String> {
+    write_to_clipboard(item, false)
+}
+
 fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), String> {
     let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
 
