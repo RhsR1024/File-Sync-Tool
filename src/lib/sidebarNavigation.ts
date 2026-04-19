@@ -9,7 +9,8 @@ export type SidebarIconKey =
   | 'codeStatistics'
   | 'networkTools'
   | 'screenShare'
-  | 'fileShare';
+  | 'fileShare'
+  | 'clipboardManager';
 
 export type SidebarMatchMode = 'exact' | 'prefix';
 export type SidebarRuntimeKey = 'screenShare' | 'fileShare';
@@ -111,6 +112,13 @@ export const SIDEBAR_NAV_SECTIONS = [
         iconKey: 'fileShare',
         matchMode: 'prefix',
         runtimeKey: 'fileShare',
+      },
+      {
+        key: 'clipboard-manager',
+        labelKey: 'sidebar.clipboardManager',
+        path: '/tools/clipboard',
+        iconKey: 'clipboardManager',
+        matchMode: 'prefix',
       },
     ],
   },

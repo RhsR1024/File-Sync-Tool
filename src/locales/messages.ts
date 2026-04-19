@@ -18,6 +18,7 @@ export const messages = {
       networkTools: 'Network Tools',
       screenShare: 'Screen Share',
       fileShare: 'File Share',
+      clipboardManager: 'Clipboard Manager',
     },
     console: {
       status: 'Status',
@@ -642,6 +643,10 @@ export const messages = {
           chip: 'File',
           description: 'Share local folders over the LAN — any device on the same network can browse and download files in a browser.',
         },
+        clipboardManager: {
+          chip: 'Clipboard',
+          description: 'Local clipboard history with search, grouping, favorites, and a global hotkey panel.',
+        },
       },
     },
     codeStatistics: {
@@ -932,6 +937,13 @@ export const messages = {
       count: 'Count',
       viewFiles: 'View Files',
     },
+    clipboard: {
+      tool: {
+        title: 'Clipboard Manager',
+        description: 'Monitor the system clipboard, persist history locally, and press Alt+C to open the quick panel.',
+        placeholder: 'Clipboard manager is being prepared — core listener and storage will be available in milestone M2.',
+      },
+    },
   },
   zh: {
     sidebar: {
@@ -952,6 +964,7 @@ export const messages = {
       networkTools: '网络工具',
       screenShare: '屏幕共享',
       fileShare: '文件共享',
+      clipboardManager: '剪贴板管理',
     },
     console: {
       status: '状态',
@@ -1576,6 +1589,10 @@ export const messages = {
           chip: '文件',
           description: '共享本地目录，局域网内任意设备均可通过浏览器浏览和下载文件，零安装。',
         },
+        clipboardManager: {
+          chip: '剪贴板',
+          description: '本地剪贴板历史：搜索、分组、收藏、全局快捷键唤出面板。',
+        },
       },
     },
     codeStatistics: {
@@ -1865,6 +1882,13 @@ export const messages = {
       size: '大小',
       count: '数量',
       viewFiles: '查看文件',
+    },
+    clipboard: {
+      tool: {
+        title: '剪贴板管理',
+        description: '监听系统剪贴板，历史本地持久化，按 Alt+C 呼出快速面板。',
+        placeholder: '剪贴板管理器准备中——核心监听与存储能力将在 M2 里程碑就绪。',
+      },
     },
   },
 };
