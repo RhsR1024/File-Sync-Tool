@@ -235,3 +235,45 @@ pub fn cb_stats(state: State<'_, AppState>) -> Result<ClipboardStats, String> {
         images_bytes,
     })
 }
+
+#[tauri::command]
+pub fn cb_is_win_v_enabled() -> bool {
+    crate::clipboard::win_v::is_win_v_replacement_enabled()
+}
+
+#[tauri::command]
+pub async fn cb_enable_win_v(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::clipboard::win_v::enable_win_v_replacement()?;
+    // Re-register the clipboard panel hotkey as Super+V (the Win key).
+    // Roll back the registry change if hotkey registration fails.
+    if let Err(e) = crate::clipboard::hotkey::change(
+        app.clone(),
+        &state.clipboard.hotkey_handle,
+        "Super+V",
+    ) {
+        let _ = crate::clipboard::win_v::disable_win_v_replacement();
+        return Err(format!("register Super+V failed, rolled back: {e}"));
+    }
+    state.clipboard.settings.write().use_win_v_replacement = true;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cb_disable_win_v(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::clipboard::win_v::disable_win_v_replacement()?;
+    // Restore the configured hotkey (default Alt+C).
+    let hotkey = state.clipboard.settings.read().hotkey.clone();
+    if let Err(e) =
+        crate::clipboard::hotkey::change(app, &state.clipboard.hotkey_handle, &hotkey)
+    {
+        return Err(format!("restore hotkey failed: {e}"));
+    }
+    state.clipboard.settings.write().use_win_v_replacement = false;
+    Ok(())
+}

@@ -2856,7 +2856,10 @@ fn main() {
             clipboard::commands::cb_reorder_favorites,
             clipboard::commands::cb_stats,
             clipboard::commands::cb_get_settings,
-            clipboard::commands::cb_save_settings
+            clipboard::commands::cb_save_settings,
+            clipboard::commands::cb_enable_win_v,
+            clipboard::commands::cb_disable_win_v,
+            clipboard::commands::cb_is_win_v_enabled
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardSettings } from '@/lib/clipboardTypes';
 import ClipboardHotkeyInput from './ClipboardHotkeyInput.vue';
+import ClipboardWinVConfirmDialog from './ClipboardWinVConfirmDialog.vue';
 
 const { t } = useI18n();
 
@@ -25,12 +26,23 @@ const model = reactive<ClipboardSettings>({ ...defaults });
 const loading = ref(true);
 const saving = ref(false);
 const error = ref<string | null>(null);
+const winVEnabled = ref(false);
+const winVDialogOpen = ref(false);
+
+async function refreshWinV() {
+  try {
+    winVEnabled.value = await clipboardApi.isWinVEnabled();
+  } catch {
+    // Leave as-is on error; surfaced via the global error banner already.
+  }
+}
 
 async function load() {
   loading.value = true;
   try {
     const got = await clipboardApi.getSettings();
     Object.assign(model, got);
+    await refreshWinV();
     error.value = null;
   } catch (e) {
     error.value = String(e);
@@ -50,6 +62,45 @@ async function save() {
   } finally {
     saving.value = false;
   }
+}
+
+function onWinVToggle(e: Event) {
+  const target = e.target as HTMLInputElement;
+  if (target.checked) {
+    // Revert the UI until the user confirms the destructive change.
+    target.checked = false;
+    winVDialogOpen.value = true;
+  } else {
+    // Disabling is non-destructive (restores Windows default); no double-confirm needed.
+    void disableWinV();
+  }
+}
+
+async function disableWinV() {
+  try {
+    await clipboardApi.disableWinV();
+    winVEnabled.value = false;
+    model.use_win_v_replacement = false;
+  } catch (e) {
+    error.value = String(e);
+    await refreshWinV();
+  }
+}
+
+async function onWinVConfirm() {
+  winVDialogOpen.value = false;
+  try {
+    await clipboardApi.enableWinV();
+    winVEnabled.value = true;
+    model.use_win_v_replacement = true;
+  } catch (e) {
+    error.value = String(e);
+    await refreshWinV();
+  }
+}
+
+function onWinVCancel() {
+  winVDialogOpen.value = false;
 }
 
 onMounted(load);
@@ -142,6 +193,36 @@ onMounted(load);
           <input type="checkbox" v-model="model.enable_text_preview" @change="save" />
         </label>
       </div>
+
+      <!-- System integration -->
+      <div class="space-y-3">
+        <h4 class="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+          {{ t('clipboard.settings.sectionSystem') }}
+        </h4>
+
+        <div class="space-y-2">
+          <div class="flex items-start gap-2 text-xs text-orange-600">
+            <span>⚠️</span>
+            <span>{{ t('clipboard.settings.winVWarning') }}</span>
+          </div>
+          <label class="flex items-center justify-between gap-4">
+            <div class="text-sm font-medium text-slate-800">
+              {{ t('clipboard.settings.winVLabel') }}
+            </div>
+            <input
+              type="checkbox"
+              :checked="winVEnabled"
+              @change="onWinVToggle($event)"
+            />
+          </label>
+        </div>
+      </div>
     </div>
+
+    <ClipboardWinVConfirmDialog
+      :open="winVDialogOpen"
+      @confirm="onWinVConfirm"
+      @cancel="onWinVCancel"
+    />
   </section>
 </template>

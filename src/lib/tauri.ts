@@ -923,4 +923,7 @@ export const clipboardApi = {
   saveSettings: (settings: ClipboardSettings) =>
     invoke<ClipboardSettings>('cb_save_settings', { settings }),
   setHotkey: (hotkey: string) => invoke<void>('cb_set_hotkey', { hotkey }),
+  enableWinV: () => invoke<void>('cb_enable_win_v'),
+  disableWinV: () => invoke<void>('cb_disable_win_v'),
+  isWinVEnabled: () => invoke<boolean>('cb_is_win_v_enabled'),
 };
