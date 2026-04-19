@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useI18n } from 'vue-i18n';
 
 import { useClipboardStore } from '@/composables/useClipboardStore';
 import { useClipboardHotkey } from '@/composables/useClipboardHotkey';
+import ClipboardList from '@/components/clipboard/ClipboardList.vue';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter } from '@/lib/clipboardTypes';
 
@@ -18,6 +19,10 @@ const selectedIndex = ref(0);
 const searchInput = ref<HTMLInputElement | null>(null);
 
 const filters: ClipboardFilter[] = ['all', 'text', 'image', 'file', 'favorite'];
+
+const selectedId = computed<number | null>(
+  () => store.items.value[selectedIndex.value]?.id ?? null,
+);
 
 async function paste(id: number, plain: boolean) {
   try {
@@ -45,6 +50,11 @@ function setFilter(f: ClipboardFilter) {
   store.filter.value = f;
   selectedIndex.value = 0;
   void store.reload();
+}
+
+function selectById(id: number) {
+  const idx = store.items.value.findIndex((it) => it.id === id);
+  if (idx >= 0) selectedIndex.value = idx;
 }
 
 useClipboardHotkey({
@@ -131,23 +141,18 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <div class="flex-1 overflow-y-auto px-2 pb-2">
+    <div class="flex-1 overflow-hidden px-2 pb-2">
       <div v-if="store.items.value.length === 0" class="flex h-full items-center justify-center p-6 text-center text-sm text-slate-400">
         {{ t('clipboard.panel.empty') }}
       </div>
-      <button
-        v-for="(it, i) in store.items.value"
-        :key="it.id"
-        type="button"
-        class="mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors"
-        :class="i === selectedIndex ? 'bg-slate-100 ring-1 ring-slate-300' : 'hover:bg-slate-50'"
-        @mouseenter="selectedIndex = i"
-        @click="paste(it.id, false)"
-      >
-        <span class="inline-flex shrink-0 rounded bg-slate-200/60 px-1.5 py-0 text-[10px] uppercase text-slate-600">{{ it.kind }}</span>
-        <span v-if="it.is_favorite" class="shrink-0 text-xs text-amber-500">★</span>
-        <span class="flex-1 truncate text-xs text-slate-700">{{ it.content_preview }}</span>
-      </button>
+      <ClipboardList
+        v-else
+        :items="store.items.value"
+        :selected-id="selectedId"
+        :compact="true"
+        @select="selectById"
+        @activate="(id) => paste(id, false)"
+      />
     </div>
   </div>
 </template>
