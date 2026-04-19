@@ -2674,6 +2674,8 @@ fn main() {
                 &app_data_dir,
                 config.clipboard.clone(),
             )?;
+            let clipboard_state_for_startup = clipboard_state.clone();
+            let clipboard_enabled_at_start = config.clipboard.enabled;
 
             app.manage(network::NetworkState::default());
             app.manage(AppState {
@@ -2698,6 +2700,17 @@ fn main() {
                 file_share: Arc::new(fileshare::FileShareHandle::new()),
                 clipboard: clipboard_state,
             });
+
+            // Start the clipboard watcher if the persisted config has it enabled.
+            // init() seeds is_enabled from config, but watcher thread only runs after enable().
+            if clipboard_enabled_at_start {
+                // Flip is_enabled back to false so enable() will actually spawn the watcher
+                // (enable() short-circuits when is_enabled is already true).
+                clipboard_state_for_startup
+                    .is_enabled
+                    .store(false, Ordering::SeqCst);
+                clipboard_state_for_startup.enable(app.handle().clone());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

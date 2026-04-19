@@ -59,4 +59,20 @@ impl ClipboardState {
             h.unregister();
         }
     }
+
+    pub fn enable(self: &std::sync::Arc<Self>, app: tauri::AppHandle) {
+        if self.is_enabled.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let handle = crate::clipboard::watcher::start(app, self.clone());
+        *self.watcher_handle.lock() = Some(handle);
+    }
+
+    pub fn disable(&self) {
+        self.is_enabled
+            .store(false, std::sync::atomic::Ordering::Release);
+        if let Some(h) = self.watcher_handle.lock().take() {
+            h.stop();
+        }
+    }
 }
