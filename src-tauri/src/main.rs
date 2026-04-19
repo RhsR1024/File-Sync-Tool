@@ -2742,19 +2742,7 @@ fn main() {
             .skip_taskbar(true)
             .always_on_top(true)
             .visible(false)
-            .transparent(true)
-            // Disable the DWM drop-shadow that Windows paints around undecorated windows.
-            // Without this, the transparent panel shows a thick shadow on left/right/bottom.
-            .shadow(false)
             .build()?;
-
-            #[cfg(target_os = "windows")]
-            {
-                // Prefer Mica (Win11); fall back to Acrylic (Win10).
-                if window_vibrancy::apply_mica(&panel, Some(true)).is_err() {
-                    let _ = window_vibrancy::apply_acrylic(&panel, Some((255, 255, 255, 125)));
-                }
-            }
 
             // Auto-hide on focus loss. We debounce by 150ms and re-check
             // `is_focused()` because calling `startDragging()` from the header

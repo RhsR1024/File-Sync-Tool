@@ -149,9 +149,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex h-screen w-screen flex-col overflow-hidden bg-white/90 backdrop-blur-xl">
+  <div class="flex h-screen w-screen flex-col overflow-hidden bg-white">
     <header
-      class="flex select-none items-center justify-between border-b border-slate-200/60 px-4 py-3"
+      class="flex select-none items-center justify-between border-b border-slate-200 px-4 py-3"
       data-tauri-drag-region
       @mousedown="onHeaderMouseDown"
     >

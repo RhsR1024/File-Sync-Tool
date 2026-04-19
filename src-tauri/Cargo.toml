@@ -67,7 +67,6 @@ parking_lot = "0.12"
 blake3 = "1"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
-window-vibrancy = "0.5"
 rayon = "1"
 
 [dev-dependencies]
