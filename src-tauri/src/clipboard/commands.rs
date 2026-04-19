@@ -102,3 +102,16 @@ pub fn cb_toggle_panel_internal(app: AppHandle) -> Result<(), String> {
 pub fn cb_toggle_panel(app: AppHandle) -> Result<(), String> {
     cb_toggle_panel_internal(app)
 }
+
+#[tauri::command]
+pub fn cb_set_hotkey(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    hotkey: String,
+) -> Result<(), String> {
+    crate::clipboard::hotkey::change(app, &state.clipboard.hotkey_handle, &hotkey)?;
+    state.clipboard.settings.write().hotkey = hotkey;
+    // Persisting to config.json is wired up in Task 4.6 (settings panel). For now, the in-memory
+    // setting is authoritative for the lifetime of the process.
+    Ok(())
+}

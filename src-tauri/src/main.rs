@@ -2582,6 +2582,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -2676,6 +2677,7 @@ fn main() {
             )?;
             let clipboard_state_for_startup = clipboard_state.clone();
             let clipboard_enabled_at_start = config.clipboard.enabled;
+            let clipboard_hotkey_at_start = config.clipboard.hotkey.clone();
 
             app.manage(network::NetworkState::default());
             app.manage(AppState {
@@ -2743,6 +2745,21 @@ fn main() {
                     let _ = panel_clone.hide();
                 }
             });
+
+            // Register the clipboard global shortcut (default Alt+C) when the feature is on.
+            if clipboard_enabled_at_start {
+                match clipboard::hotkey::register(
+                    app.handle().clone(),
+                    &clipboard_hotkey_at_start,
+                ) {
+                    Ok(handle) => {
+                        *clipboard_state_for_startup.hotkey_handle.lock() = Some(handle);
+                    }
+                    Err(e) => {
+                        eprintln!("[clipboard] hotkey register failed: {e}");
+                    }
+                }
+            }
 
             Ok(())
         })
@@ -2813,7 +2830,8 @@ fn main() {
             clipboard::commands::cb_delete_batch,
             clipboard::commands::cb_clear,
             clipboard::commands::cb_toggle_favorite,
-            clipboard::commands::cb_toggle_panel
+            clipboard::commands::cb_toggle_panel,
+            clipboard::commands::cb_set_hotkey
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
