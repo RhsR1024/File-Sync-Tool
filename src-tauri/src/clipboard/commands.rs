@@ -6,7 +6,9 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 use crate::AppState;
 use crate::clipboard::db;
-use crate::clipboard::models::{ClipboardItem, ClipboardListQuery, ClipboardListResult, ClipboardStats};
+use crate::clipboard::models::{
+    ClipboardItem, ClipboardListQuery, ClipboardListResult, ClipboardSettings, ClipboardStats,
+};
 
 #[tauri::command]
 pub fn cb_is_enabled(state: State<'_, AppState>) -> bool {
@@ -109,11 +111,63 @@ pub fn cb_set_hotkey(
     state: State<'_, AppState>,
     hotkey: String,
 ) -> Result<(), String> {
-    crate::clipboard::hotkey::change(app, &state.clipboard.hotkey_handle, &hotkey)?;
-    state.clipboard.settings.write().hotkey = hotkey;
-    // Persisting to config.json is wired up in Task 4.6 (settings panel). For now, the in-memory
-    // setting is authoritative for the lifetime of the process.
+    crate::clipboard::hotkey::change(app.clone(), &state.clipboard.hotkey_handle, &hotkey)?;
+    state.clipboard.settings.write().hotkey = hotkey.clone();
+    // Persist to config.json so the change survives restarts.
+    {
+        let mut cfg = state
+            .config
+            .lock()
+            .map_err(|e| format!("lock config: {e}"))?;
+        cfg.clipboard.hotkey = hotkey;
+        crate::config::save_config(&app, &cfg)?;
+    }
     Ok(())
+}
+
+#[tauri::command]
+pub fn cb_get_settings(state: State<'_, AppState>) -> ClipboardSettings {
+    state.clipboard.settings.read().clone()
+}
+
+#[tauri::command]
+pub fn cb_save_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: ClipboardSettings,
+) -> Result<ClipboardSettings, String> {
+    let old = state.clipboard.settings.read().clone();
+
+    // If hotkey changed, re-register the global shortcut first so we fail early on bad input.
+    if settings.hotkey != old.hotkey {
+        crate::clipboard::hotkey::change(
+            app.clone(),
+            &state.clipboard.hotkey_handle,
+            &settings.hotkey,
+        )?;
+    }
+
+    // If the enabled flag changed, start or stop the watcher.
+    if settings.enabled && !old.enabled {
+        state.clipboard.enable(app.clone());
+    } else if !settings.enabled && old.enabled {
+        state.clipboard.disable();
+    }
+
+    // Update in-memory clipboard settings.
+    *state.clipboard.settings.write() = settings.clone();
+
+    // Persist to config.json. Lock ordering: config lock is acquired last and released quickly.
+    {
+        let mut cfg = state
+            .config
+            .lock()
+            .map_err(|e| format!("lock config: {e}"))?;
+        cfg.clipboard = settings.clone();
+        crate::config::save_config(&app, &cfg)?;
+    }
+
+    Ok(settings)
 }
 
 #[tauri::command]

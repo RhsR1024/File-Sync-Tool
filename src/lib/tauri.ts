@@ -4,6 +4,7 @@ import type {
   ClipboardItem,
   ClipboardListQuery,
   ClipboardListResult,
+  ClipboardSettings,
   ClipboardStats,
 } from './clipboardTypes';
 
@@ -918,4 +919,8 @@ export const clipboardApi = {
   pastePlain: (id: number) => invoke<void>('cb_paste_plain', { id }),
   togglePanel: () => invoke<void>('cb_toggle_panel'),
   stats: () => invoke<ClipboardStats>('cb_stats'),
+  getSettings: () => invoke<ClipboardSettings>('cb_get_settings'),
+  saveSettings: (settings: ClipboardSettings) =>
+    invoke<ClipboardSettings>('cb_save_settings', { settings }),
+  setHotkey: (hotkey: string) => invoke<void>('cb_set_hotkey', { hotkey }),
 };

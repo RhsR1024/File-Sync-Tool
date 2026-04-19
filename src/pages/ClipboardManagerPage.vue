@@ -6,6 +6,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 import { useClipboardStore } from '@/composables/useClipboardStore';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
 import ClipboardStats from '@/components/clipboard/ClipboardStats.vue';
+import ClipboardSettingsPanel from '@/components/clipboard/ClipboardSettingsPanel.vue';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter } from '@/lib/clipboardTypes';
 
@@ -116,6 +117,15 @@ const selectionCount = computed(() => selectedIds.value.size);
         </h1>
         <p class="text-sm text-slate-500">{{ t('clipboard.tool.description') }}</p>
       </header>
+
+      <details class="rounded-2xl border border-slate-200 bg-white">
+        <summary class="cursor-pointer px-5 py-3 text-sm font-medium text-slate-700">
+          {{ t('clipboard.settings.title') }}
+        </summary>
+        <div class="border-t border-slate-100">
+          <ClipboardSettingsPanel />
+        </div>
+      </details>
 
       <ClipboardStats :reload-signal="reloadCounter" />
 
