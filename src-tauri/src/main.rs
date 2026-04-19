@@ -2831,7 +2831,9 @@ fn main() {
             clipboard::commands::cb_clear,
             clipboard::commands::cb_toggle_favorite,
             clipboard::commands::cb_toggle_panel,
-            clipboard::commands::cb_set_hotkey
+            clipboard::commands::cb_set_hotkey,
+            clipboard::commands::cb_paste,
+            clipboard::commands::cb_paste_plain
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

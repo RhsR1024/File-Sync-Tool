@@ -115,3 +115,25 @@ pub fn cb_set_hotkey(
     // setting is authoritative for the lifetime of the process.
     Ok(())
 }
+
+#[tauri::command]
+pub fn cb_paste(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let item = {
+        let conn = state.clipboard.db.lock();
+        db::get_item(&conn, id).map_err(|e| e.to_string())?
+    };
+    crate::clipboard::paste::paste_item(&app, &item, false)
+}
+
+#[tauri::command]
+pub fn cb_paste_plain(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let item = {
+        let conn = state.clipboard.db.lock();
+        db::get_item(&conn, id).map_err(|e| e.to_string())?
+    };
+    crate::clipboard::paste::paste_item(&app, &item, true)
+}
