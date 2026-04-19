@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 use crate::AppState;
 use crate::clipboard::db;
@@ -63,4 +63,42 @@ pub fn cb_toggle_favorite(
 ) -> Result<ClipboardItem, String> {
     let conn = state.clipboard.db.lock();
     db::toggle_favorite(&conn, id).map_err(|e| e.to_string())
+}
+
+pub fn cb_toggle_panel_internal(app: AppHandle) -> Result<(), String> {
+    let panel = app
+        .get_webview_window("clipboard-panel")
+        .ok_or_else(|| "clipboard-panel window not found".to_string())?;
+
+    let visible = panel.is_visible().unwrap_or(false);
+    if visible {
+        let _ = panel.hide();
+        return Ok(());
+    }
+
+    // Position near cursor, clamped to current monitor bounds
+    if let Ok(pos) = app.cursor_position() {
+        let monitor = panel.current_monitor().ok().flatten();
+        let (sw, sh) = monitor
+            .map(|m| {
+                let sz = m.size();
+                (sz.width as i32, sz.height as i32)
+            })
+            .unwrap_or((1920, 1080));
+        let w = 420i32;
+        let h = 720i32;
+        let cx = (pos.x as i32).min(sw - w - 10).max(10);
+        let cy = (pos.y as i32).min(sh - h - 10).max(10);
+        let _ = panel.set_position(PhysicalPosition::new(cx, cy));
+    }
+
+    let _ = panel.show();
+    let _ = panel.set_focus();
+    let _ = app.emit("clipboard-panel-shown", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cb_toggle_panel(app: AppHandle) -> Result<(), String> {
+    cb_toggle_panel_internal(app)
 }

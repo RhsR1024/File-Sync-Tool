@@ -2711,6 +2711,39 @@ fn main() {
                     .store(false, Ordering::SeqCst);
                 clipboard_state_for_startup.enable(app.handle().clone());
             }
+
+            // Create clipboard panel window (hidden by default; shown on demand via cb_toggle_panel or hotkey).
+            let panel = tauri::WebviewWindowBuilder::new(
+                app,
+                "clipboard-panel",
+                tauri::WebviewUrl::App("index.html#/clipboard-panel".into()),
+            )
+            .title("Clipboard")
+            .inner_size(420.0, 720.0)
+            .decorations(false)
+            .resizable(false)
+            .skip_taskbar(true)
+            .always_on_top(true)
+            .visible(false)
+            .transparent(true)
+            .build()?;
+
+            #[cfg(target_os = "windows")]
+            {
+                // Prefer Mica (Win11); fall back to Acrylic (Win10).
+                if window_vibrancy::apply_mica(&panel, Some(true)).is_err() {
+                    let _ = window_vibrancy::apply_acrylic(&panel, Some((255, 255, 255, 125)));
+                }
+            }
+
+            // Auto-hide on focus loss.
+            let panel_clone = panel.clone();
+            panel.on_window_event(move |ev| {
+                if let tauri::WindowEvent::Focused(false) = ev {
+                    let _ = panel_clone.hide();
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2779,7 +2812,8 @@ fn main() {
             clipboard::commands::cb_delete,
             clipboard::commands::cb_delete_batch,
             clipboard::commands::cb_clear,
-            clipboard::commands::cb_toggle_favorite
+            clipboard::commands::cb_toggle_favorite,
+            clipboard::commands::cb_toggle_panel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
