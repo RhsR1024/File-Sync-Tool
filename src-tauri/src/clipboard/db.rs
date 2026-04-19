@@ -173,6 +173,45 @@ fn build_where(q: &ClipboardListQuery) -> (String, Vec<Box<dyn ToSql>>) {
         values.push(Box::new(like));
     }
 
+    // Operator DSL predicates (spec §9.1). Each uses parameter binding.
+    if let Some(ref k) = q.op_type {
+        let p = values.len() + 1;
+        clauses.push(format!("kind = ?{p}"));
+        values.push(Box::new(k.clone()));
+    }
+    if let Some(from_ms) = q.op_from_ms {
+        let p = values.len() + 1;
+        clauses.push(format!("COALESCE(updated_at, created_at) >= ?{p}"));
+        values.push(Box::new(from_ms));
+    }
+    if let Some(to_ms) = q.op_to_ms {
+        let p = values.len() + 1;
+        clauses.push(format!("COALESCE(updated_at, created_at) <= ?{p}"));
+        values.push(Box::new(to_ms));
+    }
+    if let Some(ref app) = q.op_app {
+        let like = format!(
+            "%{}%",
+            app.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"),
+        );
+        let p = values.len() + 1;
+        clauses.push(format!("source_app LIKE ?{p} ESCAPE '\\'"));
+        values.push(Box::new(like));
+    }
+    if q.op_fav_only {
+        clauses.push("is_favorite = 1".into());
+    }
+    if let Some(n) = q.op_size_gt {
+        let p = values.len() + 1;
+        clauses.push(format!("byte_size > ?{p}"));
+        values.push(Box::new(n));
+    }
+    if let Some(n) = q.op_size_lt {
+        let p = values.len() + 1;
+        clauses.push(format!("byte_size < ?{p}"));
+        values.push(Box::new(n));
+    }
+
     let where_sql = if clauses.is_empty() {
         "1=1".into()
     } else {
@@ -316,6 +355,13 @@ mod tests {
         let q = ClipboardListQuery {
             filter: ClipboardFilter::All,
             search: String::new(),
+            op_type: None,
+            op_from_ms: None,
+            op_to_ms: None,
+            op_app: None,
+            op_fav_only: false,
+            op_size_gt: None,
+            op_size_lt: None,
             offset: 0,
             limit: 10,
         };
@@ -352,6 +398,13 @@ mod tests {
         let q = ClipboardListQuery {
             filter: ClipboardFilter::All,
             search: "ana".into(),
+            op_type: None,
+            op_from_ms: None,
+            op_to_ms: None,
+            op_app: None,
+            op_fav_only: false,
+            op_size_gt: None,
+            op_size_lt: None,
             offset: 0,
             limit: 10,
         };
@@ -444,5 +497,32 @@ mod tests {
             params![non_fav], |r| r.get(0),
         ).unwrap();
         assert!(idx.is_none(), "non-favorite should not receive a sort index");
+    }
+
+    #[test]
+    fn op_type_and_size_filters_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let mk = |kind: ContentKind, hash: &str, bytes: i64| NewItem {
+            kind, content_preview: "x".into(),
+            content_full: None, html: None,
+            image_path: None, image_width: None, image_height: None,
+            file_paths: None, byte_size: bytes,
+            hash: hash.into(), source_app: None,
+        };
+        insert_item(&conn, &mk(ContentKind::Text,  "t1", 100)).unwrap();
+        insert_item(&conn, &mk(ContentKind::Image, "i1", 5_000)).unwrap();
+        insert_item(&conn, &mk(ContentKind::Image, "i2", 50_000)).unwrap();
+
+        let q = ClipboardListQuery {
+            filter: ClipboardFilter::All, search: String::new(),
+            op_type: Some("image".into()),
+            op_size_gt: Some(10_000), op_size_lt: None,
+            op_from_ms: None, op_to_ms: None, op_app: None, op_fav_only: false,
+            offset: 0, limit: 10,
+        };
+        let result = list_items(&conn, &q).unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].hash, "i2");
     }
 }

@@ -2,6 +2,7 @@ import { ref } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { clipboardApi } from '@/lib/tauri';
+import { parseSearch } from '@/lib/clipboardSearchParser';
 import type { ClipboardFilter, ClipboardItem } from '@/lib/clipboardTypes';
 
 export function useClipboardStore() {
@@ -16,9 +17,24 @@ export function useClipboardStore() {
     loading.value = true;
     error.value = null;
     try {
+      const parsed = parseSearch(search.value);
+      const fromMs = parsed.filters.from
+        ? new Date(parsed.filters.from + 'T00:00:00').getTime()
+        : null;
+      const toMs = parsed.filters.to
+        ? new Date(parsed.filters.to + 'T23:59:59').getTime()
+        : null;
+
       const result = await clipboardApi.list({
         filter: filter.value,
-        search: search.value,
+        search: parsed.keywords.join(' '),
+        op_type: parsed.filters.type ?? null,
+        op_from_ms: fromMs,
+        op_to_ms: toMs,
+        op_app: parsed.filters.app ?? null,
+        op_fav_only: parsed.filters.fav === true,
+        op_size_gt: parsed.filters.sizeGt ?? null,
+        op_size_lt: parsed.filters.sizeLt ?? null,
         offset: 0,
         limit: 200,
       });

@@ -36,6 +36,13 @@ export interface ClipboardSettings {
 export interface ClipboardListQuery {
   filter: ClipboardFilter;
   search: string;
+  op_type?: string | null;
+  op_from_ms?: number | null;
+  op_to_ms?: number | null;
+  op_app?: string | null;
+  op_fav_only?: boolean;
+  op_size_gt?: number | null;
+  op_size_lt?: number | null;
   offset: number;
   limit: number;
 }

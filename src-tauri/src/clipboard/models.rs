@@ -77,6 +77,20 @@ pub struct ClipboardListQuery {
     pub filter: ClipboardFilter,
     #[serde(default)]
     pub search: String,
+    #[serde(default)]
+    pub op_type: Option<String>,
+    #[serde(default)]
+    pub op_from_ms: Option<i64>,
+    #[serde(default)]
+    pub op_to_ms: Option<i64>,
+    #[serde(default)]
+    pub op_app: Option<String>,
+    #[serde(default)]
+    pub op_fav_only: bool,
+    #[serde(default)]
+    pub op_size_gt: Option<i64>,
+    #[serde(default)]
+    pub op_size_lt: Option<i64>,
     pub offset: i64,
     pub limit: i64,
 }
