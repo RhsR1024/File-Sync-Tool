@@ -1,5 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 
+import type {
+  ClipboardItem,
+  ClipboardListQuery,
+  ClipboardListResult,
+} from './clipboardTypes';
+
 export interface CommandGroup {
   id: string;
   name: string;
@@ -890,3 +896,20 @@ export async function fileShareStop(): Promise<void> {
 export async function fileShareGetStatus(): Promise<FileShareStatus> {
   return await invoke<FileShareStatus>('file_share_get_status');
 }
+
+// ─── Clipboard Manager ────────────────────────────────────
+
+export const clipboardApi = {
+  isEnabled: () => invoke<boolean>('cb_is_enabled'),
+  enable: () => invoke<void>('cb_enable'),
+  disable: () => invoke<void>('cb_disable'),
+  list: (query: ClipboardListQuery) =>
+    invoke<ClipboardListResult>('cb_list', { query }),
+  get: (id: number) => invoke<ClipboardItem>('cb_get', { id }),
+  delete: (id: number) => invoke<void>('cb_delete', { id }),
+  deleteBatch: (ids: number[]) => invoke<void>('cb_delete_batch', { ids }),
+  clear: (keepFavorites: boolean) =>
+    invoke<number>('cb_clear', { keepFavorites }),
+  toggleFavorite: (id: number) =>
+    invoke<ClipboardItem>('cb_toggle_favorite', { id }),
+};
