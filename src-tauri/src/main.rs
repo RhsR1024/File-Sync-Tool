@@ -2770,7 +2770,16 @@ fn main() {
             fileshare::file_share_start,
             fileshare::file_share_stop,
             fileshare::file_share_get_status,
-            confirm_quit
+            confirm_quit,
+            clipboard::commands::cb_is_enabled,
+            clipboard::commands::cb_enable,
+            clipboard::commands::cb_disable,
+            clipboard::commands::cb_list,
+            clipboard::commands::cb_get,
+            clipboard::commands::cb_delete,
+            clipboard::commands::cb_delete_batch,
+            clipboard::commands::cb_clear,
+            clipboard::commands::cb_toggle_favorite
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
