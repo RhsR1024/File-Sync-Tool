@@ -1,11 +1,13 @@
 import { ref } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { useI18n } from 'vue-i18n';
 
 import { clipboardApi } from '@/lib/tauri';
 import { parseSearch } from '@/lib/clipboardSearchParser';
 import type { ClipboardFilter, ClipboardItem } from '@/lib/clipboardTypes';
 
 export function useClipboardStore() {
+  const { t } = useI18n();
   const items = ref<ClipboardItem[]>([]);
   const total = ref(0);
   const filter = ref<ClipboardFilter>('all');
@@ -41,7 +43,8 @@ export function useClipboardStore() {
       items.value = result.items;
       total.value = result.total;
     } catch (e) {
-      error.value = String(e);
+      console.error('[clipboard] reload failed:', e);
+      error.value = `${t('clipboard.errors.loadFailed')} — ${e}`;
     } finally {
       loading.value = false;
     }
@@ -52,7 +55,8 @@ export function useClipboardStore() {
       await clipboardApi.toggleFavorite(id);
       await reload();
     } catch (e) {
-      error.value = String(e);
+      console.error('[clipboard] toggleFavorite failed:', e);
+      error.value = `${t('clipboard.errors.saveFailed')} — ${e}`;
     }
   }
 
@@ -61,7 +65,8 @@ export function useClipboardStore() {
       await clipboardApi.delete(id);
       await reload();
     } catch (e) {
-      error.value = String(e);
+      console.error('[clipboard] remove failed:', e);
+      error.value = `${t('clipboard.errors.saveFailed')} — ${e}`;
     }
   }
 

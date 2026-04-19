@@ -57,7 +57,8 @@ async function load() {
     await refreshAdmin();
     error.value = null;
   } catch (e) {
-    error.value = String(e);
+    console.error('[clipboard] load settings failed:', e);
+    error.value = `${t('clipboard.errors.loadFailed')} — ${e}`;
   } finally {
     loading.value = false;
   }
@@ -70,7 +71,8 @@ async function save() {
     Object.assign(model, updated);
     error.value = null;
   } catch (e) {
-    error.value = String(e);
+    console.error('[clipboard] save settings failed:', e);
+    error.value = `${t('clipboard.errors.saveFailed')} — ${e}`;
   } finally {
     saving.value = false;
   }
@@ -94,7 +96,8 @@ async function disableWinV() {
     winVEnabled.value = false;
     model.use_win_v_replacement = false;
   } catch (e) {
-    error.value = String(e);
+    console.error('[clipboard] disableWinV failed:', e);
+    error.value = `${t('clipboard.errors.winVFailed')} — ${e}`;
     await refreshWinV();
   }
 }
@@ -106,7 +109,8 @@ async function onWinVConfirm() {
     winVEnabled.value = true;
     model.use_win_v_replacement = true;
   } catch (e) {
-    error.value = String(e);
+    console.error('[clipboard] enableWinV failed:', e);
+    error.value = `${t('clipboard.errors.winVFailed')} — ${e}`;
     await refreshWinV();
   }
 }
@@ -123,7 +127,8 @@ async function onRunAsAdminToggle(e: Event) {
     runAsAdminEnabled.value = next;
     model.run_as_admin = next;
   } catch (err) {
-    error.value = String(err);
+    console.error('[clipboard] setRunAsAdmin failed:', err);
+    error.value = `${t('clipboard.errors.saveFailed')} — ${err}`;
     target.checked = runAsAdminEnabled.value;
   }
 }

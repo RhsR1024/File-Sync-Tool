@@ -76,7 +76,8 @@ async function batchDelete() {
     await store.reload();
     reloadCounter.value++;
   } catch (e) {
-    store.error.value = String(e);
+    console.error('[clipboard] batchDelete failed:', e);
+    store.error.value = `${t('clipboard.errors.saveFailed')} — ${e}`;
   }
 }
 
@@ -88,7 +89,8 @@ async function batchFavorite(forward: boolean) {
       if (forward && !item.is_favorite) await clipboardApi.toggleFavorite(id);
       if (!forward && item.is_favorite) await clipboardApi.toggleFavorite(id);
     } catch (e) {
-      store.error.value = String(e);
+      console.error('[clipboard] batchFavorite failed:', e);
+      store.error.value = `${t('clipboard.errors.saveFailed')} — ${e}`;
     }
   }
   clearSelection();
@@ -101,7 +103,8 @@ async function onReorder(ids: number[]) {
     await clipboardApi.reorderFavorites(ids);
     await store.reload();
   } catch (e) {
-    store.error.value = String(e);
+    console.error('[clipboard] reorder failed:', e);
+    store.error.value = `${t('clipboard.errors.saveFailed')} — ${e}`;
   }
 }
 
@@ -191,7 +194,7 @@ const selectionCount = computed(() => selectedIds.value.size);
           {{ t('clipboard.loading') }}
         </div>
         <div v-else-if="store.items.value.length === 0" class="p-8 text-center text-sm text-slate-400">
-          {{ t('clipboard.panel.empty') }}
+          {{ store.search.value ? t('clipboard.panel.noMatch') : t('clipboard.panel.empty') }}
         </div>
         <div v-else-if="batchMode" class="max-h-[60vh] overflow-y-auto">
           <label

@@ -18,7 +18,8 @@ async function reload() {
     stats.value = await clipboardApi.stats();
     error.value = null;
   } catch (e) {
-    error.value = String(e);
+    console.error('[clipboard] stats reload failed:', e);
+    error.value = `${t('clipboard.errors.loadFailed')} — ${e}`;
   }
 }
 

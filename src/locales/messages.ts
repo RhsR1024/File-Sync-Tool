@@ -945,7 +945,7 @@ export const messages = {
       },
       filter: { all: 'All', text: 'Text', image: 'Image', file: 'File', favorite: 'Favorite' },
       search: { placeholder: 'Search clipboard...' },
-      panel: { empty: 'No clipboard history yet' },
+      panel: { empty: 'No clipboard history yet', noMatch: 'No matching items' },
       actions: {
         favorite: 'Favorite',
         unfavorite: 'Unfavorite',
@@ -965,6 +965,15 @@ export const messages = {
       },
       loading: 'Loading...',
       totalSuffix: 'items',
+      errors: {
+        hotkeyConflict: 'Hotkey could not be registered — it may conflict with another app.',
+        winVFailed:
+          'Failed to toggle Win+V replacement. The system may have been left in a partial state; see scripts/restore-win-v.ps1 for recovery.',
+        pasteFailed: 'Paste failed.',
+        loadFailed: 'Failed to load clipboard data.',
+        dbLocked: 'Database is busy. Retry in a moment.',
+        saveFailed: 'Failed to save settings.',
+      },
       notification: {
         title: 'File-Sync-Tool Clipboard',
         body: 'Clipboard watcher started. Press {hotkey} to open the panel.',
@@ -1950,7 +1959,7 @@ export const messages = {
       },
       filter: { all: '全部', text: '文本', image: '图片', file: '文件', favorite: '收藏' },
       search: { placeholder: '搜索剪贴板…' },
-      panel: { empty: '暂无剪贴板历史' },
+      panel: { empty: '暂无剪贴板历史', noMatch: '没有匹配的记录' },
       actions: {
         favorite: '收藏',
         unfavorite: '取消收藏',
@@ -1970,6 +1979,14 @@ export const messages = {
       },
       loading: '加载中…',
       totalSuffix: '条',
+      errors: {
+        hotkeyConflict: '快捷键注册失败，可能与其他程序冲突。',
+        winVFailed: 'Win+V 替代操作失败。如系统状态异常，请使用 scripts/restore-win-v.ps1 恢复。',
+        pasteFailed: '粘贴失败。',
+        loadFailed: '加载剪贴板数据失败。',
+        dbLocked: '数据库繁忙，请稍后再试。',
+        saveFailed: '设置保存失败。',
+      },
       notification: {
         title: 'File-Sync-Tool 剪贴板',
         body: '剪贴板监听已启动，按 {hotkey} 呼出面板',

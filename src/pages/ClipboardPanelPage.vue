@@ -31,7 +31,8 @@ async function paste(id: number, plain: boolean) {
     if (plain) await clipboardApi.pastePlain(id);
     else await clipboardApi.paste(id);
   } catch (e) {
-    store.error.value = String(e);
+    console.error('[clipboard] paste failed:', e);
+    store.error.value = `${t('clipboard.errors.pasteFailed')} — ${e}`;
   }
 }
 
@@ -40,7 +41,8 @@ async function onReorder(ids: number[]) {
     await clipboardApi.reorderFavorites(ids);
     await store.reload();
   } catch (e) {
-    store.error.value = String(e);
+    console.error('[clipboard] reorder failed:', e);
+    store.error.value = `${t('clipboard.errors.saveFailed')} — ${e}`;
   }
 }
 
@@ -166,7 +168,7 @@ onBeforeUnmount(() => {
       @wheel="preview.onWheelZoom($event)"
     >
       <div v-if="store.items.value.length === 0" class="flex h-full items-center justify-center p-6 text-center text-sm text-slate-400">
-        {{ t('clipboard.panel.empty') }}
+        {{ store.search.value ? t('clipboard.panel.noMatch') : t('clipboard.panel.empty') }}
       </div>
       <ClipboardList
         v-else
