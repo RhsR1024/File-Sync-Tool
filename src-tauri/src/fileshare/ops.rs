@@ -6,8 +6,11 @@ use super::model::DeleteMode;
 use chrono::{DateTime, Local};
 use serde::Serialize;
 
-pub const ZIP_DOWNLOAD_MAX_BYTES: u64 = 500 * 1024 * 1024;
-pub const ZIP_DOWNLOAD_MAX_FILES: usize = 20_000;
+// Byte-size cap is intentionally disabled so large directories can still be
+// packaged into a ZIP archive. File count and nesting depth caps remain as a
+// safety net against runaway recursion / zip-bomb-style inputs.
+pub const ZIP_DOWNLOAD_MAX_BYTES: u64 = u64::MAX;
+pub const ZIP_DOWNLOAD_MAX_FILES: usize = 200_000;
 const ZIP_MAX_DEPTH: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

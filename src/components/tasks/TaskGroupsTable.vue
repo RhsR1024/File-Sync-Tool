@@ -46,7 +46,7 @@ function formatStartTime(isoStr: string): string {
 }
 
 function formatDuration(seconds: number): string {
-  if (!seconds || seconds <= 0 || !isFinite(seconds)) return '-';
+  if (seconds == null || seconds < 0 || !isFinite(seconds)) return '-';
   if (seconds < 60) return `${Math.round(seconds)}s`;
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);

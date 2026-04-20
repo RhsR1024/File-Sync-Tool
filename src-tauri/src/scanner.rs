@@ -1015,13 +1015,33 @@ async fn perform_copy<R: tauri::Runtime>(
         }
 
         if filtered_files.is_empty() {
+            // Build a concise rule summary so users can tell why nothing matched.
+            let rules_summary = {
+                let mut parts = Vec::new();
+                if !extensions.is_empty() {
+                    parts.push(format!("extensions=[{}]", extensions.join(", ")));
+                }
+                if !includes.is_empty() {
+                    parts.push(format!("keywords=[{}]", includes.join(", ")));
+                }
+                if parts.is_empty() {
+                    "no filter rules".to_string()
+                } else {
+                    parts.join("; ")
+                }
+            };
             emit_log(
                 &handle,
                 format!(
-                    "'{}' is up to date — no new files to copy.",
-                    folder_name_clone
+                    "Matched 0 file(s) to copy for '{}' (rules: {}). Scanned {} file(s); {} skipped by extension, {} skipped by keyword, {} already exist locally. Skipping copy.",
+                    folder_name_clone,
+                    rules_summary,
+                    total_files_scanned,
+                    skipped_by_ext.len(),
+                    skipped_by_keyword.len(),
+                    skipped_existing
                 ),
-                "info",
+                "warn",
             );
             return Ok(0u64);
         }
@@ -1588,14 +1608,17 @@ async fn perform_copy<R: tauri::Runtime>(
 
     match copy_task.await {
         Ok(Ok(0)) => {
-            // Nothing was copied (all files already up to date) — do not count as "copied"
+            // Nothing was copied (either no files matched the rules or all files already up to date).
+            // The detailed reason was already emitted as a warn-level log just above (see the
+            // "Matched 0 file(s) to copy" / "All recent candidate files are still being written"
+            // branches); this terminal marker just closes out the run.
             if let Some(task_handle) = task_handle.as_ref() {
                 if run_needs_copy_completion(&task_manager, task_handle) {
                     mark_copy_completed_for_handle(
                         &task_manager,
                         Some(task_handle),
                         false,
-                        "Copy completed with no file changes",
+                        "Copy completed — 0 files matched the copy rules",
                     );
                 }
             }

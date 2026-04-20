@@ -47,15 +47,17 @@ const { t } = useI18n();
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(3, 8, 15, 0.72);
-  backdrop-filter: blur(10px);
+  background: rgba(26, 37, 53, 0.45);
+  backdrop-filter: blur(6px);
 }
 
 .dialog-card {
   width: min(100%, 460px);
-  border-radius: 24px;
-  background: rgba(7, 14, 24, 0.97);
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 20px;
+  background: var(--fs-panel, rgba(255, 255, 255, 0.96));
+  border: 1px solid var(--fs-panel-border, rgba(99, 119, 150, 0.22));
+  box-shadow: 0 24px 60px -20px rgba(15, 23, 42, 0.25);
+  color: var(--fs-text, #1a2535);
 }
 
 .dialog-header,
@@ -69,44 +71,78 @@ const { t } = useI18n();
   margin: 0;
 }
 
+.dialog-header h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--fs-text, #1a2535);
+}
+
 .dialog-header p {
   margin-top: 8px;
-  color: #95abc0;
+  color: var(--fs-muted, #5a7194);
+  font-size: 13px;
 }
 
 .target-name {
   margin: 0;
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 700;
-  color: #fff5f5;
+  color: var(--fs-danger, #dc2626);
+  word-break: break-all;
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(220, 38, 38, 0.2);
+  border-radius: 10px;
+  padding: 10px 14px;
 }
 
 .dialog-footer {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+  border-top: 1px solid var(--fs-panel-border, rgba(99, 119, 150, 0.18));
 }
 
 .danger-button,
 .ghost-button {
   border: none;
   border-radius: 999px;
-  padding: 10px 18px;
+  padding: 10px 20px;
+  font-size: 13px;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+
+.danger-button:disabled,
+.ghost-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .danger-button {
-  background: linear-gradient(135deg, #fb7185, #ef4444);
-  color: white;
+  background: var(--fs-danger, #dc2626);
+  color: #ffffff;
   font-weight: 700;
+  box-shadow: 0 6px 16px -6px rgba(220, 38, 38, 0.55);
+}
+
+.danger-button:not(:disabled):hover {
+  background: #b91c1c;
+  box-shadow: 0 8px 20px -6px rgba(185, 28, 28, 0.6);
 }
 
 .ghost-button {
-  background: rgba(148, 163, 184, 0.12);
-  color: #dbe7f3;
+  background: var(--fs-surface, rgba(241, 245, 250, 0.9));
+  color: var(--fs-text, #1a2535);
+  border: 1px solid var(--fs-panel-border, rgba(99, 119, 150, 0.2));
+  font-weight: 600;
+}
+
+.ghost-button:not(:disabled):hover {
+  background: var(--fs-surface-strong, rgba(226, 232, 242, 0.96));
 }
 
 .error-text {
   margin: 14px 0 0;
-  color: #fda4af;
+  color: var(--fs-danger, #dc2626);
+  font-size: 13px;
 }
 </style>
