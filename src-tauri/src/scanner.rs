@@ -1609,11 +1609,14 @@ async fn perform_copy<R: tauri::Runtime>(
     match copy_task.await {
         Ok(Ok(0)) => {
             // Nothing was copied (either no files matched the rules or all files already up to date).
-            // The detailed reason was already emitted as a warn-level log just above (see the
-            // "Matched 0 file(s) to copy" / "All recent candidate files are still being written"
-            // branches); this terminal marker just closes out the run.
+            // For scheduled ticks we discard the run so the task-detail history only keeps rows
+            // that actually copied files or were interrupted/cancelled. Manual copies still get a
+            // "completed" row so the user sees their explicit action was received.
             if let Some(task_handle) = task_handle.as_ref() {
-                if run_needs_copy_completion(&task_manager, task_handle) {
+                if source == "scheduled" {
+                    let _ = task_manager
+                        .discard_noop_run(&task_handle.task_group_id, &task_handle.run_id);
+                } else if run_needs_copy_completion(&task_manager, task_handle) {
                     mark_copy_completed_for_handle(
                         &task_manager,
                         Some(task_handle),

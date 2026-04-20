@@ -406,6 +406,44 @@ impl TaskManager {
         Ok(())
     }
 
+    // Drop a scheduled run that produced no real work (0 files matched the copy rules).
+    // Scheduled ticks without actual copy/deploy activity would otherwise accumulate as
+    // noise rows in the task-detail run history. Removing them keeps the history focused
+    // on runs that either copied files or were interrupted/cancelled by the user.
+    pub fn discard_noop_run(&self, task_group_id: &str, run_id: &str) -> Result<(), String> {
+        let group_removed;
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group_index = state
+                .groups
+                .iter()
+                .position(|group| group.task_group_id == task_group_id)
+                .ok_or_else(|| format!("Task group not found: {task_group_id}"))?;
+
+            let group = &mut state.groups[group_index];
+            let Some(run_index) = group.runs.iter().position(|run| run.run_id == run_id) else {
+                return Ok(());
+            };
+            group.runs.remove(run_index);
+
+            if group.runs.is_empty() {
+                state.groups.remove(group_index);
+                group_removed = true;
+            } else {
+                group.latest_run_id = group.runs.last().map(|run| run.run_id.clone());
+                group.refresh_from_runs();
+                group_removed = false;
+            }
+        }
+
+        if group_removed {
+            self.after_change(None);
+        } else {
+            self.after_change(Some(task_group_id));
+        }
+        Ok(())
+    }
+
     pub fn begin_local_exec(&self, task_group_id: &str, run_id: &str) -> Result<(), String> {
         {
             let mut state = self.inner.state.lock().unwrap();
@@ -1273,6 +1311,41 @@ mod tests {
             after.runs.last().unwrap().run_type,
             TaskRunType::ManualDeploy
         );
+    }
+
+    #[test]
+    fn discard_noop_run_removes_empty_group() {
+        let manager = TaskManager::new_in_memory();
+        let handle = manager.begin_scheduled_copy(TaskStartRequest::sample());
+
+        manager
+            .discard_noop_run(&handle.task_group_id, &handle.run_id)
+            .unwrap();
+
+        assert!(manager.list_groups().is_empty());
+        assert!(manager.get_group_detail(&handle.task_group_id).is_none());
+    }
+
+    #[test]
+    fn discard_noop_run_preserves_group_when_earlier_run_remains() {
+        let manager = TaskManager::new_in_memory();
+        let first = manager.begin_scheduled_copy(TaskStartRequest::sample());
+        manager
+            .mark_copy_completed(&first.task_group_id, &first.run_id, false)
+            .unwrap();
+
+        let second = manager.begin_scheduled_copy(TaskStartRequest::sample());
+        assert_eq!(second.task_group_id, first.task_group_id);
+
+        manager
+            .discard_noop_run(&second.task_group_id, &second.run_id)
+            .unwrap();
+
+        let detail = manager.get_group_detail(&first.task_group_id).unwrap();
+        assert_eq!(detail.runs.len(), 1);
+        assert_eq!(detail.runs[0].run_id, first.run_id);
+        assert_eq!(detail.latest_run_id.as_deref(), Some(first.run_id.as_str()));
+        assert_eq!(detail.copy_status, CopyState::Completed);
     }
 
     #[test]
