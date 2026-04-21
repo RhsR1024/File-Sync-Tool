@@ -20,7 +20,6 @@ import type { ClipboardContextActionId } from '@/composables/clipboardContextMen
 import ClipboardCardMenu from '@/components/clipboard/ClipboardCardMenu.vue';
 import ClipboardFileDetailsDialog from '@/components/clipboard/ClipboardFileDetailsDialog.vue';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
-import ClipboardHoverPreview from '@/components/clipboard/ClipboardHoverPreview.vue';
 import ClipboardMergePasteDialog from '@/components/clipboard/ClipboardMergePasteDialog.vue';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter } from '@/lib/clipboardTypes';
@@ -32,6 +31,7 @@ const store = useClipboardStore();
 
 const selectedIndex = ref(0);
 const searchInput = ref<HTMLInputElement | null>(null);
+const previewDelayMs = ref(500);
 
 const filters: ClipboardFilter[] = ['all', 'text', 'image', 'file', 'favorite'];
 
@@ -64,6 +64,7 @@ async function togglePinned() {
 }
 
 function toggleBatchMode() {
+  preview.hideNow();
   store.toggleBatchMode();
   closeMenu();
 }
@@ -76,6 +77,7 @@ function onToggleSelect(payload: { id: number; shiftKey: boolean }) {
 async function onBatchDelete() {
   const ids = store.orderedSelectedIds.value;
   if (ids.length === 0) return;
+  preview.hideNow();
   try {
     await clipboardApi.deleteBatch(ids);
     resetBatchSelection();
@@ -107,6 +109,7 @@ async function onBatchFavorite(nextFavorite: boolean) {
 }
 
 async function onConfirmClear() {
+  preview.hideNow();
   try {
     await clipboardApi.clear(true); // keep_favorites = true
     clearDialogOpen.value = false;
@@ -121,6 +124,7 @@ async function onConfirmClear() {
 
 async function openSettings() {
   try {
+    preview.hideNow();
     await clipboardApi.openSettings();
   } catch (e) {
     console.error('[clipboard] openSettings failed:', e);
@@ -150,6 +154,7 @@ async function onReorder(ids: number[]) {
 }
 
 function close() {
+  preview.hideNow();
   void getCurrentWindow().hide();
 }
 
@@ -181,12 +186,30 @@ function selectById(id: number) {
   if (idx >= 0) selectedIndex.value = idx;
 }
 
-const preview = useHoverPreview();
+async function refreshPreviewSettings() {
+  try {
+    const settings = await clipboardApi.getSettings();
+    previewDelayMs.value = Math.max(0, settings.preview.delay_ms);
+  } catch (error) {
+    console.error('[clipboard] getSettings for preview failed:', error);
+  }
+}
+
+const preview = useHoverPreview({
+  delayMs: () => previewDelayMs.value,
+  onError: (error) => {
+    console.error('[clipboard] preview command failed:', error);
+  },
+});
 
 function onListSelect(id: number) {
   selectById(id);
-  const item = store.items.value.find((it) => it.id === id);
-  if (item && item.kind === 'image') preview.onEnter(item);
+  preview.onItemChange(store.items.value.find((it) => it.id === id) ?? null);
+}
+
+async function onRemoveItem(id: number) {
+  preview.hideNow();
+  await store.remove(id);
 }
 
 const {
@@ -212,10 +235,11 @@ const {
   selectedIdOrder: store.orderedSelectedIds,
   onPaste: paste,
   onCopy: (id: number) => clipboardApi.copy(id),
-  onDelete: (id: number) => store.remove(id),
+  onDelete: (id: number) => onRemoveItem(id),
   onToggleFavorite: (id: number) => store.toggleFavorite(id),
   onError: setClipboardActionError,
   onMergeSuccess: async () => {
+    preview.hideNow();
     resetBatchSelection();
     await store.reload();
   },
@@ -240,7 +264,7 @@ useClipboardHotkey({
   filter: store.filter,
   searchValue: store.search,
   onPaste: paste,
-  onDelete: (id) => store.remove(id),
+  onDelete: onRemoveItem,
   onFavorite: (id) => store.toggleFavorite(id),
   onClose: close,
   onFocusSearch: () => searchInput.value?.focus(),
@@ -262,6 +286,7 @@ const showCounter = ref(0);
 const listKey = computed(() => `${store.filter.value}-${showCounter.value}`);
 
 onMounted(async () => {
+  await refreshPreviewSettings();
   // Read initial pinned state from backend so the toolbar reflects reality.
   clipboardApi
     .isPanelPinned()
@@ -271,6 +296,8 @@ onMounted(async () => {
     .catch(() => {});
 
   unlistenShown = await listen('clipboard-panel-shown', async () => {
+    preview.hideNow();
+    await refreshPreviewSettings();
     store.search.value = '';
     selectedIndex.value = 0;
     resetBatchSelection();
@@ -286,6 +313,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  preview.hideNow();
   unlistenShown?.();
   unlistenItemAdded?.();
 });
@@ -436,7 +464,6 @@ onBeforeUnmount(() => {
     <div
       class="flex-1 overflow-hidden px-1 pb-2"
       @mouseleave="preview.onLeave()"
-      @wheel="preview.onWheelZoom($event)"
     >
       <div v-if="store.items.value.length === 0" class="flex h-full items-center justify-center p-6 text-center text-sm text-slate-400">
         {{ store.search.value ? t('clipboard.panel.noMatch') : t('clipboard.panel.empty') }}
@@ -456,7 +483,7 @@ onBeforeUnmount(() => {
         @activate="(id: number) => paste(id, false)"
         @toggle="onToggleSelect"
         @favorite="(id: number) => store.toggleFavorite(id)"
-        @remove="(id: number) => store.remove(id)"
+        @remove="onRemoveItem"
         @menu="onListMenu"
         @reorder="onReorder"
       />
@@ -494,12 +521,6 @@ onBeforeUnmount(() => {
       </div>
     </div>
   </div>
-
-  <ClipboardHoverPreview
-    v-if="preview.activeItem.value"
-    :item="preview.activeItem.value"
-    :scale="preview.scale.value"
-  />
 
   <ClipboardCardMenu
     :open="menuOpen"

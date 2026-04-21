@@ -181,6 +181,7 @@ fn write_text_to_clipboard(text: &str) -> Result<(), String> {
 }
 
 fn finish_paste(app: &AppHandle) -> Result<(), String> {
+    crate::clipboard::preview::hide_preview_windows(app);
     if let Some(panel) = app.get_webview_window("clipboard-panel") {
         let _ = panel.hide();
     }

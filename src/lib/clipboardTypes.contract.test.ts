@@ -31,7 +31,7 @@ export const clipboardSettingsContract: ClipboardSettings = {
   },
   preview: {
     image_enabled: true,
-    text_enabled: true,
+    text_enabled: false,
     delay_ms: 500,
     zoom_step: 10,
     position: 'auto',

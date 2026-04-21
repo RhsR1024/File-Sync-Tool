@@ -9,6 +9,7 @@ pub mod icon_store;
 pub mod image_store;
 pub mod models;
 pub mod paste;
+pub mod preview;
 pub mod retention;
 pub mod source;
 pub mod watcher;

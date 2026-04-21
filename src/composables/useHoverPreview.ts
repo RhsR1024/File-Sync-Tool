@@ -1,25 +1,31 @@
-import { onBeforeUnmount, ref } from 'vue';
+import { onBeforeUnmount } from 'vue';
 
 import type { ClipboardItem } from '@/lib/clipboardTypes';
+import {
+  resolveHoverPreviewTarget,
+  type HoverPreviewTarget,
+} from '@/lib/clipboardPreviewHelpers';
+import { clipboardApi } from '@/lib/tauri';
 
 export interface HoverPreviewOptions {
-  delayMs?: number;
+  delayMs?: number | (() => number);
   hideDelayMs?: number;
-  minScale?: number;
-  maxScale?: number;
+  onError?: (error: unknown) => void;
 }
 
 export function useHoverPreview(opts: HoverPreviewOptions = {}) {
-  const delayMs = opts.delayMs ?? 500;
   const hideDelayMs = opts.hideDelayMs ?? 150;
-  const minScale = opts.minScale ?? 0.5;
-  const maxScale = opts.maxScale ?? 5;
-
-  const activeItem = ref<ClipboardItem | null>(null);
-  const scale = ref(1);
 
   let showTimer: number | null = null;
   let hideTimer: number | null = null;
+
+  function resolveDelayMs(): number {
+    const delayMs =
+      typeof opts.delayMs === 'function'
+        ? opts.delayMs()
+        : opts.delayMs;
+    return Math.max(0, delayMs ?? 500);
+  }
 
   function clearTimers() {
     if (showTimer !== null) {
@@ -32,37 +38,66 @@ export function useHoverPreview(opts: HoverPreviewOptions = {}) {
     }
   }
 
-  function onEnter(item: ClipboardItem) {
+  async function hidePreview(): Promise<void> {
+    try {
+      await clipboardApi.hidePreview();
+    } catch (error) {
+      opts.onError?.(error);
+    }
+  }
+
+  async function showPreview(target: HoverPreviewTarget): Promise<void> {
+    try {
+      if (target.kind === 'image') {
+        await clipboardApi.showImagePreview(target.id);
+      } else {
+        await clipboardApi.showTextPreview(target.id);
+      }
+    } catch (error) {
+      opts.onError?.(error);
+    }
+  }
+
+  function onItemChange(item: ClipboardItem | null) {
     clearTimers();
-    scale.value = 1;
+
+    const target = resolveHoverPreviewTarget(item);
+    if (!target) {
+      hideTimer = window.setTimeout(() => {
+        void hidePreview();
+        hideTimer = null;
+      }, hideDelayMs);
+      return;
+    }
+
+    void hidePreview();
     showTimer = window.setTimeout(() => {
-      activeItem.value = item;
+      void showPreview(target);
       showTimer = null;
-    }, delayMs);
+    }, resolveDelayMs());
   }
 
   function onLeave() {
     clearTimers();
     hideTimer = window.setTimeout(() => {
-      activeItem.value = null;
+      void hidePreview();
       hideTimer = null;
     }, hideDelayMs);
   }
 
-  function onWheelZoom(e: WheelEvent) {
-    if (!e.ctrlKey || !activeItem.value || activeItem.value.kind !== 'image') return;
-    e.preventDefault();
-    const delta = e.deltaY < 0 ? 0.1 : -0.1;
-    scale.value = Math.max(minScale, Math.min(maxScale, scale.value + delta));
+  function hideNow() {
+    clearTimers();
+    void hidePreview();
   }
 
-  onBeforeUnmount(clearTimers);
+  onBeforeUnmount(() => {
+    clearTimers();
+    void hidePreview();
+  });
 
   return {
-    activeItem,
-    scale,
-    onEnter,
+    onItemChange,
     onLeave,
-    onWheelZoom,
+    hideNow,
   };
 }

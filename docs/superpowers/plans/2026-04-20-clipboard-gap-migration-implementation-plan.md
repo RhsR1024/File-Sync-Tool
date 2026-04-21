@@ -644,7 +644,7 @@ cargo test clipboard --manifest-path src-tauri\Cargo.toml
 ```
 
 Status 2026-04-21:
-- Task 8 implementation and verification are complete; only the commit step remains.
+- Task 8 is complete and committed as `147635e` (`feat(clipboard): expand settings model for m8`).
 - Added new nested clipboard settings coverage for panel behavior and navigation (`panel.follow_cursor`, `panel.remember_position`, `panel.animate`, `panel.use_mica`, `navigation.enabled`) plus `toolbar.visible` defaults on both the Rust and TypeScript contracts.
 - `src-tauri/src/clipboard/models.rs` now includes explicit serde-defaulted structs/tests for the new settings paths, while `src-tauri/src/config.rs` verifies legacy `AppConfig` JSON still deserializes with the new nested defaults.
 - `src/lib/clipboardTypes.ts` and `src/lib/clipboardTypes.contract.test.ts` now mirror the expanded settings shape so frontend normalization keeps old payloads compatible.
@@ -660,7 +660,7 @@ $env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTF
 
 Observed: `2` new clipboard-settings model tests passed, `1` legacy-config round-trip test passed, `cmd /c pnpm check` completed successfully, and `cargo test clipboard --manifest-path src-tauri\Cargo.toml` finished green with `65` clipboard/config tests passing.
 
-- [ ] **Step 8.5: Commit**
+- [x] **Step 8.5: Commit**
 
 ```powershell
 git add src-tauri/src/clipboard/models.rs src-tauri/src/config.rs src/lib/clipboardTypes.ts src/lib/tauri.ts src-tauri/src/clipboard/commands.rs
@@ -681,11 +681,11 @@ git commit -m "feat(clipboard): expand settings model for m8"
 
 **Depends on:** Task 8
 
-- [ ] **Step 9.1: Write failing tests for backend preview-window helpers when possible**
+- [x] **Step 9.1: Write failing tests for backend preview-window helpers when possible**
 
 If window creation code is not easily testable, isolate geometry/anchor calculations into helper functions and test those.
 
-- [ ] **Step 9.2: Implement dedicated preview window management**
+- [x] **Step 9.2: Implement dedicated preview window management**
 
 Requirements:
 - show/hide commands for image/text preview
@@ -693,23 +693,40 @@ Requirements:
 - anchor to panel side according to preference
 - avoid blocking the main panel
 
-- [ ] **Step 9.3: Build preview routes and pages**
+- [x] **Step 9.3: Build preview routes and pages**
 
 Pages must support:
 - image zoom percentage
 - text scrolling
 - content updates from backend events/commands
 
-- [ ] **Step 9.4: Remove old overlay-only assumptions**
+- [x] **Step 9.4: Remove old overlay-only assumptions**
 
 `useHoverPreview.ts` and panel page should become command-driven rather than local-overlay-driven.
 
-- [ ] **Step 9.5: Run checks**
+- [x] **Step 9.5: Run checks**
 
 ```powershell
 cmd /c pnpm check
 cargo test clipboard --manifest-path src-tauri\Cargo.toml
 ```
+
+Status 2026-04-21:
+- Task 9 implementation and verification are complete; only the commit step remains.
+- Added a new frontend preview helper/test pair (`src/lib/clipboardPreviewHelpers.ts`, `src/lib/clipboardPreviewHelpers.test.mjs`) to lock down hover-target routing and image zoom clamping before wiring the new windows.
+- `src-tauri/src/clipboard/preview.rs` now owns dedicated image/text preview window creation, prewarming, placement calculation, show/hide commands, and panel-side focus coordination so preview interaction does not immediately collapse the main panel.
+- Added dedicated preview routes/pages in `src/pages/ClipboardImagePreview.vue` and `src/pages/ClipboardTextPreview.vue`, plus the router and Tauri wrapper plumbing needed for backend-driven preview updates.
+- `src/composables/useHoverPreview.ts` and `src/pages/ClipboardPanelPage.vue` now use backend preview commands instead of the old in-panel overlay, including cleanup on close/delete/clear flows and delay refresh from saved settings.
+- Fresh verification passed with:
+
+```powershell
+node --test --test-isolation=none src/lib/clipboardPreviewHelpers.test.mjs
+cmd /c pnpm check
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTFLAGS='-C debuginfo=0'; cargo test clipboard --manifest-path src-tauri\Cargo.toml
+```
+
+Observed: `5` new Node tests passed, `cmd /c pnpm check` completed successfully, and `cargo test clipboard --manifest-path src-tauri\Cargo.toml` finished green with `69` clipboard/config tests passing.
+- Verification note: the Rust test run needed elevated sandbox access because the build script hit `EPERM` while reading the shared worktree `vite.js` dependency tree; rerunning without sandbox restrictions resolved it.
 
 - [ ] **Step 9.6: Commit**
 

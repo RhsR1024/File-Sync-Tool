@@ -2751,6 +2751,7 @@ fn main() {
             // the panel would hide the instant the user pressed the header.
             // Skip auto-hide entirely when the user pinned the panel.
             let panel_clone = panel.clone();
+            let preview_app_handle = panel.app_handle().clone();
             let pinned_flag = clipboard_state_for_startup.clone();
             panel.on_window_event(move |ev| {
                 if let tauri::WindowEvent::Focused(false) = ev {
@@ -2761,14 +2762,20 @@ fn main() {
                         return;
                     }
                     let panel = panel_clone.clone();
+                    let preview_app_handle = preview_app_handle.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(150));
-                        if !panel.is_focused().unwrap_or(false) {
+                        if !panel.is_focused().unwrap_or(false)
+                            && !clipboard::preview::preview_window_is_focused(&preview_app_handle)
+                        {
+                            clipboard::preview::hide_preview_windows(&preview_app_handle);
                             let _ = panel.hide();
                         }
                     });
                 }
             });
+
+            clipboard::preview::ensure_preview_windows(app)?;
 
             // Register the clipboard global shortcut (default Alt+C) when the feature is on.
             if clipboard_enabled_at_start {
@@ -2880,6 +2887,9 @@ fn main() {
             clipboard::commands::cb_save_image_as,
             clipboard::commands::cb_open_in_explorer,
             clipboard::commands::cb_merge_paste,
+            clipboard::commands::cb_show_image_preview,
+            clipboard::commands::cb_show_text_preview,
+            clipboard::commands::cb_hide_preview,
             clipboard::commands::cb_reorder_favorites,
             clipboard::commands::cb_stats,
             clipboard::commands::cb_get_settings,

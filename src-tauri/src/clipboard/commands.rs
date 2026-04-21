@@ -204,6 +204,7 @@ pub fn cb_toggle_panel_internal(app: AppHandle) -> Result<(), String> {
 
     let visible = panel.is_visible().unwrap_or(false);
     if visible {
+        crate::clipboard::preview::hide_preview_windows(&app);
         let _ = panel.hide();
         return Ok(());
     }
@@ -413,6 +414,39 @@ pub fn cb_reorder_favorites(state: State<'_, AppState>, ids: Vec<i64>) -> Result
 }
 
 #[tauri::command]
+pub fn cb_show_image_preview(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let item = {
+        let conn = state.clipboard.read_db.lock();
+        db::get_item(&conn, id).map_err(|e| e.to_string())?
+    };
+    let settings = state.clipboard.settings.read().clone();
+    crate::clipboard::preview::show_image_preview(&app, &settings, &item)
+}
+
+#[tauri::command]
+pub fn cb_show_text_preview(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let item = {
+        let conn = state.clipboard.read_db.lock();
+        db::get_item(&conn, id).map_err(|e| e.to_string())?
+    };
+    let settings = state.clipboard.settings.read().clone();
+    crate::clipboard::preview::show_text_preview(&app, &settings, &item)
+}
+
+#[tauri::command]
+pub fn cb_hide_preview(app: AppHandle) {
+    crate::clipboard::preview::hide_preview_windows(&app);
+}
+
+#[tauri::command]
 pub fn cb_stats(state: State<'_, AppState>) -> Result<ClipboardStats, String> {
     let conn = state.clipboard.db.lock();
     let total: i64 = conn
@@ -516,6 +550,7 @@ pub fn cb_is_panel_pinned(state: State<'_, AppState>) -> bool {
 /// the navigation; if the main window is closed-to-tray it will reappear.
 #[tauri::command]
 pub fn cb_open_settings(app: AppHandle) -> Result<(), String> {
+    crate::clipboard::preview::hide_preview_windows(&app);
     if let Some(panel) = app.get_webview_window("clipboard-panel") {
         let _ = panel.hide();
     }

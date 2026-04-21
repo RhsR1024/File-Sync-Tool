@@ -938,6 +938,9 @@ export const clipboardApi = {
   openInExplorer: (path: string) => invoke<void>('cb_open_in_explorer', { path }),
   mergePaste: (ids: number[], separator?: string | null) =>
     invoke<void>('cb_merge_paste', { ids, separator: separator ?? null }),
+  showImagePreview: (id: number) => invoke<void>('cb_show_image_preview', { id }),
+  showTextPreview: (id: number) => invoke<void>('cb_show_text_preview', { id }),
+  hidePreview: () => invoke<void>('cb_hide_preview'),
   togglePanel: () => invoke<void>('cb_toggle_panel'),
   stats: () => invoke<ClipboardStats>('cb_stats'),
   getSettings: () => invoke<ClipboardSettings>('cb_get_settings'),

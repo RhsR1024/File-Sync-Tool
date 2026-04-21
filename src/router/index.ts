@@ -67,6 +67,16 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../pages/ClipboardPanelPage.vue'),
     meta: { noLayout: true },
   },
+  {
+    path: '/clipboard-preview/image',
+    component: () => import('../pages/ClipboardImagePreview.vue'),
+    meta: { noLayout: true },
+  },
+  {
+    path: '/clipboard-preview/text',
+    component: () => import('../pages/ClipboardTextPreview.vue'),
+    meta: { noLayout: true },
+  },
 ]
 
 const router = createRouter({
