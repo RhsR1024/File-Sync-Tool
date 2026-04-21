@@ -955,82 +955,21 @@ async fn handler_node_archive(
     let disposition = format!("attachment; filename*=UTF-8''{}", url_encode(&zip_name));
 
     let target = node.path.clone();
-    let tmp_path = std::env::temp_dir().join(format!("fst-zip-{}.zip", uuid::Uuid::new_v4()));
     remember_connected_ip(&state.visitor_ips, addr.ip().to_string());
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    // In-memory pipe: the producer task writes zip bytes into writer_half,
+    // the HTTP response streams them out of reader_half. Because the zip is
+    // produced with async_zip's data-descriptor streaming mode (no seeks),
+    // bytes flow to the client in real time — matching CHFS behaviour.
+    let (writer_half, reader_half) = tokio::io::duplex(64 * 1024);
 
-    let build_path = tmp_path.clone();
-    let build_target = target.clone();
-    let build_handle =
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let file = std::fs::File::create(&build_path).map_err(|e| e.to_string())?;
-            let mut zip_w = zip::ZipWriter::new(file);
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored)
-                .large_file(true);
-            ops::zip_dir(&mut zip_w, &build_target, &build_target, options)?;
-            zip_w.finish().map_err(|e| e.to_string())?;
-            Ok(())
-        });
-
-    let stream_path = tmp_path.clone();
     tokio::spawn(async move {
-        let build_result = build_handle.await;
-        let build_ok = match build_result {
-            Ok(Ok(())) => true,
-            Ok(Err(message)) => {
-                log::warn!("File share archive build failed: {}", message);
-                false
-            }
-            Err(err) => {
-                log::warn!("File share archive build task panicked: {}", err);
-                false
-            }
-        };
-        if !build_ok {
-            let _ = tx
-                .send(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "zip build failed",
-                )))
-                .await;
-            let _ = tokio::fs::remove_file(&stream_path).await;
-            return;
+        if let Err(err) = ops::stream_zip_dir(&target, writer_half).await {
+            log::warn!("File share archive streaming failed: {}", err);
         }
-        let mut file = match tokio::fs::File::open(&stream_path).await {
-            Ok(f) => f,
-            Err(err) => {
-                let _ = tx.send(Err(err)).await;
-                let _ = tokio::fs::remove_file(&stream_path).await;
-                return;
-            }
-        };
-        let mut buf = vec![0u8; 65536];
-        loop {
-            match file.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(Ok(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    let _ = tx.send(Err(err)).await;
-                    break;
-                }
-            }
-        }
-        drop(file);
-        let _ = tokio::fs::remove_file(&stream_path).await;
     });
 
-    let stream = async_stream::stream! {
-        let mut rx = rx;
-        while let Some(item) = rx.recv().await {
-            yield item;
-        }
-    };
+    let stream = tokio_util::io::ReaderStream::new(reader_half);
 
     Response::builder()
         .header("Content-Type", "application/zip")

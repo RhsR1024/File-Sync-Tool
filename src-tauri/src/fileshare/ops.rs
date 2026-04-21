@@ -310,55 +310,99 @@ pub fn validate_zip_source_with_limits(
     Ok(stats)
 }
 
-pub fn zip_dir<W: std::io::Write + std::io::Seek>(
-    zip: &mut zip::ZipWriter<W>,
-    base: &Path,
-    current: &Path,
-    options: zip::write::SimpleFileOptions,
+/// Stream a directory into a ZIP archive using async_zip.
+///
+/// Unlike the sync `zip_dir` above, this uses data descriptors (per-entry
+/// trailing CRC/size) so the zip can be written to a pure forward-only
+/// AsyncWrite sink — no Seek required. This lets us pipe the zip bytes to
+/// the HTTP response as they are produced, matching CHFS-style real-time
+/// download progress.
+pub async fn stream_zip_dir(
+    root: &Path,
+    writer: tokio::io::DuplexStream,
 ) -> Result<(), String> {
-    zip_dir_inner(zip, base, current, options, 0)
-}
+    use async_zip::{base::write::ZipFileWriter, Compression, ZipEntryBuilder};
+    use futures_lite::io::AsyncWriteExt;
+    use tokio::io::AsyncReadExt;
+    use tokio_util::compat::TokioAsyncWriteCompatExt;
 
-fn zip_dir_inner<W: std::io::Write + std::io::Seek>(
-    zip: &mut zip::ZipWriter<W>,
-    base: &Path,
-    current: &Path,
-    options: zip::write::SimpleFileOptions,
-    depth: usize,
-) -> Result<(), String> {
-    if depth > ZIP_MAX_DEPTH {
-        return Err(format!(
-            "Directory nesting too deep (>{ZIP_MAX_DEPTH} levels)"
-        ));
-    }
+    let compat = writer.compat_write();
+    // Force zip64 structs so archives larger than 4 GiB / >65 535 entries
+    // remain valid.
+    let mut zip_writer = ZipFileWriter::new(compat).force_zip64();
 
-    for entry in fs::read_dir(current)
-        .map_err(|e| format!("Failed to read {}: {}", current.display(), e))?
-        .flatten()
-    {
-        let path = entry.path();
-        let metadata = entry
-            .metadata()
-            .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
-        let relative = path
-            .strip_prefix(base)
-            .map_err(|e| format!("Failed to build ZIP entry path: {}", e))?;
-        let relative = path_to_relative_string(relative);
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    while let Some((current, depth)) = stack.pop() {
+        if depth > ZIP_MAX_DEPTH {
+            return Err(format!(
+                "Directory nesting too deep (>{ZIP_MAX_DEPTH} levels)"
+            ));
+        }
 
-        if metadata.is_dir() {
-            zip.add_directory(&relative, options)
-                .map_err(|e| format!("Failed to add directory {} to ZIP: {}", path.display(), e))?;
-            zip_dir_inner(zip, base, &path, options, depth + 1)?;
-        } else if metadata.is_file() {
-            zip.start_file(&relative, options)
-                .map_err(|e| format!("Failed to add file {} to ZIP: {}", path.display(), e))?;
-            let mut file = fs::File::open(&path)
-                .map_err(|e| format!("Failed to open {} for ZIP: {}", path.display(), e))?;
-            std::io::copy(&mut file, zip)
-                .map_err(|e| format!("Failed to write {} into ZIP: {}", path.display(), e))?;
+        let mut dir = tokio::fs::read_dir(&current)
+            .await
+            .map_err(|e| format!("Failed to read {}: {}", current.display(), e))?;
+        while let Some(entry) = dir
+            .next_entry()
+            .await
+            .map_err(|e| format!("Failed to iterate {}: {}", current.display(), e))?
+        {
+            let path = entry.path();
+            let metadata = entry
+                .metadata()
+                .await
+                .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|e| format!("Failed to build ZIP entry path: {}", e))?;
+            let relative_str = path_to_relative_string(relative);
+
+            if metadata.is_dir() {
+                let dir_name = format!("{}/", relative_str);
+                let opts = ZipEntryBuilder::new(dir_name.into(), Compression::Stored).build();
+                let entry_writer = zip_writer
+                    .write_entry_stream(opts)
+                    .await
+                    .map_err(|e| format!("Failed to add directory entry: {}", e))?;
+                entry_writer
+                    .close()
+                    .await
+                    .map_err(|e| format!("Failed to close directory entry: {}", e))?;
+                stack.push((path, depth + 1));
+            } else if metadata.is_file() {
+                let opts =
+                    ZipEntryBuilder::new(relative_str.clone().into(), Compression::Stored).build();
+                let mut entry_writer = zip_writer
+                    .write_entry_stream(opts)
+                    .await
+                    .map_err(|e| format!("Failed to start file entry {}: {}", relative_str, e))?;
+                let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
+                    format!("Failed to open {} for ZIP: {}", path.display(), e)
+                })?;
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let n = file.read(&mut buf).await.map_err(|e| {
+                        format!("Failed reading {} for ZIP: {}", path.display(), e)
+                    })?;
+                    if n == 0 {
+                        break;
+                    }
+                    entry_writer.write_all(&buf[..n]).await.map_err(|e| {
+                        format!("Failed writing {} into ZIP: {}", path.display(), e)
+                    })?;
+                }
+                entry_writer
+                    .close()
+                    .await
+                    .map_err(|e| format!("Failed to close file entry {}: {}", relative_str, e))?;
+            }
         }
     }
 
+    zip_writer
+        .close()
+        .await
+        .map_err(|e| format!("Failed to close ZIP: {}", e))?;
     Ok(())
 }
 
