@@ -3,8 +3,13 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
+import { useClipboardContextMenu } from '@/composables/useClipboardContextMenu';
 import { useClipboardStore } from '@/composables/useClipboardStore';
+import type { ClipboardContextActionId } from '@/composables/clipboardContextMenuHelpers';
+import ClipboardCardMenu from '@/components/clipboard/ClipboardCardMenu.vue';
+import ClipboardFileDetailsDialog from '@/components/clipboard/ClipboardFileDetailsDialog.vue';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
+import ClipboardMergePasteDialog from '@/components/clipboard/ClipboardMergePasteDialog.vue';
 import ClipboardStats from '@/components/clipboard/ClipboardStats.vue';
 import ClipboardSettingsPanel from '@/components/clipboard/ClipboardSettingsPanel.vue';
 import { clipboardApi } from '@/lib/tauri';
@@ -21,6 +26,17 @@ const selectedIds = ref<Set<number>>(new Set());
 const reloadCounter = ref(0);
 const copyToast = ref<string | null>(null);
 let copyToastTimer: number | null = null;
+
+function resetBatchSelection() {
+  batchMode.value = false;
+  clearSelection();
+}
+
+function setClipboardActionError(error: unknown, action: ClipboardContextActionId) {
+  store.error.value = `${t('clipboard.errors.actionFailed', {
+    action: t(`clipboard.actionNames.${action}`),
+  })} ${error}`;
+}
 
 function flashCopyToast(message: string) {
   copyToast.value = message;
@@ -72,6 +88,7 @@ function onSearchInput(e: Event) {
 
 function toggleBatchMode() {
   batchMode.value = !batchMode.value;
+  closeMenu();
   if (!batchMode.value) clearSelection();
 }
 
@@ -134,6 +151,66 @@ async function onReorder(ids: number[]) {
 }
 
 const selectionCount = computed(() => selectedIds.value.size);
+
+async function pasteFromContextMenu(id: number, plain: boolean) {
+  try {
+    if (plain) await clipboardApi.pastePlain(id);
+    else await clipboardApi.paste(id);
+  } catch (error) {
+    setClipboardActionError(error, plain ? 'pastePlain' : 'paste');
+  }
+}
+
+const {
+  canMergeSelection,
+  closeMenu,
+  closeMergeDialog,
+  confirmMergePaste,
+  fileDetailsItem,
+  fileDetailsOpen,
+  fileDetailsStatuses,
+  fileStatusLoading,
+  menuItems,
+  menuOpen,
+  menuPosition,
+  mergeDialogOpen,
+  mergePending,
+  mergeSeparatorInput,
+  openMenu,
+  openMergeDialog,
+  runAction,
+} = useClipboardContextMenu({
+  selectedIds,
+  onPaste: pasteFromContextMenu,
+  onCopy: copyToClipboard,
+  onDelete: async (id: number) => {
+    await store.remove(id);
+    reloadCounter.value++;
+  },
+  onToggleFavorite: async (id: number) => {
+    await store.toggleFavorite(id);
+    reloadCounter.value++;
+  },
+  onError: setClipboardActionError,
+  onMergeSuccess: async () => {
+    resetBatchSelection();
+    await store.reload();
+    reloadCounter.value++;
+  },
+});
+
+function onListMenu(payload: { item: (typeof store.items.value)[number]; x: number; y: number }) {
+  selectedId.value = payload.item.id;
+  openMenu(payload.item, { x: payload.x, y: payload.y });
+}
+
+async function onOpenDetailPath(path: string) {
+  try {
+    await clipboardApi.openInExplorer(path);
+  } catch (error) {
+    setClipboardActionError(error, 'openInExplorer');
+  }
+}
 </script>
 
 <template>
@@ -190,6 +267,14 @@ const selectionCount = computed(() => selectedIds.value.size);
         </button>
         <button type="button" class="rounded-full bg-slate-100 px-2.5 py-0.5 hover:bg-slate-200" @click="batchFavorite(false)">
           {{ t('clipboard.actions.batchUnfavorite') }}
+        </button>
+        <button
+          type="button"
+          class="rounded-full bg-slate-900/10 px-2.5 py-0.5 text-slate-700 hover:bg-slate-900/20 disabled:opacity-40"
+          :disabled="!canMergeSelection"
+          @click="openMergeDialog"
+        >
+          {{ t('clipboard.actions.mergePaste') }}
         </button>
         <button type="button" class="rounded-full bg-rose-100 px-2.5 py-0.5 text-rose-700 hover:bg-rose-200" @click="batchDelete">
           {{ t('clipboard.actions.batchDelete') }}
@@ -249,6 +334,7 @@ const selectionCount = computed(() => selectedIds.value.size);
           @select="(id) => (selectedId = id)"
           @activate="(id) => copyToClipboard(id)"
           @favorite="(id) => store.toggleFavorite(id)"
+          @menu="onListMenu"
           @reorder="onReorder"
         />
       </section>
@@ -270,5 +356,32 @@ const selectionCount = computed(() => selectedIds.value.size);
         {{ copyToast }}
       </div>
     </transition>
+
+    <ClipboardCardMenu
+      :open="menuOpen"
+      :x="menuPosition.x"
+      :y="menuPosition.y"
+      :items="menuItems"
+      @close="closeMenu"
+      @select="runAction"
+    />
+
+    <ClipboardFileDetailsDialog
+      :open="fileDetailsOpen"
+      :item="fileDetailsItem"
+      :statuses="fileDetailsStatuses"
+      :busy="fileStatusLoading"
+      @close="fileDetailsOpen = false"
+      @open-path="onOpenDetailPath"
+    />
+
+    <ClipboardMergePasteDialog
+      v-model="mergeSeparatorInput"
+      :open="mergeDialogOpen"
+      :selected-count="selectedIds.size"
+      :pending="mergePending"
+      @close="closeMergeDialog"
+      @confirm="confirmMergePaste"
+    />
   </div>
 </template>

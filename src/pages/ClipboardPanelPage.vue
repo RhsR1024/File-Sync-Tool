@@ -13,10 +13,15 @@ import {
 } from 'lucide-vue-next';
 
 import { useClipboardStore } from '@/composables/useClipboardStore';
+import { useClipboardContextMenu } from '@/composables/useClipboardContextMenu';
 import { useClipboardHotkey } from '@/composables/useClipboardHotkey';
 import { useHoverPreview } from '@/composables/useHoverPreview';
+import type { ClipboardContextActionId } from '@/composables/clipboardContextMenuHelpers';
+import ClipboardCardMenu from '@/components/clipboard/ClipboardCardMenu.vue';
+import ClipboardFileDetailsDialog from '@/components/clipboard/ClipboardFileDetailsDialog.vue';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
 import ClipboardHoverPreview from '@/components/clipboard/ClipboardHoverPreview.vue';
+import ClipboardMergePasteDialog from '@/components/clipboard/ClipboardMergePasteDialog.vue';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter } from '@/lib/clipboardTypes';
 
@@ -40,6 +45,17 @@ const batchMode = ref(false);
 const selectedIds = ref<Set<number>>(new Set());
 const clearDialogOpen = ref(false);
 
+function resetBatchSelection() {
+  batchMode.value = false;
+  selectedIds.value = new Set();
+}
+
+function setClipboardActionError(error: unknown, action: ClipboardContextActionId) {
+  store.error.value = `${t('clipboard.errors.actionFailed', {
+    action: t(`clipboard.actionNames.${action}`),
+  })} ${error}`;
+}
+
 async function togglePinned() {
   const next = !pinned.value;
   try {
@@ -52,6 +68,7 @@ async function togglePinned() {
 
 function toggleBatchMode() {
   batchMode.value = !batchMode.value;
+  closeMenu();
   if (!batchMode.value) selectedIds.value = new Set();
 }
 
@@ -67,8 +84,7 @@ async function onBatchDelete() {
   const ids = Array.from(selectedIds.value);
   try {
     await clipboardApi.deleteBatch(ids);
-    selectedIds.value = new Set();
-    batchMode.value = false;
+    resetBatchSelection();
     await store.reload();
   } catch (e) {
     console.error('[clipboard] batch delete failed:', e);
@@ -159,6 +175,50 @@ function onListSelect(id: number) {
   if (item && item.kind === 'image') preview.onEnter(item);
 }
 
+const {
+  canMergeSelection,
+  closeMenu,
+  closeMergeDialog,
+  confirmMergePaste,
+  fileDetailsItem,
+  fileDetailsOpen,
+  fileDetailsStatuses,
+  fileStatusLoading,
+  menuItems,
+  menuOpen,
+  menuPosition,
+  mergeDialogOpen,
+  mergePending,
+  mergeSeparatorInput,
+  openMenu,
+  openMergeDialog,
+  runAction,
+} = useClipboardContextMenu({
+  selectedIds,
+  onPaste: paste,
+  onCopy: (id: number) => clipboardApi.copy(id),
+  onDelete: (id: number) => store.remove(id),
+  onToggleFavorite: (id: number) => store.toggleFavorite(id),
+  onError: setClipboardActionError,
+  onMergeSuccess: async () => {
+    resetBatchSelection();
+    await store.reload();
+  },
+});
+
+function onListMenu(payload: { item: (typeof store.items.value)[number]; x: number; y: number }) {
+  selectById(payload.item.id);
+  openMenu(payload.item, { x: payload.x, y: payload.y });
+}
+
+async function onOpenDetailPath(path: string) {
+  try {
+    await clipboardApi.openInExplorer(path);
+  } catch (error) {
+    setClipboardActionError(error, 'openInExplorer');
+  }
+}
+
 useClipboardHotkey({
   items: store.items,
   selectedIndex,
@@ -198,8 +258,7 @@ onMounted(async () => {
   unlistenShown = await listen('clipboard-panel-shown', async () => {
     store.search.value = '';
     selectedIndex.value = 0;
-    batchMode.value = false;
-    selectedIds.value = new Set();
+    resetBatchSelection();
     await store.reload();
     await nextTick();
     await new Promise<void>((resolve) => {
@@ -293,6 +352,14 @@ onBeforeUnmount(() => {
       <div class="flex items-center gap-1">
         <button
           type="button"
+          class="rounded bg-slate-900/10 px-2 py-1 text-xs text-slate-700 transition-colors hover:bg-slate-900/20 disabled:opacity-40"
+          :disabled="!canMergeSelection"
+          @click="openMergeDialog"
+        >
+          {{ t('clipboard.actions.mergePaste') }}
+        </button>
+        <button
+          type="button"
           class="rounded bg-red-500/10 px-2 py-1 text-xs text-red-600 transition-colors hover:bg-red-500/20 disabled:opacity-40"
           :disabled="selectedIds.size === 0"
           @click="onBatchDelete"
@@ -359,6 +426,7 @@ onBeforeUnmount(() => {
         @toggle="onToggleSelect"
         @favorite="(id: number) => store.toggleFavorite(id)"
         @remove="(id: number) => store.remove(id)"
+        @menu="onListMenu"
         @reorder="onReorder"
       />
     </div>
@@ -400,5 +468,32 @@ onBeforeUnmount(() => {
     v-if="preview.activeItem.value"
     :item="preview.activeItem.value"
     :scale="preview.scale.value"
+  />
+
+  <ClipboardCardMenu
+    :open="menuOpen"
+    :x="menuPosition.x"
+    :y="menuPosition.y"
+    :items="menuItems"
+    @close="closeMenu"
+    @select="runAction"
+  />
+
+  <ClipboardFileDetailsDialog
+    :open="fileDetailsOpen"
+    :item="fileDetailsItem"
+    :statuses="fileDetailsStatuses"
+    :busy="fileStatusLoading"
+    @close="fileDetailsOpen = false"
+    @open-path="onOpenDetailPath"
+  />
+
+  <ClipboardMergePasteDialog
+    v-model="mergeSeparatorInput"
+    :open="mergeDialogOpen"
+    :selected-count="selectedIds.size"
+    :pending="mergePending"
+    @close="closeMergeDialog"
+    @confirm="confirmMergePaste"
   />
 </template>

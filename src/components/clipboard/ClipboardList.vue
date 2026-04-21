@@ -4,7 +4,7 @@ import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller';
 import { VueDraggable } from 'vue-draggable-plus';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { AppWindow, Trash2, Star } from 'lucide-vue-next';
+import { AppWindow, Ellipsis, Trash2, Star } from 'lucide-vue-next';
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 
 import type { ClipboardItem } from '@/lib/clipboardTypes';
@@ -33,6 +33,7 @@ const emit = defineEmits<{
   remove: [id: number];
   reorder: [ids: number[]];
   toggle: [id: number];
+  menu: [payload: { item: ClipboardItem; x: number; y: number }];
 }>();
 
 const { t } = useI18n();
@@ -115,6 +116,25 @@ function onRowClick(e: MouseEvent, id: number) {
   emit('activate', id);
 }
 
+function emitMenuRequest(item: ClipboardItem, x: number, y: number) {
+  emit('menu', { item, x, y });
+}
+
+function onRowContextMenu(event: MouseEvent, item: ClipboardItem) {
+  if (props.batchMode) return;
+  event.preventDefault();
+  emit('select', item.id);
+  emitMenuRequest(item, event.clientX, event.clientY);
+}
+
+function onMenuButtonClick(event: MouseEvent, item: ClipboardItem) {
+  const target = event.currentTarget as HTMLElement | null;
+  if (!target) return;
+  const rect = target.getBoundingClientRect();
+  emit('select', item.id);
+  emitMenuRequest(item, rect.right - 12, rect.bottom + 6);
+}
+
 const itemsWithHeight = computed(() =>
   props.items.map((it, idx) => ({
     ...it,
@@ -161,6 +181,7 @@ function onReorderEnd() {
       @mouseenter="emit('select', it.id)"
       @click="onRowClick($event, it.id)"
       @keydown="onRowKeydown($event, it.id)"
+      @contextmenu="onRowContextMenu($event, it)"
     >
       <div class="flex items-start gap-2">
         <span
@@ -217,7 +238,7 @@ function onReorderEnd() {
       </div>
 
       <div
-        v-if="props.showFavoriteButton || props.showDeleteButton"
+        v-if="!props.batchMode"
         class="pointer-events-none absolute right-1.5 top-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100"
       >
         <button
@@ -237,6 +258,14 @@ function onReorderEnd() {
           @click.stop="emit('remove', it.id)"
         >
           <Trash2 class="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          class="rounded-full p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          :title="t('clipboard.actions.moreActions')"
+          @click.stop="onMenuButtonClick($event, it)"
+        >
+          <Ellipsis class="h-3.5 w-3.5" />
         </button>
       </div>
     </div>
@@ -270,6 +299,7 @@ function onReorderEnd() {
           @mouseenter="emit('select', item.id)"
           @click="onRowClick($event, item.id)"
           @keydown="onRowKeydown($event, item.id)"
+          @contextmenu="onRowContextMenu($event, item)"
         >
           <div class="flex items-start gap-2">
             <span
@@ -326,7 +356,7 @@ function onReorderEnd() {
           </div>
 
           <div
-            v-if="props.showFavoriteButton || props.showDeleteButton"
+            v-if="!props.batchMode"
             class="pointer-events-none absolute right-1.5 top-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100"
           >
             <button
@@ -346,6 +376,14 @@ function onReorderEnd() {
               @click.stop="emit('remove', item.id)"
             >
               <Trash2 class="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              class="rounded-full p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+              :title="t('clipboard.actions.moreActions')"
+              @click.stop="onMenuButtonClick($event, item)"
+            >
+              <Ellipsis class="h-3.5 w-3.5" />
             </button>
           </div>
         </div>

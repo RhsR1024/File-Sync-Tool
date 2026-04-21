@@ -930,8 +930,14 @@ export const clipboardApi = {
   pastePlain: (id: number) => invoke<void>('cb_paste_plain', { id }),
   copy: (id: number) => invoke<void>('cb_copy', { id }),
   pasteAsFiles: (id: number) => invoke<void>('cb_paste_as_files', { id }),
+  pasteAsPath: (id: number) => invoke<void>('cb_paste_as_path', { id }),
   checkFilePaths: (ids: number[]) =>
     invoke<FilePathStatus[]>('cb_check_file_paths', { ids }),
+  saveImageAs: (id: number, targetPath: string) =>
+    invoke<void>('cb_save_image_as', { id, targetPath }),
+  openInExplorer: (path: string) => invoke<void>('cb_open_in_explorer', { path }),
+  mergePaste: (ids: number[], separator?: string | null) =>
+    invoke<void>('cb_merge_paste', { ids, separator: separator ?? null }),
   togglePanel: () => invoke<void>('cb_toggle_panel'),
   stats: () => invoke<ClipboardStats>('cb_stats'),
   getSettings: () => invoke<ClipboardSettings>('cb_get_settings'),

@@ -489,11 +489,11 @@ Observed: `62` clipboard tests passed, `0` failed.
 
 **Depends on:** Task 5
 
-- [ ] **Step 6.1: Write failing TS/UI tests if the repo has an appropriate pattern**
+- [x] **Step 6.1: Write failing TS/UI tests if the repo has an appropriate pattern**
 
 If no meaningful component test harness exists, document the manual interaction checklist directly in the task notes and keep logic extracted into small composables/helpers that can still be unit tested.
 
-- [ ] **Step 6.2: Add the context menu and dialogs**
+- [x] **Step 6.2: Add the context menu and dialogs**
 
 Requirements:
 - per-kind actions
@@ -502,7 +502,7 @@ Requirements:
 - merge-paste prompt
 - clean i18n keys in both languages
 
-- [ ] **Step 6.3: Refactor list row events**
+- [x] **Step 6.3: Refactor list row events**
 
 Add explicit row action hooks without breaking:
 - hover selection
@@ -510,7 +510,7 @@ Add explicit row action hooks without breaking:
 - virtual scrolling
 - manager-page copy behavior
 
-- [ ] **Step 6.4: Run checks**
+- [x] **Step 6.4: Run checks**
 
 ```powershell
 cmd /c pnpm check
@@ -524,6 +524,22 @@ Expected: green type-check.
 git add src/components/clipboard src/composables/useClipboardContextMenu.ts src/pages/ClipboardPanelPage.vue src/pages/ClipboardManagerPage.vue src/locales/messages.ts
 git commit -m "feat(clipboard): add m7 context actions and dialogs"
 ```
+
+Status 2026-04-21:
+- Task 6 implementation and verification are complete; only the commit step remains.
+- Added a tested context-menu helper/composable split (`src/composables/clipboardContextMenuHelpers.ts`, `src/composables/useClipboardContextMenu.ts`, `src/composables/useClipboardContextMenu.test.mjs`) plus new UI shells for the row menu, file-details dialog, and merge-paste dialog.
+- `ClipboardList.vue`, `ClipboardPanelPage.vue`, and `ClipboardManagerPage.vue` now support per-row menu actions, file-details invalid-path feedback, image save-to-directory flow, and shared batch merge-paste entry points without changing the manager page's primary click-to-copy behavior.
+- Synced missing frontend wrappers in `src/lib/tauri.ts` for Task 5/6 clipboard actions and added the required English/Chinese i18n keys.
+- Manual interaction checklist for Task 6 was recorded in `.trellis/tasks/04-20-clipboard-gap-migration/prd.md` because the repo still lacks a meaningful component-test harness.
+- Fresh RED→GREEN verification passed with:
+
+```powershell
+node --test --test-isolation=none src/composables/useClipboardContextMenu.test.mjs
+cmd /c pnpm check
+```
+
+Observed: `4` tests passed, `0` failed, and `cmd /c pnpm check` completed successfully.
+- Step 6.4 was unblocked by reinstalling the shared worktree/frontend dependencies from the branch lockfile with `cmd /c pnpm install --frozen-lockfile --config.confirmModulesPurge=false`, which restored the missing `vue-draggable-plus` and `vue-virtual-scroller` packages in the shared `node_modules`.
 
 ### Task 7: Range Selection, Quick-Paste, And Batch Interaction Parity
 

@@ -39,3 +39,14 @@ Bring the clipboard manager in `File-Sync-Tool` up to and beyond the `2026-04-19
 2. Build outward from backend capability to frontend integration
 3. Keep milestone boundaries explicit so subagents can execute one bounded task at a time
 4. Run spec-first reviews after each subagent task, then code-quality review
+
+## Task 6 Manual Checklist
+- Panel page: right-click or menu-button on text/html/rtf row shows paste, plain-text paste, copy, favorite/unfavorite, and delete actions.
+- Panel page: file row menu shows paste-as-files, paste-as-path, file-details, and open-in-explorer actions; missing paths are marked inside the details dialog.
+- Panel page: image row menu can save the cached image into a user-picked directory with a deterministic default file name.
+- Manager page: row primary click still performs copy-to-clipboard, while the new context menu remains available for advanced actions.
+- Both pages: batch selection can open the merge-paste dialog, accept a custom separator, and pass the selected ids through one shared code path.
+
+Verification 2026-04-21:
+- `node --test --test-isolation=none src/composables/useClipboardContextMenu.test.mjs` passed (`4` tests).
+- `cmd /c pnpm check` passed after refreshing the shared worktree `node_modules` from the branch lockfile.
