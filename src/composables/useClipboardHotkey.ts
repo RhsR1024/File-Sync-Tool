@@ -8,12 +8,14 @@ export interface ClipboardHotkeyOptions {
   selectedIndex: Ref<number>;
   filter: Ref<ClipboardFilter>;
   searchValue: Ref<string>;
+  enabled?: Ref<boolean>;
   onPaste: (id: number, plain: boolean) => void;
   onDelete: (id: number) => void;
   onFavorite: (id: number) => void;
   onClose: () => void;
   onFocusSearch: () => void;
   onFilterChange: (dir: 1 | -1) => void;
+  onSearchChange?: (value: string) => void;
 }
 
 export function useClipboardHotkey(opts: ClipboardHotkeyOptions): void {
@@ -24,6 +26,8 @@ export function useClipboardHotkey(opts: ClipboardHotkeyOptions): void {
   }
 
   function handler(e: KeyboardEvent) {
+    if (opts.enabled && !opts.enabled.value) return;
+
     const inEditable = isEditable(e.target);
     const list = opts.items.value;
     const idx = opts.selectedIndex.value;
@@ -102,7 +106,8 @@ export function useClipboardHotkey(opts: ClipboardHotkeyOptions): void {
         break;
       case 'Escape':
         if (opts.searchValue.value) {
-          opts.searchValue.value = '';
+          if (opts.onSearchChange) opts.onSearchChange('');
+          else opts.searchValue.value = '';
           e.preventDefault();
         } else {
           opts.onClose();

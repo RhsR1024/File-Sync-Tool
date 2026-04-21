@@ -10,8 +10,11 @@ import ClipboardCardMenu from '@/components/clipboard/ClipboardCardMenu.vue';
 import ClipboardFileDetailsDialog from '@/components/clipboard/ClipboardFileDetailsDialog.vue';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
 import ClipboardMergePasteDialog from '@/components/clipboard/ClipboardMergePasteDialog.vue';
+import ClipboardSearchBox from '@/components/clipboard/ClipboardSearchBox.vue';
 import ClipboardStats from '@/components/clipboard/ClipboardStats.vue';
 import ClipboardSettingsPanel from '@/components/clipboard/ClipboardSettingsPanel.vue';
+import ClipboardToolbar from '@/components/clipboard/ClipboardToolbar.vue';
+import { buildClipboardToolbarLayout } from '@/lib/clipboardSettingsUi';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter } from '@/lib/clipboardTypes';
 
@@ -20,6 +23,7 @@ defineOptions({ name: 'ClipboardManagerPage' });
 const { t } = useI18n();
 const store = useClipboardStore();
 const selectedId = ref<number | null>(null);
+const settingsOpen = ref(false);
 
 const reloadCounter = ref(0);
 const copyToast = ref<string | null>(null);
@@ -78,9 +82,13 @@ function setFilter(f: ClipboardFilter) {
   void store.reload();
 }
 
-function onSearchInput(e: Event) {
-  store.search.value = (e.target as HTMLInputElement).value;
+function onSearchChange(value: string) {
+  store.search.value = value;
   void store.reload();
+}
+
+function toggleSettingsPanel() {
+  settingsOpen.value = !settingsOpen.value;
 }
 
 function toggleBatchMode() {
@@ -145,6 +153,9 @@ async function onReorder(ids: number[]) {
 }
 
 const selectionCount = computed(() => store.selectedIds.value.size);
+const toolbarLayout = computed(() =>
+  buildClipboardToolbarLayout(store.settings.value.toolbar, ['batch', 'settings']),
+);
 
 async function pasteFromContextMenu(id: number, plain: boolean) {
   try {
@@ -218,7 +229,11 @@ async function onOpenDetailPath(path: string) {
         <p class="text-sm text-slate-500">{{ t('clipboard.tool.description') }}</p>
       </header>
 
-      <details class="rounded-2xl border border-slate-200 bg-white">
+      <details
+        class="rounded-2xl border border-slate-200 bg-white"
+        :open="settingsOpen"
+        @toggle="settingsOpen = ($event.target as HTMLDetailsElement).open"
+      >
         <summary class="cursor-pointer px-5 py-3 text-sm font-medium text-slate-700">
           {{ t('clipboard.settings.title') }}
         </summary>
@@ -229,24 +244,43 @@ async function onOpenDetailPath(path: string) {
 
       <ClipboardStats :reload-signal="reloadCounter" />
 
-      <div class="flex items-center gap-3">
-        <input
-          type="search"
-          :placeholder="t('clipboard.search.placeholder')"
-          class="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm outline-none focus:border-slate-400"
-          @input="onSearchInput"
-        />
-        <span class="text-xs text-slate-400">{{ store.total.value }} {{ t('clipboard.totalSuffix') }}</span>
-        <button
-          type="button"
-          class="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium transition-colors"
-          :class="store.batchMode.value
-            ? 'bg-slate-900 text-white border-slate-900'
-            : 'bg-white text-slate-600 hover:bg-slate-100'"
-          @click="toggleBatchMode"
-        >
-          {{ store.batchMode.value ? t('clipboard.actions.clearSelection') : t('clipboard.actions.selectAll') }}
-        </button>
+      <div class="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+        <div class="flex flex-wrap items-start gap-3">
+          <div class="min-w-0 flex-1 space-y-3">
+            <ClipboardSearchBox
+              v-if="toolbarLayout.showSearch"
+              :model-value="store.search.value"
+              :placeholder="t('clipboard.search.placeholder')"
+              @update:model-value="onSearchChange"
+              @clear="onSearchChange('')"
+            />
+
+            <div v-if="toolbarLayout.showFilter" class="flex flex-wrap gap-2">
+              <button
+                v-for="f in filters"
+                :key="f"
+                type="button"
+                class="rounded-full px-3 py-1 text-xs font-medium transition-colors"
+                :class="store.filter.value === f
+                  ? 'bg-slate-900 text-white shadow-sm'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+                @click="setFilter(f)"
+              >
+                {{ t(`clipboard.filter.${f}`) }}
+              </button>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-400">{{ store.total.value }} {{ t('clipboard.totalSuffix') }}</span>
+            <ClipboardToolbar
+              :items="toolbarLayout.actionItems"
+              :batch-mode="store.batchMode.value"
+              @batch="toggleBatchMode"
+              @settings="toggleSettingsPanel"
+            />
+          </div>
+        </div>
       </div>
 
       <div v-if="store.batchMode.value" class="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs">
@@ -274,21 +308,6 @@ async function onOpenDetailPath(path: string) {
         </button>
         <button type="button" class="rounded-full bg-rose-100 px-2.5 py-0.5 text-rose-700 hover:bg-rose-200" @click="batchDelete">
           {{ t('clipboard.actions.batchDelete') }}
-        </button>
-      </div>
-
-      <div class="flex flex-wrap gap-2">
-        <button
-          v-for="f in filters"
-          :key="f"
-          type="button"
-          class="rounded-full px-3 py-1 text-xs font-medium transition-colors"
-          :class="store.filter.value === f
-            ? 'bg-slate-900 text-white shadow-sm'
-            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
-          @click="setFilter(f)"
-        >
-          {{ t(`clipboard.filter.${f}`) }}
         </button>
       </div>
 

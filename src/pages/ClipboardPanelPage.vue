@@ -5,10 +5,6 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useI18n } from 'vue-i18n';
 import {
   Trash2,
-  CheckSquare,
-  Lock,
-  LockOpen,
-  Settings,
   X,
 } from 'lucide-vue-next';
 
@@ -21,6 +17,9 @@ import ClipboardCardMenu from '@/components/clipboard/ClipboardCardMenu.vue';
 import ClipboardFileDetailsDialog from '@/components/clipboard/ClipboardFileDetailsDialog.vue';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
 import ClipboardMergePasteDialog from '@/components/clipboard/ClipboardMergePasteDialog.vue';
+import ClipboardSearchBox from '@/components/clipboard/ClipboardSearchBox.vue';
+import ClipboardToolbar from '@/components/clipboard/ClipboardToolbar.vue';
+import { buildClipboardToolbarLayout } from '@/lib/clipboardSettingsUi';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter } from '@/lib/clipboardTypes';
 
@@ -30,7 +29,7 @@ const { t } = useI18n();
 const store = useClipboardStore();
 
 const selectedIndex = ref(0);
-const searchInput = ref<HTMLInputElement | null>(null);
+const searchInput = ref<{ focus: () => void } | null>(null);
 const previewDelayMs = ref(500);
 
 const filters: ClipboardFilter[] = ['all', 'text', 'image', 'file', 'favorite'];
@@ -181,6 +180,11 @@ function setFilter(f: ClipboardFilter) {
   void store.reload();
 }
 
+function onSearchChange(value: string) {
+  store.search.value = value;
+  void store.reload();
+}
+
 function selectById(id: number) {
   const idx = store.items.value.findIndex((it) => it.id === id);
   if (idx >= 0) selectedIndex.value = idx;
@@ -263,12 +267,14 @@ useClipboardHotkey({
   selectedIndex,
   filter: store.filter,
   searchValue: store.search,
+  enabled: computed(() => store.settings.value.navigation.enabled),
   onPaste: paste,
   onDelete: onRemoveItem,
   onFavorite: (id) => store.toggleFavorite(id),
   onClose: close,
   onFocusSearch: () => searchInput.value?.focus(),
   onFilterChange: changeFilter,
+  onSearchChange,
 });
 
 watch(
@@ -284,6 +290,9 @@ let unlistenShown: UnlistenFn | null = null;
 let unlistenItemAdded: UnlistenFn | null = null;
 const showCounter = ref(0);
 const listKey = computed(() => `${store.filter.value}-${showCounter.value}`);
+const toolbarLayout = computed(() =>
+  buildClipboardToolbarLayout(store.settings.value.toolbar, ['batch', 'settings', 'lock']),
+);
 
 onMounted(async () => {
   await refreshPreviewSettings();
@@ -330,7 +339,7 @@ onBeforeUnmount(() => {
         {{ t('clipboard.tool.title') }}
       </span>
 
-      <div class="flex items-center gap-0.5" data-no-drag>
+      <div class="flex items-center gap-1" data-no-drag>
         <button
           type="button"
           data-no-drag
@@ -340,40 +349,15 @@ onBeforeUnmount(() => {
         >
           <Trash2 class="h-4 w-4" />
         </button>
-        <button
-          type="button"
-          data-no-drag
-          class="inline-flex h-7 w-7 items-center justify-center rounded transition-colors"
-          :class="store.batchMode.value
-            ? 'bg-blue-50 text-blue-600'
-            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'"
-          :title="store.batchMode.value ? t('clipboard.actions.exitBatch') : t('clipboard.actions.batchSelect')"
-          @click="toggleBatchMode"
-        >
-          <CheckSquare class="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          data-no-drag
-          class="inline-flex h-7 w-7 items-center justify-center rounded transition-colors"
-          :class="pinned
-            ? 'bg-amber-50 text-amber-600'
-            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'"
-          :title="pinned ? t('clipboard.actions.unlockWindow') : t('clipboard.actions.lockWindow')"
-          @click="togglePinned"
-        >
-          <Lock v-if="pinned" class="h-4 w-4" />
-          <LockOpen v-else class="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          data-no-drag
-          class="inline-flex h-7 w-7 items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800"
-          :title="t('clipboard.actions.openSettings')"
-          @click="openSettings"
-        >
-          <Settings class="h-4 w-4" />
-        </button>
+        <ClipboardToolbar
+          :items="toolbarLayout.actionItems"
+          :batch-mode="store.batchMode.value"
+          :locked="pinned"
+          compact
+          @batch="toggleBatchMode"
+          @lock="togglePinned"
+          @settings="openSettings"
+        />
         <span class="mx-0.5 h-5 w-px bg-slate-200" aria-hidden />
         <button
           type="button"
@@ -435,18 +419,17 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="px-3 pt-2.5 pb-2">
-      <input
+    <div v-if="toolbarLayout.showSearch" class="px-3 pt-2.5 pb-2">
+      <ClipboardSearchBox
         ref="searchInput"
-        v-model="store.search.value"
-        type="search"
+        :model-value="store.search.value"
         :placeholder="t('clipboard.search.placeholder')"
-        class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm outline-none focus:border-slate-400 focus:bg-white"
-        @input="store.reload()"
+        @update:model-value="onSearchChange"
+        @clear="onSearchChange('')"
       />
     </div>
 
-    <div class="flex flex-wrap gap-1 px-3 pb-2">
+    <div v-if="toolbarLayout.showFilter" class="flex flex-wrap gap-1 px-3 pb-2">
       <button
         v-for="f in filters"
         :key="f"

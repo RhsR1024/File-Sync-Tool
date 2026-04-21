@@ -809,34 +809,54 @@ git commit -m "feat(clipboard): add display personalization and highlighting"
 - Create: `src/components/clipboard-settings/AboutTab.vue`
 - Create: `src/components/clipboard/ClipboardSearchBox.vue`
 - Create: `src/components/clipboard/ClipboardToolbar.vue`
+- Create: `src/lib/clipboardSettingsUi.ts`
 - Modify: `src/components/clipboard/ClipboardSettingsPanel.vue`
+- Modify: `src/composables/useClipboardHotkey.ts`
+- Modify: `src/locales/messages.ts`
 - Modify: `src/pages/ClipboardPanelPage.vue`
 - Modify: `src/pages/ClipboardManagerPage.vue`
+- Test: `src/lib/clipboardSettingsUi.test.mjs`
 
 **Depends on:** Task 10
 
-- [ ] **Step 11.1: Write failing tests for any new helper-level UI state code**
+- [x] **Step 11.1: Write failing tests for any new helper-level UI state code**
 
 Prefer testing helper/composable logic over template snapshots.
 
-- [ ] **Step 11.2: Split settings into tabs**
+- [x] **Step 11.2: Split settings into tabs**
 
 Requirements:
 - settings information architecture matches the spec and `ElegantClipboard`
 - no single oversized settings component
 - each tab owns one responsibility
 
-- [ ] **Step 11.3: Introduce custom search box and toolbar config**
+- [x] **Step 11.3: Introduce custom search box and toolbar config**
 
 Add clear button, toolbar visibility/ordering, and keyboard-nav toggle.
 
-- [ ] **Step 11.4: Run checks**
+- [x] **Step 11.4: Run checks**
 
 ```powershell
 cmd /c pnpm check
 ```
 
-- [ ] **Step 11.5: Commit**
+Status 2026-04-21:
+- Task 11 implementation and verification are complete; the commit step is being recorded with this checkpoint.
+- Added a new pure helper/test pair (`src/lib/clipboardSettingsUi.ts`, `src/lib/clipboardSettingsUi.test.mjs`) to lock down toolbar-item normalization, reordering, and page-level toolbar layout resolution before wiring the shared UI.
+- Rebuilt `ClipboardSettingsPanel.vue` into an 8-tab settings surface (`General`, `Display`, `Shortcuts`, `Data`, `Preview`, `App Filter`, `Audio`, `About`) so the richer M8 settings model is no longer trapped in one oversized component.
+- Added reusable `ClipboardSearchBox.vue` and `ClipboardToolbar.vue`, then updated both `ClipboardPanelPage.vue` and `ClipboardManagerPage.vue` to respect saved toolbar visibility/order for search, filter chips, batch mode, settings access, and panel lock controls.
+- `useClipboardHotkey.ts` now respects `navigation.enabled` and uses a caller-provided search updater so the new keyboard-navigation toggle and search clear flows take effect immediately.
+- `src/locales/messages.ts` now includes the new tab, toolbar, and settings copy needed for the tabbed settings UI and custom search box.
+- Fresh verification passed with:
+
+```powershell
+node --test --test-isolation=none src/lib/clipboardSettingsUi.test.mjs
+cmd /c pnpm check
+```
+
+Observed: `3` new Node tests passed and `cmd /c pnpm check` completed successfully.
+
+- [x] **Step 11.5: Commit**
 
 ```powershell
 git add src/components/clipboard-settings src/components/clipboard/ClipboardSearchBox.vue src/components/clipboard/ClipboardToolbar.vue src/components/clipboard/ClipboardSettingsPanel.vue src/pages/ClipboardPanelPage.vue src/pages/ClipboardManagerPage.vue
