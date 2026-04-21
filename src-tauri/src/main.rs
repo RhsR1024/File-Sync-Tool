@@ -2048,19 +2048,12 @@ fn run_remote_command_over_ssh(
     Ok(output.trim().to_string())
 }
 
-/// RSA encrypt plaintext with a PEM public key, return Base64-encoded ciphertext.
-fn rsa_encrypt(public_key_pem: &str, plaintext: &str) -> Result<String, String> {
-    use base64::{engine::general_purpose, Engine as _};
-    use rand::rngs::OsRng;
-    use rsa::{pkcs8::DecodePublicKey, Pkcs1v15Encrypt, RsaPublicKey};
-
-    let public_key = RsaPublicKey::from_public_key_pem(public_key_pem)
-        .map_err(|e| format!("Failed to parse public key: {}", e))?;
-    let mut rng = OsRng;
-    let encrypted = public_key
-        .encrypt(&mut rng, Pkcs1v15Encrypt, plaintext.as_bytes())
-        .map_err(|e| format!("RSA encryption failed: {}", e))?;
-    Ok(general_purpose::STANDARD.encode(&encrypted))
+/// SHA-256 hash of the given text, returned as lowercase hex.
+fn sha256_hex(plaintext: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(plaintext.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn password_change_failure(ip: &str, message: String, failed_at: &str) -> PasswordChangeResult {
@@ -2091,55 +2084,13 @@ async fn change_framework_password_for_ip(
         ));
     }
 
-    let pubkey_url = format!("http://{}:21900/openAPI/auth/v1/publicKey", ip);
-    let public_key = match client.get(&pubkey_url).send().await {
-        Ok(response) => match response.json::<serde_json::Value>().await {
-            Ok(json) => match json
-                .get("data")
-                .and_then(|d| d.get("publicKey"))
-                .and_then(|k| k.as_str())
-            {
-                Some(key) => key.to_string(),
-                None => {
-                    return Some(password_change_failure(
-                        &ip,
-                        format!("Failed to get public key: {:?}", json),
-                        "login",
-                    ));
-                }
-            },
-            Err(e) => {
-                return Some(password_change_failure(
-                    &ip,
-                    format!("Public key response parse error: {}", e),
-                    "login",
-                ));
-            }
-        },
-        Err(e) => {
-            return Some(password_change_failure(
-                &ip,
-                format!("Public key request failed: {}", e),
-                "login",
-            ));
-        }
-    };
-
-    let encrypted_old = match rsa_encrypt(&public_key, &old_passwd) {
-        Ok(v) => v,
-        Err(e) => {
-            return Some(password_change_failure(
-                &ip,
-                format!("RSA encrypt old password failed: {}", e),
-                "login",
-            ));
-        }
-    };
+    let hashed_old = sha256_hex(&old_passwd);
+    let hashed_new = sha256_hex(&new_passwd);
 
     let login_url = format!("http://{}:21900/openAPI/userMgr/v1/login", ip);
     let login_body = json!({
         "userName": "admin",
-        "userPasswd": encrypted_old,
+        "userPasswd": hashed_old,
         "isUnlockLogin": false
     });
 
@@ -2197,32 +2148,11 @@ async fn change_framework_password_for_ip(
         }
     };
 
-    let encrypted_old_for_change = match rsa_encrypt(&public_key, &old_passwd) {
-        Ok(v) => v,
-        Err(e) => {
-            return Some(password_change_failure(
-                &ip,
-                format!("RSA encrypt failed: {}", e),
-                "changePasswd",
-            ));
-        }
-    };
-    let encrypted_new = match rsa_encrypt(&public_key, &new_passwd) {
-        Ok(v) => v,
-        Err(e) => {
-            return Some(password_change_failure(
-                &ip,
-                format!("RSA encrypt new password failed: {}", e),
-                "changePasswd",
-            ));
-        }
-    };
-
     let change_passwd_url = format!("http://{}:21900/openAPI/userMgr/v1/changePasswd", ip);
     let change_passwd_body = json!({
         "userName": "admin",
-        "oldUserPasswd": encrypted_old_for_change,
-        "newUserPasswd": encrypted_new
+        "oldUserPasswd": hashed_old,
+        "newUserPasswd": hashed_new
     });
 
     let change_success = match client
@@ -2273,7 +2203,7 @@ async fn change_framework_password_for_ip(
     let logout_url = format!("http://{}:21900/openAPI/userMgr/v1/logout", ip);
     let logout_body = json!({
         "userName": "admin",
-        "userPasswd": encrypted_old,
+        "userPasswd": hashed_old,
         "token": token
     });
 
