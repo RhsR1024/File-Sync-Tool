@@ -51,11 +51,14 @@ const autoStart = ref(false);
 const isActive = ref(false);
 const isStarting = ref(false);
 const serverUrl = ref('');
-const showQr = ref(false);
-const copiedUrl = ref(false);
-const showAltUrls = ref(false);
+const qrForUrl = ref<string | null>(null);
+const copiedUrl = ref<string | null>(null);
 const showConnectionDetails = ref(true);
 const showAllConnIps = ref(false);
+const qrCanvases = ref<Record<string, HTMLCanvasElement | null>>({});
+const setQrCanvas = (url: string, el: unknown) => {
+  qrCanvases.value[url] = (el as HTMLCanvasElement | null) ?? null;
+};
 const errorMsg = ref('');
 
 const status = ref<ScreenShareStatus>({
@@ -71,7 +74,6 @@ const status = ref<ScreenShareStatus>({
 });
 
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
-const qrCanvas = ref<HTMLCanvasElement | null>(null);
 let lastUptimeUpdate = 0;
 
 const monitorOptions = computed(() =>
@@ -97,7 +99,16 @@ const formattedBitrate = computed(() => {
   return `${kbps} Kbps`;
 });
 
-const altUrls = computed(() => (status.value.all_urls || []).filter((url) => url !== serverUrl.value));
+const allUrls = computed(() => {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const url of [serverUrl.value, ...(status.value.all_urls || [])]) {
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    ordered.push(url);
+  }
+  return ordered;
+});
 const connectedIps = computed(() => status.value.connected_ips || []);
 const connectionCount = computed(() => status.value.connection_count ?? connectedIps.value.length);
 const visibleConnIps = computed(() => showAllConnIps.value ? connectedIps.value : connectedIps.value.slice(0, 10));
@@ -219,7 +230,7 @@ async function stopShare() {
   }
   isActive.value = false;
   serverUrl.value = '';
-  showQr.value = false;
+  qrForUrl.value = null;
   showConnectionDetails.value = false;
   showAllConnIps.value = false;
   status.value = {
@@ -235,34 +246,42 @@ async function stopShare() {
   };
 }
 
-async function copyUrl() {
+async function copyUrl(url: string) {
   try {
-    await navigator.clipboard.writeText(serverUrl.value);
-    copiedUrl.value = true;
+    await navigator.clipboard.writeText(url);
+    copiedUrl.value = url;
     setTimeout(() => {
-      copiedUrl.value = false;
+      if (copiedUrl.value === url) copiedUrl.value = null;
     }, 1800);
   } catch {
     /* Clipboard access can fail in restricted environments. */
   }
 }
 
-async function copyText(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    /* Clipboard access can fail in restricted environments. */
-  }
-}
-
-async function openInBrowser() {
-  if (!serverUrl.value) {
+async function openInBrowser(url?: string) {
+  const target = url ?? serverUrl.value;
+  if (!target) {
     return;
   }
   try {
-    await invoke('open_url', { url: serverUrl.value });
+    await invoke('open_url', { url: target });
   } catch {
     /* Opening the system browser is best-effort. */
+  }
+}
+
+async function toggleQr(url: string) {
+  qrForUrl.value = qrForUrl.value === url ? null : url;
+  if (qrForUrl.value) {
+    await nextTick();
+    const canvas = qrCanvases.value[url];
+    if (canvas) {
+      await QRCode.toCanvas(canvas, url, {
+        width: 128,
+        margin: 1,
+        color: { dark: '#1e293b', light: '#ffffff' },
+      });
+    }
   }
 }
 
@@ -275,19 +294,8 @@ function addLog(level: string, message: string) {
   }
 }
 
-watch([showQr, serverUrl], async ([show, url]) => {
-  if (!show || !url) {
-    return;
-  }
-  await nextTick();
-  if (!qrCanvas.value) {
-    return;
-  }
-  await QRCode.toCanvas(qrCanvas.value, url, {
-    width: 128,
-    margin: 1,
-    color: { dark: '#1e293b', light: '#ffffff' },
-  });
+watch(serverUrl, () => {
+  qrForUrl.value = null;
 });
 
 let unlistenStatus: UnlistenFn | null = null;
@@ -566,61 +574,44 @@ onUnmounted(() => {
           <template v-if="isActive && serverUrl">
             <div class="ss-card">
               <p class="ss-section-label">{{ t('tools.screenShare.accessUrl') }}</p>
-              <div class="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
-                <code class="flex-1 truncate font-mono text-sm font-semibold text-violet-700">{{ serverUrl }}</code>
-                <button
-                  type="button"
-                  @click="copyUrl"
-                  class="ss-icon-button"
-                  :title="t('tools.screenShare.copyUrl')"
-                  aria-label="Copy URL"
-                >
-                  <Copy class="h-4 w-4" :class="copiedUrl ? 'text-violet-600' : ''" />
-                </button>
-                <button
-                  type="button"
-                  @click="showQr = !showQr"
-                  class="ss-icon-button"
-                  :title="showQr ? t('tools.screenShare.hideQrCode') : t('tools.screenShare.showQrCode')"
-                >
-                  <QrCode class="h-4 w-4" :class="showQr ? 'text-violet-600' : ''" />
-                </button>
-                <button
-                  type="button"
-                  @click="openInBrowser"
-                  class="ss-icon-button"
-                  :title="t('tools.screenShare.openInBrowser')"
-                >
-                  <ExternalLink class="h-4 w-4" />
-                </button>
-              </div>
-              <p v-if="copiedUrl" class="mt-2 text-xs text-violet-600">{{ t('tools.screenShare.copied') }}</p>
-              <p v-else class="mt-2 text-xs text-slate-500">{{ t('tools.screenShare.qrCodeHint') }}</p>
-
-              <div v-if="showQr" class="mt-4 flex justify-center">
-                <div class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
-                  <canvas ref="qrCanvas" width="128" height="128" />
-                </div>
-              </div>
-
-              <div v-if="altUrls.length > 0" class="mt-4">
-                <button type="button" @click="showAltUrls = !showAltUrls" class="ss-inline-button">
-                  <component :is="showAltUrls ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />
-                  {{ t('tools.screenShare.altUrls', { n: altUrls.length }) }}
-                </button>
-                <div v-if="showAltUrls" class="mt-3 space-y-2">
-                  <div
-                    v-for="url in altUrls"
-                    :key="url"
-                    class="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"
-                  >
-                    <code class="flex-1 truncate font-mono text-xs text-slate-600">{{ url }}</code>
-                    <button type="button" @click="copyText(url)" class="text-slate-400 transition hover:text-violet-600">
-                      <Copy class="h-3.5 w-3.5" />
+              <div class="space-y-2">
+                <div v-for="url in allUrls" :key="url" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                  <div class="flex items-center gap-2">
+                    <code class="flex-1 truncate font-mono text-sm font-semibold text-violet-700">{{ url }}</code>
+                    <button
+                      type="button"
+                      @click="copyUrl(url)"
+                      class="ss-icon-button"
+                      :title="t('tools.screenShare.copyUrl')"
+                      aria-label="Copy URL"
+                    >
+                      <Copy class="h-4 w-4" :class="copiedUrl === url ? 'text-violet-600' : ''" />
                     </button>
+                    <button
+                      type="button"
+                      @click="toggleQr(url)"
+                      class="ss-icon-button"
+                      :title="qrForUrl === url ? t('tools.screenShare.hideQrCode') : t('tools.screenShare.showQrCode')"
+                    >
+                      <QrCode class="h-4 w-4" :class="qrForUrl === url ? 'text-violet-600' : ''" />
+                    </button>
+                    <button
+                      type="button"
+                      @click="openInBrowser(url)"
+                      class="ss-icon-button"
+                      :title="t('tools.screenShare.openInBrowser')"
+                    >
+                      <ExternalLink class="h-4 w-4" />
+                    </button>
+                  </div>
+                  <div v-if="qrForUrl === url" class="mt-3 flex justify-center">
+                    <div class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                      <canvas :ref="(el) => setQrCanvas(url, el)" width="128" height="128" />
+                    </div>
                   </div>
                 </div>
               </div>
+              <p class="mt-2 text-xs text-slate-500">{{ t('tools.screenShare.qrCodeHint') }}</p>
             </div>
 
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">

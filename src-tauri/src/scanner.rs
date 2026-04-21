@@ -658,6 +658,8 @@ async fn perform_copy<R: tauri::Runtime>(
                         &should_skip,
                         &is_paused,
                     );
+                    let _ = task_manager
+                        .mark_copy_started(&task_handle.task_group_id, &task_handle.run_id);
                     Some(execution)
                 }
                 Err(error) => {
@@ -673,6 +675,12 @@ async fn perform_copy<R: tauri::Runtime>(
     } else {
         None
     };
+
+    if source != "scheduled" {
+        if let Some(handle) = task_handle.as_ref() {
+            let _ = task_manager.mark_copy_started(&handle.task_group_id, &handle.run_id);
+        }
+    }
 
     if target_full_path.exists() && !target_full_path.is_dir() {
         let err_msg = format!(

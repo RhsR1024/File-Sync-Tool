@@ -257,19 +257,30 @@ const isSaving = ref(false);
 const isApplying = ref(false);
 const isActive = ref(false);
 const serverUrl = ref('');
-const copied = ref(false);
-const showQr = ref(false);
-const showAltUrls = ref(false);
+const copiedUrl = ref<string | null>(null);
+const qrForUrl = ref<string | null>(null);
 const showConnections = ref(true);
 const showAllIps = ref(false);
-const qrCanvas = ref<HTMLCanvasElement | null>(null);
+const qrCanvases = ref<Record<string, HTMLCanvasElement | null>>({});
+const setQrCanvas = (url: string, el: unknown) => {
+  qrCanvases.value[url] = (el as HTMLCanvasElement | null) ?? null;
+};
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
 
 const guest = computed(() => draft.value.guest_account);
 const customAccounts = computed(() => draft.value.accounts);
 const enabledRoots = computed(() => draft.value.roots.filter((r) => r.enabled));
 const enabledCustomAccounts = computed(() => customAccounts.value.filter((a) => a.enabled));
-const altUrls = computed(() => (status.value.all_urls ?? []).filter((u) => u !== serverUrl.value));
+const allUrls = computed(() => {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const url of [serverUrl.value, ...(status.value.all_urls ?? [])]) {
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    ordered.push(url);
+  }
+  return ordered;
+});
 const connectedIps = computed(() => status.value.connected_ips ?? []);
 const connCount = computed(() => status.value.connection_count ?? connectedIps.value.length);
 const visibleIps = computed(() => showAllIps.value ? connectedIps.value : connectedIps.value.slice(0, 10));
@@ -348,7 +359,7 @@ const setStatus = (next: FileShareStatus) => {
   isActive.value = status.value.is_active;
   serverUrl.value = status.value.server_url;
   if (!status.value.is_active) {
-    showQr.value = false;
+    qrForUrl.value = null;
     showConnections.value = false;
     showAllIps.value = false;
     lastUptimeUpdate = 0;
@@ -484,19 +495,33 @@ const onClear = (a: EditUser) => {
 const copy = async (text: string) => {
   try {
     await navigator.clipboard.writeText(text);
-    copied.value = text === serverUrl.value;
-    if (copied.value) setTimeout(() => { copied.value = false; }, 1800);
+    copiedUrl.value = text;
+    setTimeout(() => {
+      if (copiedUrl.value === text) copiedUrl.value = null;
+    }, 1800);
   } catch {
     /* Clipboard access can fail in restricted environments. */
   }
 };
 
-const openBrowser = async () => {
-  if (!serverUrl.value) return;
+const openBrowser = async (url?: string) => {
+  const target = url ?? serverUrl.value;
+  if (!target) return;
   try {
-    await invoke('open_url', { url: serverUrl.value });
+    await invoke('open_url', { url: target });
   } catch {
     /* Opening the system browser is best-effort. */
+  }
+};
+
+const toggleQr = async (url: string) => {
+  qrForUrl.value = qrForUrl.value === url ? null : url;
+  if (qrForUrl.value) {
+    await nextTick();
+    const canvas = qrCanvases.value[url];
+    if (canvas) {
+      await QRCode.toCanvas(canvas, url, { width: 128, margin: 1, color: { dark: '#0f766e', light: '#ffffff' } });
+    }
   }
 };
 
@@ -512,10 +537,8 @@ watch(
   },
 );
 
-watch([showQr, serverUrl], async ([show, url]) => {
-  if (!show || !url || !qrCanvas.value) return;
-  await nextTick();
-  await QRCode.toCanvas(qrCanvas.value, url, { width: 128, margin: 1, color: { dark: '#0f766e', light: '#ffffff' } });
+watch(serverUrl, () => {
+  qrForUrl.value = null;
 });
 
 let offStatus: UnlistenFn | null = null;
@@ -682,20 +705,23 @@ onUnmounted(() => {
             </div>
 
             <div class="fs-account">
-              <div class="mb-3 flex items-center justify-between gap-3">
-                <div class="font-semibold text-slate-900">{{ t('tools.fileShare.guestAccount') }}</div>
+              <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div class="flex items-center gap-3">
+                  <label class="fs-toggle-line" :title="t('tools.fileShare.guestAccess')"><span class="fs-toggle"><input v-model="draft.guest_access_enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.guest_access_enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.guest_access_enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span></label>
+                  <div class="font-semibold text-slate-900">{{ t('tools.fileShare.guestAccount') }}</div>
+                </div>
                 <span class="rounded-full border px-2 py-1 text-xs" :class="guest.password_set || guest.new_password ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'">
                   {{ guest.password_set || guest.new_password ? t('tools.fileShare.passwordSetState') : t('tools.fileShare.noPasswordState') }}
                 </span>
               </div>
-              <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div><label class="fs-label">{{ t('tools.fileShare.username') }}</label><input v-model="guest.username" :disabled="formDisabled" class="fs-input w-full" /></div>
-                <div class="md:col-span-2">
+                <div>
                   <label class="fs-label">{{ t('tools.fileShare.guestPassword') }}</label>
                   <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="guest.new_password" type="password" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(guest)" /></div>
-                  <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="guest.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(guest)" />{{ t('tools.fileShare.clearGuestPasswordOnSave') }}</label>
                 </div>
               </div>
+              <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="guest.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(guest)" />{{ t('tools.fileShare.clearGuestPasswordOnSave') }}</label>
               <div class="mt-4">
                 <label class="fs-label">{{ t('tools.fileShare.rootAccess') }}</label>
                 <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-center text-sm text-slate-500">
@@ -749,19 +775,21 @@ onUnmounted(() => {
             </div>
             <div v-else class="mt-4 space-y-4">
               <div v-for="account in customAccounts" :key="account.draft_key" class="fs-account">
-                <div class="mb-3 flex items-center justify-between gap-3">
-                  <div class="font-semibold text-slate-900">{{ account.username || t('tools.fileShare.newAccountDefaultUsername') }}</div>
+                <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div class="flex items-center gap-3">
+                    <label class="fs-toggle-line" :title="t('tools.fileShare.accountEnabled')"><span class="fs-toggle"><input v-model="account.enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="account.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="account.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span></label>
+                    <div class="font-semibold text-slate-900">{{ account.username || t('tools.fileShare.newAccountDefaultUsername') }}</div>
+                  </div>
                   <button type="button" :disabled="formDisabled" class="fs-btn fs-btn-danger" @click="draft.accounts = draft.accounts.filter((a) => a.draft_key !== account.draft_key)"><Trash2 class="h-4 w-4" /></button>
                 </div>
-                <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <div><label class="fs-label">{{ t('tools.fileShare.username') }}</label><input v-model="account.username" :disabled="formDisabled" class="fs-input w-full" /></div>
-                  <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="account.enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="account.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="account.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.accountEnabled') }}</span></label>
-                  <div class="md:col-span-2">
+                  <div>
                     <label class="fs-label">{{ t('tools.fileShare.accountPassword') }}</label>
                     <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="account.new_password" type="password" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(account)" /></div>
-                    <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="account.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(account)" />{{ t('tools.fileShare.clearAccountPasswordOnSave') }}</label>
                   </div>
                 </div>
+                <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="account.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(account)" />{{ t('tools.fileShare.clearAccountPasswordOnSave') }}</label>
                 <div class="mt-4">
                   <label class="fs-label">{{ t('tools.fileShare.rootAccess') }}</label>
                   <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-center text-sm text-slate-500">
@@ -839,19 +867,18 @@ onUnmounted(() => {
           <template v-if="isActive && serverUrl">
             <div class="fs-card">
               <p class="fs-label-sm">{{ t('tools.fileShare.accessUrl') }}</p>
-              <div class="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
-                <code class="flex-1 truncate font-mono text-sm font-semibold text-teal-700">{{ serverUrl }}</code>
-                <button type="button" @click="copy(serverUrl)" class="fs-icon" :title="t('tools.fileShare.copyUrl')"><Copy class="h-4 w-4" :class="copied ? 'text-teal-600' : ''" /></button>
-                <button type="button" @click="showQr = !showQr" class="fs-icon" :title="showQr ? t('tools.fileShare.hideQrCode') : t('tools.fileShare.showQrCode')"><QrCode class="h-4 w-4" :class="showQr ? 'text-teal-600' : ''" /></button>
-                <button type="button" @click="openBrowser" class="fs-icon" :title="t('tools.fileShare.openInBrowser')"><ExternalLink class="h-4 w-4" /></button>
-              </div>
-              <div v-if="showQr" class="mt-4 flex justify-center"><div class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm"><canvas ref="qrCanvas" width="128" height="128" /></div></div>
-              <div v-if="altUrls.length" class="mt-4">
-                <button type="button" @click="showAltUrls = !showAltUrls" class="fs-link"><component :is="showAltUrls ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />{{ t('tools.fileShare.altUrls', { n: altUrls.length }) }}</button>
-                <div v-if="showAltUrls" class="mt-2 space-y-2">
-                  <div v-for="url in altUrls" :key="url" class="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                    <code class="flex-1 truncate font-mono text-xs text-slate-600">{{ url }}</code>
-                    <button type="button" @click="copy(url)" class="text-slate-400 hover:text-teal-600"><Copy class="h-3.5 w-3.5" /></button>
+              <div class="space-y-2">
+                <div v-for="url in allUrls" :key="url" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                  <div class="flex items-center gap-2">
+                    <code class="flex-1 truncate font-mono text-sm font-semibold text-teal-700">{{ url }}</code>
+                    <button type="button" @click="copy(url)" class="fs-icon" :title="t('tools.fileShare.copyUrl')"><Copy class="h-4 w-4" :class="copiedUrl === url ? 'text-teal-600' : ''" /></button>
+                    <button type="button" @click="toggleQr(url)" class="fs-icon" :title="qrForUrl === url ? t('tools.fileShare.hideQrCode') : t('tools.fileShare.showQrCode')"><QrCode class="h-4 w-4" :class="qrForUrl === url ? 'text-teal-600' : ''" /></button>
+                    <button type="button" @click="openBrowser(url)" class="fs-icon" :title="t('tools.fileShare.openInBrowser')"><ExternalLink class="h-4 w-4" /></button>
+                  </div>
+                  <div v-if="qrForUrl === url" class="mt-3 flex justify-center">
+                    <div class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                      <canvas :ref="(el) => setQrCanvas(url, el)" width="128" height="128" />
+                    </div>
                   </div>
                 </div>
               </div>

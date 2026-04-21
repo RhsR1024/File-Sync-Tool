@@ -834,17 +834,47 @@ fn cancel_task_run(
     task_group_id: String,
     run_id: String,
 ) -> Result<(), String> {
-    set_targeted_run_controls(
-        state.inner(),
-        &task_group_id,
-        &run_id,
-        Some(true),
-        Some(false),
-        None,
-    )?;
+    let is_active = state
+        .task_runtime
+        .current()
+        .map(|active| active.task_group_id == task_group_id && active.run_id == run_id)
+        .unwrap_or(false);
+
+    if is_active {
+        set_targeted_run_controls(
+            state.inner(),
+            &task_group_id,
+            &run_id,
+            Some(true),
+            Some(false),
+            None,
+        )?;
+        let _ = state
+            .task_manager
+            .request_run_cancel(&task_group_id, &run_id);
+        return Ok(());
+    }
+
+    let removed_key = {
+        let mut queue = state.manual_copy_queue.lock().unwrap();
+        let position = queue.iter().position(|item| {
+            item.task_handle
+                .as_ref()
+                .map(|handle| handle.task_group_id == task_group_id && handle.run_id == run_id)
+                .unwrap_or(false)
+        });
+        position.and_then(|idx| queue.remove(idx).map(|item| item.key))
+    };
+    if let Some(key) = removed_key {
+        state.manual_copy_keys.lock().unwrap().remove(&key);
+    }
+
     let _ = state
         .task_manager
         .request_run_cancel(&task_group_id, &run_id);
+    let _ = state
+        .task_manager
+        .mark_copy_cancelled(&task_group_id, &run_id);
     Ok(())
 }
 

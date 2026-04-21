@@ -177,7 +177,7 @@ impl TaskManager {
                 trigger_source: request.trigger_source,
                 started_at: started_at.clone(),
                 finished_at: None,
-                copy_phase: CopyState::Running,
+                copy_phase: CopyState::Pending,
                 local_exec_phase: LocalExecState::NotStarted,
                 deploy_phase: DeployState::NotStarted,
                 deploy_attempts: vec![],
@@ -191,6 +191,25 @@ impl TaskManager {
             task_group_id: actual_group_id,
             run_id,
         }
+    }
+
+    pub fn mark_copy_started(&self, task_group_id: &str, run_id: &str) -> Result<(), String> {
+        let started_at = current_timestamp();
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            let run = &mut group.runs[run_index];
+            if !matches!(run.copy_phase, CopyState::Pending) {
+                return Ok(());
+            }
+            run.copy_phase = CopyState::Running;
+            run.started_at = started_at.clone();
+            group.started_at = started_at;
+            group.refresh_from_runs();
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
     }
 
     pub fn begin_manual_copy_run(
@@ -1039,6 +1058,12 @@ mod tests {
         let groups = manager.list_groups();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].task_group_id, handle.task_group_id);
+        assert_eq!(groups[0].summary_status, TaskSummaryStatus::Queued);
+
+        manager
+            .mark_copy_started(&handle.task_group_id, &handle.run_id)
+            .expect("mark_copy_started should succeed");
+        let groups = manager.list_groups();
         assert_eq!(groups[0].summary_status, TaskSummaryStatus::Copying);
     }
 

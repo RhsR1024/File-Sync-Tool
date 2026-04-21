@@ -322,7 +322,8 @@ function triggerDownload(node: FileShareNode) {
     : fileShareApi.downloadFileUrl(node.node_id);
   const link = document.createElement('a');
   link.href = href;
-  link.target = '_blank';
+  link.rel = 'noopener';
+  link.download = node.is_dir ? `${node.name}.zip` : node.name;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);

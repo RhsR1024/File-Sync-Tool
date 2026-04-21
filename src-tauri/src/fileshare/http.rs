@@ -956,44 +956,79 @@ async fn handler_node_archive(
 
     let target = node.path.clone();
     let tmp_path = std::env::temp_dir().join(format!("fst-zip-{}.zip", uuid::Uuid::new_v4()));
-    let tmp_clone = tmp_path.clone();
     remember_connected_ip(&state.visitor_ips, addr.ip().to_string());
 
-    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let file = std::fs::File::create(&tmp_clone).map_err(|e| e.to_string())?;
-        let mut zip_w = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        ops::zip_dir(&mut zip_w, &target, &target, options)?;
-        zip_w.finish().map_err(|e| e.to_string())?;
-        Ok(())
-    })
-    .await;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 
-    let ok = matches!(result, Ok(Ok(())));
-    if !ok {
-        let _ = std::fs::remove_file(&tmp_path);
-        return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create zip");
-    }
+    let build_path = tmp_path.clone();
+    let build_target = target.clone();
+    let build_handle =
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let file = std::fs::File::create(&build_path).map_err(|e| e.to_string())?;
+            let mut zip_w = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .large_file(true);
+            ops::zip_dir(&mut zip_w, &build_target, &build_target, options)?;
+            zip_w.finish().map_err(|e| e.to_string())?;
+            Ok(())
+        });
 
-    let tmp = TempFile(tmp_path.clone());
-    let file = match tokio::fs::File::open(&tmp_path).await {
-        Ok(f) => f,
-        Err(_) => {
-            return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to open zip");
+    let stream_path = tmp_path.clone();
+    tokio::spawn(async move {
+        let build_result = build_handle.await;
+        let build_ok = match build_result {
+            Ok(Ok(())) => true,
+            Ok(Err(message)) => {
+                log::warn!("File share archive build failed: {}", message);
+                false
+            }
+            Err(err) => {
+                log::warn!("File share archive build task panicked: {}", err);
+                false
+            }
+        };
+        if !build_ok {
+            let _ = tx
+                .send(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "zip build failed",
+                )))
+                .await;
+            let _ = tokio::fs::remove_file(&stream_path).await;
+            return;
         }
-    };
-
-    let stream = async_stream::stream! {
-        let _t = tmp;
-        let mut f = file;
+        let mut file = match tokio::fs::File::open(&stream_path).await {
+            Ok(f) => f,
+            Err(err) => {
+                let _ = tx.send(Err(err)).await;
+                let _ = tokio::fs::remove_file(&stream_path).await;
+                return;
+            }
+        };
         let mut buf = vec![0u8; 65536];
         loop {
-            match f.read(&mut buf).await {
+            match file.read(&mut buf).await {
                 Ok(0) => break,
-                Ok(n) => yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..n])),
-                Err(e) => { yield Err(e); break; }
+                Ok(n) => {
+                    if tx.send(Ok(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(err)).await;
+                    break;
+                }
             }
+        }
+        drop(file);
+        let _ = tokio::fs::remove_file(&stream_path).await;
+    });
+
+    let stream = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(item) = rx.recv().await {
+            yield item;
         }
     };
 

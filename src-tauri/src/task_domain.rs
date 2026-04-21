@@ -363,7 +363,11 @@ impl TaskGroup {
             self.cancel_requested = false;
         }
 
-        self.summary_status = if self.cancel_requested && base_summary == TaskSummaryStatus::Copying
+        self.summary_status = if self.cancel_requested
+            && matches!(
+                base_summary,
+                TaskSummaryStatus::Copying | TaskSummaryStatus::Queued
+            )
         {
             TaskSummaryStatus::Cancelling
         } else if self.paused && base_summary == TaskSummaryStatus::Copying {
@@ -537,7 +541,8 @@ fn summarize_group(
     deploy_phase: &DeployState,
 ) -> TaskSummaryStatus {
     match copy_phase {
-        CopyState::Pending | CopyState::Running => TaskSummaryStatus::Copying,
+        CopyState::Pending => TaskSummaryStatus::Queued,
+        CopyState::Running => TaskSummaryStatus::Copying,
         CopyState::Failed => TaskSummaryStatus::Failed,
         CopyState::Cancelled => TaskSummaryStatus::Cancelled,
         CopyState::Interrupted => TaskSummaryStatus::Interrupted,
