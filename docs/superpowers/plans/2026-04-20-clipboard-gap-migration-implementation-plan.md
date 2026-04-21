@@ -421,14 +421,14 @@ Observed blockers:
 
 **Depends on:** Task 4
 
-- [ ] **Step 5.1: Write failing tests for merge/file actions where logic is testable**
+- [x] **Step 5.1: Write failing tests for merge/file actions where logic is testable**
 
 Add tests for:
 - merge separator handling
 - file-path existence payload formatting
 - path-only paste transformation
 
-- [ ] **Step 5.2: Add M7 backend commands**
+- [x] **Step 5.2: Add M7 backend commands**
 
 Implement:
 - `cb_paste_as_path`
@@ -440,7 +440,7 @@ Implement:
 
 Reference `ElegantClipboard` behavior for path formatting, Explorer selection, and invalid-file signaling.
 
-- [ ] **Step 5.3: Run targeted tests**
+- [x] **Step 5.3: Run targeted tests**
 
 ```powershell
 cargo test clipboard --manifest-path src-tauri\Cargo.toml
@@ -448,12 +448,32 @@ cargo test clipboard --manifest-path src-tauri\Cargo.toml
 
 Expected: new helper tests pass.
 
-- [ ] **Step 5.4: Commit**
+- [x] **Step 5.4: Commit**
 
 ```powershell
 git add src-tauri/src/clipboard/commands.rs src-tauri/src/clipboard/paste.rs
 git commit -m "feat(clipboard): add backend actions for m7 interactions"
 ```
+
+Status 2026-04-21:
+- Task 5 is complete.
+- Added the remaining M7 backend action commands in `commands.rs` and registered them in `main.rs`: `cb_paste_as_path`, `cb_save_image_as`, `cb_open_in_explorer`, and `cb_merge_paste`; Task 4's `cb_paste_as_files` and `cb_check_file_paths` remain part of the delivered Task 5 command surface.
+- `paste.rs` now exposes focused helpers for path-only paste, merge-paste text construction, generic plain-text paste, and image save-as copying, with merge semantics tightened so only text-like rows with real `content_full` participate.
+- Added/extended focused Rust coverage for path-only transformation, stale selection handling, merge separator behavior, preview-only merge rejection, explorer-path validation, and image save-as success/error paths.
+- Fresh verification passed with:
+
+```powershell
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'
+$env:CARGO_PROFILE_DEV_DEBUG='0'
+$env:CARGO_PROFILE_TEST_DEBUG='0'
+$env:CARGO_INCREMENTAL='0'
+cargo test clipboard:: --manifest-path src-tauri\Cargo.toml
+```
+
+Observed: `62` clipboard tests passed, `0` failed.
+- Verification required two environment recoveries in the shared worktree setup: rerunning `cmd /c pnpm build:file-share-web` with elevated sandbox access for the Rust build script, and a full `cargo clean` on the shared target after the drive filled during archive creation.
+- Spec review: approved after fixing stale-selection command-path handling and empty-separator fallback coverage.
+- Code-quality review: approved after preserving single-space separators and rejecting preview-only merge payloads.
 
 ### Task 6: Build The M7 Frontend Interaction Layer
 

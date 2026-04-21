@@ -22,14 +22,7 @@ use crate::clipboard::models::{ClipboardItem, ContentKind};
 /// Paste an item. If `plain_text` is true, rich items are written as plain text.
 pub fn paste_item(app: &AppHandle, item: &ClipboardItem, plain_text: bool) -> Result<(), String> {
     write_to_clipboard(item, plain_text)?;
-
-    if let Some(panel) = app.get_webview_window("clipboard-panel") {
-        let _ = panel.hide();
-    }
-
-    thread::sleep(Duration::from_millis(30));
-
-    simulate_paste()
+    finish_paste(app)
 }
 
 /// Explicit actual-files paste path for file items.
@@ -45,19 +38,96 @@ pub fn copy_item(item: &ClipboardItem) -> Result<(), String> {
     write_to_clipboard(item, false)
 }
 
+/// Paste file items as newline-joined paths.
+pub fn paste_file_paths_as_text(app: &AppHandle, item: &ClipboardItem) -> Result<(), String> {
+    let text = file_paths_as_text(item)?;
+    paste_text(app, &text)
+}
+
+/// Paste plain text directly.
+pub fn paste_text(app: &AppHandle, text: &str) -> Result<(), String> {
+    write_text_to_clipboard(text)?;
+    finish_paste(app)
+}
+
+/// Convert a file item into the path text used by "paste as path".
+pub fn file_paths_as_text(item: &ClipboardItem) -> Result<String, String> {
+    if item.kind != ContentKind::File {
+        return Err("clipboard item is not a file kind".to_string());
+    }
+
+    let paths = item
+        .file_paths
+        .as_ref()
+        .filter(|paths| !paths.is_empty())
+        .ok_or_else(|| "file paths missing".to_string())?;
+
+    Ok(paths_as_newline_text(paths))
+}
+
+/// Merge text-like clipboard items into a single plain-text payload.
+pub fn merge_items_text(items: &[ClipboardItem], separator: Option<&str>) -> Result<String, String> {
+    if items.is_empty() {
+        return Err("no clipboard items were provided".to_string());
+    }
+
+    let separator = separator.filter(|value| !value.is_empty()).unwrap_or("\n");
+    let mut merged = Vec::with_capacity(items.len());
+    for item in items {
+        match item.kind {
+            ContentKind::Text | ContentKind::Html | ContentKind::Rtf => {}
+            _ => return Err("all selected clipboard items must be text-like".to_string()),
+        }
+
+        let text = item
+            .content_full
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "selected clipboard item is missing full text".to_string())?;
+        if text.is_empty() {
+            return Err("selected clipboard item is empty".to_string());
+        }
+        merged.push(text);
+    }
+
+    Ok(merged.join(separator))
+}
+
+/// Copy an image item to a caller-selected path.
+pub fn save_image_item_to_path(item: &ClipboardItem, target_path: &str) -> Result<(), String> {
+    if item.kind != ContentKind::Image {
+        return Err("clipboard item is not an image kind".to_string());
+    }
+
+    if target_path.trim().is_empty() {
+        return Err("target path missing".to_string());
+    }
+
+    let source_path = item
+        .image_path
+        .as_deref()
+        .ok_or_else(|| "image path missing".to_string())?;
+    let source = std::path::Path::new(source_path);
+
+    if !source.is_file() {
+        return Err(format!("image file does not exist: {}", source.display()));
+    }
+
+    std::fs::copy(source, target_path).map_err(|e| format!("copy image: {e}"))?;
+    Ok(())
+}
+
 fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), String> {
     match item.kind {
         ContentKind::Text => {
-            let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
-            cb.set_text(preferred_text(item))
-                .map_err(|e| format!("set text: {e}"))?;
+            write_text_to_clipboard(preferred_text(item))?;
         }
         ContentKind::Html => {
             let text = preferred_text(item);
-            let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
             if plain_text {
-                cb.set_text(text).map_err(|e| format!("set text: {e}"))?;
+                write_text_to_clipboard(text)?;
             } else {
+                let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
                 let html = item.html.as_deref().unwrap_or(text);
                 cb.set_html(html, Some(text))
                     .map_err(|e| format!("set html: {e}"))?;
@@ -67,9 +137,7 @@ fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), Stri
             let text = preferred_rich_text(item);
             let rich_text = item.rtf_content.as_deref().filter(|rtf| !rtf.is_empty());
             if plain_text || rich_text.is_none() {
-                let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
-                cb.set_text(text)
-                    .map_err(|e| format!("set rtf text: {e}"))?;
+                write_text_to_clipboard(text)?;
             } else {
                 write_rtf_to_clipboard(text, rich_text.unwrap())?;
             }
@@ -92,15 +160,10 @@ fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), Stri
             cb.set_image(data).map_err(|e| format!("set image: {e}"))?;
         }
         ContentKind::File => {
-            let paths = item
-                .file_paths
-                .as_ref()
-                .ok_or_else(|| "file paths missing".to_string())?;
-            let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
             if plain_text {
-                cb.set_text(paths_as_newline_text(paths))
-                    .map_err(|e| format!("set text (files): {e}"))?;
+                write_text_to_clipboard(&file_paths_as_text(item)?)?;
             } else {
+                let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
                 let file_paths = resolve_file_list_paths(item)?;
                 cb.set()
                     .file_list(&file_paths)
@@ -110,6 +173,20 @@ fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), Stri
     }
 
     Ok(())
+}
+
+fn write_text_to_clipboard(text: &str) -> Result<(), String> {
+    let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
+    cb.set_text(text).map_err(|e| format!("set text: {e}"))
+}
+
+fn finish_paste(app: &AppHandle) -> Result<(), String> {
+    if let Some(panel) = app.get_webview_window("clipboard-panel") {
+        let _ = panel.hide();
+    }
+
+    thread::sleep(Duration::from_millis(30));
+    simulate_paste()
 }
 
 fn preferred_text(item: &ClipboardItem) -> &str {
@@ -262,6 +339,7 @@ fn simulate_paste() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     fn sample_item(kind: ContentKind) -> ClipboardItem {
         ClipboardItem {
@@ -307,5 +385,121 @@ mod tests {
             paths,
             vec![PathBuf::from("C:\\alpha.txt"), PathBuf::from("D:\\beta.png")]
         );
+    }
+
+    #[test]
+    fn file_paths_as_text_converts_file_items_for_path_paste() {
+        let item = sample_item(ContentKind::File);
+
+        let text = file_paths_as_text(&item).unwrap();
+
+        assert_eq!(text, "C:\\alpha.txt\nD:\\beta.png");
+    }
+
+    #[test]
+    fn file_paths_as_text_rejects_non_file_items_or_missing_paths() {
+        let err = file_paths_as_text(&sample_item(ContentKind::Text)).unwrap_err();
+        assert!(err.contains("file kind"));
+
+        let mut missing_paths = sample_item(ContentKind::File);
+        missing_paths.file_paths = Some(vec![]);
+
+        let err = file_paths_as_text(&missing_paths).unwrap_err();
+        assert!(err.contains("missing"));
+    }
+
+    #[test]
+    fn merge_items_text_defaults_to_newline_and_honors_custom_separator() {
+        let mut first = sample_item(ContentKind::Text);
+        first.content_full = Some("alpha".into());
+        first.content_preview = "alpha".into();
+
+        let mut second = sample_item(ContentKind::Html);
+        second.content_full = Some("beta".into());
+        second.content_preview = "beta".into();
+
+        assert_eq!(
+            merge_items_text(&[first.clone(), second.clone()], None).unwrap(),
+            "alpha\nbeta"
+        );
+        assert_eq!(
+            merge_items_text(&[first, second], Some(", ")).unwrap(),
+            "alpha, beta"
+        );
+    }
+
+    #[test]
+    fn merge_items_text_treats_empty_separator_as_default_newline() {
+        let mut first = sample_item(ContentKind::Text);
+        first.content_full = Some("alpha".into());
+        first.content_preview = "alpha".into();
+
+        let mut second = sample_item(ContentKind::Rtf);
+        second.content_full = Some("beta".into());
+        second.content_preview = "beta".into();
+
+        assert_eq!(
+            merge_items_text(&[first.clone(), second.clone()], Some("")).unwrap(),
+            "alpha\nbeta"
+        );
+        assert_eq!(
+            merge_items_text(&[first, second], Some(" ")).unwrap(),
+            "alpha beta"
+        );
+    }
+
+    #[test]
+    fn merge_items_text_rejects_non_text_like_items() {
+        let err = merge_items_text(
+            &[sample_item(ContentKind::Text), sample_item(ContentKind::File)],
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("text-like"));
+    }
+
+    #[test]
+    fn merge_items_text_rejects_preview_only_text_like_items() {
+        let mut item = sample_item(ContentKind::Text);
+        item.content_full = None;
+        item.content_preview = "preview only".into();
+
+        let err = merge_items_text(&[item], None).unwrap_err();
+
+        assert!(err.contains("full text"));
+    }
+
+    #[test]
+    fn save_image_item_to_path_copies_existing_image() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("source.png");
+        let target = temp_dir.path().join("target.png");
+
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([12, 34, 56, 255]))
+            .save(&source)
+            .unwrap();
+
+        let mut item = sample_item(ContentKind::Image);
+        item.image_path = Some(source.to_string_lossy().to_string());
+        item.file_paths = None;
+
+        save_image_item_to_path(&item, &target.to_string_lossy()).unwrap();
+
+        assert_eq!(std::fs::read(&source).unwrap(), std::fs::read(&target).unwrap());
+    }
+
+    #[test]
+    fn save_image_item_to_path_rejects_non_image_or_missing_source() {
+        let err = save_image_item_to_path(&sample_item(ContentKind::Text), "target.png")
+            .unwrap_err();
+        assert!(err.contains("image kind"));
+
+        let mut image = sample_item(ContentKind::Image);
+        image.file_paths = None;
+        image.image_path = None;
+
+        let err = save_image_item_to_path(&image, "target.png").unwrap_err();
+        assert!(err.contains("image path missing"));
     }
 }

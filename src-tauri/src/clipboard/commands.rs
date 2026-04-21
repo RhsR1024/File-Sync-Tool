@@ -1,5 +1,7 @@
 //! Tauri commands for clipboard manager (spec §5.3). Implemented incrementally across M2-M5.
 
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::Ordering;
 
 use rayon::prelude::*;
@@ -64,6 +66,72 @@ fn collect_file_path_statuses_for_selection(
     }
 
     Ok(collect_file_path_statuses(items))
+}
+
+fn load_items_by_ids(
+    conn: &rusqlite::Connection,
+    ids: &[i64],
+) -> Result<Vec<ClipboardItem>, String> {
+    ids.iter()
+        .map(|id| match db::get_item(conn, *id) {
+            Ok(item) => Ok(item),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Err("one or more clipboard items no longer exist".to_string())
+            }
+            Err(error) => Err(error.to_string()),
+        })
+        .collect()
+}
+
+fn selection_target_for_explorer(path: &str) -> Result<PathBuf, String> {
+    if path.trim().is_empty() {
+        return Err("path is empty".to_string());
+    }
+
+    let target = PathBuf::from(path);
+    if !target.exists() {
+        return Err(format!("path does not exist: {}", target.display()));
+    }
+
+    Ok(target)
+}
+
+fn open_and_select_in_explorer(path: &str) -> Result<(), String> {
+    let target = selection_target_for_explorer(path)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let target_display = target.to_string_lossy().into_owned();
+        Command::new("explorer.exe")
+            .args(["/select,", &target_display])
+            .spawn()
+            .map_err(|e| format!("open explorer: {e}"))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R", &target.to_string_lossy()])
+            .spawn()
+            .map_err(|e| format!("open finder: {e}"))?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let parent = target
+            .parent()
+            .map(|path| path.to_path_buf())
+            .unwrap_or_else(|| target.clone());
+
+        if Command::new("xdg-open").arg(&parent).spawn().is_err() {
+            Command::new("nautilus")
+                .arg(&target)
+                .spawn()
+                .map_err(|e| format!("open file manager: {e}"))?;
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -275,6 +343,19 @@ pub fn cb_paste_as_files(
 }
 
 #[tauri::command]
+pub fn cb_paste_as_path(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let item = {
+        let conn = state.clipboard.db.lock();
+        db::get_item(&conn, id).map_err(|e| e.to_string())?
+    };
+    crate::clipboard::paste::paste_file_paths_as_text(&app, &item)
+}
+
+#[tauri::command]
 pub fn cb_check_file_paths(
     state: State<'_, AppState>,
     ids: Vec<i64>,
@@ -282,11 +363,47 @@ pub fn cb_check_file_paths(
     let requested_ids = ids.len();
     let items = {
         let conn = state.clipboard.db.lock();
-        ids.into_iter()
-            .map(|id| db::get_item(&conn, id).map_err(|e| e.to_string()))
-            .collect::<Result<Vec<_>, _>>()?
+        load_items_by_ids(&conn, &ids)?
     };
     collect_file_path_statuses_for_selection(&items, requested_ids)
+}
+
+#[tauri::command]
+pub fn cb_save_image_as(
+    state: State<'_, AppState>,
+    id: i64,
+    target_path: String,
+) -> Result<(), String> {
+    let item = {
+        let conn = state.clipboard.db.lock();
+        db::get_item(&conn, id).map_err(|e| e.to_string())?
+    };
+    crate::clipboard::paste::save_image_item_to_path(&item, &target_path)
+}
+
+#[tauri::command]
+pub fn cb_open_in_explorer(path: String) -> Result<(), String> {
+    open_and_select_in_explorer(&path)
+}
+
+#[tauri::command]
+pub fn cb_merge_paste(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    separator: Option<String>,
+) -> Result<(), String> {
+    if ids.len() < 2 {
+        return Err("at least two clipboard items must be selected".to_string());
+    }
+
+    let items = {
+        let conn = state.clipboard.db.lock();
+        load_items_by_ids(&conn, &ids)?
+    };
+
+    let merged = crate::clipboard::paste::merge_items_text(&items, separator.as_deref())?;
+    crate::clipboard::paste::paste_text(&app, &merged)
 }
 
 #[tauri::command]
@@ -598,6 +715,41 @@ mod tests {
         let err =
             collect_file_path_statuses_for_selection(&[sample_file_item(Some(vec!["C:\\ok.txt".into()]))], 2)
                 .unwrap_err();
+        assert!(err.contains("no longer exist"));
+    }
+
+    #[test]
+    fn selection_target_for_explorer_requires_an_existing_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let existing = temp_dir.path().join("existing.txt");
+        let missing = temp_dir.path().join("missing.txt");
+        std::fs::write(&existing, b"hello").unwrap();
+
+        assert_eq!(
+            selection_target_for_explorer(existing.to_string_lossy().as_ref()).unwrap(),
+            existing
+        );
+
+        let err = selection_target_for_explorer(missing.to_string_lossy().as_ref()).unwrap_err();
+        assert!(err.contains("does not exist"));
+    }
+
+    #[test]
+    fn load_items_by_ids_reports_stale_selection() {
+        let temp_dir = TempDir::new().unwrap();
+        let clipboard = crate::clipboard::ClipboardState::init(
+            temp_dir.path(),
+            ClipboardSettings::default(),
+        )
+        .unwrap();
+
+        let existing_id = {
+            let conn = clipboard.db.lock();
+            insert_item(&conn, &sample_asset_item(None, None, "stale-selection")).unwrap()
+        };
+
+        let conn = clipboard.db.lock();
+        let err = load_items_by_ids(&conn, &[existing_id, existing_id + 1]).unwrap_err();
         assert!(err.contains("no longer exist"));
     }
 }
