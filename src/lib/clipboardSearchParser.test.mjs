@@ -9,6 +9,12 @@ test('parses type operator', () => {
   assert.deepEqual(r.keywords, ['hello']);
 });
 
+test('parses rtf type operator', () => {
+  const r = parseSearch('type:rtf quote');
+  assert.equal(r.filters.type, 'rtf');
+  assert.deepEqual(r.keywords, ['quote']);
+});
+
 test('invalid type falls back to keyword', () => {
   const r = parseSearch('type:video react');
   assert.equal(r.filters.type, undefined);

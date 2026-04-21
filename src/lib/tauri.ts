@@ -6,6 +6,14 @@ import type {
   ClipboardListResult,
   ClipboardSettings,
   ClipboardStats,
+  FilePathStatus,
+} from './clipboardTypes';
+
+export type {
+  ClipboardGroup,
+  ClipboardSearchFilters,
+  ClipboardSearchPayload,
+  FilePathStatus,
 } from './clipboardTypes';
 
 export interface CommandGroup {
@@ -112,6 +120,9 @@ export interface AppConfig {
 
   /** HTTP request timeout in seconds for the framework password API. Default: 5. */
   framework_password_api_timeout_secs: number;
+
+  /** Clipboard manager settings mirrored from Rust AppConfig. */
+  clipboard: ClipboardSettings;
 }
 
 export type TaskSourceType = 'scheduled' | 'manual';
@@ -918,6 +929,9 @@ export const clipboardApi = {
   paste: (id: number) => invoke<void>('cb_paste', { id }),
   pastePlain: (id: number) => invoke<void>('cb_paste_plain', { id }),
   copy: (id: number) => invoke<void>('cb_copy', { id }),
+  pasteAsFiles: (id: number) => invoke<void>('cb_paste_as_files', { id }),
+  checkFilePaths: (ids: number[]) =>
+    invoke<FilePathStatus[]>('cb_check_file_paths', { ids }),
   togglePanel: () => invoke<void>('cb_toggle_panel'),
   stats: () => invoke<ClipboardStats>('cb_stats'),
   getSettings: () => invoke<ClipboardSettings>('cb_get_settings'),

@@ -2,13 +2,69 @@
 
 use std::sync::atomic::Ordering;
 
+use rayon::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 use crate::clipboard::db;
 use crate::clipboard::models::{
     ClipboardItem, ClipboardListQuery, ClipboardListResult, ClipboardSettings, ClipboardStats,
+    FilePathStatus,
 };
 use crate::AppState;
+
+fn cleanup_assets_after_mutation<T>(
+    clipboard: &crate::clipboard::ClipboardState,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    let value = result?;
+    clipboard.cleanup_orphan_assets();
+    Ok(value)
+}
+
+fn collect_file_path_statuses(items: &[ClipboardItem]) -> Vec<FilePathStatus> {
+    let paths: Vec<String> = items
+        .iter()
+        .filter_map(|item| item.file_paths.as_ref())
+        .flat_map(|paths| paths.iter().cloned())
+        .collect();
+
+    paths.par_iter()
+        .map(|path| match std::fs::metadata(path) {
+            Ok(metadata) => FilePathStatus {
+                path: path.clone(),
+                exists: true,
+                size: Some(metadata.len()),
+            },
+            Err(_) => FilePathStatus {
+                path: path.clone(),
+                exists: false,
+                size: None,
+            },
+        })
+        .collect()
+}
+
+fn collect_file_path_statuses_for_selection(
+    items: &[ClipboardItem],
+    requested_ids: usize,
+) -> Result<Vec<FilePathStatus>, String> {
+    if items.len() != requested_ids {
+        return Err("one or more clipboard items no longer exist".to_string());
+    }
+
+    if items.iter().any(|item| item.kind != crate::clipboard::models::ContentKind::File) {
+        return Err("all selected clipboard items must be file items".to_string());
+    }
+
+    if items
+        .iter()
+        .any(|item| item.file_paths.as_ref().map_or(true, |paths| paths.is_empty()))
+    {
+        return Err("selected file item is missing file paths".to_string());
+    }
+
+    Ok(collect_file_path_statuses(items))
+}
 
 #[tauri::command]
 pub fn cb_is_enabled(state: State<'_, AppState>) -> bool {
@@ -42,20 +98,29 @@ pub fn cb_get(state: State<'_, AppState>, id: i64) -> Result<ClipboardItem, Stri
 
 #[tauri::command]
 pub fn cb_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    let conn = state.clipboard.db.lock();
-    db::delete_item(&conn, id).map_err(|e| e.to_string())
+    let result = {
+        let conn = state.clipboard.db.lock();
+        db::delete_item(&conn, id).map_err(|e| e.to_string())
+    };
+    cleanup_assets_after_mutation(state.clipboard.as_ref(), result)
 }
 
 #[tauri::command]
 pub fn cb_delete_batch(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
-    let mut conn = state.clipboard.db.lock();
-    db::delete_batch(&mut conn, &ids).map_err(|e| e.to_string())
+    let result = {
+        let mut conn = state.clipboard.db.lock();
+        db::delete_batch(&mut conn, &ids).map_err(|e| e.to_string())
+    };
+    cleanup_assets_after_mutation(state.clipboard.as_ref(), result)
 }
 
 #[tauri::command]
 pub fn cb_clear(state: State<'_, AppState>, keep_favorites: bool) -> Result<u64, String> {
-    let conn = state.clipboard.db.lock();
-    db::clear_all(&conn, keep_favorites).map_err(|e| e.to_string())
+    let result = {
+        let conn = state.clipboard.db.lock();
+        db::clear_all(&conn, keep_favorites).map_err(|e| e.to_string())
+    };
+    cleanup_assets_after_mutation(state.clipboard.as_ref(), result)
 }
 
 #[tauri::command]
@@ -197,6 +262,34 @@ pub fn cb_copy(state: State<'_, AppState>, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn cb_paste_as_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let item = {
+        let conn = state.clipboard.db.lock();
+        db::get_item(&conn, id).map_err(|e| e.to_string())?
+    };
+    crate::clipboard::paste::paste_file_item(&app, &item)
+}
+
+#[tauri::command]
+pub fn cb_check_file_paths(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> Result<Vec<FilePathStatus>, String> {
+    let requested_ids = ids.len();
+    let items = {
+        let conn = state.clipboard.db.lock();
+        ids.into_iter()
+            .map(|id| db::get_item(&conn, id).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    collect_file_path_statuses_for_selection(&items, requested_ids)
+}
+
+#[tauri::command]
 pub fn cb_reorder_favorites(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
     let mut conn = state.clipboard.db.lock();
     db::reorder_favorites(&mut conn, &ids).map_err(|e| e.to_string())
@@ -316,4 +409,195 @@ pub fn cb_open_settings(app: AppHandle) -> Result<(), String> {
         let _ = main.emit("clipboard-open-settings", ());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clipboard::db::{insert_item, NewItem};
+    use crate::clipboard::models::{ClipboardItem, ClipboardSettings, ContentKind};
+    use tempfile::TempDir;
+
+    fn sample_asset_item(image_path: Option<String>, icon_path: Option<String>, hash: &str) -> NewItem {
+        NewItem {
+            kind: ContentKind::Text,
+            content_preview: "asset".into(),
+            content_full: Some("asset".into()),
+            rtf_content: None,
+            html: None,
+            image_path,
+            image_width: None,
+            image_height: None,
+            file_paths: None,
+            byte_size: 5,
+            hash: hash.into(),
+            source_app: Some("Word".into()),
+            source_app_icon: icon_path,
+        }
+    }
+
+    fn sample_file_item(paths: Option<Vec<String>>) -> ClipboardItem {
+        ClipboardItem {
+            id: 9,
+            kind: ContentKind::File,
+            content_preview: "files".into(),
+            content_full: None,
+            rtf_content: None,
+            html: None,
+            image_path: None,
+            image_width: None,
+            image_height: None,
+            file_paths: paths,
+            byte_size: 0,
+            char_count: 0,
+            hash: "files-hash".into(),
+            source_app: Some("Explorer".into()),
+            source_app_icon: None,
+            group_id: None,
+            is_favorite: false,
+            is_pinned: false,
+            favorite_sort_index: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn sample_text_item() -> ClipboardItem {
+        ClipboardItem {
+            id: 10,
+            kind: ContentKind::Text,
+            content_preview: "text".into(),
+            content_full: Some("text".into()),
+            rtf_content: None,
+            html: None,
+            image_path: None,
+            image_width: None,
+            image_height: None,
+            file_paths: None,
+            byte_size: 4,
+            char_count: 4,
+            hash: "text-hash".into(),
+            source_app: Some("Notepad".into()),
+            source_app_icon: None,
+            group_id: None,
+            is_favorite: false,
+            is_pinned: false,
+            favorite_sort_index: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn cleanup_assets_after_mutation_removes_orphans_after_delete() {
+        let temp_dir = TempDir::new().unwrap();
+        let clipboard = crate::clipboard::ClipboardState::init(
+            temp_dir.path(),
+            ClipboardSettings::default(),
+        )
+        .unwrap();
+
+        let image_path = clipboard.image_dir.join("delete.png");
+        let icon_path = clipboard.icon_dir.join("delete-icon.png");
+        std::fs::write(&image_path, b"png").unwrap();
+        std::fs::write(&icon_path, b"png").unwrap();
+
+        let id = {
+            let conn = clipboard.db.lock();
+            insert_item(
+                &conn,
+                &sample_asset_item(
+                    Some(image_path.to_string_lossy().to_string()),
+                    Some(icon_path.to_string_lossy().to_string()),
+                    "delete-assets",
+                ),
+            )
+            .unwrap()
+        };
+
+        let result = {
+            let conn = clipboard.db.lock();
+            db::delete_item(&conn, id).map_err(|e| e.to_string())
+        };
+        cleanup_assets_after_mutation(clipboard.as_ref(), result).unwrap();
+
+        assert!(!image_path.exists());
+        assert!(!icon_path.exists());
+    }
+
+    #[test]
+    fn cleanup_assets_after_mutation_removes_orphans_after_clear() {
+        let temp_dir = TempDir::new().unwrap();
+        let clipboard = crate::clipboard::ClipboardState::init(
+            temp_dir.path(),
+            ClipboardSettings::default(),
+        )
+        .unwrap();
+
+        let image_path = clipboard.image_dir.join("clear.png");
+        let icon_path = clipboard.icon_dir.join("clear-icon.png");
+        std::fs::write(&image_path, b"png").unwrap();
+        std::fs::write(&icon_path, b"png").unwrap();
+
+        {
+            let conn = clipboard.db.lock();
+            insert_item(
+                &conn,
+                &sample_asset_item(
+                    Some(image_path.to_string_lossy().to_string()),
+                    Some(icon_path.to_string_lossy().to_string()),
+                    "clear-assets",
+                ),
+            )
+            .unwrap();
+        }
+
+        let result = {
+            let conn = clipboard.db.lock();
+            db::clear_all(&conn, false).map_err(|e| e.to_string())
+        };
+        cleanup_assets_after_mutation(clipboard.as_ref(), result).unwrap();
+
+        assert!(!image_path.exists());
+        assert!(!icon_path.exists());
+    }
+
+    #[test]
+    fn collect_file_path_statuses_reports_existing_and_missing_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let existing = temp_dir.path().join("existing.txt");
+        std::fs::write(&existing, b"hello").unwrap();
+        let missing = temp_dir.path().join("missing.txt");
+
+        let statuses = collect_file_path_statuses(&[
+            sample_file_item(Some(vec![
+                existing.to_string_lossy().to_string(),
+                missing.to_string_lossy().to_string(),
+            ])),
+            sample_file_item(None),
+        ]);
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].path, existing.to_string_lossy());
+        assert!(statuses[0].exists);
+        assert_eq!(statuses[0].size, Some(5));
+        assert_eq!(statuses[1].path, missing.to_string_lossy());
+        assert!(!statuses[1].exists);
+        assert_eq!(statuses[1].size, None);
+    }
+
+    #[test]
+    fn collect_file_path_statuses_for_selection_rejects_mixed_or_stale_selection() {
+        let err = collect_file_path_statuses_for_selection(&[sample_text_item()], 1).unwrap_err();
+        assert!(err.contains("file items"));
+
+        let err =
+            collect_file_path_statuses_for_selection(&[sample_file_item(None)], 1).unwrap_err();
+        assert!(err.contains("missing file paths"));
+
+        let err =
+            collect_file_path_statuses_for_selection(&[sample_file_item(Some(vec!["C:\\ok.txt".into()]))], 2)
+                .unwrap_err();
+        assert!(err.contains("no longer exist"));
+    }
 }

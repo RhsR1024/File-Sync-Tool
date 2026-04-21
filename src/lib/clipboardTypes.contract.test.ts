@@ -1,0 +1,135 @@
+import type {
+  ClipboardGroup,
+  ClipboardItem,
+  ClipboardListQuery,
+  ClipboardSettings,
+  FilePathStatus,
+} from './clipboardTypes';
+
+export const clipboardSettingsContract: ClipboardSettings = {
+  enabled: true,
+  hotkey: 'Alt+C',
+  max_items: 1000,
+  retain_days: 30,
+  max_item_bytes: 10 * 1024 * 1024,
+  preview_delay_ms: 500,
+  enable_text_preview: false,
+  use_win_v_replacement: false,
+  run_as_admin: false,
+  show_startup_notification: true,
+  dedup_strategy: 'move_to_top',
+  display: {
+    density: 'standard',
+    preview_lines: 3,
+    time_format: 'relative',
+    show_char_count: false,
+    show_byte_size: true,
+    show_source_app: 'name',
+    image_max_height: 120,
+    image_auto_height: true,
+    drag_indicator: true,
+  },
+  preview: {
+    image_enabled: true,
+    text_enabled: true,
+    delay_ms: 500,
+    zoom_step: 10,
+    position: 'auto',
+  },
+  shortcuts: {
+    quick_paste: ['Alt+1'],
+    paste: 'Enter',
+    plain_paste: 'Shift+Enter',
+    delete: 'Delete',
+    favorite: 'Ctrl+D',
+    edit: 'Ctrl+E',
+    focus_search: ['Ctrl+F', '/'],
+    close: 'Escape',
+  },
+  toolbar: {
+    items: ['search', 'filter', 'batch', 'settings', 'lock'],
+  },
+  data: {
+    max_items: 1000,
+    retain_days: 30,
+    max_item_bytes: 10 * 1024 * 1024,
+  },
+  audio: {
+    enabled: false,
+    volume: 100,
+    on_copy: false,
+    on_paste: false,
+  },
+  app_filter: {
+    enabled: false,
+    mode: 'blacklist',
+    patterns: ['chrome.exe'],
+  },
+};
+
+export const clipboardItemContract: ClipboardItem = {
+  id: 1,
+  kind: 'rtf',
+  content_preview: 'hello',
+  content_full: 'hello world',
+  rtf_content: '{\\rtf1\\ansi hello world}',
+  html: null,
+  image_path: null,
+  image_width: null,
+  image_height: null,
+  file_paths: null,
+  byte_size: 11,
+  char_count: 11,
+  hash: 'hash-1',
+  source_app: 'code.exe',
+  source_app_icon: null,
+  group_id: 7,
+  is_favorite: false,
+  is_pinned: true,
+  favorite_sort_index: null,
+  created_at: 0,
+  updated_at: 0,
+};
+
+export const clipboardQueryContract: ClipboardListQuery = {
+  filter: 'pinned',
+  search: 'hello',
+  search_payload: {
+    keywords: ['hello'],
+    filters: {
+      kind: 'rtf',
+      from: '2026-04-01',
+      to: '2026-04-20',
+      app: 'code',
+      fav: false,
+      size_gt: 10,
+      size_lt: 100,
+      group_id: 7,
+      pinned_only: true,
+    },
+  },
+  group_id: 7,
+  pinned_only: true,
+  op_type: 'rtf',
+  op_from_ms: 0,
+  op_to_ms: 1,
+  op_app: 'code',
+  op_fav_only: false,
+  op_size_gt: 10,
+  op_size_lt: 100,
+  offset: 0,
+  limit: 20,
+};
+
+export const clipboardGroupContract: ClipboardGroup = {
+  id: 7,
+  name: 'Work',
+  sort_index: 0,
+  created_at: 0,
+};
+
+export const filePathStatusContract: FilePathStatus = {
+  path: 'C:/temp/demo.txt',
+  exists: true,
+  size: 42,
+};

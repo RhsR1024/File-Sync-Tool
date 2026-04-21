@@ -33,12 +33,15 @@ pub fn save_image_png(
 
 /// Delete all `.png` files in `image_dir` whose absolute string path is NOT in `referenced_paths`.
 /// Uses rayon for parallel deletion. Returns the number of files deleted.
-#[allow(dead_code)] // reserved: orphan image GC, invoked from future retention hook
 pub fn gc_orphan_images(
     image_dir: &Path,
     referenced_paths: &std::collections::HashSet<String>,
 ) -> Result<u64, String> {
     use rayon::prelude::*;
+
+    if !image_dir.exists() {
+        return Ok(0);
+    }
 
     let files: Vec<PathBuf> = std::fs::read_dir(image_dir)
         .map_err(|e| format!("read dir: {e}"))?

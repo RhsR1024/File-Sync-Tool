@@ -193,6 +193,10 @@ fn default_framework_password_api_timeout_secs() -> u64 {
     5
 }
 
+fn default_clipboard_settings() -> ClipboardSettings {
+    ClipboardSettings::default()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -216,7 +220,7 @@ impl Default for AppConfig {
             max_task_records: 100,
             appliance_ssh_api_timeout_secs: 5,
             framework_password_api_timeout_secs: 5,
-            clipboard: ClipboardSettings::default(),
+            clipboard: default_clipboard_settings(),
         }
     }
 }

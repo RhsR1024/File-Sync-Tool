@@ -7,6 +7,7 @@ import { taskStateStore } from '@/lib/taskStateStore';
 import { restartSchedulerInterval } from '@/lib/scheduler';
 import DirectoryPathInput from '@/components/settings/DirectoryPathInput.vue';
 import { getDirectoryInputValue, getTaskLocalPathHint, getTaskLocalPathPlaceholder, toOptionalDirectoryValue } from '@/lib/settingsDirectoryPathState';
+import { createDefaultClipboardSettings } from '@/lib/clipboardTypes';
 import { useI18n } from 'vue-i18n';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -39,7 +40,8 @@ const config = ref<AppConfig>({
   copy_buffer_size_kb: 4096,
   max_task_records: 100,
   appliance_ssh_api_timeout_secs: 5,
-  framework_password_api_timeout_secs: 5
+  framework_password_api_timeout_secs: 5,
+  clipboard: createDefaultClipboardSettings(),
 });
 
 const newExt = ref('');

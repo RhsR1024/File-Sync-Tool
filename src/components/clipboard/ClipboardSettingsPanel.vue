@@ -3,26 +3,16 @@ import { onMounted, reactive, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { clipboardApi } from '@/lib/tauri';
-import type { ClipboardSettings } from '@/lib/clipboardTypes';
+import {
+  createDefaultClipboardSettings,
+  normalizeClipboardSettings,
+  type ClipboardSettings,
+} from '@/lib/clipboardTypes';
 import ClipboardHotkeyInput from './ClipboardHotkeyInput.vue';
 import ClipboardWinVConfirmDialog from './ClipboardWinVConfirmDialog.vue';
 
 const { t } = useI18n();
-
-const defaults: ClipboardSettings = {
-  enabled: true,
-  hotkey: 'Alt+C',
-  max_items: 1000,
-  retain_days: 30,
-  max_item_bytes: 10 * 1024 * 1024,
-  preview_delay_ms: 500,
-  enable_text_preview: false,
-  use_win_v_replacement: false,
-  run_as_admin: false,
-  show_startup_notification: true,
-};
-
-const model = reactive<ClipboardSettings>({ ...defaults });
+const model = reactive<ClipboardSettings>(createDefaultClipboardSettings());
 const loading = ref(true);
 const saving = ref(false);
 const error = ref<string | null>(null);
@@ -52,7 +42,7 @@ async function load() {
   loading.value = true;
   try {
     const got = await clipboardApi.getSettings();
-    Object.assign(model, got);
+    Object.assign(model, normalizeClipboardSettings(got));
     await refreshWinV();
     await refreshAdmin();
     error.value = null;
@@ -67,8 +57,9 @@ async function load() {
 async function save() {
   saving.value = true;
   try {
-    const updated = await clipboardApi.saveSettings({ ...model });
-    Object.assign(model, updated);
+    const payload = normalizeClipboardSettings(model);
+    const updated = await clipboardApi.saveSettings(payload);
+    Object.assign(model, normalizeClipboardSettings(updated));
     error.value = null;
   } catch (e) {
     console.error('[clipboard] save settings failed:', e);

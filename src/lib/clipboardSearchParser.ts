@@ -1,7 +1,7 @@
 export interface ParsedClipboardSearch {
   keywords: string[];
   filters: {
-    type?: 'text' | 'html' | 'image' | 'file';
+    type?: 'text' | 'html' | 'rtf' | 'image' | 'file';
     from?: string;        // YYYY-MM-DD
     to?: string;          // YYYY-MM-DD
     app?: string;
@@ -11,7 +11,7 @@ export interface ParsedClipboardSearch {
   };
 }
 
-const VALID_KINDS = new Set(['text', 'html', 'image', 'file']);
+const VALID_KINDS = new Set(['text', 'html', 'rtf', 'image', 'file']);
 
 export function parseSearch(input: string): ParsedClipboardSearch {
   const result: ParsedClipboardSearch = { keywords: [], filters: {} };

@@ -5,6 +5,7 @@ pub mod admin;
 pub mod commands;
 pub mod db;
 pub mod hotkey;
+pub mod icon_store;
 pub mod image_store;
 pub mod models;
 pub mod paste;
@@ -21,14 +22,17 @@ use std::sync::Arc;
 use models::ClipboardSettings;
 
 pub struct ClipboardState {
+    /// Compatibility alias for existing callers that still use the write path.
     pub db: Arc<Mutex<rusqlite::Connection>>,
+    pub read_db: Arc<Mutex<rusqlite::Connection>>,
+    pub write_db: Arc<Mutex<rusqlite::Connection>>,
     pub db_path: PathBuf,
     pub image_dir: PathBuf,
+    pub icon_dir: PathBuf,
     pub is_enabled: AtomicBool,
     /// When true the popup panel does NOT auto-hide on focus loss. Toggled by
     /// the lock-window toolbar button on the panel.
     pub panel_pinned: AtomicBool,
-    pub last_hash: Mutex<Option<[u8; 32]>>,
     pub settings: Arc<RwLock<ClipboardSettings>>,
     pub watcher_handle: Mutex<Option<watcher::WatcherHandle>>,
     pub hotkey_handle: Mutex<Option<hotkey::HotkeyHandle>>,
@@ -41,21 +45,31 @@ impl ClipboardState {
     ) -> Result<std::sync::Arc<Self>, String> {
         let db_path = app_data_dir.join("clipboard.db");
         let image_dir = app_data_dir.join("clipboard_images");
+        let icon_dir = app_data_dir.join("clipboard_icons");
         std::fs::create_dir_all(&image_dir).map_err(|e| format!("create image dir: {e}"))?;
+        std::fs::create_dir_all(&icon_dir).map_err(|e| format!("create icon dir: {e}"))?;
 
-        let conn = db::open(&db_path).map_err(|e| format!("open db: {e}"))?;
+        let write_conn = db::open(&db_path).map_err(|e| format!("open db: {e}"))?;
+        let read_conn = db::open_read(&db_path).map_err(|e| format!("open read db: {e}"))?;
+        let write_db = std::sync::Arc::new(parking_lot::Mutex::new(write_conn));
+        let read_db = std::sync::Arc::new(parking_lot::Mutex::new(read_conn));
 
-        Ok(std::sync::Arc::new(Self {
-            db: std::sync::Arc::new(parking_lot::Mutex::new(conn)),
+        let state = std::sync::Arc::new(Self {
+            db: write_db.clone(),
+            read_db,
+            write_db,
             db_path,
             image_dir,
+            icon_dir,
             is_enabled: std::sync::atomic::AtomicBool::new(settings.enabled),
             panel_pinned: std::sync::atomic::AtomicBool::new(false),
-            last_hash: parking_lot::Mutex::new(None),
             settings: std::sync::Arc::new(parking_lot::RwLock::new(settings)),
             watcher_handle: parking_lot::Mutex::new(None),
             hotkey_handle: parking_lot::Mutex::new(None),
-        }))
+        });
+
+        state.cleanup_orphan_assets();
+        Ok(state)
     }
 
     #[allow(dead_code)] // reserved for explicit shutdown; Tauri exit handler lets OS reclaim
@@ -84,6 +98,34 @@ impl ClipboardState {
             .store(false, std::sync::atomic::Ordering::Release);
         if let Some(h) = self.watcher_handle.lock().take() {
             h.stop();
+        }
+    }
+
+    pub fn cleanup_orphan_assets(&self) {
+        let (image_paths, icon_paths) = {
+            let conn = self.write_db.lock();
+            let image_paths = match db::list_referenced_image_paths(&conn) {
+                Ok(paths) => paths,
+                Err(err) => {
+                    eprintln!("[clipboard] list referenced images failed: {err}");
+                    return;
+                }
+            };
+            let icon_paths = match db::list_referenced_icon_paths(&conn) {
+                Ok(paths) => paths,
+                Err(err) => {
+                    eprintln!("[clipboard] list referenced icons failed: {err}");
+                    return;
+                }
+            };
+            (image_paths, icon_paths)
+        };
+
+        if let Err(err) = image_store::gc_orphan_images(&self.image_dir, &image_paths) {
+            eprintln!("[clipboard] orphan image cleanup failed: {err}");
+        }
+        if let Err(err) = icon_store::gc_orphan_icons(&self.icon_dir, &icon_paths) {
+            eprintln!("[clipboard] orphan icon cleanup failed: {err}");
         }
     }
 }

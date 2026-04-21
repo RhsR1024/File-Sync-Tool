@@ -4,7 +4,8 @@ use rusqlite::{params, Connection, Result as SqlResult};
 
 use crate::clipboard::models::ClipboardSettings;
 
-/// Apply `retain_days` and `max_items` limits. Favorites are always exempt.
+/// Apply `retain_days` and `max_items` limits. Favorites and pinned items are
+/// always exempt.
 /// Returns `(deleted_by_age, deleted_by_cap)`.
 pub fn run_cleanup(conn: &Connection, settings: &ClipboardSettings) -> SqlResult<(u64, u64)> {
     let mut deleted_by_age = 0u64;
@@ -14,6 +15,7 @@ pub fn run_cleanup(conn: &Connection, settings: &ClipboardSettings) -> SqlResult
         deleted_by_age = conn.execute(
             "DELETE FROM clipboard_items
              WHERE is_favorite = 0
+               AND is_pinned = 0
                AND COALESCE(updated_at, created_at) < ?1",
             params![cutoff],
         )? as u64;
@@ -22,7 +24,7 @@ pub fn run_cleanup(conn: &Connection, settings: &ClipboardSettings) -> SqlResult
     let mut deleted_by_cap = 0u64;
     if settings.max_items > 0 {
         let total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM clipboard_items WHERE is_favorite = 0",
+            "SELECT COUNT(*) FROM clipboard_items WHERE is_favorite = 0 AND is_pinned = 0",
             [],
             |r| r.get(0),
         )?;
@@ -33,6 +35,7 @@ pub fn run_cleanup(conn: &Connection, settings: &ClipboardSettings) -> SqlResult
                  WHERE id IN (
                      SELECT id FROM clipboard_items
                      WHERE is_favorite = 0
+                       AND is_pinned = 0
                      ORDER BY COALESCE(updated_at, created_at) ASC
                      LIMIT ?1
                  )",
@@ -60,6 +63,7 @@ mod tests {
                     kind: ContentKind::Text,
                     content_preview: format!("item {i}"),
                     content_full: None,
+                    rtf_content: None,
                     html: None,
                     image_path: None,
                     image_width: None,
@@ -68,6 +72,7 @@ mod tests {
                     byte_size: 0,
                     hash: format!("h{i}"),
                     source_app: None,
+                    source_app_icon: None,
                 },
             )
             .unwrap();
@@ -110,5 +115,29 @@ mod tests {
         let (by_age, by_cap) = run_cleanup(&conn, &settings).unwrap();
         assert_eq!(by_age, 0);
         assert_eq!(by_cap, 0);
+    }
+
+    #[test]
+    fn cleanup_keeps_pinned_items() {
+        let conn = seed(5);
+        conn.execute("UPDATE clipboard_items SET is_pinned = 1 WHERE id = 1", [])
+            .unwrap();
+
+        let settings = ClipboardSettings {
+            max_items: 1,
+            retain_days: 0,
+            ..ClipboardSettings::default()
+        };
+        let (_, by_cap) = run_cleanup(&conn, &settings).unwrap();
+        assert_eq!(by_cap, 3);
+
+        let pinned_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clipboard_items WHERE is_pinned = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pinned_count, 1);
     }
 }
