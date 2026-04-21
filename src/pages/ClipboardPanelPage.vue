@@ -473,6 +473,8 @@ onBeforeUnmount(() => {
         :key="listKey"
         :items="store.items.value"
         :selected-id="selectedId"
+        :display-settings="store.settings.value.display"
+        :highlight-keywords="store.searchKeywords.value"
         :compact="true"
         :draggable="!store.batchMode.value && store.filter.value === 'favorite'"
         :batch-mode="store.batchMode.value"

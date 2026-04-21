@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { emit } from '@tauri-apps/api/event';
 import { onMounted, reactive, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
@@ -59,7 +60,9 @@ async function save() {
   try {
     const payload = normalizeClipboardSettings(model);
     const updated = await clipboardApi.saveSettings(payload);
-    Object.assign(model, normalizeClipboardSettings(updated));
+    const normalized = normalizeClipboardSettings(updated);
+    Object.assign(model, normalized);
+    await emit('clipboard-settings-updated', normalized);
     error.value = null;
   } catch (e) {
     console.error('[clipboard] save settings failed:', e);

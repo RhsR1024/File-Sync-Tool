@@ -728,12 +728,15 @@ $env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTF
 Observed: `5` new Node tests passed, `cmd /c pnpm check` completed successfully, and `cargo test clipboard --manifest-path src-tauri\Cargo.toml` finished green with `69` clipboard/config tests passing.
 - Verification note: the Rust test run needed elevated sandbox access because the build script hit `EPERM` while reading the shared worktree `vite.js` dependency tree; rerunning without sandbox restrictions resolved it.
 
-- [ ] **Step 9.6: Commit**
+- [x] **Step 9.6: Commit**
 
 ```powershell
 git add src-tauri/src/clipboard/preview.rs src-tauri/tauri.conf.json src-tauri/src/main.rs src/pages/ClipboardImagePreview.vue src/pages/ClipboardTextPreview.vue src/router/index.ts src/composables/useHoverPreview.ts src/pages/ClipboardPanelPage.vue
 git commit -m "feat(clipboard): move hover preview to dedicated windows"
 ```
+
+Status 2026-04-21 update:
+- Task 9 commit checkpoint is recorded as `463d0a4` (`feat(clipboard): move hover preview to dedicated windows`).
 
 ### Task 10: Refactor Clipboard List Rendering For Display Preferences And Highlighting
 
@@ -746,11 +749,11 @@ git commit -m "feat(clipboard): move hover preview to dedicated windows"
 
 **Depends on:** Task 9
 
-- [ ] **Step 10.1: Write failing tests for highlight helpers and any extracted formatting helpers**
+- [x] **Step 10.1: Write failing tests for highlight helpers and any extracted formatting helpers**
 
 Keep text highlighting logic outside the template if possible so it can be tested.
 
-- [ ] **Step 10.2: Add display preference-driven rendering**
+- [x] **Step 10.2: Add display preference-driven rendering**
 
 The list must react to settings for:
 - density
@@ -760,17 +763,33 @@ The list must react to settings for:
 - source app icon/name/both
 - image height behavior
 
-- [ ] **Step 10.3: Add keyword highlighting**
+- [x] **Step 10.3: Add keyword highlighting**
 
 Highlight only the actual search keywords, not the entire DSL string.
 
-- [ ] **Step 10.4: Run checks**
+- [x] **Step 10.4: Run checks**
 
 ```powershell
 cmd /c pnpm check
 ```
 
-- [ ] **Step 10.5: Commit**
+Status 2026-04-21:
+- Task 10 implementation and verification are complete; the commit step is being recorded with this checkpoint.
+- Added a new pure helper/test pair (`src/lib/clipboardListPresentation.ts`, `src/lib/clipboardListPresentation.test.mjs`) to keep DSL keyword extraction, highlight splitting, source-app display policy, and time formatting out of the Vue template.
+- `ClipboardList.vue` now reacts to saved display preferences for density, preview-line count, relative/absolute time labels, char-count and byte-size visibility, source-app icon/name presentation, and image preview height.
+- Added `ClipboardHighlightText.vue` and `ClipboardAppIcon.vue` so both panel and manager list views share the same highlight and source-app rendering behavior.
+- `useClipboardStore.ts` now keeps clipboard settings in sync with the list views and listens for a frontend-emitted `clipboard-settings-updated` event, so saving settings in the manager window updates list presentation immediately without reopening the page.
+- `src/locales/messages.ts` did not require changes for this step because the new app-icon helper uses a local fallback label and all other list copy reuses existing clipboard i18n strings.
+- Fresh verification passed with:
+
+```powershell
+node --test --test-isolation=none src/lib/clipboardListPresentation.test.mjs
+cmd /c pnpm check
+```
+
+Observed: `3` new Node tests passed and `cmd /c pnpm check` completed successfully.
+
+- [x] **Step 10.5: Commit**
 
 ```powershell
 git add src/components/clipboard/ClipboardHighlightText.vue src/components/clipboard/ClipboardAppIcon.vue src/components/clipboard/ClipboardList.vue src/composables/useClipboardStore.ts src/locales/messages.ts

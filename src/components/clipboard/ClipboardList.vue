@@ -4,23 +4,31 @@ import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller';
 import { VueDraggable } from 'vue-draggable-plus';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { AppWindow, Ellipsis, Trash2, Star } from 'lucide-vue-next';
+import { Ellipsis, Trash2, Star } from 'lucide-vue-next';
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 
-import type { ClipboardItem } from '@/lib/clipboardTypes';
+import ClipboardAppIcon from '@/components/clipboard/ClipboardAppIcon.vue';
+import ClipboardHighlightText from '@/components/clipboard/ClipboardHighlightText.vue';
+import {
+  formatClipboardTimeLabel,
+  resolveSourceAppPresentation,
+} from '@/lib/clipboardListPresentation';
+import {
+  createDefaultClipboardSettings,
+  type ClipboardDisplaySettings,
+  type ClipboardItem,
+} from '@/lib/clipboardTypes';
 
 interface Props {
   items: ClipboardItem[];
   selectedId: number | null;
+  displaySettings?: ClipboardDisplaySettings;
+  highlightKeywords?: string[];
   compact?: boolean;
   draggable?: boolean;
-  /** When true, render a visible favorite toggle button on each row. */
   showFavoriteButton?: boolean;
-  /** When true, render an inline delete button on each row. */
   showDeleteButton?: boolean;
-  /** When true, prepend a checkbox and handle click → toggleSelect instead of activate. */
   batchMode?: boolean;
-  /** Set of selected ids (only meaningful in batchMode). */
   selectedIds?: Set<number>;
 }
 
@@ -37,6 +45,47 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const defaultDisplaySettings = createDefaultClipboardSettings().display;
+
+const displaySettings = computed<ClipboardDisplaySettings>(
+  () => props.displaySettings ?? defaultDisplaySettings,
+);
+const highlightKeywords = computed(() => props.highlightKeywords ?? []);
+const previewLines = computed(() =>
+  Math.max(1, Math.min(displaySettings.value.preview_lines ?? 3, 6)),
+);
+const densityClasses = computed(() => {
+  switch (displaySettings.value.density) {
+    case 'compact':
+      return {
+        card: 'gap-0.5 px-2.5 py-1.5',
+        text: 'text-xs leading-snug',
+        file: 'text-[11px]',
+        meta: 'text-[10px]',
+        imageCap: 'max-h-20',
+        badge: 'text-[9px]',
+      };
+    case 'spacious':
+      return {
+        card: 'gap-1.5 px-3.5 py-3',
+        text: 'text-[15px] leading-6',
+        file: 'text-sm',
+        meta: 'text-xs',
+        imageCap: 'max-h-32',
+        badge: 'text-[11px]',
+      };
+    case 'standard':
+    default:
+      return {
+        card: 'gap-1 px-3 py-2',
+        text: 'text-sm leading-snug',
+        file: 'text-xs',
+        meta: 'text-[11px]',
+        imageCap: 'max-h-24',
+        badge: 'text-[10px]',
+      };
+  }
+});
 
 function emitToggleRequest(id: number, shiftKey: boolean) {
   emit('toggle', { id, shiftKey });
@@ -52,9 +101,28 @@ function onRowKeydown(e: KeyboardEvent, id: number) {
 }
 
 function heightOf(it: ClipboardItem): number {
-  if (it.kind === 'image') return props.compact ? 148 : 168;
-  if (it.kind === 'file') return props.compact ? 80 : 96;
-  return props.compact ? 72 : 88;
+  const densityAdjust = (() => {
+    switch (displaySettings.value.density) {
+      case 'compact':
+        return -8;
+      case 'spacious':
+        return 16;
+      case 'standard':
+      default:
+        return 0;
+    }
+  })();
+
+  if (it.kind === 'image') {
+    const fixedHeightAdjust = displaySettings.value.image_auto_height ? 0 : 18;
+    return (props.compact ? 148 : 168) + densityAdjust + fixedHeightAdjust;
+  }
+  if (it.kind === 'file') {
+    return (props.compact ? 80 : 96) + densityAdjust;
+  }
+
+  const lineAdjust = Math.max(0, previewLines.value - 2) * 18;
+  return (props.compact ? 72 : 88) + densityAdjust + lineAdjust;
 }
 
 function assetUrl(path: string): string {
@@ -62,37 +130,25 @@ function assetUrl(path: string): string {
 }
 
 function formatTime(tsMs: number): string {
-  const d = new Date(tsMs);
-  const now = new Date();
-  const diffSec = Math.floor((now.getTime() - tsMs) / 1000);
-  if (diffSec < 60) return t('clipboard.time.justNow');
-  if (diffSec < 3600)
-    return t('clipboard.time.minutesAgo', { n: Math.floor(diffSec / 60) });
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  if (sameDay) return `${t('clipboard.time.today')} ${hh}:${mm}`;
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const isYesterday =
-    d.getFullYear() === yesterday.getFullYear() &&
-    d.getMonth() === yesterday.getMonth() &&
-    d.getDate() === yesterday.getDate();
-  if (isYesterday) return `${t('clipboard.time.yesterday')} ${hh}:${mm}`;
-  const mo = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${mo}-${dd} ${hh}:${mm}`;
+  return formatClipboardTimeLabel(
+    tsMs,
+    displaySettings.value.time_format,
+    {
+      justNow: t('clipboard.time.justNow'),
+      today: t('clipboard.time.today'),
+      yesterday: t('clipboard.time.yesterday'),
+      minutesAgo: (minutes) => t('clipboard.time.minutesAgo', { n: minutes }),
+    },
+  );
 }
 
 function formatCharCount(it: ClipboardItem): string {
-  // Prefer content_full length; fall back to preview (truncated).
   const text = it.content_full ?? it.content_preview ?? '';
-  const n = [...text].length; // code-point count; close enough for display
-  if (n >= 10000) return t('clipboard.meta.charCountWan', { n: (n / 10000).toFixed(1) });
-  return t('clipboard.meta.charCount', { n: n.toLocaleString() });
+  const count = it.char_count ?? [...text].length;
+  if (count >= 10000) {
+    return t('clipboard.meta.charCountWan', { n: (count / 10000).toFixed(1) });
+  }
+  return t('clipboard.meta.charCount', { n: count.toLocaleString() });
 }
 
 function formatSize(bytes: number): string {
@@ -103,9 +159,31 @@ function formatSize(bytes: number): string {
 
 function metaItems(it: ClipboardItem): string[] {
   const list: string[] = [formatTime(it.updated_at ?? it.created_at)];
-  if (it.kind === 'text' || it.kind === 'html') list.push(formatCharCount(it));
-  if (it.byte_size > 0) list.push(formatSize(it.byte_size));
+  if (
+    displaySettings.value.show_char_count
+    && (it.kind === 'text' || it.kind === 'html' || it.kind === 'rtf')
+  ) {
+    list.push(formatCharCount(it));
+  }
+  if (displaySettings.value.show_byte_size && it.byte_size > 0) {
+    list.push(formatSize(it.byte_size));
+  }
   return list;
+}
+
+function imageStyle(): Record<string, string> {
+  const maxHeight = `${displaySettings.value.image_max_height}px`;
+  return displaySettings.value.image_auto_height
+    ? { maxHeight }
+    : { height: maxHeight, maxHeight };
+}
+
+function sourceAppPresentation(it: ClipboardItem) {
+  return resolveSourceAppPresentation(
+    displaySettings.value.show_source_app,
+    it.source_app,
+    it.source_app_icon,
+  );
 }
 
 function isSelected(id: number): boolean {
@@ -164,7 +242,6 @@ function onReorderEnd() {
 </script>
 
 <template>
-  <!-- Draggable mode (favorites) -->
   <VueDraggable
     v-if="props.draggable"
     v-model="draggableItems"
@@ -176,8 +253,9 @@ function onReorderEnd() {
       :key="it.id"
       role="button"
       tabindex="0"
-      class="group relative flex w-full cursor-move flex-col gap-1 rounded-lg border px-3 py-2 text-left shadow-sm transition-all"
+      class="group relative flex w-full cursor-move flex-col rounded-lg border text-left shadow-sm transition-all"
       :class="[
+        densityClasses.card,
         it.id === props.selectedId
           ? 'border-slate-300 bg-slate-50'
           : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow',
@@ -198,7 +276,14 @@ function onReorderEnd() {
             : 'border-slate-300 bg-white'"
           aria-hidden
         >
-          <svg v-if="isSelected(it.id)" viewBox="0 0 16 16" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.5">
+          <svg
+            v-if="isSelected(it.id)"
+            viewBox="0 0 16 16"
+            class="h-3 w-3"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+          >
             <polyline points="3 8.5 6.5 12 13 4.5" />
           </svg>
         </span>
@@ -206,38 +291,69 @@ function onReorderEnd() {
         <div v-if="it.kind === 'image' && it.image_path" class="flex-1">
           <img
             :src="assetUrl(it.image_path)"
-            class="max-h-24 w-full rounded object-contain"
+            :style="imageStyle()"
+            class="w-full rounded object-contain"
+            :class="densityClasses.imageCap"
             loading="lazy"
             alt=""
           />
         </div>
-        <div v-else-if="it.kind === 'file'" class="flex-1 truncate font-mono text-xs text-slate-700">
-          {{ it.content_preview }}
+        <div
+          v-else-if="it.kind === 'file'"
+          class="flex-1 font-mono text-slate-700"
+          :class="densityClasses.file"
+        >
+          <ClipboardHighlightText
+            :text="it.content_preview"
+            :keywords="highlightKeywords"
+            :lines="previewLines"
+          />
         </div>
-        <div v-else class="flex-1 break-all text-sm leading-snug text-slate-800 line-clamp-2">
-          {{ it.content_preview }}
+        <div v-else class="flex-1 text-slate-800" :class="densityClasses.text">
+          <ClipboardHighlightText
+            :text="it.content_preview"
+            :keywords="highlightKeywords"
+            :lines="previewLines"
+          />
         </div>
 
         <span
           v-if="it.is_favorite"
           class="shrink-0 text-[13px] text-amber-500"
           aria-hidden
-        >★</span>
+        >鈽?/span>
       </div>
 
-      <div class="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+      <div
+        class="flex items-center justify-between gap-2 text-slate-500"
+        :class="densityClasses.meta"
+      >
         <div class="flex min-w-0 items-center gap-1.5">
           <template v-for="(m, i) in metaItems(it)" :key="i">
-            <span v-if="i > 0" class="text-slate-300">·</span>
+            <span v-if="i > 0" class="text-slate-300">路</span>
             <span class="truncate">{{ m }}</span>
           </template>
         </div>
+
         <div class="flex shrink-0 items-center gap-1.5">
-          <span v-if="it.source_app" class="flex items-center gap-1 text-slate-500">
-            <AppWindow class="h-3 w-3 text-slate-400" />
-            <span class="max-w-[96px] truncate">{{ it.source_app }}</span>
+          <span
+            v-if="sourceAppPresentation(it).showIcon || sourceAppPresentation(it).showName"
+            class="flex items-center gap-1 text-slate-500"
+          >
+            <ClipboardAppIcon
+              v-if="sourceAppPresentation(it).showIcon"
+              :icon-path="it.source_app_icon"
+              :source-app="it.source_app"
+            />
+            <span
+              v-if="sourceAppPresentation(it).showName"
+              class="max-w-[96px] truncate"
+            >{{ it.source_app }}</span>
           </span>
-          <span class="inline-flex min-w-[20px] items-center justify-center rounded-full bg-slate-100 px-1.5 text-[10px] font-semibold text-slate-500">
+          <span
+            class="inline-flex min-w-[20px] items-center justify-center rounded-full bg-slate-100 px-1.5 font-semibold text-slate-500"
+            :class="densityClasses.badge"
+          >
             {{ idx + 1 }}
           </span>
         </div>
@@ -277,7 +393,6 @@ function onReorderEnd() {
     </div>
   </VueDraggable>
 
-  <!-- Virtual list mode -->
   <DynamicScroller
     v-else
     :items="itemsWithHeight"
@@ -289,13 +404,23 @@ function onReorderEnd() {
       <DynamicScrollerItem
         :item="item"
         :active="active"
-        :size-dependencies="[item.content_preview, item.kind, item.image_path]"
+        :size-dependencies="[
+          item.content_preview,
+          item.kind,
+          item.image_path,
+          displaySettings.density,
+          displaySettings.preview_lines,
+          displaySettings.image_max_height,
+          displaySettings.image_auto_height,
+          displaySettings.show_source_app,
+        ]"
       >
         <div
           role="button"
           tabindex="0"
-          class="group relative mx-1 my-0.5 flex w-[calc(100%-0.5rem)] cursor-pointer flex-col gap-1 rounded-lg border px-3 py-2 text-left shadow-sm transition-all"
+          class="group relative mx-1 my-0.5 flex w-[calc(100%-0.5rem)] cursor-pointer flex-col rounded-lg border text-left shadow-sm transition-all"
           :class="[
+            densityClasses.card,
             item.id === props.selectedId
               ? 'border-slate-300 bg-slate-50'
               : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow',
@@ -316,7 +441,14 @@ function onReorderEnd() {
                 : 'border-slate-300 bg-white'"
               aria-hidden
             >
-              <svg v-if="isSelected(item.id)" viewBox="0 0 16 16" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.5">
+              <svg
+                v-if="isSelected(item.id)"
+                viewBox="0 0 16 16"
+                class="h-3 w-3"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+              >
                 <polyline points="3 8.5 6.5 12 13 4.5" />
               </svg>
             </span>
@@ -324,38 +456,69 @@ function onReorderEnd() {
             <div v-if="item.kind === 'image' && item.image_path" class="flex-1">
               <img
                 :src="assetUrl(item.image_path)"
-                class="max-h-24 w-full rounded object-contain"
+                :style="imageStyle()"
+                class="w-full rounded object-contain"
+                :class="densityClasses.imageCap"
                 loading="lazy"
                 alt=""
               />
             </div>
-            <div v-else-if="item.kind === 'file'" class="flex-1 truncate font-mono text-xs text-slate-700">
-              {{ item.content_preview }}
+            <div
+              v-else-if="item.kind === 'file'"
+              class="flex-1 font-mono text-slate-700"
+              :class="densityClasses.file"
+            >
+              <ClipboardHighlightText
+                :text="item.content_preview"
+                :keywords="highlightKeywords"
+                :lines="previewLines"
+              />
             </div>
-            <div v-else class="flex-1 break-all text-sm leading-snug text-slate-800 line-clamp-2">
-              {{ item.content_preview }}
+            <div v-else class="flex-1 text-slate-800" :class="densityClasses.text">
+              <ClipboardHighlightText
+                :text="item.content_preview"
+                :keywords="highlightKeywords"
+                :lines="previewLines"
+              />
             </div>
 
             <span
               v-if="item.is_favorite"
               class="shrink-0 text-[13px] text-amber-500"
               aria-hidden
-            >★</span>
+            >鈽?/span>
           </div>
 
-          <div class="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+          <div
+            class="flex items-center justify-between gap-2 text-slate-500"
+            :class="densityClasses.meta"
+          >
             <div class="flex min-w-0 items-center gap-1.5">
               <template v-for="(m, i) in metaItems(item)" :key="i">
-                <span v-if="i > 0" class="text-slate-300">·</span>
+                <span v-if="i > 0" class="text-slate-300">路</span>
                 <span class="truncate">{{ m }}</span>
               </template>
             </div>
+
             <div class="flex shrink-0 items-center gap-1.5">
-              <span v-if="item.source_app" class="flex items-center gap-1 text-slate-500">
-                <AppWindow class="h-3 w-3 text-slate-400" />
-                <span class="max-w-[96px] truncate">{{ item.source_app }}</span>
+              <span
+                v-if="sourceAppPresentation(item).showIcon || sourceAppPresentation(item).showName"
+                class="flex items-center gap-1 text-slate-500"
+              >
+                <ClipboardAppIcon
+                  v-if="sourceAppPresentation(item).showIcon"
+                  :icon-path="item.source_app_icon"
+                  :source-app="item.source_app"
+                />
+                <span
+                  v-if="sourceAppPresentation(item).showName"
+                  class="max-w-[96px] truncate"
+                >{{ item.source_app }}</span>
               </span>
-              <span class="inline-flex min-w-[20px] items-center justify-center rounded-full bg-slate-100 px-1.5 text-[10px] font-semibold text-slate-500">
+              <span
+                class="inline-flex min-w-[20px] items-center justify-center rounded-full bg-slate-100 px-1.5 font-semibold text-slate-500"
+                :class="densityClasses.badge"
+              >
                 {{ item._idx + 1 }}
               </span>
             </div>

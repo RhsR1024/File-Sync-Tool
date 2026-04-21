@@ -6,9 +6,16 @@ import {
   pruneClipboardSelection,
   toggleClipboardSelection,
 } from '@/composables/clipboardInteractionHelpers';
+import { extractClipboardSearchKeywords } from '@/lib/clipboardListPresentation';
 import { clipboardApi } from '@/lib/tauri';
 import { parseSearch } from '@/lib/clipboardSearchParser';
-import type { ClipboardFilter, ClipboardItem } from '@/lib/clipboardTypes';
+import {
+  createDefaultClipboardSettings,
+  normalizeClipboardSettings,
+  type ClipboardFilter,
+  type ClipboardItem,
+  type ClipboardSettings,
+} from '@/lib/clipboardTypes';
 
 export function useClipboardStore() {
   const { t } = useI18n();
@@ -21,6 +28,11 @@ export function useClipboardStore() {
   const batchMode = ref(false);
   const selectedIds = ref<Set<number>>(new Set());
   const selectionAnchorId = ref<number | null>(null);
+  const settings = ref<ClipboardSettings>(createDefaultClipboardSettings());
+  const parsedSearch = computed(() => parseSearch(search.value));
+  const searchKeywords = computed(() =>
+    extractClipboardSearchKeywords(search.value),
+  );
 
   const orderedSelectedIds = computed(() =>
     items.value.filter((item) => selectedIds.value.has(item.id)).map((item) => item.id),
@@ -62,7 +74,7 @@ export function useClipboardStore() {
     loading.value = true;
     error.value = null;
     try {
-      const parsed = parseSearch(search.value);
+      const parsed = parsedSearch.value;
       const fromMs = parsed.filters.from
         ? new Date(parsed.filters.from + 'T00:00:00').getTime()
         : null;
@@ -93,6 +105,15 @@ export function useClipboardStore() {
     }
   }
 
+  async function reloadSettings() {
+    try {
+      const next = await clipboardApi.getSettings();
+      settings.value = normalizeClipboardSettings(next);
+    } catch (e) {
+      console.error('[clipboard] reload settings failed:', e);
+    }
+  }
+
   async function toggleFavorite(id: number) {
     try {
       await clipboardApi.toggleFavorite(id);
@@ -114,9 +135,20 @@ export function useClipboardStore() {
   }
 
   async function startListening(): Promise<UnlistenFn> {
-    return listen('clipboard-item-added', () => {
+    const unlistenItemAdded = await listen('clipboard-item-added', () => {
       void reload();
     });
+    const unlistenSettings = await listen<ClipboardSettings>(
+      'clipboard-settings-updated',
+      (event) => {
+        settings.value = normalizeClipboardSettings(event.payload);
+      },
+    );
+    await reloadSettings();
+    return () => {
+      unlistenItemAdded();
+      unlistenSettings();
+    };
   }
 
   watch(
@@ -142,7 +174,10 @@ export function useClipboardStore() {
     batchMode,
     selectedIds,
     orderedSelectedIds,
+    settings,
+    searchKeywords,
     reload,
+    reloadSettings,
     toggleFavorite,
     remove,
     startListening,

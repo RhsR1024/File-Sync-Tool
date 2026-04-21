@@ -325,6 +325,8 @@ async function onOpenDetailPath(path: string) {
           v-else
           :items="store.items.value"
           :selected-id="selectedId"
+          :display-settings="store.settings.value.display"
+          :highlight-keywords="store.searchKeywords.value"
           :draggable="store.filter.value === 'favorite'"
           :show-favorite-button="true"
           @select="(id) => (selectedId = id)"
