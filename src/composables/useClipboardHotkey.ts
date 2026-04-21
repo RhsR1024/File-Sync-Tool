@@ -1,5 +1,6 @@
 import { onBeforeUnmount, onMounted, type Ref } from 'vue';
 
+import { resolveQuickPasteTargetId } from '@/composables/clipboardInteractionHelpers';
 import type { ClipboardFilter, ClipboardItem } from '@/lib/clipboardTypes';
 
 export interface ClipboardHotkeyOptions {
@@ -26,6 +27,15 @@ export function useClipboardHotkey(opts: ClipboardHotkeyOptions): void {
     const inEditable = isEditable(e.target);
     const list = opts.items.value;
     const idx = opts.selectedIndex.value;
+    const quickPasteId = inEditable
+      ? null
+      : resolveQuickPasteTargetId(list, e.key, e.altKey);
+
+    if (quickPasteId !== null) {
+      opts.onPaste(quickPasteId, false);
+      e.preventDefault();
+      return;
+    }
 
     switch (e.key) {
       case 'ArrowDown':

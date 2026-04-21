@@ -32,16 +32,21 @@ const emit = defineEmits<{
   favorite: [id: number];
   remove: [id: number];
   reorder: [ids: number[]];
-  toggle: [id: number];
+  toggle: [payload: { id: number; shiftKey: boolean }];
   menu: [payload: { item: ClipboardItem; x: number; y: number }];
 }>();
 
 const { t } = useI18n();
 
+function emitToggleRequest(id: number, shiftKey: boolean) {
+  emit('toggle', { id, shiftKey });
+}
+
 function onRowKeydown(e: KeyboardEvent, id: number) {
   if (e.key === 'Enter' || e.key === ' ') {
     e.preventDefault();
-    if (props.batchMode) emit('toggle', id);
+    emit('select', id);
+    if (props.batchMode) emitToggleRequest(id, e.shiftKey);
     else emit('activate', id);
   }
 }
@@ -108,9 +113,10 @@ function isSelected(id: number): boolean {
 }
 
 function onRowClick(e: MouseEvent, id: number) {
+  emit('select', id);
   if (props.batchMode) {
     e.stopPropagation();
-    emit('toggle', id);
+    emitToggleRequest(id, e.shiftKey);
     return;
   }
   emit('activate', id);

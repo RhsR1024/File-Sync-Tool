@@ -50,3 +50,15 @@ Bring the clipboard manager in `File-Sync-Tool` up to and beyond the `2026-04-19
 Verification 2026-04-21:
 - `node --test --test-isolation=none src/composables/useClipboardContextMenu.test.mjs` passed (`4` tests).
 - `cmd /c pnpm check` passed after refreshing the shared worktree `node_modules` from the branch lockfile.
+
+## Task 7 Manual Checklist
+- Panel page: in batch mode, click one row and Shift-click a later row to select the full contiguous range.
+- Manager page: in batch mode, Shift-clicking rows updates the same ordered selection source used by merge paste, favorite/unfavorite, and delete.
+- Panel page: `Alt+1` through `Alt+9` target the current visible list order rather than stale insertion order.
+- Both pages: merge paste uses the visible-order selected id list instead of raw `Set` insertion order after filtering or range selection.
+
+Verification 2026-04-21:
+- `node --test --test-isolation=none src/composables/clipboardInteractionHelpers.test.mjs` passed (`4` tests).
+- `node --test --test-isolation=none src/composables/useClipboardContextMenu.test.mjs` passed (`4` tests).
+- `cmd /c pnpm check` passed.
+- `$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTFLAGS='-C debuginfo=0'; cargo test clipboard:: --manifest-path src-tauri\Cargo.toml` passed (`62` clipboard tests).

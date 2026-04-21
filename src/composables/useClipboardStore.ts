@@ -1,7 +1,11 @@
-import { ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useI18n } from 'vue-i18n';
 
+import {
+  pruneClipboardSelection,
+  toggleClipboardSelection,
+} from '@/composables/clipboardInteractionHelpers';
 import { clipboardApi } from '@/lib/tauri';
 import { parseSearch } from '@/lib/clipboardSearchParser';
 import type { ClipboardFilter, ClipboardItem } from '@/lib/clipboardTypes';
@@ -14,6 +18,45 @@ export function useClipboardStore() {
   const search = ref('');
   const loading = ref(false);
   const error = ref<string | null>(null);
+  const batchMode = ref(false);
+  const selectedIds = ref<Set<number>>(new Set());
+  const selectionAnchorId = ref<number | null>(null);
+
+  const orderedSelectedIds = computed(() =>
+    items.value.filter((item) => selectedIds.value.has(item.id)).map((item) => item.id),
+  );
+
+  function clearSelection() {
+    selectedIds.value = new Set();
+    selectionAnchorId.value = null;
+  }
+
+  function setBatchMode(next: boolean) {
+    batchMode.value = next;
+    if (!next) clearSelection();
+  }
+
+  function toggleBatchMode() {
+    setBatchMode(!batchMode.value);
+  }
+
+  function toggleSelection(id: number, shiftKey = false) {
+    const next = toggleClipboardSelection({
+      visibleIds: items.value.map((item) => item.id),
+      selectedIds: selectedIds.value,
+      anchorId: selectionAnchorId.value,
+      targetId: id,
+      shiftKey,
+    });
+    selectedIds.value = next.selectedIds;
+    selectionAnchorId.value = next.anchorId;
+  }
+
+  function selectAllVisible() {
+    const visibleIds = items.value.map((item) => item.id);
+    selectedIds.value = new Set(visibleIds);
+    selectionAnchorId.value = visibleIds.at(-1) ?? null;
+  }
 
   async function reload() {
     loading.value = true;
@@ -76,6 +119,19 @@ export function useClipboardStore() {
     });
   }
 
+  watch(
+    items,
+    (list) => {
+      const next = pruneClipboardSelection(list.map((item) => item.id), {
+        selectedIds: selectedIds.value,
+        anchorId: selectionAnchorId.value,
+      });
+      selectedIds.value = next.selectedIds;
+      selectionAnchorId.value = next.anchorId;
+    },
+    { deep: false },
+  );
+
   return {
     items,
     total,
@@ -83,9 +139,17 @@ export function useClipboardStore() {
     search,
     loading,
     error,
+    batchMode,
+    selectedIds,
+    orderedSelectedIds,
     reload,
     toggleFavorite,
     remove,
     startListening,
+    clearSelection,
+    setBatchMode,
+    toggleBatchMode,
+    toggleSelection,
+    selectAllVisible,
   };
 }

@@ -21,15 +21,12 @@ const { t } = useI18n();
 const store = useClipboardStore();
 const selectedId = ref<number | null>(null);
 
-const batchMode = ref(false);
-const selectedIds = ref<Set<number>>(new Set());
 const reloadCounter = ref(0);
 const copyToast = ref<string | null>(null);
 let copyToastTimer: number | null = null;
 
 function resetBatchSelection() {
-  batchMode.value = false;
-  clearSelection();
+  store.setBatchMode(false);
 }
 
 function setClipboardActionError(error: unknown, action: ClipboardContextActionId) {
@@ -77,7 +74,7 @@ onBeforeUnmount(() => {
 function setFilter(f: ClipboardFilter) {
   store.filter.value = f;
   selectedId.value = null;
-  clearSelection();
+  store.clearSelection();
   void store.reload();
 }
 
@@ -87,28 +84,25 @@ function onSearchInput(e: Event) {
 }
 
 function toggleBatchMode() {
-  batchMode.value = !batchMode.value;
+  store.toggleBatchMode();
   closeMenu();
-  if (!batchMode.value) clearSelection();
 }
 
-function toggleSelect(id: number) {
-  const next = new Set(selectedIds.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
-  selectedIds.value = next;
+function toggleSelect(payload: { id: number; shiftKey: boolean }) {
+  selectedId.value = payload.id;
+  store.toggleSelection(payload.id, payload.shiftKey);
 }
 
 function selectAll() {
-  selectedIds.value = new Set(store.items.value.map((it) => it.id));
+  store.selectAllVisible();
 }
 
 function clearSelection() {
-  selectedIds.value = new Set();
+  store.clearSelection();
 }
 
 async function batchDelete() {
-  const ids = [...selectedIds.value];
+  const ids = store.orderedSelectedIds.value;
   if (ids.length === 0) return;
   const msg = t('clipboard.actions.batchDeleteConfirm', { n: ids.length });
   if (!window.confirm(msg)) return;
@@ -124,7 +118,7 @@ async function batchDelete() {
 }
 
 async function batchFavorite(forward: boolean) {
-  const ids = [...selectedIds.value];
+  const ids = store.orderedSelectedIds.value;
   for (const id of ids) {
     try {
       const item = await clipboardApi.get(id);
@@ -150,7 +144,7 @@ async function onReorder(ids: number[]) {
   }
 }
 
-const selectionCount = computed(() => selectedIds.value.size);
+const selectionCount = computed(() => store.selectedIds.value.size);
 
 async function pasteFromContextMenu(id: number, plain: boolean) {
   try {
@@ -180,7 +174,8 @@ const {
   openMergeDialog,
   runAction,
 } = useClipboardContextMenu({
-  selectedIds,
+  selectedIds: store.selectedIds,
+  selectedIdOrder: store.orderedSelectedIds,
   onPaste: pasteFromContextMenu,
   onCopy: copyToClipboard,
   onDelete: async (id: number) => {
@@ -245,17 +240,18 @@ async function onOpenDetailPath(path: string) {
         <button
           type="button"
           class="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium transition-colors"
-          :class="batchMode
+          :class="store.batchMode.value
             ? 'bg-slate-900 text-white border-slate-900'
             : 'bg-white text-slate-600 hover:bg-slate-100'"
           @click="toggleBatchMode"
         >
-          {{ batchMode ? t('clipboard.actions.clearSelection') : t('clipboard.actions.selectAll') }}
+          {{ store.batchMode.value ? t('clipboard.actions.clearSelection') : t('clipboard.actions.selectAll') }}
         </button>
       </div>
 
-      <div v-if="batchMode" class="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs">
+      <div v-if="store.batchMode.value" class="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs">
         <span class="text-slate-500">{{ selectionCount }} / {{ store.items.value.length }}</span>
+        <span class="text-slate-400">{{ t('clipboard.batchBar.shiftHint') }}</span>
         <button type="button" class="rounded-full bg-slate-100 px-2.5 py-0.5 hover:bg-slate-200" @click="selectAll">
           {{ t('clipboard.actions.selectAll') }}
         </button>
@@ -306,17 +302,17 @@ async function onOpenDetailPath(path: string) {
         <div v-else-if="store.items.value.length === 0" class="p-8 text-center text-sm text-slate-400">
           {{ store.search.value ? t('clipboard.panel.noMatch') : t('clipboard.panel.empty') }}
         </div>
-        <div v-else-if="batchMode" class="max-h-[60vh] overflow-y-auto">
+        <div v-else-if="store.batchMode.value" class="max-h-[60vh] overflow-y-auto">
           <label
             v-for="it in store.items.value"
             :key="it.id"
             class="flex cursor-pointer items-center gap-3 border-b border-slate-100 px-4 py-2 hover:bg-slate-50"
+            @click.prevent="toggleSelect({ id: it.id, shiftKey: $event.shiftKey })"
           >
             <input
               type="checkbox"
               class="h-4 w-4 shrink-0"
-              :checked="selectedIds.has(it.id)"
-              @change="toggleSelect(it.id)"
+              :checked="store.selectedIds.value.has(it.id)"
             />
             <span class="inline-flex shrink-0 rounded bg-slate-200/60 px-1.5 py-0.5 text-[10px] uppercase text-slate-600">
               {{ it.kind }}
@@ -378,7 +374,7 @@ async function onOpenDetailPath(path: string) {
     <ClipboardMergePasteDialog
       v-model="mergeSeparatorInput"
       :open="mergeDialogOpen"
-      :selected-count="selectedIds.size"
+      :selected-count="store.selectedIds.value.size"
       :pending="mergePending"
       @close="closeMergeDialog"
       @confirm="confirmMergePaste"

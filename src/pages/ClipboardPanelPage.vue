@@ -41,13 +41,10 @@ const selectedId = computed<number | null>(
 
 // Toolbar state ----------------------------------------------------------
 const pinned = ref(false);
-const batchMode = ref(false);
-const selectedIds = ref<Set<number>>(new Set());
 const clearDialogOpen = ref(false);
 
 function resetBatchSelection() {
-  batchMode.value = false;
-  selectedIds.value = new Set();
+  store.setBatchMode(false);
 }
 
 function setClipboardActionError(error: unknown, action: ClipboardContextActionId) {
@@ -67,21 +64,18 @@ async function togglePinned() {
 }
 
 function toggleBatchMode() {
-  batchMode.value = !batchMode.value;
+  store.toggleBatchMode();
   closeMenu();
-  if (!batchMode.value) selectedIds.value = new Set();
 }
 
-function onToggleSelect(id: number) {
-  const s = new Set(selectedIds.value);
-  if (s.has(id)) s.delete(id);
-  else s.add(id);
-  selectedIds.value = s;
+function onToggleSelect(payload: { id: number; shiftKey: boolean }) {
+  selectById(payload.id);
+  store.toggleSelection(payload.id, payload.shiftKey);
 }
 
 async function onBatchDelete() {
-  if (selectedIds.value.size === 0) return;
-  const ids = Array.from(selectedIds.value);
+  const ids = store.orderedSelectedIds.value;
+  if (ids.length === 0) return;
   try {
     await clipboardApi.deleteBatch(ids);
     resetBatchSelection();
@@ -90,6 +84,26 @@ async function onBatchDelete() {
     console.error('[clipboard] batch delete failed:', e);
     store.error.value = `${t('clipboard.errors.loadFailed')} — ${e}`;
   }
+}
+
+async function onBatchFavorite(nextFavorite: boolean) {
+  const ids = store.orderedSelectedIds.value;
+  if (ids.length === 0) return;
+
+  for (const id of ids) {
+    try {
+      const item = await clipboardApi.get(id);
+      if (nextFavorite && !item.is_favorite) await clipboardApi.toggleFavorite(id);
+      if (!nextFavorite && item.is_favorite) await clipboardApi.toggleFavorite(id);
+    } catch (error) {
+      console.error('[clipboard] batch favorite failed:', error);
+      store.error.value = `${t('clipboard.errors.saveFailed')} 鈥?${error}`;
+      return;
+    }
+  }
+
+  resetBatchSelection();
+  await store.reload();
 }
 
 async function onConfirmClear() {
@@ -194,7 +208,8 @@ const {
   openMergeDialog,
   runAction,
 } = useClipboardContextMenu({
-  selectedIds,
+  selectedIds: store.selectedIds,
+  selectedIdOrder: store.orderedSelectedIds,
   onPaste: paste,
   onCopy: (id: number) => clipboardApi.copy(id),
   onDelete: (id: number) => store.remove(id),
@@ -301,10 +316,10 @@ onBeforeUnmount(() => {
           type="button"
           data-no-drag
           class="inline-flex h-7 w-7 items-center justify-center rounded transition-colors"
-          :class="batchMode
+          :class="store.batchMode.value
             ? 'bg-blue-50 text-blue-600'
             : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'"
-          :title="batchMode ? t('clipboard.actions.exitBatch') : t('clipboard.actions.batchSelect')"
+          :title="store.batchMode.value ? t('clipboard.actions.exitBatch') : t('clipboard.actions.batchSelect')"
           @click="toggleBatchMode"
         >
           <CheckSquare class="h-4 w-4" />
@@ -344,12 +359,28 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div v-if="batchMode" class="flex items-center justify-between gap-2 border-b border-blue-200 bg-blue-50/80 px-3 py-1.5">
+    <div v-if="store.batchMode.value" class="flex items-center justify-between gap-2 border-b border-blue-200 bg-blue-50/80 px-3 py-1.5">
       <span class="text-xs text-slate-600">
-        {{ t('clipboard.batchBar.selected', { n: selectedIds.size }) }}
+        {{ t('clipboard.batchBar.selected', { n: store.selectedIds.value.size }) }}
         <span class="ml-1.5 text-slate-400">{{ t('clipboard.batchBar.shiftHint') }}</span>
       </span>
       <div class="flex items-center gap-1">
+        <button
+          type="button"
+          class="rounded bg-amber-500/10 px-2 py-1 text-xs text-amber-700 transition-colors hover:bg-amber-500/20 disabled:opacity-40"
+          :disabled="store.selectedIds.value.size === 0"
+          @click="onBatchFavorite(true)"
+        >
+          {{ t('clipboard.actions.batchFavorite') }}
+        </button>
+        <button
+          type="button"
+          class="rounded bg-slate-900/10 px-2 py-1 text-xs text-slate-700 transition-colors hover:bg-slate-900/20 disabled:opacity-40"
+          :disabled="store.selectedIds.value.size === 0"
+          @click="onBatchFavorite(false)"
+        >
+          {{ t('clipboard.actions.batchUnfavorite') }}
+        </button>
         <button
           type="button"
           class="rounded bg-slate-900/10 px-2 py-1 text-xs text-slate-700 transition-colors hover:bg-slate-900/20 disabled:opacity-40"
@@ -361,7 +392,7 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="rounded bg-red-500/10 px-2 py-1 text-xs text-red-600 transition-colors hover:bg-red-500/20 disabled:opacity-40"
-          :disabled="selectedIds.size === 0"
+          :disabled="store.selectedIds.value.size === 0"
           @click="onBatchDelete"
         >
           {{ t('clipboard.actions.batchDelete') }}
@@ -416,11 +447,11 @@ onBeforeUnmount(() => {
         :items="store.items.value"
         :selected-id="selectedId"
         :compact="true"
-        :draggable="store.filter.value === 'favorite'"
-        :batch-mode="batchMode"
-        :selected-ids="selectedIds"
-        :show-delete-button="!batchMode"
-        :show-favorite-button="!batchMode"
+        :draggable="!store.batchMode.value && store.filter.value === 'favorite'"
+        :batch-mode="store.batchMode.value"
+        :selected-ids="store.selectedIds.value"
+        :show-delete-button="!store.batchMode.value"
+        :show-favorite-button="!store.batchMode.value"
         @select="onListSelect"
         @activate="(id: number) => paste(id, false)"
         @toggle="onToggleSelect"
@@ -491,7 +522,7 @@ onBeforeUnmount(() => {
   <ClipboardMergePasteDialog
     v-model="mergeSeparatorInput"
     :open="mergeDialogOpen"
-    :selected-count="selectedIds.size"
+    :selected-count="store.selectedIds.value.size"
     :pending="mergePending"
     @close="closeMergeDialog"
     @confirm="confirmMergePaste"

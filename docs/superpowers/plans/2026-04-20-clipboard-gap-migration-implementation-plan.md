@@ -518,7 +518,7 @@ cmd /c pnpm check
 
 Expected: green type-check.
 
-- [ ] **Step 6.5: Commit**
+- [x] **Step 6.5: Commit**
 
 ```powershell
 git add src/components/clipboard src/composables/useClipboardContextMenu.ts src/pages/ClipboardPanelPage.vue src/pages/ClipboardManagerPage.vue src/locales/messages.ts
@@ -526,7 +526,7 @@ git commit -m "feat(clipboard): add m7 context actions and dialogs"
 ```
 
 Status 2026-04-21:
-- Task 6 implementation and verification are complete; only the commit step remains.
+- Task 6 is complete and committed as `c8b6ca3` (`feat(clipboard): add m7 context actions and dialogs`).
 - Added a tested context-menu helper/composable split (`src/composables/clipboardContextMenuHelpers.ts`, `src/composables/useClipboardContextMenu.ts`, `src/composables/useClipboardContextMenu.test.mjs`) plus new UI shells for the row menu, file-details dialog, and merge-paste dialog.
 - `ClipboardList.vue`, `ClipboardPanelPage.vue`, and `ClipboardManagerPage.vue` now support per-row menu actions, file-details invalid-path feedback, image save-to-directory flow, and shared batch merge-paste entry points without changing the manager page's primary click-to-copy behavior.
 - Synced missing frontend wrappers in `src/lib/tauri.ts` for Task 5/6 clipboard actions and added the required English/Chinese i18n keys.
@@ -554,22 +554,22 @@ Observed: `4` tests passed, `0` failed, and `cmd /c pnpm check` completed succes
 
 **Depends on:** Task 6
 
-- [ ] **Step 7.1: Write failing tests for parser/hotkey/range-selection helpers where possible**
+- [x] **Step 7.1: Write failing tests for parser/hotkey/range-selection helpers where possible**
 
 At minimum, isolate selection math and quick-paste mapping into testable helper functions.
 
-- [ ] **Step 7.2: Implement Shift-range selection and Alt+1..9 quick paste**
+- [x] **Step 7.2: Implement Shift-range selection and Alt+1..9 quick paste**
 
 Requirements:
 - panel and manager stay in sync with selected ids
 - range selection remembers last toggled index
 - Alt+1..9 maps to visible row order
 
-- [ ] **Step 7.3: Improve batch action wiring**
+- [x] **Step 7.3: Improve batch action wiring**
 
 Ensure merge paste, delete, favorite, and future export actions all use the same selected-id source of truth.
 
-- [ ] **Step 7.4: Run checks**
+- [x] **Step 7.4: Run checks**
 
 ```powershell
 cmd /c pnpm check
@@ -577,6 +577,24 @@ cargo test clipboard --manifest-path src-tauri\Cargo.toml
 ```
 
 Expected: green.
+
+Status 2026-04-21:
+- Task 7 implementation and verification are complete; only the commit step remains.
+- Added a pure interaction helper/test pair (`src/composables/clipboardInteractionHelpers.ts`, `src/composables/clipboardInteractionHelpers.test.mjs`) to lock down range-selection math and Alt+1..9 quick-paste targeting.
+- `useClipboardStore.ts` now owns batch-mode state, ordered selected ids, shift-range anchor tracking, and visible-list pruning so panel and manager batch actions read from one source of truth.
+- `useClipboardHotkey.ts` now maps Alt+1..9 to the current visible panel row order, while `ClipboardList.vue` emits shift-aware toggle payloads so range selection works inside the shared list component.
+- `ClipboardPanelPage.vue`, `ClipboardManagerPage.vue`, and `useClipboardContextMenu.ts` now route merge-paste, delete, favorite, and future batch actions through the ordered selected-id list for consistent visible-order behavior.
+- No new Rust command or global-hotkey changes were required for this step because Task 7's quick-paste behavior stayed window-local and existing clipboard commands already covered the needed mutations.
+- Verification passed with:
+
+```powershell
+node --test --test-isolation=none src/composables/clipboardInteractionHelpers.test.mjs
+node --test --test-isolation=none src/composables/useClipboardContextMenu.test.mjs
+cmd /c pnpm check
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTFLAGS='-C debuginfo=0'; cargo test clipboard:: --manifest-path src-tauri\Cargo.toml
+```
+
+Observed: `8` Node tests passed across the Task 6/7 helper suites, `cmd /c pnpm check` completed successfully, and `62` clipboard Rust tests passed with `0` failures.
 
 - [ ] **Step 7.5: Commit**
 

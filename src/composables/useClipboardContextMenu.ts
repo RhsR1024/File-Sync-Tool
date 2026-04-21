@@ -17,6 +17,7 @@ export interface ClipboardContextMenuPosition {
 
 interface UseClipboardContextMenuOptions {
   selectedIds: Ref<Set<number>>;
+  selectedIdOrder?: Ref<number[]>;
   onPaste: (id: number, plain: boolean) => Promise<void>;
   onCopy: (id: number) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
@@ -43,6 +44,9 @@ export function useClipboardContextMenu(options: UseClipboardContextMenuOptions)
   const mergeDialogOpen = ref(false);
   const mergePending = ref(false);
   const mergeSeparatorInput = ref('\\n');
+  const selectedIdOrder = computed(() =>
+    options.selectedIdOrder?.value ?? Array.from(options.selectedIds.value),
+  );
 
   async function refreshFileStatuses(item: ClipboardItem): Promise<FilePathStatus[] | null> {
     fileStatusLoading.value = true;
@@ -133,12 +137,12 @@ export function useClipboardContextMenu(options: UseClipboardContextMenuOptions)
   }
 
   async function confirmMergePaste(): Promise<void> {
-    if (options.selectedIds.value.size < 2) return;
+    if (selectedIdOrder.value.length < 2) return;
 
     mergePending.value = true;
     try {
       await clipboardApi.mergePaste(
-        Array.from(options.selectedIds.value),
+        selectedIdOrder.value,
         decodeMergeSeparatorInput(mergeSeparatorInput.value),
       );
       mergeDialogOpen.value = false;
@@ -158,7 +162,7 @@ export function useClipboardContextMenu(options: UseClipboardContextMenuOptions)
     });
   });
 
-  const canMergeSelection = computed(() => options.selectedIds.value.size >= 2);
+  const canMergeSelection = computed(() => selectedIdOrder.value.length >= 2);
 
   return {
     activeItem,
