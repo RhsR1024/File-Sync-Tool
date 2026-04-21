@@ -120,6 +120,26 @@ impl Default for ClipboardPreviewSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ClipboardPanelSettings {
+    pub follow_cursor: bool,
+    pub remember_position: bool,
+    pub animate: bool,
+    pub use_mica: bool,
+}
+
+impl Default for ClipboardPanelSettings {
+    fn default() -> Self {
+        Self {
+            follow_cursor: true,
+            remember_position: false,
+            animate: true,
+            use_mica: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClipboardShortcutsSettings {
     pub quick_paste: Vec<String>,
     pub paste: String,
@@ -148,13 +168,27 @@ impl Default for ClipboardShortcutsSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ClipboardNavigationSettings {
+    pub enabled: bool,
+}
+
+impl Default for ClipboardNavigationSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClipboardToolbarSettings {
+    pub visible: bool,
     pub items: Vec<String>,
 }
 
 impl Default for ClipboardToolbarSettings {
     fn default() -> Self {
         Self {
+            visible: true,
             items: vec![
                 "search".to_string(),
                 "filter".to_string(),
@@ -241,7 +275,11 @@ pub struct ClipboardSettings {
     #[serde(default)]
     pub preview: ClipboardPreviewSettings,
     #[serde(default)]
+    pub panel: ClipboardPanelSettings,
+    #[serde(default)]
     pub shortcuts: ClipboardShortcutsSettings,
+    #[serde(default)]
+    pub navigation: ClipboardNavigationSettings,
     #[serde(default)]
     pub toolbar: ClipboardToolbarSettings,
     #[serde(default)]
@@ -268,7 +306,9 @@ impl Default for ClipboardSettings {
             dedup_strategy: ClipboardDedupStrategy::MoveToTop,
             display: ClipboardDisplaySettings::default(),
             preview: ClipboardPreviewSettings::default(),
+            panel: ClipboardPanelSettings::default(),
             shortcuts: ClipboardShortcutsSettings::default(),
+            navigation: ClipboardNavigationSettings::default(),
             toolbar: ClipboardToolbarSettings::default(),
             data: ClipboardDataSettings::default(),
             audio: ClipboardAudioSettings::default(),
@@ -421,5 +461,75 @@ impl ContentKind {
             "file" => Self::File,
             _ => Self::Text,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn clipboard_settings_default_exposes_panel_navigation_and_toolbar_visibility() {
+        let settings = ClipboardSettings::default();
+
+        assert!(settings.panel.follow_cursor);
+        assert!(!settings.panel.remember_position);
+        assert!(settings.panel.animate);
+        assert!(settings.panel.use_mica);
+        assert!(settings.navigation.enabled);
+        assert!(settings.toolbar.visible);
+    }
+
+    #[test]
+    fn clipboard_settings_roundtrip_keeps_new_nested_settings_and_backfills_legacy_json() {
+        let configured = ClipboardSettings {
+            toolbar: ClipboardToolbarSettings {
+                visible: false,
+                items: vec!["search".to_string(), "filter".to_string()],
+            },
+            panel: ClipboardPanelSettings {
+                follow_cursor: false,
+                remember_position: true,
+                animate: false,
+                use_mica: false,
+            },
+            navigation: ClipboardNavigationSettings { enabled: false },
+            ..ClipboardSettings::default()
+        };
+
+        let roundtrip: ClipboardSettings =
+            serde_json::from_value(serde_json::to_value(&configured).unwrap()).unwrap();
+        assert!(!roundtrip.toolbar.visible);
+        assert_eq!(
+            roundtrip.toolbar.items,
+            vec!["search".to_string(), "filter".to_string()]
+        );
+        assert!(!roundtrip.panel.follow_cursor);
+        assert!(roundtrip.panel.remember_position);
+        assert!(!roundtrip.panel.animate);
+        assert!(!roundtrip.panel.use_mica);
+        assert!(!roundtrip.navigation.enabled);
+
+        let legacy: ClipboardSettings = serde_json::from_value(json!({
+            "enabled": false,
+            "hotkey": "Ctrl+Shift+V",
+            "toolbar": {
+                "items": ["search", "filter"]
+            },
+            "display": {
+                "density": "compact"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(legacy.hotkey, "Ctrl+Shift+V");
+        assert_eq!(legacy.display.density, ClipboardCardDensity::Compact);
+        assert!(legacy.toolbar.visible);
+        assert!(legacy.panel.follow_cursor);
+        assert!(!legacy.panel.remember_position);
+        assert!(legacy.panel.animate);
+        assert!(legacy.panel.use_mica);
+        assert!(legacy.navigation.enabled);
     }
 }

@@ -27,6 +27,13 @@ export interface ClipboardPreviewSettings {
   position: ClipboardPreviewPosition;
 }
 
+export interface ClipboardPanelSettings {
+  follow_cursor: boolean;
+  remember_position: boolean;
+  animate: boolean;
+  use_mica: boolean;
+}
+
 export interface ClipboardShortcutsSettings {
   quick_paste: string[];
   paste: string;
@@ -39,7 +46,12 @@ export interface ClipboardShortcutsSettings {
 }
 
 export interface ClipboardToolbarSettings {
+  visible: boolean;
   items: string[];
+}
+
+export interface ClipboardNavigationSettings {
+  enabled: boolean;
 }
 
 export interface ClipboardDataSettings {
@@ -75,7 +87,9 @@ export interface ClipboardSettings {
   dedup_strategy: ClipboardDedupStrategy;
   display: ClipboardDisplaySettings;
   preview: ClipboardPreviewSettings;
+  panel: ClipboardPanelSettings;
   shortcuts: ClipboardShortcutsSettings;
+  navigation: ClipboardNavigationSettings;
   toolbar: ClipboardToolbarSettings;
   data: ClipboardDataSettings;
   audio: ClipboardAudioSettings;
@@ -120,6 +134,12 @@ const DEFAULT_CLIPBOARD_SETTINGS: ClipboardSettings = {
     zoom_step: 10,
     position: 'auto',
   },
+  panel: {
+    follow_cursor: true,
+    remember_position: false,
+    animate: true,
+    use_mica: true,
+  },
   shortcuts: {
     quick_paste: [],
     paste: 'Enter',
@@ -130,7 +150,11 @@ const DEFAULT_CLIPBOARD_SETTINGS: ClipboardSettings = {
     focus_search: ['Ctrl+F', '/'],
     close: 'Escape',
   },
+  navigation: {
+    enabled: true,
+  },
   toolbar: {
+    visible: true,
     items: ['search', 'filter', 'batch', 'settings', 'lock'],
   },
   data: {
@@ -156,11 +180,13 @@ export function cloneClipboardSettings(settings: ClipboardSettings): ClipboardSe
     ...settings,
     display: { ...settings.display },
     preview: { ...settings.preview },
+    panel: { ...settings.panel },
     shortcuts: {
       ...settings.shortcuts,
       quick_paste: [...settings.shortcuts.quick_paste],
       focus_search: [...settings.shortcuts.focus_search],
     },
+    navigation: { ...settings.navigation },
     toolbar: {
       ...settings.toolbar,
       items: [...settings.toolbar.items],
@@ -193,6 +219,10 @@ export function normalizeClipboardSettings(
       ...defaults.preview,
       ...(input?.preview ?? {}),
     },
+    panel: {
+      ...defaults.panel,
+      ...(input?.panel ?? {}),
+    },
     shortcuts: {
       ...defaults.shortcuts,
       ...(input?.shortcuts ?? {}),
@@ -202,6 +232,10 @@ export function normalizeClipboardSettings(
       focus_search: input?.shortcuts?.focus_search
         ? [...input.shortcuts.focus_search]
         : [...defaults.shortcuts.focus_search],
+    },
+    navigation: {
+      ...defaults.navigation,
+      ...(input?.navigation ?? {}),
     },
     toolbar: {
       ...defaults.toolbar,

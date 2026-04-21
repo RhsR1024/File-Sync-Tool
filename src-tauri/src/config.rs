@@ -439,3 +439,43 @@ pub fn get_default_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
 pub fn get_default_config_dir(app_handle: &tauri::AppHandle) -> PathBuf {
     app_handle.path().app_config_dir().unwrap()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn app_config_deserializes_legacy_clipboard_settings_with_new_nested_defaults() {
+        let config: AppConfig = serde_json::from_value(json!({
+            "tasks": [],
+            "local_path": "E:/UMS_TEMP",
+            "interval_minutes": 10,
+            "time_ranges": [],
+            "file_extensions": [],
+            "filename_includes": [],
+            "deploy_enabled": false,
+            "servers": [],
+            "command_groups": [],
+            "local_command_groups": [],
+            "clipboard": {
+                "enabled": true,
+                "toolbar": {
+                    "items": ["search", "filter"]
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(config.clipboard.toolbar.visible);
+        assert_eq!(
+            config.clipboard.toolbar.items,
+            vec!["search".to_string(), "filter".to_string()]
+        );
+        assert!(config.clipboard.panel.follow_cursor);
+        assert!(!config.clipboard.panel.remember_position);
+        assert!(config.clipboard.panel.animate);
+        assert!(config.clipboard.panel.use_mica);
+        assert!(config.clipboard.navigation.enabled);
+    }
+}

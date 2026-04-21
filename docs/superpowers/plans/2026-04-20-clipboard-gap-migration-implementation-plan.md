@@ -579,7 +579,7 @@ cargo test clipboard --manifest-path src-tauri\Cargo.toml
 Expected: green.
 
 Status 2026-04-21:
-- Task 7 implementation and verification are complete; only the commit step remains.
+- Task 7 is complete and committed as `5600680` (`feat(clipboard): add quick paste and range selection`).
 - Added a pure interaction helper/test pair (`src/composables/clipboardInteractionHelpers.ts`, `src/composables/clipboardInteractionHelpers.test.mjs`) to lock down range-selection math and Alt+1..9 quick-paste targeting.
 - `useClipboardStore.ts` now owns batch-mode state, ordered selected ids, shift-range anchor tracking, and visible-list pruning so panel and manager batch actions read from one source of truth.
 - `useClipboardHotkey.ts` now maps Alt+1..9 to the current visible panel row order, while `ClipboardList.vue` emits shift-aware toggle payloads so range selection works inside the shared list component.
@@ -596,7 +596,7 @@ $env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTF
 
 Observed: `8` Node tests passed across the Task 6/7 helper suites, `cmd /c pnpm check` completed successfully, and `62` clipboard Rust tests passed with `0` failures.
 
-- [ ] **Step 7.5: Commit**
+- [x] **Step 7.5: Commit**
 
 ```powershell
 git add src/composables/useClipboardHotkey.ts src/composables/useClipboardStore.ts src/pages/ClipboardPanelPage.vue src/pages/ClipboardManagerPage.vue src/components/clipboard/ClipboardList.vue src-tauri/src/clipboard/hotkey.rs src-tauri/src/clipboard/commands.rs
@@ -618,11 +618,11 @@ git commit -m "feat(clipboard): add quick paste and range selection"
 
 **Depends on:** Task 7
 
-- [ ] **Step 8.1: Write failing tests for settings round-trip behavior**
+- [x] **Step 8.1: Write failing tests for settings round-trip behavior**
 
 Add Rust tests for default serialization/deserialization and any helper logic introduced for new nested settings.
 
-- [ ] **Step 8.2: Add M8 settings fields**
+- [x] **Step 8.2: Add M8 settings fields**
 
 Include:
 - display density, preview lines, time format, metadata toggles
@@ -633,15 +633,32 @@ Include:
 - toolbar visibility and ordering
 - audio flags
 
-- [ ] **Step 8.3: Keep old configs loading**
+- [x] **Step 8.3: Keep old configs loading**
 
 `#[serde(default)]` must protect every new field path.
 
-- [ ] **Step 8.4: Run tests**
+- [x] **Step 8.4: Run tests**
 
 ```powershell
 cargo test clipboard --manifest-path src-tauri\Cargo.toml
 ```
+
+Status 2026-04-21:
+- Task 8 implementation and verification are complete; only the commit step remains.
+- Added new nested clipboard settings coverage for panel behavior and navigation (`panel.follow_cursor`, `panel.remember_position`, `panel.animate`, `panel.use_mica`, `navigation.enabled`) plus `toolbar.visible` defaults on both the Rust and TypeScript contracts.
+- `src-tauri/src/clipboard/models.rs` now includes explicit serde-defaulted structs/tests for the new settings paths, while `src-tauri/src/config.rs` verifies legacy `AppConfig` JSON still deserializes with the new nested defaults.
+- `src/lib/clipboardTypes.ts` and `src/lib/clipboardTypes.contract.test.ts` now mirror the expanded settings shape so frontend normalization keeps old payloads compatible.
+- No `src/lib/tauri.ts` or `src-tauri/src/clipboard/commands.rs` edits were required in this step because the existing `cb_get_settings` / `cb_save_settings` and `clipboardApi.getSettings` / `saveSettings` paths already pass the entire `ClipboardSettings` object through unchanged.
+- Verification passed with:
+
+```powershell
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTFLAGS='-C debuginfo=0'; cargo test clipboard::models::tests --manifest-path src-tauri\Cargo.toml
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTFLAGS='-C debuginfo=0'; cargo test app_config_deserializes_legacy_clipboard_settings_with_new_nested_defaults --manifest-path src-tauri\Cargo.toml
+cmd /c pnpm check
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTFLAGS='-C debuginfo=0'; cargo test clipboard --manifest-path src-tauri\Cargo.toml
+```
+
+Observed: `2` new clipboard-settings model tests passed, `1` legacy-config round-trip test passed, `cmd /c pnpm check` completed successfully, and `cargo test clipboard --manifest-path src-tauri\Cargo.toml` finished green with `65` clipboard/config tests passing.
 
 - [ ] **Step 8.5: Commit**
 

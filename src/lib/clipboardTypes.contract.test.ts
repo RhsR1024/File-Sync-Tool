@@ -36,6 +36,12 @@ export const clipboardSettingsContract: ClipboardSettings = {
     zoom_step: 10,
     position: 'auto',
   },
+  panel: {
+    follow_cursor: true,
+    remember_position: false,
+    animate: true,
+    use_mica: true,
+  },
   shortcuts: {
     quick_paste: ['Alt+1'],
     paste: 'Enter',
@@ -47,7 +53,11 @@ export const clipboardSettingsContract: ClipboardSettings = {
     close: 'Escape',
   },
   toolbar: {
+    visible: true,
     items: ['search', 'filter', 'batch', 'settings', 'lock'],
+  },
+  navigation: {
+    enabled: true,
   },
   data: {
     max_items: 1000,
