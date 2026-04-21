@@ -25,3 +25,7 @@ dist-ssr
 .vite
 .pnpm-store/
 .worktrees/
+
+# 对标参考源码（仅本地研究，禁止提交）
+/ElegantClipboard-main/
+

@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Worktree Shared Dependencies / Worktree 共享依赖
+
+- When using a git worktree in this repository, prefer reusing the main workspace dependency tree and build artifacts instead of duplicating large directories per worktree.
+- Frontend dependencies should reuse the repo-root `node_modules`; in Windows worktrees, prefer a junction or symlink from the worktree `node_modules`.
+- Rust and Tauri commands in a worktree should reuse a shared build directory through `CARGO_TARGET_DIR`, preferably the repo-root `src-tauri/target`.
+- If a shared dependency path is recreated or disappears, verify `vite`, `vue-tsc`, and cargo artifacts resolve correctly before treating the environment as broken.
+- Do not commit temporary dependency copies created only to bypass worktree isolation.
+
 ---
 
 ## 项目概述

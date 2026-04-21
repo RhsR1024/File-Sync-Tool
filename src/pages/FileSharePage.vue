@@ -598,51 +598,6 @@ onUnmounted(() => {
       <div class="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1.7fr)_minmax(320px,380px)]">
         <div class="space-y-4">
           <div class="fs-card">
-            <div class="mb-4 flex items-center justify-between gap-3">
-              <div>
-                <p class="fs-label-sm">{{ t('tools.fileShare.sharedRootsTitle') }}</p>
-                <p class="text-sm text-slate-500">{{ t('tools.fileShare.sharedRootsDescription') }}</p>
-              </div>
-              <button type="button" :disabled="formDisabled" @click="addRoot()" class="fs-btn fs-btn-soft">
-                <Plus class="h-4 w-4" />{{ t('tools.fileShare.addDir') }}
-              </button>
-            </div>
-            <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
-              {{ t('tools.fileShare.noDirs') }}
-            </div>
-            <div v-else class="fs-root-list">
-              <div v-for="(root, index) in draft.roots" :key="root.id" class="fs-root-row">
-                <div class="fs-root-row-top">
-                  <div class="min-w-0">
-                    <label class="fs-label">{{ t('tools.fileShare.aliasLabel') }}</label>
-                    <input v-model="root.alias" :disabled="formDisabled" class="fs-input w-full" />
-                  </div>
-
-                  <div class="fs-root-actions">
-                    <label class="fs-inline-toggle">
-                      <span class="fs-toggle">
-                        <input v-model="root.enabled" type="checkbox" :disabled="formDisabled" class="sr-only">
-                        <span class="fs-toggle-track" :class="root.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="root.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span>
-                      </span>
-                      <span>{{ t('tools.fileShare.enabledLabel') }}</span>
-                    </label>
-
-                    <button type="button" :disabled="formDisabled" @click="addRoot(root)" class="fs-btn fs-btn-plain fs-btn-compact">
-                      {{ t('tools.fileShare.changePath') }}
-                    </button>
-
-                    <button type="button" :disabled="formDisabled" @click="draft.roots.splice(index, 1)" class="fs-btn fs-btn-danger fs-btn-icon">
-                      <Trash2 class="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-
-                <div class="fs-root-path" :title="root.path">{{ root.path }}</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="fs-card">
             <p class="fs-label-sm">{{ t('tools.fileShare.generalSettingsTitle') }}</p>
             <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div>
@@ -691,6 +646,51 @@ onUnmounted(() => {
                   {{ rule }}
                   <button type="button" :disabled="formDisabled" class="ml-2 text-slate-400 hover:text-red-500" @click="draft.ip_rules.splice(index, 1)">×</button>
                 </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="fs-card">
+            <div class="mb-4 flex items-center justify-between gap-3">
+              <div>
+                <p class="fs-label-sm">{{ t('tools.fileShare.sharedRootsTitle') }}</p>
+                <p class="text-sm text-slate-500">{{ t('tools.fileShare.sharedRootsDescription') }}</p>
+              </div>
+              <button type="button" :disabled="formDisabled" @click="addRoot()" class="fs-btn fs-btn-soft">
+                <Plus class="h-4 w-4" />{{ t('tools.fileShare.addDir') }}
+              </button>
+            </div>
+            <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+              {{ t('tools.fileShare.noDirs') }}
+            </div>
+            <div v-else class="fs-root-list">
+              <div v-for="(root, index) in draft.roots" :key="root.id" class="fs-root-row">
+                <div class="fs-root-row-top">
+                  <div class="min-w-0">
+                    <label class="fs-label">{{ t('tools.fileShare.aliasLabel') }}</label>
+                    <input v-model="root.alias" :disabled="formDisabled" class="fs-input w-full" />
+                  </div>
+
+                  <div class="fs-root-actions">
+                    <label class="fs-inline-toggle">
+                      <span class="fs-toggle">
+                        <input v-model="root.enabled" type="checkbox" :disabled="formDisabled" class="sr-only">
+                        <span class="fs-toggle-track" :class="root.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="root.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span>
+                      </span>
+                      <span>{{ t('tools.fileShare.enabledLabel') }}</span>
+                    </label>
+
+                    <button type="button" :disabled="formDisabled" @click="addRoot(root)" class="fs-btn fs-btn-plain fs-btn-compact">
+                      {{ t('tools.fileShare.changePath') }}
+                    </button>
+
+                    <button type="button" :disabled="formDisabled" @click="draft.roots.splice(index, 1)" class="fs-btn fs-btn-danger fs-btn-icon">
+                      <Trash2 class="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <div class="fs-root-path" :title="root.path">{{ root.path }}</div>
               </div>
             </div>
           </div>
