@@ -343,9 +343,9 @@ export const messages = {
     tools: {
       frameworkPassword: {
         title: 'Framework Password Change',
-        description: 'Modify the default password for framework admin account via RSA-encrypted API',
+        description: 'Modify the default password for framework admin account via SHA-256 hashed API',
         info: 'Framework Password Change',
-        infoDetail: 'This tool will change the framework\'s admin account password on the specified servers. The password is RSA-encrypted before transmission.',
+        infoDetail: 'This tool will change the framework\'s admin account password on the specified servers. The password is SHA-256 hashed before transmission.',
         selectServer: 'Select Servers',
         optional: 'Optional',
         noServers: 'No enabled servers configured',
@@ -376,7 +376,7 @@ export const messages = {
         oldPasswordPlaceholder: 'Default: 123456',
         newPassword: 'New Password',
         newPasswordPlaceholder: 'Default: admin_123',
-        passwordConfigHint: 'Passwords will be RSA-encrypted before transmission. Leave blank to use defaults.',
+        passwordConfigHint: 'Passwords will be SHA-256 hashed before transmission. Leave blank to use defaults.',
       },
       applianceSsh: {
         title: 'Enable Appliance SSH',
@@ -1277,9 +1277,9 @@ export const messages = {
     tools: {
       frameworkPassword: {
         title: '框架密码修改',
-        description: '通过 RSA 加密 API 修改框架上 admin 账户的默认密码',
+        description: '通过 SHA-256 哈希 API 修改框架上 admin 账户的默认密码',
         info: '框架密码修改',
-        infoDetail: '此工具将修改指定服务器上框架 admin 账户的密码，密码在传输前会进行 RSA 加密。',
+        infoDetail: '此工具将修改指定服务器上框架 admin 账户的密码，密码在传输前会进行 SHA-256 哈希处理。',
         selectServer: '选择服务器',
         optional: '可选',
         noServers: '未配置已启用的服务器',
@@ -1310,7 +1310,7 @@ export const messages = {
         oldPasswordPlaceholder: '默认：123456',
         newPassword: '新密码',
         newPasswordPlaceholder: '默认：admin_123',
-        passwordConfigHint: '密码在传输前会进行 RSA 加密，留空则使用默认值。',
+        passwordConfigHint: '密码在传输前会进行 SHA-256 哈希处理，留空则使用默认值。',
       },
       applianceSsh: {
         title: '开启一体机 SSH',
