@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::clipboard::models::{ClipboardAppFilterMode, ClipboardAppFilterSettings};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceAppInfo {
     pub app_name: String,
@@ -29,6 +31,93 @@ pub fn resolve_display_name(exe_path: &Path, file_description: Option<&str>) -> 
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_else(|| "Unknown".to_string())
+}
+
+fn wildcard_match(pattern: &str, candidate: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().flat_map(|ch| ch.to_lowercase()).collect();
+    let candidate: Vec<char> = candidate.chars().flat_map(|ch| ch.to_lowercase()).collect();
+
+    let mut pattern_index = 0usize;
+    let mut candidate_index = 0usize;
+    let mut last_star = None;
+    let mut last_star_match = 0usize;
+
+    while candidate_index < candidate.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == '?' || pattern[pattern_index] == candidate[candidate_index])
+        {
+            pattern_index += 1;
+            candidate_index += 1;
+            continue;
+        }
+
+        if pattern_index < pattern.len() && pattern[pattern_index] == '*' {
+            last_star = Some(pattern_index);
+            pattern_index += 1;
+            last_star_match = candidate_index;
+            continue;
+        }
+
+        if let Some(star_index) = last_star {
+            pattern_index = star_index + 1;
+            last_star_match += 1;
+            candidate_index = last_star_match;
+            continue;
+        }
+
+        return false;
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == '*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern.len()
+}
+
+pub fn matches_app_pattern(info: &SourceAppInfo, pattern: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+
+    wildcard_match(pattern, &info.app_name)
+        || info
+            .exe_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| wildcard_match(pattern, name))
+        || info
+            .exe_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| wildcard_match(pattern, stem))
+        || wildcard_match(pattern, &info.exe_path.to_string_lossy())
+}
+
+pub fn should_capture_source_app(
+    info: Option<&SourceAppInfo>,
+    settings: &ClipboardAppFilterSettings,
+) -> bool {
+    if !settings.enabled {
+        return true;
+    }
+
+    let mut patterns = settings
+        .patterns
+        .iter()
+        .map(|pattern| pattern.trim())
+        .filter(|pattern| !pattern.is_empty())
+        .peekable();
+    if patterns.peek().is_none() {
+        return true;
+    }
+
+    let matched = info.is_some_and(|info| patterns.any(|pattern| matches_app_pattern(info, pattern)));
+    match settings.mode {
+        ClipboardAppFilterMode::Blacklist => !matched,
+        ClipboardAppFilterMode::Whitelist => matched,
+    }
 }
 
 fn decode_clipboard_text_bytes(bytes: &[u8]) -> Option<String> {
@@ -340,6 +429,15 @@ fn get_file_description(exe_path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard::models::{ClipboardAppFilterMode, ClipboardAppFilterSettings};
+
+    fn sample_info(app_name: &str, exe_path: &str) -> SourceAppInfo {
+        SourceAppInfo {
+            app_name: app_name.to_string(),
+            exe_path: PathBuf::from(exe_path),
+            icon_cache_key: "icon-key".to_string(),
+        }
+    }
 
     #[test]
     fn icon_cache_key_is_case_insensitive_and_short() {
@@ -392,5 +490,62 @@ mod tests {
     fn decode_clipboard_text_bytes_preserves_non_utf8_rtf_payload() {
         let decoded = decode_clipboard_text_bytes(b"{\\rtf1\\ansi caf\xe9}\0");
         assert_eq!(decoded.as_deref(), Some("{\\rtf1\\ansi caf\u{00e9}}"));
+    }
+
+    #[test]
+    fn matches_app_pattern_checks_display_name_and_executable_candidates() {
+        let info = sample_info(
+            "Visual Studio Code",
+            "C:\\Users\\Admin\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+        );
+
+        assert!(matches_app_pattern(&info, "Visual Studio Code"));
+        assert!(matches_app_pattern(&info, "visual*code"));
+        assert!(matches_app_pattern(&info, "Code.exe"));
+        assert!(matches_app_pattern(&info, "code"));
+        assert!(matches_app_pattern(&info, "*vs code\\Code.exe"));
+        assert!(!matches_app_pattern(&info, "SnippingTool.exe"));
+    }
+
+    #[test]
+    fn should_capture_source_app_applies_blacklist_and_whitelist_rules() {
+        let chrome = sample_info(
+            "Google Chrome",
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        );
+        let code = sample_info(
+            "Visual Studio Code",
+            "C:\\Users\\Admin\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+        );
+        let blacklist = ClipboardAppFilterSettings {
+            enabled: true,
+            mode: ClipboardAppFilterMode::Blacklist,
+            patterns: vec!["*chrome*".to_string(), "SnippingTool.exe".to_string()],
+        };
+        let whitelist = ClipboardAppFilterSettings {
+            enabled: true,
+            mode: ClipboardAppFilterMode::Whitelist,
+            patterns: vec!["Code.exe".to_string(), "Windows Terminal".to_string()],
+        };
+
+        assert!(!should_capture_source_app(Some(&chrome), &blacklist));
+        assert!(should_capture_source_app(Some(&code), &blacklist));
+        assert!(should_capture_source_app(Some(&code), &whitelist));
+        assert!(!should_capture_source_app(Some(&chrome), &whitelist));
+        assert!(should_capture_source_app(None, &blacklist));
+        assert!(!should_capture_source_app(None, &whitelist));
+    }
+
+    #[test]
+    fn should_capture_source_app_ignores_empty_patterns() {
+        let info = sample_info("Notepad", "C:\\Windows\\System32\\notepad.exe");
+        let settings = ClipboardAppFilterSettings {
+            enabled: true,
+            mode: ClipboardAppFilterMode::Whitelist,
+            patterns: vec!["   ".to_string()],
+        };
+
+        assert!(should_capture_source_app(Some(&info), &settings));
+        assert!(should_capture_source_app(None, &settings));
     }
 }

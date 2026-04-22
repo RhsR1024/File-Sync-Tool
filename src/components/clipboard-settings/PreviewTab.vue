@@ -13,9 +13,14 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const previewPositionOptions = ['auto', 'left', 'right'] as const;
+const delayPresets = [150, 300, 500] as const;
 
 function patch(next: DeepPartial<ClipboardSettings>) {
   emit('patch', next);
+}
+
+function applyDelayPreset(delay: number) {
+  patch({ preview: { delay_ms: delay } });
 }
 </script>
 
@@ -24,6 +29,10 @@ function patch(next: DeepPartial<ClipboardSettings>) {
     <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <h4 class="text-sm font-semibold text-slate-900">{{ t('clipboard.settings.tabs.preview') }}</h4>
       <div class="mt-4 space-y-4">
+        <p class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500">
+          {{ t('clipboard.settings.preview.delayHint') }}
+        </p>
+
         <label class="flex items-center justify-between gap-4">
           <span class="text-sm text-slate-700">{{ t('clipboard.settings.preview.imageEnabled') }}</span>
           <input
@@ -46,6 +55,20 @@ function patch(next: DeepPartial<ClipboardSettings>) {
           <div class="flex items-center justify-between gap-3">
             <span class="text-sm font-medium text-slate-700">{{ t('clipboard.settings.previewDelayLabel') }}</span>
             <span class="text-xs text-slate-500">{{ props.settings.preview.delay_ms }}ms</span>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button
+              v-for="preset in delayPresets"
+              :key="preset"
+              type="button"
+              class="rounded-full border px-3 py-1 text-[11px] font-medium transition-colors"
+              :class="props.settings.preview.delay_ms === preset
+                ? 'border-slate-900 bg-slate-900 text-white'
+                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'"
+              @click="applyDelayPreset(preset)"
+            >
+              {{ preset }}ms
+            </button>
           </div>
           <input
             type="range"

@@ -101,6 +101,12 @@ impl ClipboardHandler for Handler {
 
 fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
     let source_info = source::get_clipboard_source_app();
+    let app_filter = state.settings.read().app_filter.clone();
+    if !source::should_capture_source_app(source_info.as_ref(), &app_filter) {
+        // Skip before touching heavier clipboard payload APIs when the source app is excluded.
+        return Ok(());
+    }
+
     let rtf = source::read_clipboard_rtf().and_then(normalize_optional_text);
 
     let mut clipboard = Clipboard::new().map_err(|err| format!("clipboard init: {err}"))?;

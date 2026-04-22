@@ -39,6 +39,8 @@ pub fn gc_orphan_images(
 ) -> Result<u64, String> {
     use rayon::prelude::*;
 
+    const PARALLEL_DELETE_THRESHOLD: usize = 32;
+
     if !image_dir.exists() {
         return Ok(0);
     }
@@ -49,20 +51,23 @@ pub fn gc_orphan_images(
         .filter(|p| p.extension().map(|e| e == "png").unwrap_or(false))
         .collect();
 
-    let deleted: u64 = files
-        .par_iter()
-        .filter(|p| {
-            let s = p.to_string_lossy().to_string();
-            !referenced_paths.contains(&s)
-        })
-        .map(|p| {
-            if std::fs::remove_file(p).is_ok() {
-                1u64
-            } else {
-                0
-            }
-        })
-        .sum();
+    let is_orphan = |path: &PathBuf| {
+        let display = path.to_string_lossy();
+        !referenced_paths.contains(display.as_ref())
+    };
+    let delete_file = |path: &PathBuf| u64::from(std::fs::remove_file(path).is_ok());
+
+    let deleted: u64 = if files.len() < PARALLEL_DELETE_THRESHOLD {
+        files.iter()
+            .filter(|path| is_orphan(path))
+            .map(delete_file)
+            .sum()
+    } else {
+        files.par_iter()
+            .filter(|path| is_orphan(path))
+            .map(delete_file)
+            .sum()
+    };
 
     Ok(deleted)
 }

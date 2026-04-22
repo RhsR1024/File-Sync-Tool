@@ -140,4 +140,46 @@ mod tests {
             .unwrap();
         assert_eq!(pinned_count, 1);
     }
+
+    #[test]
+    fn cleanup_by_age_keeps_favorites_and_pinned_items() {
+        let conn = seed(4);
+        let old_ms = chrono::Utc::now().timestamp_millis() - 5 * 86_400_000;
+        conn.execute(
+            "UPDATE clipboard_items
+             SET created_at = ?1,
+                 updated_at = ?1",
+            params![old_ms],
+        )
+        .unwrap();
+        conn.execute("UPDATE clipboard_items SET is_favorite = 1 WHERE id = 1", [])
+            .unwrap();
+        conn.execute("UPDATE clipboard_items SET is_pinned = 1 WHERE id = 2", [])
+            .unwrap();
+
+        let settings = ClipboardSettings {
+            max_items: 0,
+            retain_days: 1,
+            ..ClipboardSettings::default()
+        };
+        let (by_age, by_cap) = run_cleanup(&conn, &settings).unwrap();
+        assert_eq!(by_age, 2);
+        assert_eq!(by_cap, 0);
+
+        let remaining: Vec<(i64, bool, bool)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, is_favorite, is_pinned
+                     FROM clipboard_items
+                     ORDER BY id ASC",
+                )
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+
+        assert_eq!(remaining, vec![(1, true, false), (2, false, true)]);
+    }
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import type { DeepPartial, ClipboardSettings } from '@/lib/clipboardTypes';
@@ -14,7 +14,18 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const modeOptions = ['blacklist', 'whitelist'] as const;
+const examplePatterns = [
+  'Code.exe',
+  '*chrome*',
+  'C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE',
+] as const;
 const patternsText = ref(props.settings.app_filter.patterns.join('\n'));
+const modeHintKey = computed(() => (
+  props.settings.app_filter.mode === 'blacklist'
+    ? 'clipboard.settings.appFilter.modeHintBlacklist'
+    : 'clipboard.settings.appFilter.modeHintWhitelist'
+));
+const patternCount = computed(() => props.settings.app_filter.patterns.length);
 
 watch(
   () => props.settings.app_filter.patterns,
@@ -37,6 +48,17 @@ function commitPatterns() {
     },
   });
 }
+
+function appendExample(pattern: string) {
+  const existing = patternsText.value
+    .split(/\r?\n/u)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!existing.includes(pattern)) {
+    patternsText.value = [...existing, pattern].join('\n');
+    commitPatterns();
+  }
+}
 </script>
 
 <template>
@@ -53,8 +75,17 @@ function commitPatterns() {
           >
         </label>
 
+        <p class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500">
+          {{ t(modeHintKey) }}
+        </p>
+
         <div class="space-y-2">
-          <div class="text-sm font-medium text-slate-700">{{ t('clipboard.settings.appFilter.mode') }}</div>
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-medium text-slate-700">{{ t('clipboard.settings.appFilter.mode') }}</div>
+            <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">
+              {{ patternCount }} {{ t('clipboard.settings.appFilter.rulesSuffix') }}
+            </span>
+          </div>
           <div class="flex flex-wrap gap-2">
             <button
               v-for="option in modeOptions"
@@ -72,7 +103,10 @@ function commitPatterns() {
         </div>
 
         <label class="block space-y-2">
-          <div class="text-sm font-medium text-slate-700">{{ t('clipboard.settings.appFilter.patterns') }}</div>
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm font-medium text-slate-700">{{ t('clipboard.settings.appFilter.patterns') }}</div>
+            <span class="text-[11px] text-slate-400">{{ t('clipboard.settings.appFilter.examples') }}</span>
+          </div>
           <textarea
             v-model="patternsText"
             rows="8"
@@ -80,6 +114,20 @@ function commitPatterns() {
             placeholder="Code.exe&#10;SnippingTool.exe"
             @change="commitPatterns"
           />
+          <p class="text-xs leading-5 text-slate-500">
+            {{ t('clipboard.settings.appFilter.patternsHint') }}
+          </p>
+          <div class="flex flex-wrap gap-2">
+            <button
+              v-for="pattern in examplePatterns"
+              :key="pattern"
+              type="button"
+              class="rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
+              @click="appendExample(pattern)"
+            >
+              {{ pattern }}
+            </button>
+          </div>
         </label>
       </div>
     </div>

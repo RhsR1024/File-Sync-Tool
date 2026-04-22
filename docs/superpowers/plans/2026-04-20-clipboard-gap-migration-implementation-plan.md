@@ -1083,18 +1083,18 @@ Observed:
 
 **Depends on:** Task 14
 
-- [ ] **Step 15.1: Write failing tests for app-filter matching and cleanup behavior**
+- [x] **Step 15.1: Write failing tests for app-filter matching and cleanup behavior**
 
 Use helper-level tests to cover:
 - wildcard matching
 - blacklist/whitelist rules
 - cleanup exclusions for pinned/favorites
 
-- [ ] **Step 15.2: Implement app filtering and final cleanup hooks**
+- [x] **Step 15.2: Implement app filtering and final cleanup hooks**
 
 The watcher should skip capture for excluded apps and cleanup flows should preserve the intended records/assets.
 
-- [ ] **Step 15.3: Tune for the spec's performance targets**
+- [x] **Step 15.3: Tune for the spec's performance targets**
 
 Check:
 - large-list search path
@@ -1102,19 +1102,36 @@ Check:
 - preview open latency
 - cleanup cost
 
-- [ ] **Step 15.4: Run checks**
+- [x] **Step 15.4: Run checks**
 
 ```powershell
 cargo test clipboard --manifest-path src-tauri\Cargo.toml
 cmd /c pnpm check
 ```
 
-- [ ] **Step 15.5: Commit**
+- [x] **Step 15.5: Commit**
 
 ```powershell
 git add src-tauri/src/clipboard/watcher.rs src-tauri/src/clipboard/source.rs src-tauri/src/clipboard/image_store.rs src-tauri/src/clipboard/retention.rs src/components/clipboard-settings/AppFilterTab.vue src/components/clipboard-settings/AboutTab.vue src/components/clipboard-settings/PreviewTab.vue src/components/clipboard-settings/AudioTab.vue
 git commit -m "feat(clipboard): finish filters cleanup and performance tuning"
 ```
+
+Status 2026-04-22:
+- Task 15 is complete and closes the remaining M9 filter/cleanup gap before the final verification sweep.
+- Added RED/GREEN coverage for wildcard app matching, blacklist/whitelist decisions, and cleanup protection for pinned/favorite records.
+- `watcher.rs` now short-circuits excluded source apps before opening heavier clipboard payload APIs, and `source.rs` matches rules against display name, exe name, file stem, and full path with case-insensitive `*` / `?` support.
+- `image_store.rs` now avoids rayon overhead on tiny cleanup batches and skips extra path-string allocations during orphan-image scans.
+- The settings tabs now explain filter semantics, expose quick pattern / delay / volume presets, disable audio sub-controls when audio is off, and summarize cleanup/filter state in the About tab.
+- Fresh verification passed with:
+
+```powershell
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'
+$env:RUSTFLAGS='-C debuginfo=0'
+cargo test clipboard --manifest-path src-tauri\Cargo.toml
+cmd /c pnpm check
+```
+
+Observed: `81` clipboard-related Rust tests passed, `0` failed; `cmd /c pnpm check` completed successfully.
 
 ### Task 16: Final Verification, Regression Sweep, And Release Readiness
 
