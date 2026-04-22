@@ -160,15 +160,6 @@ impl HttpState {
     }
 }
 
-/// Deletes the temp file when dropped.
-struct TempFile(PathBuf);
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 // ─── Tauri Commands ─────────────────────────────────────────
 
 #[tauri::command]

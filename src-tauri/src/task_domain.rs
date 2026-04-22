@@ -366,8 +366,7 @@ impl TaskGroup {
             && matches!(
                 base_summary,
                 TaskSummaryStatus::Copying | TaskSummaryStatus::Queued
-            )
-        {
+            ) {
             TaskSummaryStatus::Cancelling
         } else if self.paused && base_summary == TaskSummaryStatus::Copying {
             TaskSummaryStatus::Paused

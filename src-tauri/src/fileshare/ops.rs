@@ -317,10 +317,7 @@ pub fn validate_zip_source_with_limits(
 /// AsyncWrite sink — no Seek required. This lets us pipe the zip bytes to
 /// the HTTP response as they are produced, matching CHFS-style real-time
 /// download progress.
-pub async fn stream_zip_dir(
-    root: &Path,
-    writer: tokio::io::DuplexStream,
-) -> Result<(), String> {
+pub async fn stream_zip_dir(root: &Path, writer: tokio::io::DuplexStream) -> Result<(), String> {
     use async_zip::{base::write::ZipFileWriter, Compression, ZipEntryBuilder};
     use futures_lite::io::AsyncWriteExt;
     use tokio::io::AsyncReadExt;
@@ -376,14 +373,15 @@ pub async fn stream_zip_dir(
                     .write_entry_stream(opts)
                     .await
                     .map_err(|e| format!("Failed to start file entry {}: {}", relative_str, e))?;
-                let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
-                    format!("Failed to open {} for ZIP: {}", path.display(), e)
-                })?;
+                let mut file = tokio::fs::File::open(&path)
+                    .await
+                    .map_err(|e| format!("Failed to open {} for ZIP: {}", path.display(), e))?;
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
-                    let n = file.read(&mut buf).await.map_err(|e| {
-                        format!("Failed reading {} for ZIP: {}", path.display(), e)
-                    })?;
+                    let n = file
+                        .read(&mut buf)
+                        .await
+                        .map_err(|e| format!("Failed reading {} for ZIP: {}", path.display(), e))?;
                     if n == 0 {
                         break;
                     }
