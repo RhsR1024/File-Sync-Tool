@@ -4,7 +4,7 @@ import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller';
 import { VueDraggable } from 'vue-draggable-plus';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { Ellipsis, Trash2, Star } from 'lucide-vue-next';
+import { Ellipsis, Pin, Star, Trash2 } from 'lucide-vue-next';
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 
 import ClipboardAppIcon from '@/components/clipboard/ClipboardAppIcon.vue';
@@ -27,9 +27,11 @@ interface Props {
   compact?: boolean;
   draggable?: boolean;
   showFavoriteButton?: boolean;
+  showPinButton?: boolean;
   showDeleteButton?: boolean;
   batchMode?: boolean;
   selectedIds?: Set<number>;
+  indexOffset?: number;
 }
 
 const props = defineProps<Props>();
@@ -38,6 +40,7 @@ const emit = defineEmits<{
   select: [id: number];
   activate: [id: number];
   favorite: [id: number];
+  pin: [id: number];
   remove: [id: number];
   reorder: [ids: number[]];
   toggle: [payload: { id: number; shiftKey: boolean }];
@@ -91,16 +94,16 @@ function emitToggleRequest(id: number, shiftKey: boolean) {
   emit('toggle', { id, shiftKey });
 }
 
-function onRowKeydown(e: KeyboardEvent, id: number) {
-  if (e.key === 'Enter' || e.key === ' ') {
-    e.preventDefault();
+function onRowKeydown(event: KeyboardEvent, id: number) {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
     emit('select', id);
-    if (props.batchMode) emitToggleRequest(id, e.shiftKey);
+    if (props.batchMode) emitToggleRequest(id, event.shiftKey);
     else emit('activate', id);
   }
 }
 
-function heightOf(it: ClipboardItem): number {
+function heightOf(item: ClipboardItem): number {
   const densityAdjust = (() => {
     switch (displaySettings.value.density) {
       case 'compact':
@@ -113,16 +116,20 @@ function heightOf(it: ClipboardItem): number {
     }
   })();
 
-  if (it.kind === 'image') {
+  if (item.kind === 'image') {
     const fixedHeightAdjust = displaySettings.value.image_auto_height ? 0 : 18;
     return (props.compact ? 148 : 168) + densityAdjust + fixedHeightAdjust;
   }
-  if (it.kind === 'file') {
+  if (item.kind === 'file') {
     return (props.compact ? 80 : 96) + densityAdjust;
   }
 
   const lineAdjust = Math.max(0, previewLines.value - 2) * 18;
   return (props.compact ? 72 : 88) + densityAdjust + lineAdjust;
+}
+
+function displayIndex(index: number): number {
+  return (props.indexOffset ?? 0) + index + 1;
 }
 
 function assetUrl(path: string): string {
@@ -142,9 +149,9 @@ function formatTime(tsMs: number): string {
   );
 }
 
-function formatCharCount(it: ClipboardItem): string {
-  const text = it.content_full ?? it.content_preview ?? '';
-  const count = it.char_count ?? [...text].length;
+function formatCharCount(item: ClipboardItem): string {
+  const text = item.content_full ?? item.content_preview ?? '';
+  const count = item.char_count ?? [...text].length;
   if (count >= 10000) {
     return t('clipboard.meta.charCountWan', { n: (count / 10000).toFixed(1) });
   }
@@ -157,18 +164,18 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-function metaItems(it: ClipboardItem): string[] {
-  const list: string[] = [formatTime(it.updated_at ?? it.created_at)];
+function metaItems(item: ClipboardItem): string[] {
+  const items = [formatTime(item.updated_at ?? item.created_at)];
   if (
     displaySettings.value.show_char_count
-    && (it.kind === 'text' || it.kind === 'html' || it.kind === 'rtf')
+    && (item.kind === 'text' || item.kind === 'html' || item.kind === 'rtf')
   ) {
-    list.push(formatCharCount(it));
+    items.push(formatCharCount(item));
   }
-  if (displaySettings.value.show_byte_size && it.byte_size > 0) {
-    list.push(formatSize(it.byte_size));
+  if (displaySettings.value.show_byte_size && item.byte_size > 0) {
+    items.push(formatSize(item.byte_size));
   }
-  return list;
+  return items;
 }
 
 function imageStyle(): Record<string, string> {
@@ -178,11 +185,11 @@ function imageStyle(): Record<string, string> {
     : { height: maxHeight, maxHeight };
 }
 
-function sourceAppPresentation(it: ClipboardItem) {
+function sourceAppPresentation(item: ClipboardItem) {
   return resolveSourceAppPresentation(
     displaySettings.value.show_source_app,
-    it.source_app,
-    it.source_app_icon,
+    item.source_app,
+    item.source_app_icon,
   );
 }
 
@@ -190,11 +197,11 @@ function isSelected(id: number): boolean {
   return props.selectedIds?.has(id) ?? false;
 }
 
-function onRowClick(e: MouseEvent, id: number) {
+function onRowClick(event: MouseEvent, id: number) {
   emit('select', id);
   if (props.batchMode) {
-    e.stopPropagation();
-    emitToggleRequest(id, e.shiftKey);
+    event.stopPropagation();
+    emitToggleRequest(id, event.shiftKey);
     return;
   }
   emit('activate', id);
@@ -220,10 +227,10 @@ function onMenuButtonClick(event: MouseEvent, item: ClipboardItem) {
 }
 
 const itemsWithHeight = computed(() =>
-  props.items.map((it, idx) => ({
-    ...it,
-    _height: heightOf(it),
-    _idx: idx,
+  props.items.map((item, index) => ({
+    ...item,
+    _height: heightOf(item),
+    _idx: index,
   })),
 );
 
@@ -237,7 +244,7 @@ watch(
 );
 
 function onReorderEnd() {
-  emit('reorder', draggableItems.value.map((it) => it.id));
+  emit('reorder', draggableItems.value.map((item) => item.id));
 }
 </script>
 
@@ -249,35 +256,35 @@ function onReorderEnd() {
     @end="onReorderEnd"
   >
     <div
-      v-for="(it, idx) in draggableItems"
-      :key="it.id"
+      v-for="(item, index) in draggableItems"
+      :key="item.id"
       role="button"
       tabindex="0"
       class="group relative flex w-full cursor-move flex-col rounded-lg border text-left shadow-sm transition-all"
       :class="[
         densityClasses.card,
-        it.id === props.selectedId
+        item.id === props.selectedId
           ? 'border-slate-300 bg-slate-50'
           : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow',
-        props.batchMode && isSelected(it.id) && 'ring-2 ring-blue-400',
+        props.batchMode && isSelected(item.id) && 'ring-2 ring-blue-400',
       ]"
-      :style="{ minHeight: `${heightOf(it)}px` }"
-      @mouseenter="emit('select', it.id)"
-      @click="onRowClick($event, it.id)"
-      @keydown="onRowKeydown($event, it.id)"
-      @contextmenu="onRowContextMenu($event, it)"
+      :style="{ minHeight: `${heightOf(item)}px` }"
+      @mouseenter="emit('select', item.id)"
+      @click="onRowClick($event, item.id)"
+      @keydown="onRowKeydown($event, item.id)"
+      @contextmenu="onRowContextMenu($event, item)"
     >
       <div class="flex items-start gap-2">
         <span
           v-if="props.batchMode"
           class="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border"
-          :class="isSelected(it.id)
+          :class="isSelected(item.id)
             ? 'border-blue-500 bg-blue-500 text-white'
             : 'border-slate-300 bg-white'"
           aria-hidden
         >
           <svg
-            v-if="isSelected(it.id)"
+            v-if="isSelected(item.id)"
             viewBox="0 0 16 16"
             class="h-3 w-3"
             fill="none"
@@ -288,9 +295,9 @@ function onReorderEnd() {
           </svg>
         </span>
 
-        <div v-if="it.kind === 'image' && it.image_path" class="flex-1">
+        <div v-if="item.kind === 'image' && item.image_path" class="flex-1">
           <img
-            :src="assetUrl(it.image_path)"
+            :src="assetUrl(item.image_path)"
             :style="imageStyle()"
             class="w-full rounded object-contain"
             :class="densityClasses.imageCap"
@@ -299,29 +306,37 @@ function onReorderEnd() {
           />
         </div>
         <div
-          v-else-if="it.kind === 'file'"
+          v-else-if="item.kind === 'file'"
           class="flex-1 font-mono text-slate-700"
           :class="densityClasses.file"
         >
           <ClipboardHighlightText
-            :text="it.content_preview"
+            :text="item.content_preview"
             :keywords="highlightKeywords"
             :lines="previewLines"
           />
         </div>
         <div v-else class="flex-1 text-slate-800" :class="densityClasses.text">
           <ClipboardHighlightText
-            :text="it.content_preview"
+            :text="item.content_preview"
             :keywords="highlightKeywords"
             :lines="previewLines"
           />
         </div>
 
-        <span
-          v-if="it.is_favorite"
-          class="shrink-0 text-[13px] text-amber-500"
-          aria-hidden
-        >鈽?/span>
+        <div class="mt-0.5 flex shrink-0 items-center gap-1">
+          <Star
+            v-if="item.is_favorite"
+            class="h-3.5 w-3.5 text-amber-500"
+            fill="currentColor"
+            aria-hidden="true"
+          />
+          <Pin
+            v-if="item.is_pinned"
+            class="h-3.5 w-3.5 text-amber-700"
+            aria-hidden="true"
+          />
+        </div>
       </div>
 
       <div
@@ -329,32 +344,32 @@ function onReorderEnd() {
         :class="densityClasses.meta"
       >
         <div class="flex min-w-0 items-center gap-1.5">
-          <template v-for="(m, i) in metaItems(it)" :key="i">
-            <span v-if="i > 0" class="text-slate-300">路</span>
-            <span class="truncate">{{ m }}</span>
+          <template v-for="(meta, metaIndex) in metaItems(item)" :key="metaIndex">
+            <span v-if="metaIndex > 0" class="text-slate-300">·</span>
+            <span class="truncate">{{ meta }}</span>
           </template>
         </div>
 
         <div class="flex shrink-0 items-center gap-1.5">
           <span
-            v-if="sourceAppPresentation(it).showIcon || sourceAppPresentation(it).showName"
+            v-if="sourceAppPresentation(item).showIcon || sourceAppPresentation(item).showName"
             class="flex items-center gap-1 text-slate-500"
           >
             <ClipboardAppIcon
-              v-if="sourceAppPresentation(it).showIcon"
-              :icon-path="it.source_app_icon"
-              :source-app="it.source_app"
+              v-if="sourceAppPresentation(item).showIcon"
+              :icon-path="item.source_app_icon"
+              :source-app="item.source_app"
             />
             <span
-              v-if="sourceAppPresentation(it).showName"
+              v-if="sourceAppPresentation(item).showName"
               class="max-w-[96px] truncate"
-            >{{ it.source_app }}</span>
+            >{{ item.source_app }}</span>
           </span>
           <span
             class="inline-flex min-w-[20px] items-center justify-center rounded-full bg-slate-100 px-1.5 font-semibold text-slate-500"
             :class="densityClasses.badge"
           >
-            {{ idx + 1 }}
+            {{ displayIndex(index) }}
           </span>
         </div>
       </div>
@@ -367,17 +382,26 @@ function onReorderEnd() {
           v-if="props.showFavoriteButton"
           type="button"
           class="rounded-full p-1 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-500"
-          :title="it.is_favorite ? t('clipboard.actions.unfavorite') : t('clipboard.actions.favorite')"
-          @click.stop="emit('favorite', it.id)"
+          :title="item.is_favorite ? t('clipboard.actions.unfavorite') : t('clipboard.actions.favorite')"
+          @click.stop="emit('favorite', item.id)"
         >
-          <Star class="h-3.5 w-3.5" :fill="it.is_favorite ? 'currentColor' : 'none'" />
+          <Star class="h-3.5 w-3.5" :fill="item.is_favorite ? 'currentColor' : 'none'" />
+        </button>
+        <button
+          v-if="props.showPinButton"
+          type="button"
+          class="rounded-full p-1 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-700"
+          :title="item.is_pinned ? t('clipboard.actions.unpin') : t('clipboard.actions.pin')"
+          @click.stop="emit('pin', item.id)"
+        >
+          <Pin class="h-3.5 w-3.5" :fill="item.is_pinned ? 'currentColor' : 'none'" />
         </button>
         <button
           v-if="props.showDeleteButton"
           type="button"
           class="rounded-full p-1 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
           :title="t('clipboard.actions.delete')"
-          @click.stop="emit('remove', it.id)"
+          @click.stop="emit('remove', item.id)"
         >
           <Trash2 class="h-3.5 w-3.5" />
         </button>
@@ -385,7 +409,7 @@ function onReorderEnd() {
           type="button"
           class="rounded-full p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
           :title="t('clipboard.actions.moreActions')"
-          @click.stop="onMenuButtonClick($event, it)"
+          @click.stop="onMenuButtonClick($event, item)"
         >
           <Ellipsis class="h-3.5 w-3.5" />
         </button>
@@ -408,6 +432,8 @@ function onReorderEnd() {
           item.content_preview,
           item.kind,
           item.image_path,
+          item.is_favorite,
+          item.is_pinned,
           displaySettings.density,
           displaySettings.preview_lines,
           displaySettings.image_max_height,
@@ -482,11 +508,19 @@ function onReorderEnd() {
               />
             </div>
 
-            <span
-              v-if="item.is_favorite"
-              class="shrink-0 text-[13px] text-amber-500"
-              aria-hidden
-            >鈽?/span>
+            <div class="mt-0.5 flex shrink-0 items-center gap-1">
+              <Star
+                v-if="item.is_favorite"
+                class="h-3.5 w-3.5 text-amber-500"
+                fill="currentColor"
+                aria-hidden="true"
+              />
+              <Pin
+                v-if="item.is_pinned"
+                class="h-3.5 w-3.5 text-amber-700"
+                aria-hidden="true"
+              />
+            </div>
           </div>
 
           <div
@@ -494,9 +528,9 @@ function onReorderEnd() {
             :class="densityClasses.meta"
           >
             <div class="flex min-w-0 items-center gap-1.5">
-              <template v-for="(m, i) in metaItems(item)" :key="i">
-                <span v-if="i > 0" class="text-slate-300">路</span>
-                <span class="truncate">{{ m }}</span>
+              <template v-for="(meta, metaIndex) in metaItems(item)" :key="metaIndex">
+                <span v-if="metaIndex > 0" class="text-slate-300">·</span>
+                <span class="truncate">{{ meta }}</span>
               </template>
             </div>
 
@@ -519,7 +553,7 @@ function onReorderEnd() {
                 class="inline-flex min-w-[20px] items-center justify-center rounded-full bg-slate-100 px-1.5 font-semibold text-slate-500"
                 :class="densityClasses.badge"
               >
-                {{ item._idx + 1 }}
+                {{ displayIndex(item._idx) }}
               </span>
             </div>
           </div>
@@ -536,6 +570,15 @@ function onReorderEnd() {
               @click.stop="emit('favorite', item.id)"
             >
               <Star class="h-3.5 w-3.5" :fill="item.is_favorite ? 'currentColor' : 'none'" />
+            </button>
+            <button
+              v-if="props.showPinButton"
+              type="button"
+              class="rounded-full p-1 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-700"
+              :title="item.is_pinned ? t('clipboard.actions.unpin') : t('clipboard.actions.pin')"
+              @click.stop="emit('pin', item.id)"
+            >
+              <Pin class="h-3.5 w-3.5" :fill="item.is_pinned ? 'currentColor' : 'none'" />
             </button>
             <button
               v-if="props.showDeleteButton"

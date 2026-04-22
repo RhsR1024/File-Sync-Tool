@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import type {
+  ClipboardGroup,
   ClipboardItem,
   ClipboardListQuery,
   ClipboardListResult,
@@ -939,6 +940,14 @@ export const clipboardApi = {
     invoke<number>('cb_clear', { keepFavorites }),
   toggleFavorite: (id: number) =>
     invoke<ClipboardItem>('cb_toggle_favorite', { id }),
+  togglePin: (id: number) => invoke<ClipboardItem>('cb_toggle_pin', { id }),
+  listGroups: () => invoke<ClipboardGroup[]>('cb_groups_list'),
+  createGroup: (name: string) => invoke<ClipboardGroup>('cb_groups_create', { name }),
+  renameGroup: (id: number, name: string) =>
+    invoke<ClipboardGroup>('cb_groups_rename', { id, name }),
+  deleteGroup: (id: number) => invoke<void>('cb_groups_delete', { id }),
+  moveToGroup: (itemId: number, groupId: number | null) =>
+    invoke<ClipboardItem>('cb_move_to_group', { itemId, groupId }),
   reorderFavorites: (ids: number[]) => invoke<void>('cb_reorder_favorites', { ids }),
   paste: (id: number) => invoke<void>('cb_paste', { id }),
   pastePlain: (id: number) => invoke<void>('cb_paste_plain', { id }),

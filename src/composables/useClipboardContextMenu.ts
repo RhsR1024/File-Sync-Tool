@@ -1,7 +1,7 @@
 import { computed, ref, type Ref } from 'vue';
 
 import { clipboardApi, openDirectory } from '../lib/tauri';
-import type { ClipboardItem, FilePathStatus } from '../lib/clipboardTypes';
+import type { ClipboardGroup, ClipboardItem, FilePathStatus } from '../lib/clipboardTypes';
 import {
   buildClipboardMenuItems,
   buildImageSaveTargetPath,
@@ -16,12 +16,15 @@ export interface ClipboardContextMenuPosition {
 }
 
 interface UseClipboardContextMenuOptions {
+  groups: Ref<ClipboardGroup[]>;
   selectedIds: Ref<Set<number>>;
   selectedIdOrder?: Ref<number[]>;
   onPaste: (id: number, plain: boolean) => Promise<void>;
   onCopy: (id: number) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onToggleFavorite: (id: number) => Promise<void>;
+  onTogglePin: (id: number) => Promise<void>;
+  onMoveToGroup: (id: number, groupId: number | null) => Promise<void>;
   onError: (error: unknown, action: ClipboardContextActionId) => void;
   onMergeSuccess?: () => void | Promise<void>;
 }
@@ -118,9 +121,21 @@ export function useClipboardContextMenu(options: UseClipboardContextMenuOptions)
         case 'toggleFavorite':
           await options.onToggleFavorite(item.id);
           break;
+        case 'togglePin':
+          await options.onTogglePin(item.id);
+          break;
         case 'delete':
           await options.onDelete(item.id);
           break;
+        default:
+          if (action === 'moveToGroup:none') {
+            await options.onMoveToGroup(item.id, null);
+            break;
+          }
+          if (action.startsWith('moveToGroup:')) {
+            await options.onMoveToGroup(item.id, Number(action.slice('moveToGroup:'.length)));
+            break;
+          }
       }
       closeMenu();
     } catch (error) {
@@ -159,6 +174,7 @@ export function useClipboardContextMenu(options: UseClipboardContextMenuOptions)
     return buildClipboardMenuItems({
       item: activeItem.value,
       fileStatuses: fileStatuses.value,
+      groups: options.groups.value,
     });
   });
 

@@ -10,8 +10,8 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewWindow}
 use crate::clipboard::db;
 use crate::clipboard::data_transfer::{ImportMode, ImportReport};
 use crate::clipboard::models::{
-    ClipboardItem, ClipboardListQuery, ClipboardListResult, ClipboardSettings, ClipboardStats,
-    FilePathStatus,
+    ClipboardGroup, ClipboardItem, ClipboardListQuery, ClipboardListResult, ClipboardSettings,
+    ClipboardStats, FilePathStatus,
 };
 use crate::AppState;
 
@@ -272,6 +272,81 @@ pub fn cb_clear(state: State<'_, AppState>, keep_favorites: bool) -> Result<u64,
 pub fn cb_toggle_favorite(state: State<'_, AppState>, id: i64) -> Result<ClipboardItem, String> {
     let conn = state.clipboard.db.lock();
     db::toggle_favorite(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cb_toggle_pin(state: State<'_, AppState>, id: i64) -> Result<ClipboardItem, String> {
+    let conn = state.clipboard.write_db.lock();
+    db::toggle_pin(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cb_groups_list(state: State<'_, AppState>) -> Result<Vec<ClipboardGroup>, String> {
+    let conn = state.clipboard.read_db.lock();
+    db::list_groups(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cb_groups_create(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<ClipboardGroup, String> {
+    let name = crate::clipboard::groups::normalize_group_name(&name)?;
+    let (group, groups) = {
+        let conn = state.clipboard.write_db.lock();
+        let group = db::create_group(&conn, &name).map_err(|e| e.to_string())?;
+        let groups = crate::clipboard::groups::list_groups_snapshot(&conn)?;
+        (group, groups)
+    };
+    crate::clipboard::groups::emit_groups_changed(&app, &groups);
+    Ok(group)
+}
+
+#[tauri::command]
+pub fn cb_groups_rename(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+) -> Result<ClipboardGroup, String> {
+    let name = crate::clipboard::groups::normalize_group_name(&name)?;
+    let (group, groups) = {
+        let conn = state.clipboard.write_db.lock();
+        let group = db::rename_group(&conn, id, &name).map_err(|e| e.to_string())?;
+        let groups = crate::clipboard::groups::list_groups_snapshot(&conn)?;
+        (group, groups)
+    };
+    crate::clipboard::groups::emit_groups_changed(&app, &groups);
+    Ok(group)
+}
+
+#[tauri::command]
+pub fn cb_groups_delete(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let groups = {
+        let conn = state.clipboard.write_db.lock();
+        let deleted = db::delete_group(&conn, id).map_err(|e| e.to_string())?;
+        if !deleted {
+            return Err(format!("clipboard group not found: {id}"));
+        }
+        crate::clipboard::groups::list_groups_snapshot(&conn)?
+    };
+    crate::clipboard::groups::emit_groups_changed(&app, &groups);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cb_move_to_group(
+    state: State<'_, AppState>,
+    item_id: i64,
+    group_id: Option<i64>,
+) -> Result<ClipboardItem, String> {
+    let conn = state.clipboard.write_db.lock();
+    db::move_item_to_group(&conn, item_id, group_id).map_err(|e| e.to_string())
 }
 
 pub fn cb_toggle_panel_internal(app: AppHandle) -> Result<(), String> {

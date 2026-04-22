@@ -6,6 +6,7 @@ pub mod commands;
 pub mod data_transfer;
 pub mod db;
 pub mod hotkey;
+pub mod groups;
 pub mod icon_store;
 pub mod image_store;
 pub mod models;

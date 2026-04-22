@@ -1,4 +1,4 @@
-import type { ClipboardItem, FilePathStatus } from '../lib/clipboardTypes';
+import type { ClipboardGroup, ClipboardItem, FilePathStatus } from '../lib/clipboardTypes';
 
 export type ClipboardContextActionId =
   | 'paste'
@@ -10,11 +10,15 @@ export type ClipboardContextActionId =
   | 'openInExplorer'
   | 'saveImageAs'
   | 'toggleFavorite'
+  | 'togglePin'
+  | 'moveToGroup:none'
+  | `moveToGroup:${number}`
   | 'delete';
 
 export interface ClipboardContextMenuItem {
   id: ClipboardContextActionId;
   labelKey: string;
+  labelParams?: Record<string, string | number>;
   disabled?: boolean;
   destructive?: boolean;
 }
@@ -22,6 +26,7 @@ export interface ClipboardContextMenuItem {
 interface BuildClipboardMenuItemsOptions {
   item: ClipboardItem;
   fileStatuses?: FilePathStatus[] | null;
+  groups?: ClipboardGroup[];
 }
 
 function hasAtLeastOneExistingPath(statuses?: FilePathStatus[] | null): boolean {
@@ -37,6 +42,38 @@ function pushToggleFavorite(items: ClipboardContextMenuItem[], item: ClipboardIt
   });
 }
 
+function pushTogglePin(items: ClipboardContextMenuItem[], item: ClipboardItem): void {
+  items.push({
+    id: 'togglePin',
+    labelKey: item.is_pinned
+      ? 'clipboard.actions.unpin'
+      : 'clipboard.actions.pin',
+  });
+}
+
+function pushGroupMoves(
+  items: ClipboardContextMenuItem[],
+  item: ClipboardItem,
+  groups: ClipboardGroup[],
+): void {
+  if (!groups.length) return;
+
+  items.push({
+    id: 'moveToGroup:none',
+    labelKey: 'clipboard.actions.moveToNoGroup',
+    disabled: item.group_id === null,
+  });
+
+  for (const group of groups) {
+    items.push({
+      id: `moveToGroup:${group.id}`,
+      labelKey: 'clipboard.actions.moveToGroupNamed',
+      labelParams: { name: group.name },
+      disabled: item.group_id === group.id,
+    });
+  }
+}
+
 function pushDelete(items: ClipboardContextMenuItem[]): void {
   items.push({
     id: 'delete',
@@ -48,6 +85,7 @@ function pushDelete(items: ClipboardContextMenuItem[]): void {
 export function buildClipboardMenuItems({
   item,
   fileStatuses,
+  groups = [],
 }: BuildClipboardMenuItemsOptions): ClipboardContextMenuItem[] {
   const items: ClipboardContextMenuItem[] = [];
 
@@ -80,6 +118,8 @@ export function buildClipboardMenuItems({
       },
     );
     pushToggleFavorite(items, item);
+    pushTogglePin(items, item);
+    pushGroupMoves(items, item, groups);
     pushDelete(items);
     return items;
   }
@@ -101,6 +141,8 @@ export function buildClipboardMenuItems({
       },
     );
     pushToggleFavorite(items, item);
+    pushTogglePin(items, item);
+    pushGroupMoves(items, item, groups);
     pushDelete(items);
     return items;
   }
@@ -120,6 +162,8 @@ export function buildClipboardMenuItems({
     },
   );
   pushToggleFavorite(items, item);
+  pushTogglePin(items, item);
+  pushGroupMoves(items, item, groups);
   pushDelete(items);
   return items;
 }

@@ -3,10 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useI18n } from 'vue-i18n';
-import {
-  Trash2,
-  X,
-} from 'lucide-vue-next';
+import { Trash2, X } from 'lucide-vue-next';
 
 import { useClipboardStore } from '@/composables/useClipboardStore';
 import { useClipboardContextMenu } from '@/composables/useClipboardContextMenu';
@@ -15,13 +12,15 @@ import { useHoverPreview } from '@/composables/useHoverPreview';
 import type { ClipboardContextActionId } from '@/composables/clipboardContextMenuHelpers';
 import ClipboardCardMenu from '@/components/clipboard/ClipboardCardMenu.vue';
 import ClipboardFileDetailsDialog from '@/components/clipboard/ClipboardFileDetailsDialog.vue';
+import ClipboardGroupSidebar from '@/components/clipboard/ClipboardGroupSidebar.vue';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
 import ClipboardMergePasteDialog from '@/components/clipboard/ClipboardMergePasteDialog.vue';
+import ClipboardPinnedSection from '@/components/clipboard/ClipboardPinnedSection.vue';
 import ClipboardSearchBox from '@/components/clipboard/ClipboardSearchBox.vue';
 import ClipboardToolbar from '@/components/clipboard/ClipboardToolbar.vue';
 import { buildClipboardToolbarLayout } from '@/lib/clipboardSettingsUi';
 import { clipboardApi } from '@/lib/tauri';
-import type { ClipboardFilter } from '@/lib/clipboardTypes';
+import type { ClipboardFilter, ClipboardGroup, ClipboardItem } from '@/lib/clipboardTypes';
 
 defineOptions({ name: 'ClipboardPanelPage' });
 
@@ -31,34 +30,38 @@ const store = useClipboardStore();
 const selectedIndex = ref(0);
 const searchInput = ref<{ focus: () => void } | null>(null);
 const previewDelayMs = ref(500);
-
+const clearDialogOpen = ref(false);
+const panelLocked = ref(false);
 const filters: ClipboardFilter[] = ['all', 'text', 'image', 'file', 'favorite'];
 
 const selectedId = computed<number | null>(
-  () => store.items.value[selectedIndex.value]?.id ?? null,
+  () => store.visibleItems.value[selectedIndex.value]?.id ?? null,
 );
-
-// Toolbar state ----------------------------------------------------------
-const pinned = ref(false);
-const clearDialogOpen = ref(false);
+const hasVisibleItems = computed(() => store.visibleItems.value.length > 0);
+const toolbarLayout = computed(() =>
+  buildClipboardToolbarLayout(store.settings.value.toolbar, ['batch', 'settings', 'lock']),
+);
 
 function resetBatchSelection() {
   store.setBatchMode(false);
 }
 
 function setClipboardActionError(error: unknown, action: ClipboardContextActionId) {
+  const actionNameKey = action.startsWith('moveToGroup:')
+    ? 'clipboard.actionNames.moveToGroup'
+    : `clipboard.actionNames.${action}`;
   store.error.value = `${t('clipboard.errors.actionFailed', {
-    action: t(`clipboard.actionNames.${action}`),
+    action: t(actionNameKey),
   })} ${error}`;
 }
 
-async function togglePinned() {
-  const next = !pinned.value;
+async function togglePanelLocked() {
+  const next = !panelLocked.value;
   try {
     await clipboardApi.setPanelPinned(next);
-    pinned.value = next;
-  } catch (e) {
-    console.error('[clipboard] setPanelPinned failed:', e);
+    panelLocked.value = next;
+  } catch (error) {
+    console.error('[clipboard] setPanelPinned failed:', error);
   }
 }
 
@@ -66,6 +69,11 @@ function toggleBatchMode() {
   preview.hideNow();
   store.toggleBatchMode();
   closeMenu();
+}
+
+function selectById(id: number) {
+  const nextIndex = store.visibleItems.value.findIndex((item) => item.id === id);
+  if (nextIndex >= 0) selectedIndex.value = nextIndex;
 }
 
 function onToggleSelect(payload: { id: number; shiftKey: boolean }) {
@@ -81,9 +89,9 @@ async function onBatchDelete() {
     await clipboardApi.deleteBatch(ids);
     resetBatchSelection();
     await store.reload();
-  } catch (e) {
-    console.error('[clipboard] batch delete failed:', e);
-    store.error.value = `${t('clipboard.errors.loadFailed')} — ${e}`;
+  } catch (error) {
+    console.error('[clipboard] batch delete failed:', error);
+    store.error.value = `${t('clipboard.errors.loadFailed')} - ${error}`;
   }
 }
 
@@ -98,7 +106,7 @@ async function onBatchFavorite(nextFavorite: boolean) {
       if (!nextFavorite && item.is_favorite) await clipboardApi.toggleFavorite(id);
     } catch (error) {
       console.error('[clipboard] batch favorite failed:', error);
-      store.error.value = `${t('clipboard.errors.saveFailed')} 鈥?${error}`;
+      store.error.value = `${t('clipboard.errors.saveFailed')} - ${error}`;
       return;
     }
   }
@@ -110,13 +118,13 @@ async function onBatchFavorite(nextFavorite: boolean) {
 async function onConfirmClear() {
   preview.hideNow();
   try {
-    await clipboardApi.clear(true); // keep_favorites = true
+    await clipboardApi.clear(true);
     clearDialogOpen.value = false;
     selectedIndex.value = 0;
     await store.reload();
-  } catch (e) {
-    console.error('[clipboard] clear failed:', e);
-    store.error.value = `${t('clipboard.errors.loadFailed')} — ${e}`;
+  } catch (error) {
+    console.error('[clipboard] clear failed:', error);
+    store.error.value = `${t('clipboard.errors.loadFailed')} - ${error}`;
     clearDialogOpen.value = false;
   }
 }
@@ -125,20 +133,18 @@ async function openSettings() {
   try {
     preview.hideNow();
     await clipboardApi.openSettings();
-  } catch (e) {
-    console.error('[clipboard] openSettings failed:', e);
+  } catch (error) {
+    console.error('[clipboard] openSettings failed:', error);
   }
 }
-
-// ------------------------------------------------------------------------
 
 async function paste(id: number, plain: boolean) {
   try {
     if (plain) await clipboardApi.pastePlain(id);
     else await clipboardApi.paste(id);
-  } catch (e) {
-    console.error('[clipboard] paste failed:', e);
-    store.error.value = `${t('clipboard.errors.pasteFailed')} — ${e}`;
+  } catch (error) {
+    console.error('[clipboard] paste failed:', error);
+    store.error.value = `${t('clipboard.errors.pasteFailed')} - ${error}`;
   }
 }
 
@@ -146,9 +152,9 @@ async function onReorder(ids: number[]) {
   try {
     await clipboardApi.reorderFavorites(ids);
     await store.reload();
-  } catch (e) {
-    console.error('[clipboard] reorder failed:', e);
-    store.error.value = `${t('clipboard.errors.saveFailed')} — ${e}`;
+  } catch (error) {
+    console.error('[clipboard] reorder failed:', error);
+    store.error.value = `${t('clipboard.errors.saveFailed')} - ${error}`;
   }
 }
 
@@ -157,27 +163,11 @@ function close() {
   void getCurrentWindow().hide();
 }
 
-// Explicit drag handler (stable on opaque undecorated windows).
-function onHeaderMouseDown(e: MouseEvent) {
-  if (e.button !== 0) return;
-  const target = e.target as HTMLElement | null;
+function onHeaderMouseDown(event: MouseEvent) {
+  if (event.button !== 0) return;
+  const target = event.target as HTMLElement | null;
   if (target && target.closest('button, input, a, [data-no-drag]')) return;
   void getCurrentWindow().startDragging();
-}
-
-function changeFilter(dir: 1 | -1) {
-  const cur = store.filter.value;
-  const curIdx = filters.indexOf(cur);
-  const next = filters[(curIdx + dir + filters.length) % filters.length];
-  store.filter.value = next;
-  selectedIndex.value = 0;
-  void store.reload();
-}
-
-function setFilter(f: ClipboardFilter) {
-  store.filter.value = f;
-  selectedIndex.value = 0;
-  void store.reload();
 }
 
 function onSearchChange(value: string) {
@@ -185,9 +175,42 @@ function onSearchChange(value: string) {
   void store.reload();
 }
 
-function selectById(id: number) {
-  const idx = store.items.value.findIndex((it) => it.id === id);
-  if (idx >= 0) selectedIndex.value = idx;
+function changeFilter(direction: 1 | -1) {
+  const currentIndex = filters.indexOf(store.filter.value);
+  const next = filters[(currentIndex + direction + filters.length) % filters.length];
+  setFilter(next);
+}
+
+function setFilter(filter: ClipboardFilter) {
+  preview.hideNow();
+  store.filter.value = filter;
+  store.clearSelection();
+  selectedIndex.value = 0;
+  void store.reload();
+}
+
+function setGroup(groupId: number | null) {
+  preview.hideNow();
+  store.selectGroup(groupId);
+  store.clearSelection();
+  selectedIndex.value = 0;
+  void store.reload();
+}
+
+async function createGroup(name: string) {
+  await store.createGroup(name);
+  selectedIndex.value = 0;
+}
+
+async function renameGroup(payload: { id: number; name: string }) {
+  await store.renameGroup(payload.id, payload.name);
+}
+
+async function deleteGroup(group: ClipboardGroup) {
+  if (!window.confirm(t('clipboard.groups.deleteConfirm', { name: group.name }))) return;
+  preview.hideNow();
+  await store.deleteGroup(group.id);
+  selectedIndex.value = 0;
 }
 
 async function refreshPreviewSettings() {
@@ -208,12 +231,17 @@ const preview = useHoverPreview({
 
 function onListSelect(id: number) {
   selectById(id);
-  preview.onItemChange(store.items.value.find((it) => it.id === id) ?? null);
+  preview.onItemChange(store.visibleItems.value.find((item) => item.id === id) ?? null);
 }
 
 async function onRemoveItem(id: number) {
   preview.hideNow();
   await store.remove(id);
+}
+
+async function onToggleItemPin(id: number) {
+  preview.hideNow();
+  await store.togglePin(id);
 }
 
 const {
@@ -235,12 +263,18 @@ const {
   openMergeDialog,
   runAction,
 } = useClipboardContextMenu({
+  groups: store.groups,
   selectedIds: store.selectedIds,
   selectedIdOrder: store.orderedSelectedIds,
   onPaste: paste,
   onCopy: (id: number) => clipboardApi.copy(id),
   onDelete: (id: number) => onRemoveItem(id),
   onToggleFavorite: (id: number) => store.toggleFavorite(id),
+  onTogglePin: (id: number) => onToggleItemPin(id),
+  onMoveToGroup: async (id: number, groupId: number | null) => {
+    preview.hideNow();
+    await store.moveToGroup(id, groupId);
+  },
   onError: setClipboardActionError,
   onMergeSuccess: async () => {
     preview.hideNow();
@@ -249,7 +283,7 @@ const {
   },
 });
 
-function onListMenu(payload: { item: (typeof store.items.value)[number]; x: number; y: number }) {
+function onListMenu(payload: { item: ClipboardItem; x: number; y: number }) {
   selectById(payload.item.id);
   openMenu(payload.item, { x: payload.x, y: payload.y });
 }
@@ -263,7 +297,7 @@ async function onOpenDetailPath(path: string) {
 }
 
 useClipboardHotkey({
-  items: store.items,
+  items: store.visibleItems,
   selectedIndex,
   filter: store.filter,
   searchValue: store.search,
@@ -278,29 +312,27 @@ useClipboardHotkey({
 });
 
 watch(
-  () => store.items.value.length,
-  (len) => {
-    if (selectedIndex.value >= len) {
-      selectedIndex.value = Math.max(0, len - 1);
+  () => store.visibleItems.value.length,
+  (length) => {
+    if (selectedIndex.value >= length) {
+      selectedIndex.value = Math.max(0, length - 1);
     }
   },
 );
 
 let unlistenShown: UnlistenFn | null = null;
-let unlistenItemAdded: UnlistenFn | null = null;
+let unlistenStore: UnlistenFn | null = null;
 const showCounter = ref(0);
-const listKey = computed(() => `${store.filter.value}-${showCounter.value}`);
-const toolbarLayout = computed(() =>
-  buildClipboardToolbarLayout(store.settings.value.toolbar, ['batch', 'settings', 'lock']),
+const listKey = computed(
+  () => `${store.filter.value}-${store.selectedGroupId.value ?? 'all'}-${showCounter.value}`,
 );
 
 onMounted(async () => {
   await refreshPreviewSettings();
-  // Read initial pinned state from backend so the toolbar reflects reality.
   clipboardApi
     .isPanelPinned()
-    .then((p) => {
-      pinned.value = p;
+    .then((value) => {
+      panelLocked.value = value;
     })
     .catch(() => {});
 
@@ -318,13 +350,13 @@ onMounted(async () => {
     showCounter.value += 1;
     searchInput.value?.focus();
   });
-  unlistenItemAdded = await store.startListening();
+  unlistenStore = await store.startListening();
 });
 
 onBeforeUnmount(() => {
   preview.hideNow();
   unlistenShown?.();
-  unlistenItemAdded?.();
+  unlistenStore?.();
 });
 </script>
 
@@ -342,7 +374,6 @@ onBeforeUnmount(() => {
       <div class="flex items-center gap-1" data-no-drag>
         <button
           type="button"
-          data-no-drag
           class="inline-flex h-7 w-7 items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800"
           :title="t('clipboard.actions.clearHistory')"
           @click="clearDialogOpen = true"
@@ -352,16 +383,15 @@ onBeforeUnmount(() => {
         <ClipboardToolbar
           :items="toolbarLayout.actionItems"
           :batch-mode="store.batchMode.value"
-          :locked="pinned"
+          :locked="panelLocked"
           compact
           @batch="toggleBatchMode"
-          @lock="togglePinned"
+          @lock="togglePanelLocked"
           @settings="openSettings"
         />
         <span class="mx-0.5 h-5 w-px bg-slate-200" aria-hidden />
         <button
           type="button"
-          data-no-drag
           class="inline-flex h-7 w-7 items-center justify-center rounded text-slate-500 transition-colors hover:bg-red-50 hover:text-red-600"
           :title="t('clipboard.actions.close')"
           @click="close"
@@ -371,7 +401,10 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div v-if="store.batchMode.value" class="flex items-center justify-between gap-2 border-b border-blue-200 bg-blue-50/80 px-3 py-1.5">
+    <div
+      v-if="store.batchMode.value"
+      class="flex items-center justify-between gap-2 border-b border-blue-200 bg-blue-50/80 px-3 py-1.5"
+    >
       <span class="text-xs text-slate-600">
         {{ t('clipboard.batchBar.selected', { n: store.selectedIds.value.size }) }}
         <span class="ml-1.5 text-slate-400">{{ t('clipboard.batchBar.shiftHint') }}</span>
@@ -419,62 +452,122 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-if="toolbarLayout.showSearch" class="px-3 pt-2.5 pb-2">
-      <ClipboardSearchBox
-        ref="searchInput"
-        :model-value="store.search.value"
-        :placeholder="t('clipboard.search.placeholder')"
-        @update:model-value="onSearchChange"
-        @clear="onSearchChange('')"
+    <div class="flex min-h-0 flex-1 overflow-hidden">
+      <ClipboardGroupSidebar
+        :groups="store.groups.value"
+        :selected-group-id="store.selectedGroupId.value"
+        compact
+        @select="setGroup"
+        @create="createGroup"
+        @rename="renameGroup"
+        @delete="deleteGroup"
       />
-    </div>
 
-    <div v-if="toolbarLayout.showFilter" class="flex flex-wrap gap-1 px-3 pb-2">
-      <button
-        v-for="f in filters"
-        :key="f"
-        type="button"
-        class="rounded-full px-2.5 py-0.5 text-xs transition-colors"
-        :class="store.filter.value === f
-          ? 'bg-slate-900 text-white shadow-sm'
-          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
-        @click="setFilter(f)"
-      >
-        {{ t(`clipboard.filter.${f}`) }}
-      </button>
-    </div>
+      <div class="flex min-h-0 flex-1 flex-col">
+        <div v-if="toolbarLayout.showSearch" class="px-3 pt-2.5 pb-2">
+          <ClipboardSearchBox
+            ref="searchInput"
+            :model-value="store.search.value"
+            :placeholder="t('clipboard.search.placeholder')"
+            @update:model-value="onSearchChange"
+            @clear="onSearchChange('')"
+          />
+        </div>
 
-    <div
-      class="flex-1 overflow-hidden px-1 pb-2"
-      @mouseleave="preview.onLeave()"
-    >
-      <div v-if="store.items.value.length === 0" class="flex h-full items-center justify-center p-6 text-center text-sm text-slate-400">
-        {{ store.search.value ? t('clipboard.panel.noMatch') : t('clipboard.panel.empty') }}
+        <div v-if="toolbarLayout.showFilter" class="flex flex-wrap gap-1 px-3 pb-2">
+          <button
+            v-for="filter in filters"
+            :key="filter"
+            type="button"
+            class="rounded-full px-2.5 py-0.5 text-xs transition-colors"
+            :class="store.filter.value === filter
+              ? 'bg-slate-900 text-white shadow-sm'
+              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
+            @click="setFilter(filter)"
+          >
+            {{ t(`clipboard.filter.${filter}`) }}
+          </button>
+        </div>
+
+        <div
+          class="flex-1 overflow-hidden px-2 pb-2"
+          @mouseleave="preview.onLeave()"
+        >
+          <div v-if="store.error.value" class="flex h-full items-center justify-center p-6 text-center text-sm text-rose-500">
+            {{ store.error.value }}
+          </div>
+
+          <div v-else-if="!hasVisibleItems" class="flex h-full items-center justify-center p-6 text-center text-sm text-slate-400">
+            {{ store.search.value ? t('clipboard.panel.noMatch') : t('clipboard.panel.empty') }}
+          </div>
+
+          <div v-else-if="store.batchMode.value" class="h-full">
+            <ClipboardList
+              :key="listKey"
+              :items="store.visibleItems.value"
+              :selected-id="selectedId"
+              :display-settings="store.settings.value.display"
+              :highlight-keywords="store.searchKeywords.value"
+              :compact="true"
+              :draggable="false"
+              :batch-mode="true"
+              :selected-ids="store.selectedIds.value"
+              @select="onListSelect"
+              @activate="(id: number) => paste(id, false)"
+              @toggle="onToggleSelect"
+              @favorite="(id: number) => store.toggleFavorite(id)"
+              @pin="onToggleItemPin"
+              @remove="onRemoveItem"
+              @menu="onListMenu"
+            />
+          </div>
+
+          <div v-else class="flex h-full flex-col gap-2 overflow-hidden">
+            <ClipboardPinnedSection
+              :items="store.pinnedItems.value"
+              :selected-id="selectedId"
+              :display-settings="store.settings.value.display"
+              :highlight-keywords="store.searchKeywords.value"
+              compact
+              :show-delete-button="true"
+              :show-favorite-button="true"
+              :show-pin-button="true"
+              @select="onListSelect"
+              @activate="(id: number) => paste(id, false)"
+              @favorite="(id: number) => store.toggleFavorite(id)"
+              @pin="onToggleItemPin"
+              @remove="onRemoveItem"
+              @menu="onListMenu"
+            />
+
+            <div class="min-h-0 flex-1 overflow-hidden">
+              <ClipboardList
+                v-if="store.items.value.length"
+                :key="listKey"
+                :items="store.items.value"
+                :selected-id="selectedId"
+                :display-settings="store.settings.value.display"
+                :highlight-keywords="store.searchKeywords.value"
+                :compact="true"
+                :draggable="store.filter.value === 'favorite'"
+                :show-delete-button="true"
+                :show-favorite-button="true"
+                :show-pin-button="true"
+                :index-offset="store.pinnedItems.value.length"
+                @select="onListSelect"
+                @activate="(id: number) => paste(id, false)"
+                @favorite="(id: number) => store.toggleFavorite(id)"
+                @pin="onToggleItemPin"
+                @remove="onRemoveItem"
+                @menu="onListMenu"
+                @reorder="onReorder"
+              />
+            </div>
+          </div>
+        </div>
       </div>
-      <ClipboardList
-        v-else
-        :key="listKey"
-        :items="store.items.value"
-        :selected-id="selectedId"
-        :display-settings="store.settings.value.display"
-        :highlight-keywords="store.searchKeywords.value"
-        :compact="true"
-        :draggable="!store.batchMode.value && store.filter.value === 'favorite'"
-        :batch-mode="store.batchMode.value"
-        :selected-ids="store.selectedIds.value"
-        :show-delete-button="!store.batchMode.value"
-        :show-favorite-button="!store.batchMode.value"
-        @select="onListSelect"
-        @activate="(id: number) => paste(id, false)"
-        @toggle="onToggleSelect"
-        @favorite="(id: number) => store.toggleFavorite(id)"
-        @remove="onRemoveItem"
-        @menu="onListMenu"
-        @reorder="onReorder"
-      />
     </div>
 
-    <!-- Clear-history confirmation dialog -->
     <div
       v-if="clearDialogOpen"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/30"

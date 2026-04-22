@@ -44,8 +44,39 @@ test('buildClipboardMenuItems returns text actions with plain paste and copy', (
     'pastePlain',
     'copy',
     'toggleFavorite',
+    'togglePin',
     'delete',
   ]);
+});
+
+test('buildClipboardMenuItems adds pin and move-to-group actions when groups are available', () => {
+  const items = buildClipboardMenuItems({
+    item: createItem('text', {
+      is_pinned: true,
+      group_id: 3,
+    }),
+    groups: [
+      { id: 3, name: 'Work', sort_index: 0, created_at: 0 },
+      { id: 4, name: 'Personal', sort_index: 1, created_at: 1 },
+    ],
+  });
+
+  assert.deepEqual(
+    items.map((item) => item.id),
+    [
+      'paste',
+      'pastePlain',
+      'copy',
+      'toggleFavorite',
+      'togglePin',
+      'moveToGroup:none',
+      'moveToGroup:3',
+      'moveToGroup:4',
+      'delete',
+    ],
+  );
+  assert.equal(items.find((item) => item.id === 'togglePin')?.labelKey, 'clipboard.actions.unpin');
+  assert.equal(items.find((item) => item.id === 'moveToGroup:4')?.labelParams?.name, 'Personal');
 });
 
 test('buildClipboardMenuItems disables file-system actions when every file path is missing', () => {

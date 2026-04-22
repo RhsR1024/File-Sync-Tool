@@ -943,7 +943,7 @@ export const messages = {
         description: 'Monitor the system clipboard, persist history locally, and press Alt+C to open the quick panel.',
         placeholder: 'Clipboard manager is being prepared — core listener and storage will be available in milestone M2.',
       },
-      filter: { all: 'All', text: 'Text', image: 'Image', file: 'File', favorite: 'Favorite' },
+      filter: { all: 'All', text: 'Text', image: 'Image', file: 'File', favorite: 'Favorite', pinned: 'Pinned' },
       search: {
         placeholder: 'Search clipboard...',
         clear: 'Clear search',
@@ -952,6 +952,8 @@ export const messages = {
       actions: {
         favorite: 'Favorite',
         unfavorite: 'Unfavorite',
+        pin: 'Pin',
+        unpin: 'Unpin',
         delete: 'Delete',
         close: 'Close',
         copy: 'Copy to clipboard',
@@ -977,6 +979,21 @@ export const messages = {
         batchSelect: 'Batch select',
         exitBatch: 'Exit batch select',
         openSettings: 'Settings',
+        moveToGroupNamed: 'Move to {name}',
+        moveToNoGroup: 'Remove from group',
+      },
+      groups: {
+        title: 'Groups',
+        all: 'All groups',
+        empty: 'Create your first custom group to organize clipboard items.',
+        add: 'Add group',
+        rename: 'Rename',
+        save: 'Save',
+        newPlaceholder: 'New group name',
+        deleteConfirm: 'Delete group "{name}"? Items will stay in history.',
+      },
+      pinnedSection: {
+        title: 'Pinned',
       },
       time: {
         justNow: 'Just now',
@@ -1008,6 +1025,8 @@ export const messages = {
         openInExplorer: 'open in Explorer',
         saveImageAs: 'save image as',
         toggleFavorite: 'toggle favorite',
+        togglePin: 'toggle pin',
+        moveToGroup: 'move to group',
         delete: 'delete',
       },
       fileDetails: {
@@ -2188,7 +2207,7 @@ export const messages = {
         description: '监听系统剪贴板，历史本地持久化，按 Alt+C 呼出快速面板。',
         placeholder: '剪贴板管理器准备中——核心监听与存储能力将在 M2 里程碑就绪。',
       },
-      filter: { all: '全部', text: '文本', image: '图片', file: '文件', favorite: '收藏' },
+      filter: { all: '全部', text: '文本', image: '图片', file: '文件', favorite: '收藏', pinned: '置顶' },
       search: {
         placeholder: '搜索剪贴板…',
         clear: '清空搜索',
@@ -2197,6 +2216,8 @@ export const messages = {
       actions: {
         favorite: '收藏',
         unfavorite: '取消收藏',
+        pin: '置顶',
+        unpin: '取消置顶',
         delete: '删除',
         close: '关闭',
         copy: '复制到剪贴板',
@@ -2222,6 +2243,21 @@ export const messages = {
         batchSelect: '批量选择',
         exitBatch: '退出批量选择',
         openSettings: '设置',
+        moveToGroupNamed: '移动到{name}',
+        moveToNoGroup: '移出分组',
+      },
+      groups: {
+        title: '分组',
+        all: '全部分组',
+        empty: '创建第一个自定义分组来整理剪贴板项目。',
+        add: '新建分组',
+        rename: '重命名',
+        save: '保存',
+        newPlaceholder: '新分组名称',
+        deleteConfirm: '删除分组“{name}”？项目会保留在历史记录中。',
+      },
+      pinnedSection: {
+        title: '置顶',
       },
       time: {
         justNow: '刚刚',
@@ -2253,6 +2289,8 @@ export const messages = {
         openInExplorer: '在资源管理器中显示',
         saveImageAs: '图片另存为',
         toggleFavorite: '切换收藏',
+        togglePin: '切换置顶',
+        moveToGroup: '移动到分组',
         delete: '删除',
       },
       fileDetails: {

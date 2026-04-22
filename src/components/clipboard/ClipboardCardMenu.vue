@@ -95,7 +95,7 @@ const menuStyle = computed(() => ({
           :disabled="item.disabled"
           @click="emit('select', item.id)"
         >
-          {{ t(item.labelKey) }}
+          {{ t(item.labelKey, item.labelParams) }}
         </button>
       </div>
     </div>

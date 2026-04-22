@@ -1009,7 +1009,7 @@ Observed: `3` `clipboard::data_transfer` tests passed, `cmd /c pnpm check` compl
 
 **Depends on:** Task 13
 
-- [ ] **Step 14.1: Write failing tests for group CRUD and pin/favorite semantics**
+- [x] **Step 14.1: Write failing tests for group CRUD and pin/favorite semantics**
 
 Add DB tests for:
 - create/rename/delete group
@@ -1017,7 +1017,7 @@ Add DB tests for:
 - pinned retention exemption
 - favorite vs pinned visibility rules
 
-- [ ] **Step 14.2: Implement backend group and pin APIs**
+- [x] **Step 14.2: Implement backend group and pin APIs**
 
 Add:
 - `cb_groups_list/create/rename/delete`
@@ -1025,7 +1025,7 @@ Add:
 - `cb_toggle_pin`
 - list filters for group and pinned section
 
-- [ ] **Step 14.3: Rebuild frontend store and pages around grouped navigation**
+- [x] **Step 14.3: Rebuild frontend store and pages around grouped navigation**
 
 Requirements:
 - left group sidebar
@@ -1033,19 +1033,41 @@ Requirements:
 - favorite tab remains separate
 - manager and panel both stay coherent
 
-- [ ] **Step 14.4: Run checks**
+- [x] **Step 14.4: Run checks**
 
 ```powershell
 cargo test clipboard::db::tests --manifest-path src-tauri\Cargo.toml
 cmd /c pnpm check
 ```
 
-- [ ] **Step 14.5: Commit**
+- [x] **Step 14.5: Commit**
 
 ```powershell
 git add src-tauri/src/clipboard/groups.rs src-tauri/src/clipboard/db.rs src-tauri/src/clipboard/commands.rs src/components/clipboard/ClipboardGroupSidebar.vue src/components/clipboard/ClipboardPinnedSection.vue src/composables/useClipboardStore.ts src/pages/ClipboardPanelPage.vue src/pages/ClipboardManagerPage.vue src/components/clipboard/ClipboardList.vue src/locales/messages.ts
 git commit -m "feat(clipboard): add groups and pinned favorite split"
 ```
+
+Status 2026-04-22:
+- Task 14 implementation and verification are complete.
+- Added backend clipboard group/pin command coverage with a new `groups.rs` helper module, Tauri command surface for group CRUD plus `cb_toggle_pin` / `cb_move_to_group`, and `clipboard-groups-changed` event emission so the UI stays in sync.
+- Rebuilt the clipboard store around `groups`, `selectedGroupId`, `pinnedItems`, and a combined visible-item model, then added `ClipboardGroupSidebar.vue` and `ClipboardPinnedSection.vue` so both the quick panel and manager page now support grouped navigation with a dedicated pinned section above the regular list.
+- Updated `ClipboardList.vue` and the clipboard context menu so items can be pinned/unpinned inline, moved between custom groups, and rendered with stable list numbering even when a pinned section is present.
+- Added focused RED->GREEN coverage for group-name normalization, pinned-section partitioning, and the new menu action set in:
+  - `src-tauri/src/clipboard/groups.rs`
+  - `src/composables/useClipboardContextMenu.test.mjs`
+  - `src/lib/clipboardGroupsView.test.mjs`
+- Fresh verification passed with:
+
+```powershell
+node --test --test-isolation=none src/composables/useClipboardContextMenu.test.mjs src/lib/clipboardGroupsView.test.mjs
+cmd /c pnpm check
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTFLAGS='-C debuginfo=0'; cargo test clipboard::db::tests --manifest-path src-tauri\Cargo.toml
+```
+
+Observed:
+- `7` focused Node tests passed.
+- `cmd /c pnpm check` completed successfully.
+- `cargo test clipboard::db::tests --manifest-path src-tauri\Cargo.toml` passed with `27` database tests green; only pre-existing unrelated Rust warnings remain elsewhere in the app.
 
 ### Task 15: App Filters, Final Cleanup Flows, And Performance Hardening
 
