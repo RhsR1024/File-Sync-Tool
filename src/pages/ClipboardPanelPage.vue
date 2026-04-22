@@ -12,12 +12,16 @@ import { useHoverPreview } from '@/composables/useHoverPreview';
 import type { ClipboardContextActionId } from '@/composables/clipboardContextMenuHelpers';
 import ClipboardCardMenu from '@/components/clipboard/ClipboardCardMenu.vue';
 import ClipboardFileDetailsDialog from '@/components/clipboard/ClipboardFileDetailsDialog.vue';
-import ClipboardGroupSidebar from '@/components/clipboard/ClipboardGroupSidebar.vue';
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
 import ClipboardMergePasteDialog from '@/components/clipboard/ClipboardMergePasteDialog.vue';
+import ClipboardPanelGroupMenu from '@/components/clipboard/ClipboardPanelGroupMenu.vue';
 import ClipboardPinnedSection from '@/components/clipboard/ClipboardPinnedSection.vue';
 import ClipboardSearchBox from '@/components/clipboard/ClipboardSearchBox.vue';
 import ClipboardToolbar from '@/components/clipboard/ClipboardToolbar.vue';
+import {
+  CLIPBOARD_PANEL_USE_NATIVE_DRAG_REGION,
+  shouldStartClipboardPanelDrag,
+} from '@/lib/clipboardPanelDrag';
 import { buildClipboardToolbarLayout } from '@/lib/clipboardSettingsUi';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter, ClipboardGroup, ClipboardItem } from '@/lib/clipboardTypes';
@@ -164,9 +168,7 @@ function close() {
 }
 
 function onHeaderMouseDown(event: MouseEvent) {
-  if (event.button !== 0) return;
-  const target = event.target as HTMLElement | null;
-  if (target && target.closest('button, input, a, [data-no-drag]')) return;
+  if (!shouldStartClipboardPanelDrag(event)) return;
   void getCurrentWindow().startDragging();
 }
 
@@ -362,11 +364,11 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="flex h-screen w-screen flex-col overflow-hidden bg-white">
-    <header
-      class="flex select-none items-center justify-between border-b border-slate-200 px-3 py-2.5"
-      data-tauri-drag-region
-      @mousedown="onHeaderMouseDown"
-    >
+      <header
+        class="flex select-none items-center justify-between border-b border-slate-200 px-3 py-2.5"
+        :data-tauri-drag-region="CLIPBOARD_PANEL_USE_NATIVE_DRAG_REGION ? '' : undefined"
+        @mousedown="onHeaderMouseDown"
+      >
       <span class="pointer-events-none truncate text-sm font-semibold text-slate-700">
         {{ t('clipboard.tool.title') }}
       </span>
@@ -452,118 +454,125 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="flex min-h-0 flex-1 overflow-hidden">
-      <ClipboardGroupSidebar
-        :groups="store.groups.value"
-        :selected-group-id="store.selectedGroupId.value"
-        compact
-        @select="setGroup"
-        @create="createGroup"
-        @rename="renameGroup"
-        @delete="deleteGroup"
-      />
+    <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div v-if="toolbarLayout.showSearch" class="px-3 pt-2.5 pb-2">
+        <ClipboardSearchBox
+          ref="searchInput"
+          :model-value="store.search.value"
+          :placeholder="t('clipboard.search.placeholder')"
+          @update:model-value="onSearchChange"
+          @clear="onSearchChange('')"
+        />
+      </div>
 
-      <div class="flex min-h-0 flex-1 flex-col">
-        <div v-if="toolbarLayout.showSearch" class="px-3 pt-2.5 pb-2">
-          <ClipboardSearchBox
-            ref="searchInput"
-            :model-value="store.search.value"
-            :placeholder="t('clipboard.search.placeholder')"
-            @update:model-value="onSearchChange"
-            @clear="onSearchChange('')"
+      <div
+        class="min-h-0 flex-1 overflow-hidden px-2"
+        @mouseleave="preview.onLeave()"
+      >
+        <div v-if="store.error.value" class="flex h-full items-center justify-center p-6 text-center text-sm text-rose-500">
+          {{ store.error.value }}
+        </div>
+
+        <div v-else-if="!hasVisibleItems" class="flex h-full items-center justify-center p-6 text-center text-sm text-slate-400">
+          {{ store.search.value ? t('clipboard.panel.noMatch') : t('clipboard.panel.empty') }}
+        </div>
+
+        <div v-else-if="store.batchMode.value" class="h-full pb-2">
+          <ClipboardList
+            :key="listKey"
+            :items="store.visibleItems.value"
+            :selected-id="selectedId"
+            :display-settings="store.settings.value.display"
+            :highlight-keywords="store.searchKeywords.value"
+            :compact="true"
+            :draggable="false"
+            :batch-mode="true"
+            :selected-ids="store.selectedIds.value"
+            @select="onListSelect"
+            @activate="(id: number) => paste(id, false)"
+            @toggle="onToggleSelect"
+            @favorite="(id: number) => store.toggleFavorite(id)"
+            @pin="onToggleItemPin"
+            @remove="onRemoveItem"
+            @menu="onListMenu"
           />
         </div>
 
-        <div v-if="toolbarLayout.showFilter" class="flex flex-wrap gap-1 px-3 pb-2">
-          <button
-            v-for="filter in filters"
-            :key="filter"
-            type="button"
-            class="rounded-full px-2.5 py-0.5 text-xs transition-colors"
-            :class="store.filter.value === filter
-              ? 'bg-slate-900 text-white shadow-sm'
-              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'"
-            @click="setFilter(filter)"
-          >
-            {{ t(`clipboard.filter.${filter}`) }}
-          </button>
-        </div>
+        <div v-else class="flex h-full flex-col gap-2 overflow-hidden pb-2">
+          <ClipboardPinnedSection
+            :items="store.pinnedItems.value"
+            :selected-id="selectedId"
+            :display-settings="store.settings.value.display"
+            :highlight-keywords="store.searchKeywords.value"
+            compact
+            :show-delete-button="true"
+            :show-favorite-button="true"
+            :show-pin-button="true"
+            @select="onListSelect"
+            @activate="(id: number) => paste(id, false)"
+            @favorite="(id: number) => store.toggleFavorite(id)"
+            @pin="onToggleItemPin"
+            @remove="onRemoveItem"
+            @menu="onListMenu"
+          />
 
-        <div
-          class="flex-1 overflow-hidden px-2 pb-2"
-          @mouseleave="preview.onLeave()"
-        >
-          <div v-if="store.error.value" class="flex h-full items-center justify-center p-6 text-center text-sm text-rose-500">
-            {{ store.error.value }}
-          </div>
-
-          <div v-else-if="!hasVisibleItems" class="flex h-full items-center justify-center p-6 text-center text-sm text-slate-400">
-            {{ store.search.value ? t('clipboard.panel.noMatch') : t('clipboard.panel.empty') }}
-          </div>
-
-          <div v-else-if="store.batchMode.value" class="h-full">
+          <div class="min-h-0 flex-1 overflow-hidden">
             <ClipboardList
+              v-if="store.items.value.length"
               :key="listKey"
-              :items="store.visibleItems.value"
+              :items="store.items.value"
               :selected-id="selectedId"
               :display-settings="store.settings.value.display"
               :highlight-keywords="store.searchKeywords.value"
               :compact="true"
-              :draggable="false"
-              :batch-mode="true"
-              :selected-ids="store.selectedIds.value"
-              @select="onListSelect"
-              @activate="(id: number) => paste(id, false)"
-              @toggle="onToggleSelect"
-              @favorite="(id: number) => store.toggleFavorite(id)"
-              @pin="onToggleItemPin"
-              @remove="onRemoveItem"
-              @menu="onListMenu"
-            />
-          </div>
-
-          <div v-else class="flex h-full flex-col gap-2 overflow-hidden">
-            <ClipboardPinnedSection
-              :items="store.pinnedItems.value"
-              :selected-id="selectedId"
-              :display-settings="store.settings.value.display"
-              :highlight-keywords="store.searchKeywords.value"
-              compact
+              :draggable="store.filter.value === 'favorite'"
               :show-delete-button="true"
               :show-favorite-button="true"
               :show-pin-button="true"
+              :index-offset="store.pinnedItems.value.length"
               @select="onListSelect"
               @activate="(id: number) => paste(id, false)"
               @favorite="(id: number) => store.toggleFavorite(id)"
               @pin="onToggleItemPin"
               @remove="onRemoveItem"
               @menu="onListMenu"
+              @reorder="onReorder"
             />
-
-            <div class="min-h-0 flex-1 overflow-hidden">
-              <ClipboardList
-                v-if="store.items.value.length"
-                :key="listKey"
-                :items="store.items.value"
-                :selected-id="selectedId"
-                :display-settings="store.settings.value.display"
-                :highlight-keywords="store.searchKeywords.value"
-                :compact="true"
-                :draggable="store.filter.value === 'favorite'"
-                :show-delete-button="true"
-                :show-favorite-button="true"
-                :show-pin-button="true"
-                :index-offset="store.pinnedItems.value.length"
-                @select="onListSelect"
-                @activate="(id: number) => paste(id, false)"
-                @favorite="(id: number) => store.toggleFavorite(id)"
-                @pin="onToggleItemPin"
-                @remove="onRemoveItem"
-                @menu="onListMenu"
-                @reorder="onReorder"
-              />
-            </div>
           </div>
+        </div>
+      </div>
+
+      <div class="shrink-0 px-3 pb-2 pt-1 select-none">
+        <div class="flex items-center gap-1 rounded-xl bg-slate-100 p-1" data-no-drag>
+          <div
+            v-if="toolbarLayout.showFilter"
+            class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+          >
+            <button
+              v-for="filter in filters"
+              :key="filter"
+              type="button"
+              class="shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors"
+              :class="store.filter.value === filter
+                ? 'bg-slate-900 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-white hover:text-slate-900'"
+              @click="setFilter(filter)"
+            >
+              {{ t(`clipboard.filter.${filter}`) }}
+            </button>
+          </div>
+          <div v-else class="flex-1" />
+
+          <span class="mx-0.5 h-4 w-px shrink-0 bg-slate-200" aria-hidden />
+
+          <ClipboardPanelGroupMenu
+            :groups="store.groups.value"
+            :selected-group-id="store.selectedGroupId.value"
+            @select="setGroup"
+            @create="createGroup"
+            @rename="renameGroup"
+            @delete="deleteGroup"
+          />
         </div>
       </div>
     </div>

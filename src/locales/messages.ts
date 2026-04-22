@@ -1116,6 +1116,7 @@ export const messages = {
       },
       groups: {
         title: 'Groups',
+        default: 'Default',
         all: 'All groups',
         empty: 'Create your first custom group to organize clipboard items.',
         add: 'Add group',
@@ -2534,6 +2535,7 @@ export const messages = {
       },
       groups: {
         title: '分组',
+        default: '默认',
         all: '全部分组',
         empty: '创建第一个自定义分组来整理剪贴板项目。',
         add: '新建分组',
