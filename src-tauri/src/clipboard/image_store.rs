@@ -58,12 +58,14 @@ pub fn gc_orphan_images(
     let delete_file = |path: &PathBuf| u64::from(std::fs::remove_file(path).is_ok());
 
     let deleted: u64 = if files.len() < PARALLEL_DELETE_THRESHOLD {
-        files.iter()
+        files
+            .iter()
             .filter(|path| is_orphan(path))
             .map(delete_file)
             .sum()
     } else {
-        files.par_iter()
+        files
+            .par_iter()
             .filter(|path| is_orphan(path))
             .map(delete_file)
             .sum()

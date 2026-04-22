@@ -226,7 +226,11 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
     let legacy_has_group_id = table_has_column(conn, "clipboard_items", "group_id")?;
     let legacy_has_is_pinned = table_has_column(conn, "clipboard_items", "is_pinned")?;
 
-    let rtf_select = if legacy_has_rtf { "rtf_content" } else { "NULL" };
+    let rtf_select = if legacy_has_rtf {
+        "rtf_content"
+    } else {
+        "NULL"
+    };
     let source_app_icon_select = if legacy_has_source_app_icon {
         "source_app_icon"
     } else {
@@ -237,7 +241,11 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
     } else {
         "NULL"
     };
-    let is_pinned_select = if legacy_has_is_pinned { "is_pinned" } else { "0" };
+    let is_pinned_select = if legacy_has_is_pinned {
+        "is_pinned"
+    } else {
+        "0"
+    };
     let char_count_select = if legacy_has_char_count {
         "COALESCE(char_count, COALESCE(LENGTH(COALESCE(content_full, content_preview)), 0))"
     } else {
@@ -667,6 +675,7 @@ fn get_item_by_hash(conn: &Connection, hash: &str) -> SqlResult<ClipboardItem> {
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn compute_hash(kind: &ContentKind, data: &[u8]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(kind.as_sql().as_bytes());
@@ -747,6 +756,7 @@ pub fn toggle_pin(conn: &Connection, id: i64) -> SqlResult<ClipboardItem> {
     get_item(conn, id)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn update_text_content(conn: &Connection, id: i64, new_text: &str) -> SqlResult<()> {
     if new_text.is_empty() {
         delete_item(conn, id)?;
@@ -838,7 +848,11 @@ pub fn delete_group(conn: &Connection, id: i64) -> SqlResult<bool> {
     Ok(deleted > 0)
 }
 
-pub fn move_item_to_group(conn: &Connection, item_id: i64, group_id: Option<i64>) -> SqlResult<ClipboardItem> {
+pub fn move_item_to_group(
+    conn: &Connection,
+    item_id: i64,
+    group_id: Option<i64>,
+) -> SqlResult<ClipboardItem> {
     conn.execute(
         "UPDATE clipboard_items SET group_id = ?1 WHERE id = ?2",
         params![group_id, item_id],
@@ -854,7 +868,10 @@ pub fn db_vacuum(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch("VACUUM;")
 }
 
-fn list_referenced_paths(conn: &Connection, column: &str) -> SqlResult<std::collections::HashSet<String>> {
+fn list_referenced_paths(
+    conn: &Connection,
+    column: &str,
+) -> SqlResult<std::collections::HashSet<String>> {
     let sql = match column {
         "image_path" => {
             "SELECT DISTINCT image_path FROM clipboard_items WHERE image_path IS NOT NULL AND image_path != ''"
@@ -1080,7 +1097,7 @@ mod tests {
             .unwrap();
         assert_eq!(repaired.content_preview, "broken");
         assert_eq!(repaired.char_count, 11);
-        assert_eq!(repaired.is_pinned, false);
+        assert!(!repaired.is_pinned);
     }
 
     #[test]
@@ -1166,7 +1183,9 @@ mod tests {
         drop(write);
 
         let read = open_read(&db_path).unwrap();
-        let query_only: i64 = read.query_row("PRAGMA query_only", [], |r| r.get(0)).unwrap();
+        let query_only: i64 = read
+            .query_row("PRAGMA query_only", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(query_only, 1);
         assert!(read.execute("DELETE FROM clipboard_items", []).is_err());
     }
@@ -1177,7 +1196,8 @@ mod tests {
         migrate(&conn).unwrap();
         let item = sample_text_item("dedup_move", "same text");
 
-        let first = upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::MoveToTop).unwrap();
+        let first =
+            upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::MoveToTop).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
         let second =
             upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::MoveToTop).unwrap();
@@ -1198,15 +1218,20 @@ mod tests {
         item.source_app = Some("Word".into());
         item.source_app_icon = Some("C:\\icons\\word.png".into());
 
-        let first = upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::MoveToTop).unwrap();
+        let first =
+            upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::MoveToTop).unwrap();
 
         item.source_app = Some("Excel".into());
         item.source_app_icon = Some("C:\\icons\\excel.png".into());
-        let second = upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::MoveToTop).unwrap();
+        let second =
+            upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::MoveToTop).unwrap();
 
         assert_eq!(first.id, second.id);
         assert_eq!(second.source_app.as_deref(), Some("Excel"));
-        assert_eq!(second.source_app_icon.as_deref(), Some("C:\\icons\\excel.png"));
+        assert_eq!(
+            second.source_app_icon.as_deref(),
+            Some("C:\\icons\\excel.png")
+        );
     }
 
     #[test]
@@ -1217,8 +1242,7 @@ mod tests {
 
         let first = upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::Ignore).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let second =
-            upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::Ignore).unwrap();
+        let second = upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::Ignore).unwrap();
 
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM clipboard_items", [], |r| r.get(0))
@@ -1245,7 +1269,10 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(second.updated_at, first.updated_at);
         assert_eq!(second.source_app.as_deref(), Some("Excel"));
-        assert_eq!(second.source_app_icon.as_deref(), Some("C:\\icons\\excel.png"));
+        assert_eq!(
+            second.source_app_icon.as_deref(),
+            Some("C:\\icons\\excel.png")
+        );
     }
 
     #[test]
@@ -1665,7 +1692,10 @@ mod tests {
         let html_items = list_for("html");
         assert_eq!(html_items.total, 1);
         assert_eq!(html_items.items[0].id, html_id);
-        assert_eq!(html_items.items[0].html.as_deref(), Some("<p>html text</p>"));
+        assert_eq!(
+            html_items.items[0].html.as_deref(),
+            Some("<p>html text</p>")
+        );
 
         let rtf_items = list_for("rtf");
         assert_eq!(rtf_items.total, 1);

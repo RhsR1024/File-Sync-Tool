@@ -269,7 +269,7 @@ fn well_known_port_name(port: u16) -> &'static str {
 }
 
 fn top_port_counts(mut ports: Vec<PortCount>, limit: usize) -> Vec<PortCount> {
-    ports.sort_by(|a, b| b.count.cmp(&a.count));
+    ports.sort_by_key(|port| std::cmp::Reverse(port.count));
     ports.truncate(limit);
     ports
 }
@@ -332,14 +332,14 @@ pub async fn get_tcp_connections() -> Result<TcpConnectionStats, String> {
         .into_iter()
         .map(|(state, count)| StatCount { state, count })
         .collect();
-    by_state.sort_by(|a, b| b.count.cmp(&a.count));
+    by_state.sort_by_key(|state| std::cmp::Reverse(state.count));
 
     // Sort by_remote_ip descending, top 20
     let mut by_remote_ip: Vec<IpCount> = ip_map
         .into_iter()
         .map(|(ip, count)| IpCount { ip, count })
         .collect();
-    by_remote_ip.sort_by(|a, b| b.count.cmp(&a.count));
+    by_remote_ip.sort_by_key(|entry| std::cmp::Reverse(entry.count));
     by_remote_ip.truncate(20);
 
     // Sort by_remote_port descending, top 20

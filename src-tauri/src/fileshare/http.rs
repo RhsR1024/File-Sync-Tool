@@ -1,6 +1,6 @@
 use super::*;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axum::body::Body;
 use axum::extract::multipart::MultipartRejection;
@@ -1070,7 +1070,7 @@ async fn load_tree_node_response(
             let perms = principal
                 .permissions_for_root(&root.id)
                 .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
-            if !perms.browse {
+            if !perms.allows(model::FileSharePermission::Browse) {
                 return Err(plain_response(StatusCode::FORBIDDEN, "Forbidden"));
             }
             load_directory_tree_response(root, String::new(), ApiTreeCurrentKind::ShareRoot, &perms)
@@ -1085,7 +1085,7 @@ async fn load_tree_node_response(
             let perms = principal
                 .permissions_for_root(&root.id)
                 .ok_or_else(|| plain_response(StatusCode::NOT_FOUND, "Root Not Found"))?;
-            if !perms.browse {
+            if !perms.allows(model::FileSharePermission::Browse) {
                 return Err(plain_response(StatusCode::FORBIDDEN, "Forbidden"));
             }
             load_directory_tree_response(root, relative_path, ApiTreeCurrentKind::Directory, &perms)
@@ -1154,6 +1154,7 @@ async fn load_directory_tree_response(
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn locate_search_scope(
     state: &HttpState,
     principal: &auth::ResolvedPrincipal,
@@ -1451,6 +1452,7 @@ fn decode_node_id_part(value: &str) -> Result<String, String> {
     String::from_utf8(decoded).map_err(|_| "Invalid node id".to_string())
 }
 
+#[allow(clippy::result_large_err)]
 fn resolve_parent_directory_node(
     state: &HttpState,
     principal: &auth::ResolvedPrincipal,
@@ -1468,6 +1470,7 @@ fn resolve_parent_directory_node(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn resolve_node(
     state: &HttpState,
     principal: &auth::ResolvedPrincipal,
@@ -1543,11 +1546,7 @@ fn require_root_permission(
     }
 }
 
-fn rename_saved_share_root(
-    config_path: &PathBuf,
-    root_id: &str,
-    to_name: &str,
-) -> Result<(), String> {
+fn rename_saved_share_root(config_path: &Path, root_id: &str, to_name: &str) -> Result<(), String> {
     let mut saved = persist::load_persisted_file_share_config_from_path(config_path)?;
     let Some(root) = saved.roots.iter_mut().find(|root| root.id == root_id) else {
         return Err(format!("Root not found: {root_id}"));
@@ -1577,7 +1576,7 @@ fn rename_saved_share_root(
 }
 
 fn delete_saved_share_root(
-    config_path: &PathBuf,
+    config_path: &Path,
     root_id: &str,
     delete_mode: model::DeleteMode,
 ) -> Result<(), String> {
@@ -1597,7 +1596,7 @@ fn delete_saved_share_root(
     persist::save_persisted_file_share_config_to_path(config_path, &saved)
 }
 
-fn user_visible_path_string(path: &PathBuf) -> String {
+fn user_visible_path_string(path: &Path) -> String {
     let display = path.to_string_lossy().to_string();
     if cfg!(windows) {
         display
@@ -2061,7 +2060,7 @@ mod tests {
             .oneshot(request_with_connect_info(
                 Request::builder()
                     .method("GET")
-                    .uri(&format!("/api/tree?node_id={soft_node_id}")),
+                    .uri(format!("/api/tree?node_id={soft_node_id}")),
                 Body::empty(),
             ))
             .await
@@ -2096,7 +2095,7 @@ mod tests {
             .oneshot(request_with_connect_info(
                 Request::builder()
                     .method("GET")
-                    .uri(&format!("/api/tree?node_id={tools_node_id}")),
+                    .uri(format!("/api/tree?node_id={tools_node_id}")),
                 Body::empty(),
             ))
             .await
@@ -2195,7 +2194,7 @@ mod tests {
 
         let scoped_response = app
             .oneshot(request_with_connect_info(
-                Request::builder().method("GET").uri(&format!(
+                Request::builder().method("GET").uri(format!(
                     "/api/tree/search?keyword=drawio&node_id={soft_node_id}"
                 )),
                 Body::empty(),
@@ -2257,7 +2256,7 @@ mod tests {
             .oneshot(request_with_connect_info(
                 Request::builder()
                     .method("GET")
-                    .uri(&format!("/api/download/archive?node_id={soft_node_id}")),
+                    .uri(format!("/api/download/archive?node_id={soft_node_id}")),
                 Body::empty(),
             ))
             .await

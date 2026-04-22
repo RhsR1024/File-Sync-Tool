@@ -449,16 +449,6 @@ pub fn get_config_path(app_handle: &tauri::AppHandle) -> PathBuf {
     }
 }
 
-/// Returns the default (non-custom) data directory.
-pub fn get_default_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
-    app_handle.path().app_data_dir().unwrap()
-}
-
-/// Returns the default (non-custom) config directory.
-pub fn get_default_config_dir(app_handle: &tauri::AppHandle) -> PathBuf {
-    app_handle.path().app_config_dir().unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

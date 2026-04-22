@@ -172,9 +172,17 @@ function getPathSeparator(directory: string): string {
   return directory.includes('\\') ? '\\' : '/';
 }
 
+const INVALID_FILE_NAME_CHARS = new Set(['<', '>', ':', '"', '/', '\\', '|', '?', '*']);
+
+function isControlCharacter(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return code >= 0 && code <= 31;
+}
+
 function sanitizeFileName(name: string): string {
-  const sanitized = name
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
+  const sanitized = Array.from(name)
+    .map((char) => (INVALID_FILE_NAME_CHARS.has(char) || isControlCharacter(char) ? '-' : char))
+    .join('')
     .replace(/\s+/g, ' ')
     .trim();
   return sanitized || 'clipboard-image.png';

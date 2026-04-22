@@ -1771,11 +1771,6 @@ fn validate_cidr(value: &str) -> bool {
 
 const DEVICE_BATCH_CONCURRENCY_LIMIT: usize = 4;
 const DEVICE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const DEVICE_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-
-fn build_device_http_client() -> Result<reqwest::Client, String> {
-    build_device_http_client_with_timeout(DEVICE_HTTP_REQUEST_TIMEOUT)
-}
 
 fn build_device_http_client_with_timeout(
     request_timeout: Duration,
@@ -2303,6 +2298,7 @@ async fn change_framework_password(
     Ok(results.into_iter().flatten().collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn enable_appliance_ssh_for_target(
     client: reqwest::Client,
     target: ApplianceSshTarget,

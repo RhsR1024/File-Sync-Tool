@@ -112,7 +112,8 @@ mod windows_impl {
                 wide.as_ptr() as *const u8,
                 wide.len() * std::mem::size_of::<u16>(),
             );
-            let set_status = RegSetValueExW(key, PCWSTR(value_name.as_ptr()), 0, REG_SZ, Some(bytes));
+            let set_status =
+                RegSetValueExW(key, PCWSTR(value_name.as_ptr()), 0, REG_SZ, Some(bytes));
             let _ = RegCloseKey(key);
             if set_status.is_err() {
                 return Err(format!("RegSetValueExW: {:?}", set_status));
@@ -171,10 +172,7 @@ mod windows_impl {
         status
     }
 
-    pub fn set_autostart_as_admin(
-        exe_path: &str,
-        enable: bool,
-    ) -> Result<AdminTaskStatus, String> {
+    pub fn set_autostart_as_admin(exe_path: &str, enable: bool) -> Result<AdminTaskStatus, String> {
         if enable {
             match task_scheduler::create_task() {
                 Ok(()) => {

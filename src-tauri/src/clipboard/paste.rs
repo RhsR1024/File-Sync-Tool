@@ -66,7 +66,10 @@ pub fn file_paths_as_text(item: &ClipboardItem) -> Result<String, String> {
 }
 
 /// Merge text-like clipboard items into a single plain-text payload.
-pub fn merge_items_text(items: &[ClipboardItem], separator: Option<&str>) -> Result<String, String> {
+pub fn merge_items_text(
+    items: &[ClipboardItem],
+    separator: Option<&str>,
+) -> Result<String, String> {
     if items.is_empty() {
         return Err("no clipboard items were provided".to_string());
     }
@@ -135,11 +138,14 @@ fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), Stri
         }
         ContentKind::Rtf => {
             let text = preferred_rich_text(item);
-            let rich_text = item.rtf_content.as_deref().filter(|rtf| !rtf.is_empty());
-            if plain_text || rich_text.is_none() {
+            if plain_text {
                 write_text_to_clipboard(text)?;
+            } else if let Some(rich_text) =
+                item.rtf_content.as_deref().filter(|rtf| !rtf.is_empty())
+            {
+                write_rtf_to_clipboard(text, rich_text)?;
             } else {
-                write_rtf_to_clipboard(text, rich_text.unwrap())?;
+                write_text_to_clipboard(text)?;
             }
         }
         ContentKind::Image => {
@@ -255,8 +261,8 @@ fn write_rtf_to_clipboard(text: &str, rtf: &str) -> Result<(), String> {
     unsafe fn set_text_data(text: &str) -> Result<(), String> {
         let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let bytes = utf16.len() * std::mem::size_of::<u16>();
-        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes)
-            .map_err(|e| format!("alloc clipboard text: {e}"))?;
+        let handle =
+            GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|e| format!("alloc clipboard text: {e}"))?;
         if handle.is_invalid() {
             return Err("alloc clipboard text".to_string());
         }
@@ -384,7 +390,10 @@ mod tests {
 
         assert_eq!(
             paths,
-            vec![PathBuf::from("C:\\alpha.txt"), PathBuf::from("D:\\beta.png")]
+            vec![
+                PathBuf::from("C:\\alpha.txt"),
+                PathBuf::from("D:\\beta.png")
+            ]
         );
     }
 
@@ -452,7 +461,10 @@ mod tests {
     #[test]
     fn merge_items_text_rejects_non_text_like_items() {
         let err = merge_items_text(
-            &[sample_item(ContentKind::Text), sample_item(ContentKind::File)],
+            &[
+                sample_item(ContentKind::Text),
+                sample_item(ContentKind::File),
+            ],
             None,
         )
         .unwrap_err();
@@ -487,13 +499,16 @@ mod tests {
 
         save_image_item_to_path(&item, &target.to_string_lossy()).unwrap();
 
-        assert_eq!(std::fs::read(&source).unwrap(), std::fs::read(&target).unwrap());
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(&target).unwrap()
+        );
     }
 
     #[test]
     fn save_image_item_to_path_rejects_non_image_or_missing_source() {
-        let err = save_image_item_to_path(&sample_item(ContentKind::Text), "target.png")
-            .unwrap_err();
+        let err =
+            save_image_item_to_path(&sample_item(ContentKind::Text), "target.png").unwrap_err();
         assert!(err.contains("image kind"));
 
         let mut image = sample_item(ContentKind::Image);

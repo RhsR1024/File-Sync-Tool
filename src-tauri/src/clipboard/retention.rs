@@ -152,8 +152,11 @@ mod tests {
             params![old_ms],
         )
         .unwrap();
-        conn.execute("UPDATE clipboard_items SET is_favorite = 1 WHERE id = 1", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE clipboard_items SET is_favorite = 1 WHERE id = 1",
+            [],
+        )
+        .unwrap();
         conn.execute("UPDATE clipboard_items SET is_pinned = 1 WHERE id = 2", [])
             .unwrap();
 

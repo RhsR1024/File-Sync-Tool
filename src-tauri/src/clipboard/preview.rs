@@ -1,10 +1,12 @@
 use serde::Serialize;
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Size, WebviewWindow,
-    WebviewWindowBuilder, WebviewUrl,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Size, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 
-use crate::clipboard::models::{ClipboardItem, ClipboardPreviewPosition, ClipboardSettings, ContentKind};
+use crate::clipboard::models::{
+    ClipboardItem, ClipboardPreviewPosition, ClipboardSettings, ContentKind,
+};
 
 pub const IMAGE_PREVIEW_WINDOW_LABEL: &str = "clipboard-image-preview";
 pub const TEXT_PREVIEW_WINDOW_LABEL: &str = "clipboard-text-preview";
@@ -158,7 +160,10 @@ pub fn show_text_preview<R: tauri::Runtime>(
     settings: &ClipboardSettings,
     item: &ClipboardItem,
 ) -> Result<(), String> {
-    if !matches!(item.kind, ContentKind::Text | ContentKind::Html | ContentKind::Rtf) {
+    if !matches!(
+        item.kind,
+        ContentKind::Text | ContentKind::Html | ContentKind::Rtf
+    ) {
         return Err("clipboard item is not text-previewable".to_string());
     }
 
@@ -197,8 +202,14 @@ pub fn calculate_preview_placement(
     monitor_rect: WindowRect,
     preference: ClipboardPreviewPosition,
 ) -> PreviewPlacement {
-    let width = preview_size.width.min(monitor_rect.width).max(MIN_PREVIEW_WIDTH.min(monitor_rect.width));
-    let height = preview_size.height.min(monitor_rect.height).max(MIN_PREVIEW_HEIGHT.min(monitor_rect.height));
+    let width = preview_size
+        .width
+        .min(monitor_rect.width)
+        .max(MIN_PREVIEW_WIDTH.min(monitor_rect.width));
+    let height = preview_size
+        .height
+        .min(monitor_rect.height)
+        .max(MIN_PREVIEW_HEIGHT.min(monitor_rect.height));
 
     let desired_side = match preference {
         ClipboardPreviewPosition::Left => PreviewSide::Left,
@@ -236,7 +247,9 @@ pub fn calculate_preview_placement(
     PreviewPlacement {
         side,
         x: unclamped_x.clamp(monitor_rect.x, max_x.max(monitor_rect.x)),
-        y: panel_rect.y.clamp(monitor_rect.y, max_y.max(monitor_rect.y)),
+        y: panel_rect
+            .y
+            .clamp(monitor_rect.y, max_y.max(monitor_rect.y)),
         width,
         height,
     }

@@ -48,11 +48,7 @@ pub(crate) fn build_query_task_args(verbose: bool) -> Vec<String> {
 
 #[allow(dead_code)]
 pub(crate) fn build_run_task_args() -> Vec<String> {
-    vec![
-        "/Run".to_string(),
-        "/TN".to_string(),
-        TASK_NAME.to_string(),
-    ]
+    vec!["/Run".to_string(), "/TN".to_string(), TASK_NAME.to_string()]
 }
 
 pub(crate) fn build_run_task_command() -> String {
@@ -70,8 +66,8 @@ mod windows_impl {
     use std::process::{Command, Output};
 
     use super::{
-        build_create_task_args, build_query_task_args, build_remove_task_args,
-        build_run_task_args, query_output_matches_exe_path, AdminTaskStatus,
+        build_create_task_args, build_query_task_args, build_remove_task_args, build_run_task_args,
+        query_output_matches_exe_path, AdminTaskStatus,
     };
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;

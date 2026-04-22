@@ -23,12 +23,14 @@ pub enum SessionSubject {
 }
 
 impl SessionSubject {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn username(&self) -> &str {
         match self {
             Self::Guest { username } | Self::Account { username } => username,
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_guest(&self) -> bool {
         matches!(self, Self::Guest { .. })
     }

@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
-use tauri::Manager;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct UiState {
@@ -67,7 +66,7 @@ pub fn load_kv(app_handle: tauri::AppHandle, key: String) -> Option<Value> {
 
 fn get_kv_path(app_handle: &tauri::AppHandle, key: &str) -> PathBuf {
     let safe_key = key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-    crate::config::get_data_dir(&app_handle)
+    crate::config::get_data_dir(app_handle)
         .join("kv")
         .join(format!("{}.json", safe_key))
 }

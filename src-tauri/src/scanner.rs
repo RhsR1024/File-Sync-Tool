@@ -2208,7 +2208,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                 }
 
                 // Sort
-                candidates.sort_by(|a, b| b.datetime.cmp(&a.datetime));
+                candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.datetime));
 
                 // Tree view
                 for cand in candidates.iter().take(20) {
@@ -2240,7 +2240,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                     continue;
                 }
 
-                version_matches.sort_by(|a, b| b.datetime.cmp(&a.datetime));
+                version_matches.sort_by_key(|candidate| std::cmp::Reverse(candidate.datetime));
 
                 if let Some(latest) = version_matches.first() {
                     let folder_date = latest.datetime.date();

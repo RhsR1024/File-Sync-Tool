@@ -1141,7 +1141,7 @@ Observed: `81` clipboard-related Rust tests passed, `0` failed; `cmd /c pnpm che
 
 **Depends on:** Task 15
 
-- [ ] **Step 16.1: Run Rust verification**
+- [x] **Step 16.1: Run Rust verification**
 
 ```powershell
 cargo fmt --manifest-path src-tauri\Cargo.toml --all
@@ -1151,7 +1151,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 
 Expected: all green.
 
-- [ ] **Step 16.2: Run frontend verification**
+- [x] **Step 16.2: Run frontend verification**
 
 ```powershell
 cmd /c pnpm check
@@ -1169,13 +1169,41 @@ Run through the spec's `M6`, `M7`, `M8`, and `M9` manual acceptance checklists, 
 - preview popup <= 150ms
 - 10k-row scroll >= 50fps
 
-- [ ] **Step 16.4: Fix any failures, rerun affected checks, and update plan status**
+- [x] **Step 16.4: Fix any failures, rerun affected checks, and update plan status**
 
 No open spec or quality review issues should remain.
 
 - [ ] **Step 16.5: Prepare branch completion**
 
 Use `superpowers:requesting-code-review` and then `superpowers:finishing-a-development-branch` before merge/cleanup.
+
+Status 2026-04-22:
+- Task 16 automation gates are green after follow-up fixes for final verification and lint/clippy compatibility.
+- Fresh verification passed with:
+
+```powershell
+cargo fmt --manifest-path src-tauri\Cargo.toml --all
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'
+$env:RUSTFLAGS='-C debuginfo=0'
+$env:CARGO_PROFILE_DEV_DEBUG='0'
+$env:CARGO_PROFILE_TEST_DEBUG='0'
+$env:CARGO_INCREMENTAL='0'
+cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri\Cargo.toml
+cmd /c pnpm check
+cmd /c pnpm lint
+cmd /c pnpm tauri:build:versioned-exe
+```
+
+- Observed:
+  - `cargo clippy --all-targets -- -D warnings` succeeded with `0` warnings promoted to errors.
+  - `cargo test --manifest-path src-tauri\Cargo.toml` succeeded with `157` tests passed, `0` failed.
+  - `cmd /c pnpm check` succeeded.
+  - `cmd /c pnpm lint` succeeded with `0` errors and `9` existing warnings.
+  - `cmd /c pnpm tauri:build:versioned-exe` succeeded and produced `src-tauri\target\release\file-sync-tool-1.0.7-202604221156.exe`.
+- The remaining Task 16 work is manual-only:
+  - Step 16.3 still needs human-run M6/M7/M8/M9 regression and performance validation in a live desktop session.
+  - Step 16.5 still needs the user's branch-completion choice (merge / PR / keep / discard).
 
 ---
 

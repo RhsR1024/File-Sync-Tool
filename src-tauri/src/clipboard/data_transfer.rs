@@ -79,7 +79,10 @@ pub fn export_bundle(
     include_assets: bool,
 ) -> Result<(), String> {
     if !db_path.is_file() {
-        return Err(format!("clipboard database not found: {}", db_path.display()));
+        return Err(format!(
+            "clipboard database not found: {}",
+            db_path.display()
+        ));
     }
 
     let checkpoint_conn =
@@ -195,10 +198,7 @@ fn add_directory_files_to_zip<W: Write + std::io::Seek>(
             add_directory_files_to_zip(
                 zip,
                 &path,
-                &format!(
-                    "{archive_prefix}/{}",
-                    entry.file_name().to_string_lossy()
-                ),
+                &format!("{archive_prefix}/{}", entry.file_name().to_string_lossy()),
                 options,
             )?;
             continue;
@@ -224,10 +224,8 @@ fn extract_bundle(archive_path: &Path) -> Result<ExtractedBundle, String> {
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("read import archive: {e}"))?;
 
-    let root_dir = std::env::temp_dir().join(format!(
-        "fst-clipboard-import-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root_dir =
+        std::env::temp_dir().join(format!("fst-clipboard-import-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root_dir).map_err(|e| format!("create temp import dir: {e}"))?;
 
     for index in 0..archive.len() {
@@ -370,6 +368,7 @@ fn import_groups(
     Ok((group_map, imported_count))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_imported_item(
     conn: &Connection,
     item: &ImportedItem,
@@ -380,7 +379,9 @@ fn insert_imported_item(
     target_icon_dir: &Path,
     skip_duplicate_hash: bool,
 ) -> Result<bool, String> {
-    if skip_duplicate_hash && db::item_exists_by_hash(conn, &item.hash).map_err(|e| e.to_string())? {
+    if skip_duplicate_hash
+        && db::item_exists_by_hash(conn, &item.hash).map_err(|e| e.to_string())?
+    {
         return Ok(false);
     }
 
@@ -390,7 +391,9 @@ fn insert_imported_item(
         .file_paths
         .as_ref()
         .map(|paths| serde_json::to_string(paths).unwrap_or_default());
-    let group_id = item.group_id.and_then(|value| group_map.get(&value).copied());
+    let group_id = item
+        .group_id
+        .and_then(|value| group_map.get(&value).copied());
 
     conn.execute(
         "INSERT INTO clipboard_items
@@ -625,7 +628,10 @@ mod tests {
         .unwrap();
 
         let items = list_all_items(&import_conn);
-        let hashes = items.iter().map(|item| item.hash.as_str()).collect::<Vec<_>>();
+        let hashes = items
+            .iter()
+            .map(|item| item.hash.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(report.imported_items, 1);
         assert_eq!(items.len(), 3);
         assert!(hashes.contains(&"existing-row"));

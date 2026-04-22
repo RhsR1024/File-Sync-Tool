@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 use rayon::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewWindow};
 
-use crate::clipboard::db;
 use crate::clipboard::data_transfer::{ImportMode, ImportReport};
+use crate::clipboard::db;
 use crate::clipboard::models::{
     ClipboardGroup, ClipboardItem, ClipboardListQuery, ClipboardListResult, ClipboardSettings,
     ClipboardStats, FilePathStatus,
@@ -62,7 +62,8 @@ fn collect_file_path_statuses(items: &[ClipboardItem]) -> Vec<FilePathStatus> {
         .flat_map(|paths| paths.iter().cloned())
         .collect();
 
-    paths.par_iter()
+    paths
+        .par_iter()
         .map(|path| match std::fs::metadata(path) {
             Ok(metadata) => FilePathStatus {
                 path: path.clone(),
@@ -86,14 +87,18 @@ fn collect_file_path_statuses_for_selection(
         return Err("one or more clipboard items no longer exist".to_string());
     }
 
-    if items.iter().any(|item| item.kind != crate::clipboard::models::ContentKind::File) {
+    if items
+        .iter()
+        .any(|item| item.kind != crate::clipboard::models::ContentKind::File)
+    {
         return Err("all selected clipboard items must be file items".to_string());
     }
 
-    if items
-        .iter()
-        .any(|item| item.file_paths.as_ref().map_or(true, |paths| paths.is_empty()))
-    {
+    if items.iter().any(|item| {
+        item.file_paths
+            .as_ref()
+            .map_or(true, |paths| paths.is_empty())
+    }) {
         return Err("selected file item is missing file paths".to_string());
     }
 
@@ -189,7 +194,11 @@ fn reset_clipboard_config_internal(
 
     if old.use_win_v_replacement && !defaults.use_win_v_replacement {
         crate::clipboard::win_v::disable_win_v_replacement()?;
-        crate::clipboard::hotkey::change(app.clone(), &state.clipboard.hotkey_handle, &defaults.hotkey)?;
+        crate::clipboard::hotkey::change(
+            app.clone(),
+            &state.clipboard.hotkey_handle,
+            &defaults.hotkey,
+        )?;
     }
 
     if old.run_as_admin && !defaults.run_as_admin {
@@ -322,11 +331,7 @@ pub fn cb_groups_rename(
 }
 
 #[tauri::command]
-pub fn cb_groups_delete(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<(), String> {
+pub fn cb_groups_delete(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let groups = {
         let conn = state.clipboard.write_db.lock();
         let deleted = db::delete_group(&conn, id).map_err(|e| e.to_string())?;
@@ -572,11 +577,7 @@ pub fn cb_paste_as_files(
 }
 
 #[tauri::command]
-pub fn cb_paste_as_path(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<(), String> {
+pub fn cb_paste_as_path(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let item = {
         let conn = state.clipboard.db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
@@ -829,7 +830,11 @@ mod tests {
     use crate::clipboard::models::{ClipboardItem, ClipboardSettings, ContentKind};
     use tempfile::TempDir;
 
-    fn sample_asset_item(image_path: Option<String>, icon_path: Option<String>, hash: &str) -> NewItem {
+    fn sample_asset_item(
+        image_path: Option<String>,
+        icon_path: Option<String>,
+        hash: &str,
+    ) -> NewItem {
         NewItem {
             kind: ContentKind::Text,
             content_preview: "asset".into(),
@@ -902,11 +907,9 @@ mod tests {
     #[test]
     fn cleanup_assets_after_mutation_removes_orphans_after_delete() {
         let temp_dir = TempDir::new().unwrap();
-        let clipboard = crate::clipboard::ClipboardState::init(
-            temp_dir.path(),
-            ClipboardSettings::default(),
-        )
-        .unwrap();
+        let clipboard =
+            crate::clipboard::ClipboardState::init(temp_dir.path(), ClipboardSettings::default())
+                .unwrap();
 
         let image_path = clipboard.image_dir.join("delete.png");
         let icon_path = clipboard.icon_dir.join("delete-icon.png");
@@ -939,11 +942,9 @@ mod tests {
     #[test]
     fn cleanup_assets_after_mutation_removes_orphans_after_clear() {
         let temp_dir = TempDir::new().unwrap();
-        let clipboard = crate::clipboard::ClipboardState::init(
-            temp_dir.path(),
-            ClipboardSettings::default(),
-        )
-        .unwrap();
+        let clipboard =
+            crate::clipboard::ClipboardState::init(temp_dir.path(), ClipboardSettings::default())
+                .unwrap();
 
         let image_path = clipboard.image_dir.join("clear.png");
         let icon_path = clipboard.icon_dir.join("clear-icon.png");
@@ -1006,9 +1007,11 @@ mod tests {
             collect_file_path_statuses_for_selection(&[sample_file_item(None)], 1).unwrap_err();
         assert!(err.contains("missing file paths"));
 
-        let err =
-            collect_file_path_statuses_for_selection(&[sample_file_item(Some(vec!["C:\\ok.txt".into()]))], 2)
-                .unwrap_err();
+        let err = collect_file_path_statuses_for_selection(
+            &[sample_file_item(Some(vec!["C:\\ok.txt".into()]))],
+            2,
+        )
+        .unwrap_err();
         assert!(err.contains("no longer exist"));
     }
 
@@ -1031,11 +1034,9 @@ mod tests {
     #[test]
     fn load_items_by_ids_reports_stale_selection() {
         let temp_dir = TempDir::new().unwrap();
-        let clipboard = crate::clipboard::ClipboardState::init(
-            temp_dir.path(),
-            ClipboardSettings::default(),
-        )
-        .unwrap();
+        let clipboard =
+            crate::clipboard::ClipboardState::init(temp_dir.path(), ClipboardSettings::default())
+                .unwrap();
 
         let existing_id = {
             let conn = clipboard.db.lock();

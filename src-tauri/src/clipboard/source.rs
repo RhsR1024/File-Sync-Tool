@@ -44,7 +44,8 @@ fn wildcard_match(pattern: &str, candidate: &str) -> bool {
 
     while candidate_index < candidate.len() {
         if pattern_index < pattern.len()
-            && (pattern[pattern_index] == '?' || pattern[pattern_index] == candidate[candidate_index])
+            && (pattern[pattern_index] == '?'
+                || pattern[pattern_index] == candidate[candidate_index])
         {
             pattern_index += 1;
             candidate_index += 1;
@@ -113,7 +114,8 @@ pub fn should_capture_source_app(
         return true;
     }
 
-    let matched = info.is_some_and(|info| patterns.any(|pattern| matches_app_pattern(info, pattern)));
+    let matched =
+        info.is_some_and(|info| patterns.any(|pattern| matches_app_pattern(info, pattern)));
     match settings.mode {
         ClipboardAppFilterMode::Blacklist => !matched,
         ClipboardAppFilterMode::Whitelist => matched,
@@ -121,7 +123,10 @@ pub fn should_capture_source_app(
 }
 
 fn decode_clipboard_text_bytes(bytes: &[u8]) -> Option<String> {
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
     let payload = &bytes[..end];
     if payload.is_empty() {
         return None;
@@ -205,12 +210,11 @@ pub fn get_clipboard_source_app() -> Option<SourceAppInfo> {
     None
 }
 
-pub fn foreground_process_name() -> Option<String> {
-    get_clipboard_source_app().map(|info| info.app_name)
-}
-
 #[cfg(target_os = "windows")]
-unsafe fn resolve_uwp_app(owner_hwnd: windows::Win32::Foundation::HWND, exe_path: &Path) -> Option<PathBuf> {
+unsafe fn resolve_uwp_app(
+    owner_hwnd: windows::Win32::Foundation::HWND,
+    exe_path: &Path,
+) -> Option<PathBuf> {
     if !is_application_frame_host_exe(exe_path) {
         return None;
     }
@@ -379,7 +383,11 @@ fn get_file_description(exe_path: &Path) -> Option<String> {
         let slice = unsafe { std::slice::from_raw_parts(ptr.cast::<u16>(), len as usize) };
         let end = slice.iter().position(|ch| *ch == 0).unwrap_or(slice.len());
         let value = String::from_utf16_lossy(&slice[..end]).trim().to_string();
-        if value.is_empty() { None } else { Some(value) }
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
     }
 
     unsafe {
@@ -471,7 +479,10 @@ mod tests {
 
         let resolved = resolve_uwp_child_exe_path(
             host,
-            vec![PathBuf::from("C:\\Windows\\System32\\ApplicationFrameHost.exe"), child.clone()],
+            vec![
+                PathBuf::from("C:\\Windows\\System32\\ApplicationFrameHost.exe"),
+                child.clone(),
+            ],
         );
 
         assert_eq!(resolved, Some(child));

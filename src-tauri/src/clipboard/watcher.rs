@@ -111,13 +111,18 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
 
     let mut clipboard = Clipboard::new().map_err(|err| format!("clipboard init: {err}"))?;
     let text = clipboard.get_text().ok().and_then(normalize_optional_text);
-    let html = clipboard.get().html().ok().and_then(normalize_optional_text);
+    let html = clipboard
+        .get()
+        .html()
+        .ok()
+        .and_then(normalize_optional_text);
     let files = clipboard
         .get()
         .file_list()
         .ok()
         .map(|paths| {
-            paths.into_iter()
+            paths
+                .into_iter()
                 .map(|path| path.to_string_lossy().to_string())
                 .collect::<Vec<_>>()
         })
@@ -144,10 +149,7 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
 
     let hash_hex = match kind {
         CaptureKind::Rtf => hex(&compute_hash(b"rtf", rtf.as_deref().unwrap().as_bytes())),
-        CaptureKind::Html => hex(&compute_hash(
-            b"html",
-            html.as_deref().unwrap().as_bytes(),
-        )),
+        CaptureKind::Html => hex(&compute_hash(b"html", html.as_deref().unwrap().as_bytes())),
         CaptureKind::File => hex(&compute_hash(
             b"files",
             files.as_ref().unwrap().join("\0").as_bytes(),
@@ -156,26 +158,15 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
             b"image",
             image.as_ref().unwrap().rgba.as_slice(),
         )),
-        CaptureKind::Text => hex(&compute_hash(
-            b"text",
-            text.as_deref().unwrap().as_bytes(),
-        )),
+        CaptureKind::Text => hex(&compute_hash(b"text", text.as_deref().unwrap().as_bytes())),
     };
 
     let source_capture = build_source_capture(state, source_info);
     let item = match kind {
-        CaptureKind::Rtf => build_rtf_item(
-            rtf.unwrap(),
-            text.clone(),
-            hash_hex,
-            &source_capture,
-        ),
-        CaptureKind::Html => build_html_item(
-            html.unwrap(),
-            text.clone(),
-            hash_hex,
-            &source_capture,
-        ),
+        CaptureKind::Rtf => build_rtf_item(rtf.unwrap(), text.clone(), hash_hex, &source_capture),
+        CaptureKind::Html => {
+            build_html_item(html.unwrap(), text.clone(), hash_hex, &source_capture)
+        }
         CaptureKind::File => build_file_item(files.unwrap(), hash_hex, &source_capture),
         CaptureKind::Image => {
             let image = image.unwrap();
@@ -230,7 +221,8 @@ fn build_source_capture(
         };
     };
 
-    let icon_path = icon_store::ensure_icon_cached(&info.exe_path, &state.icon_dir, &info.icon_cache_key);
+    let icon_path =
+        icon_store::ensure_icon_cached(&info.exe_path, &state.icon_dir, &info.icon_cache_key);
     CaptureSource {
         source_app: Some(info.app_name),
         source_app_icon: icon_path,
@@ -357,7 +349,8 @@ fn build_image_item(
 }
 
 fn total_file_bytes(paths: &[String]) -> i64 {
-    paths.iter()
+    paths
+        .iter()
         .filter_map(|path| {
             let path = std::path::Path::new(path);
             if path.is_file() {
@@ -421,12 +414,13 @@ fn upsert_item(state: &ClipboardState, item: NewItem) -> Result<(), String> {
     let settings = state.settings.read().clone();
     let needs_asset_cleanup = {
         let conn = state.write_db.lock();
-        let duplicate_asset_candidate = (item.image_path.is_some() || item.source_app_icon.is_some())
+        let duplicate_asset_candidate = (item.image_path.is_some()
+            || item.source_app_icon.is_some())
             && db::item_exists_by_hash(&conn, &item.hash).map_err(|err| err.to_string())?;
         db::upsert_item_with_dedup(&conn, &item, settings.dedup_strategy.clone())
             .map_err(|err| err.to_string())?;
-        let cleanup_stats =
-            crate::clipboard::retention::run_cleanup(&conn, &settings).map_err(|err| err.to_string())?;
+        let cleanup_stats = crate::clipboard::retention::run_cleanup(&conn, &settings)
+            .map_err(|err| err.to_string())?;
         duplicate_asset_candidate || cleanup_stats.0 > 0 || cleanup_stats.1 > 0
     };
 
@@ -538,7 +532,10 @@ mod tests {
         assert_eq!(with_text.kind, ContentKind::Rtf);
         assert_eq!(with_text.content_preview, "Hello");
         assert_eq!(with_text.content_full.as_deref(), Some("Hello"));
-        assert_eq!(with_text.rtf_content.as_deref(), Some("{\\rtf1\\ansi Hello}"));
+        assert_eq!(
+            with_text.rtf_content.as_deref(),
+            Some("{\\rtf1\\ansi Hello}")
+        );
         assert_eq!(with_text.byte_size, "{\\rtf1\\ansi Hello}".len() as i64);
 
         let fallback = build_rtf_item(
@@ -584,8 +581,11 @@ mod tests {
     #[test]
     fn upsert_item_cleans_replaced_icon_assets() {
         let temp_dir = TempDir::new().unwrap();
-        let state = ClipboardState::init(temp_dir.path(), crate::clipboard::models::ClipboardSettings::default())
-            .unwrap();
+        let state = ClipboardState::init(
+            temp_dir.path(),
+            crate::clipboard::models::ClipboardSettings::default(),
+        )
+        .unwrap();
 
         let old_icon = state.icon_dir.join("old.png");
         let new_icon = state.icon_dir.join("new.png");
@@ -603,12 +603,20 @@ mod tests {
 
         upsert_item(
             &state,
-            build_text_item("same text".to_string(), "same-hash".to_string(), &old_source),
+            build_text_item(
+                "same text".to_string(),
+                "same-hash".to_string(),
+                &old_source,
+            ),
         )
         .unwrap();
         upsert_item(
             &state,
-            build_text_item("same text".to_string(), "same-hash".to_string(), &new_source),
+            build_text_item(
+                "same text".to_string(),
+                "same-hash".to_string(),
+                &new_source,
+            ),
         )
         .unwrap();
 
