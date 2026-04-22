@@ -910,6 +910,12 @@ export async function fileShareGetStatus(): Promise<FileShareStatus> {
   return await invoke<FileShareStatus>('file_share_get_status');
 }
 
+export interface AdminTaskStatus {
+  installed: boolean;
+  path_valid: boolean;
+  last_error: string | null;
+}
+
 // ─── Clipboard Manager ────────────────────────────────────
 
 export const clipboardApi = {
@@ -952,8 +958,11 @@ export const clipboardApi = {
   isWinVEnabled: () => invoke<boolean>('cb_is_win_v_enabled'),
   isElevated: () => invoke<boolean>('cb_is_elevated'),
   isRunAsAdminEnabled: () => invoke<boolean>('cb_is_run_as_admin_enabled'),
+  adminTaskStatus: () => invoke<AdminTaskStatus>('cb_admin_task_status'),
+  adminTaskCreate: () => invoke<AdminTaskStatus>('cb_admin_task_create'),
+  adminTaskRemove: () => invoke<AdminTaskStatus>('cb_admin_task_remove'),
   setRunAsAdmin: (enable: boolean) =>
-    invoke<void>('cb_set_run_as_admin', { enable }),
+    invoke<AdminTaskStatus>('cb_set_run_as_admin', { enable }),
   setPanelPinned: (pinned: boolean) =>
     invoke<void>('cb_set_panel_pinned', { pinned }),
   isPanelPinned: () => invoke<boolean>('cb_is_panel_pinned'),

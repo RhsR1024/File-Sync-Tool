@@ -38,6 +38,7 @@ use serde_json::json;
 use tauri::{Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
 const TRAY_SHOW_ID: &str = "tray_show_main";
+const TRAY_CLIPBOARD_PANEL_ID: &str = "tray_toggle_clipboard_panel";
 const TRAY_QUIT_ID: &str = "tray_quit";
 
 struct AppState {
@@ -2634,6 +2635,7 @@ fn main() {
         .setup(|app| {
             let tray_menu = MenuBuilder::new(app)
                 .text(TRAY_SHOW_ID, "显示主窗口")
+                .text(TRAY_CLIPBOARD_PANEL_ID, "Clipboard Panel")
                 .separator()
                 .text(TRAY_QUIT_ID, "退出")
                 .build()?;
@@ -2645,6 +2647,9 @@ fn main() {
                 .tooltip("File Sync Tool")
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     TRAY_SHOW_ID => show_main_window(app),
+                    TRAY_CLIPBOARD_PANEL_ID => {
+                        let _ = clipboard::commands::cb_toggle_panel_internal(app.clone());
+                    }
                     TRAY_QUIT_ID => {
                         if let Some(state) = app.try_state::<AppState>() {
                             state.is_quitting.store(true, Ordering::SeqCst);
@@ -2899,6 +2904,9 @@ fn main() {
             clipboard::commands::cb_is_win_v_enabled,
             clipboard::commands::cb_is_elevated,
             clipboard::commands::cb_is_run_as_admin_enabled,
+            clipboard::commands::cb_admin_task_status,
+            clipboard::commands::cb_admin_task_create,
+            clipboard::commands::cb_admin_task_remove,
             clipboard::commands::cb_set_run_as_admin,
             clipboard::commands::cb_set_panel_pinned,
             clipboard::commands::cb_is_panel_pinned,

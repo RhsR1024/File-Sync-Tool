@@ -12,6 +12,7 @@ pub mod paste;
 pub mod preview;
 pub mod retention;
 pub mod source;
+pub mod task_scheduler;
 pub mod watcher;
 pub mod win_v;
 

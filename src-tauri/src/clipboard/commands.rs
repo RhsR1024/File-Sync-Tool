@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::atomic::Ordering;
 
 use rayon::prelude::*;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewWindow};
 
 use crate::clipboard::db;
 use crate::clipboard::models::{
@@ -21,6 +21,37 @@ fn cleanup_assets_after_mutation<T>(
     let value = result?;
     clipboard.cleanup_orphan_assets();
     Ok(value)
+}
+
+#[cfg(target_os = "windows")]
+fn show_panel_without_focus(panel: &WebviewWindow) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+
+    panel.show().map_err(|e| e.to_string())?;
+    if let Ok(hwnd) = panel.hwnd() {
+        unsafe {
+            let _ = SetWindowPos(
+                HWND(hwnd.0 as *mut _),
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_panel_without_focus(panel: &WebviewWindow) -> Result<(), String> {
+    panel.show().map_err(|e| e.to_string())?;
+    panel.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn collect_file_path_statuses(items: &[ClipboardItem]) -> Vec<FilePathStatus> {
@@ -225,8 +256,7 @@ pub fn cb_toggle_panel_internal(app: AppHandle) -> Result<(), String> {
         let _ = panel.set_position(PhysicalPosition::new(cx, cy));
     }
 
-    let _ = panel.show();
-    let _ = panel.set_focus();
+    show_panel_without_focus(&panel)?;
     let _ = app.emit("clipboard-panel-shown", ());
     Ok(())
 }
@@ -524,12 +554,43 @@ pub fn cb_is_run_as_admin_enabled() -> bool {
 }
 
 #[tauri::command]
-pub fn cb_set_run_as_admin(state: State<'_, AppState>, enable: bool) -> Result<(), String> {
+pub fn cb_admin_task_status() -> crate::clipboard::task_scheduler::AdminTaskStatus {
+    crate::clipboard::admin::admin_task_status()
+}
+
+#[tauri::command]
+pub fn cb_admin_task_create() -> Result<crate::clipboard::task_scheduler::AdminTaskStatus, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let exe_path = exe.to_string_lossy().to_string();
-    crate::clipboard::admin::set_autostart_as_admin(&exe_path, enable)?;
+    crate::clipboard::admin::create_admin_task(&exe_path)
+}
+
+#[tauri::command]
+pub fn cb_admin_task_remove() -> Result<crate::clipboard::task_scheduler::AdminTaskStatus, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe_path = exe.to_string_lossy().to_string();
+    crate::clipboard::admin::remove_admin_task(&exe_path)
+}
+
+#[tauri::command]
+pub fn cb_set_run_as_admin(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enable: bool,
+) -> Result<crate::clipboard::task_scheduler::AdminTaskStatus, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe_path = exe.to_string_lossy().to_string();
+    let status = crate::clipboard::admin::set_autostart_as_admin(&exe_path, enable)?;
     state.clipboard.settings.write().run_as_admin = enable;
-    Ok(())
+    {
+        let mut cfg = state
+            .config
+            .lock()
+            .map_err(|e| format!("lock config: {e}"))?;
+        cfg.clipboard.run_as_admin = enable;
+        crate::config::save_config(&app, &cfg)?;
+    }
+    Ok(status)
 }
 
 #[tauri::command]

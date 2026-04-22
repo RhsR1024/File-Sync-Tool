@@ -876,18 +876,19 @@ git commit -m "feat(clipboard): rebuild settings ui for m8"
 - Modify: `src-tauri/src/main.rs`
 - Modify: `src/components/clipboard-settings/GeneralTab.vue`
 - Modify: `src/lib/tauri.ts`
+- Modify: `src/locales/messages.ts`
 
 **Depends on:** Task 11
 
-- [ ] **Step 12.1: Write failing tests for task-scheduler helper functions where possible**
+- [x] **Step 12.1: Write failing tests for task-scheduler helper functions where possible**
 
 Isolate command-string generation and task-state parsing if direct Windows calls are hard to test.
 
-- [ ] **Step 12.2: Replace focus-stealing panel show logic**
+- [x] **Step 12.2: Replace focus-stealing panel show logic**
 
 Implement `SWP_NOACTIVATE`-style non-activating display while keeping panel keyboard behavior usable.
 
-- [ ] **Step 12.3: Add Task Scheduler based admin flow**
+- [x] **Step 12.3: Add Task Scheduler based admin flow**
 
 Use the spec and `ElegantClipboard` behavior as reference for:
 - task creation
@@ -895,23 +896,32 @@ Use the spec and `ElegantClipboard` behavior as reference for:
 - removal
 - fallback to current PowerShell elevation if scheduler flow fails
 
-- [ ] **Step 12.4: Wire tray menu integration**
+- [x] **Step 12.4: Wire tray menu integration**
 
 Add clipboard panel entry to the existing tray/menu flow and expose settings for tray visibility if required by the spec.
 
-- [ ] **Step 12.5: Run checks**
+- [x] **Step 12.5: Run checks**
 
 ```powershell
 cargo test clipboard --manifest-path src-tauri\Cargo.toml
 cmd /c pnpm check
 ```
 
-- [ ] **Step 12.6: Commit**
+- [x] **Step 12.6: Commit**
 
 ```powershell
 git add src-tauri/src/clipboard/commands.rs src-tauri/src/clipboard/admin.rs src-tauri/src/clipboard/task_scheduler.rs src-tauri/src/main.rs src/components/clipboard-settings/GeneralTab.vue src/lib/tauri.ts
 git commit -m "feat(clipboard): add non-activating panel and scheduler elevation"
 ```
+
+Status 2026-04-21:
+- Added task-scheduler helper coverage for command construction and task-query path matching.
+- Replaced the clipboard panel's focus-stealing show flow with a Windows `SetWindowPos(..., SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE)` helper while keeping the existing refresh event flow.
+- Switched admin auto-start to prefer Task Scheduler registration, keep a PowerShell `Start-Process -Verb RunAs` fallback when scheduler setup fails, and exposed task status/create/remove commands to the frontend.
+- Added a tray menu entry for toggling the clipboard panel and surfaced scheduler status plus repair/remove actions in `GeneralTab`.
+- Verified:
+  - `$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTFLAGS='-C debuginfo=0'; cargo test clipboard --manifest-path src-tauri\Cargo.toml`
+  - `cmd /c pnpm check`
 
 ### Task 13: Import/Export, Data-Dir Migration, And Maintenance Actions
 
