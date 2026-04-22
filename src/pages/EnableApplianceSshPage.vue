@@ -4,7 +4,7 @@ import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { AlertCircle, CheckCircle2, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, X as XIcon } from 'lucide-vue-next';
 import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshResult, type ApplianceSshTarget } from '../lib/tauri';
-import { mergeRecentItems, normalizeRecentItems } from '../lib/recentHistory';
+import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
 
 defineOptions({
   name: 'EnableApplianceSshPage',
@@ -215,6 +215,14 @@ const rememberRecentIps = async (items: readonly string[]) => {
     return;
   }
   await storeRecentIps(mergeRecentItems(recentIps.value, items, RECENT_IPS_LIMIT));
+};
+
+const removeRecentIp = async (ip: string) => {
+  await storeRecentIps(removeRecentItems(recentIps.value, ip, RECENT_IPS_LIMIT));
+};
+
+const clearRecentIps = async () => {
+  await storeRecentIps([]);
 };
 
 onMounted(async () => {
@@ -440,21 +448,46 @@ const enableStateClass = (value?: number) => {
                 <option v-for="ip in recentIps" :key="`appliance-ssh-recent-${ip}`" :value="ip" />
               </datalist>
               <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.manualIpHint') }}</p>
-              <div v-if="recentIps.length > 0" class="mt-3 flex items-center gap-2 flex-wrap">
-                <span class="text-xs font-medium text-slate-500">{{ t('history.title') }}:</span>
-                <button
-                  v-for="ip in recentIps"
-                  :key="`appliance-ssh-history-${ip}`"
-                  type="button"
-                  :disabled="isLoading"
-                  class="px-2.5 py-1 text-xs font-medium rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  :class="isRecentIpSelected(ip)
-                    ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50 hover:border-slate-400'"
-                  @click="applyRecentIp(ip)"
-                >
-                  <span class="font-mono">{{ ip }}</span>
-                </button>
+              <div v-if="recentIps.length > 0" class="mt-3 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs font-medium text-slate-500">{{ t('tools.applianceSsh.recentIps') }}</span>
+                  <button
+                    type="button"
+                    :disabled="isLoading"
+                    class="text-xs font-medium text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    @click="clearRecentIps"
+                  >
+                    {{ t('tools.applianceSsh.clearRecentIps') }}
+                  </button>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span
+                    v-for="ip in recentIps"
+                    :key="`appliance-ssh-history-${ip}`"
+                    class="inline-flex items-stretch overflow-hidden rounded-full border transition-colors"
+                    :class="isRecentIpSelected(ip)
+                      ? 'border-blue-600 bg-blue-600 text-white'
+                      : 'border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50'"
+                  >
+                    <button
+                      type="button"
+                      :disabled="isLoading"
+                      class="px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed"
+                      @click="applyRecentIp(ip)"
+                    >
+                      <span class="font-mono">{{ ip }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      :disabled="isLoading"
+                      class="inline-flex items-center border-l border-current/10 px-2 text-current/70 transition hover:text-current disabled:cursor-not-allowed"
+                      :title="t('tools.applianceSsh.removeRecentIp')"
+                      @click.stop="removeRecentIp(ip)"
+                    >
+                      <XIcon class="h-3.5 w-3.5" />
+                    </button>
+                  </span>
+                </div>
               </div>
             </div>
           </div>

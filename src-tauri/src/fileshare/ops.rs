@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::model::DeleteMode;
+use super::model::{self, DeleteMode};
 use chrono::{DateTime, Local};
 use serde::Serialize;
 
@@ -18,6 +18,27 @@ pub struct ResolvedRoot {
     pub id: String,
     pub alias: String,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveNodeKind {
+    Home,
+    ShareRoot,
+    Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPathNode {
+    pub kind: ResolveNodeKind,
+    pub root_id: Option<String>,
+    pub relative_path: String,
+    pub canonical_segments: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveError {
+    NotFound,
+    Forbidden,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -266,6 +287,112 @@ pub fn join_relative_path(parent: &str, child: &str) -> String {
     } else {
         format!("{left}/{right}")
     }
+}
+
+pub fn resolve_path_segments(
+    roots: &[ResolvedRoot],
+    _principal_permissions: &model::FileSharePermissionSet,
+    root_permissions: &[model::UserRootPermissions],
+    segments: &[String],
+) -> Result<ResolvedPathNode, ResolveError> {
+    if segments.is_empty() {
+        return Ok(ResolvedPathNode {
+            kind: ResolveNodeKind::Home,
+            root_id: None,
+            relative_path: String::new(),
+            canonical_segments: Vec::new(),
+        });
+    }
+
+    let root_segment = &segments[0];
+    let root = find_root(roots, root_segment).map_err(|_| ResolveError::NotFound)?;
+
+    let has_browse = root_permissions
+        .iter()
+        .find(|permissions| permissions.root_id == root.id)
+        .map(|permissions| permissions.permissions.browse)
+        .unwrap_or(false);
+    if !has_browse {
+        return Err(ResolveError::Forbidden);
+    }
+
+    if segments.len() == 1 {
+        return Ok(ResolvedPathNode {
+            kind: ResolveNodeKind::ShareRoot,
+            root_id: Some(root.id.clone()),
+            relative_path: String::new(),
+            canonical_segments: vec![root_segment.clone()],
+        });
+    }
+
+    let mut current_path = root.path.clone();
+    let mut canonical_segments = vec![root_segment.clone()];
+
+    for segment in &segments[1..] {
+        if !is_valid_path_segment(segment) {
+            return Err(ResolveError::NotFound);
+        }
+
+        let canonical_segment = resolve_directory_segment(&current_path, segment)?;
+        current_path.push(&canonical_segment);
+        canonical_segments.push(canonical_segment);
+    }
+
+    Ok(ResolvedPathNode {
+        kind: ResolveNodeKind::Directory,
+        root_id: Some(root.id.clone()),
+        relative_path: canonical_segments[1..].join("/"),
+        canonical_segments,
+    })
+}
+
+fn resolve_directory_segment(current_path: &Path, segment: &str) -> Result<String, ResolveError> {
+    let mut names = Vec::new();
+    let entries = fs::read_dir(current_path).map_err(|_| ResolveError::NotFound)?;
+
+    for entry in entries {
+        let entry = entry.map_err(|_| ResolveError::NotFound)?;
+        let file_type = entry.file_type().map_err(|_| ResolveError::NotFound)?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        names.push(name);
+    }
+
+    resolve_directory_name_match(segment, names)
+}
+
+fn resolve_directory_name_match(
+    segment: &str,
+    candidate_names: impl IntoIterator<Item = String>,
+) -> Result<String, ResolveError> {
+    let mut case_insensitive_matches = Vec::new();
+
+    for name in candidate_names {
+        if name == segment {
+            return Ok(name);
+        }
+        if name.eq_ignore_ascii_case(segment) {
+            case_insensitive_matches.push(name);
+        }
+    }
+
+    match case_insensitive_matches.len() {
+        1 => Ok(case_insensitive_matches.remove(0)),
+        _ => Err(ResolveError::NotFound),
+    }
+}
+
+fn is_valid_path_segment(segment: &str) -> bool {
+    if segment.is_empty() || segment == "." || segment == ".." {
+        return false;
+    }
+
+    !segment.chars().any(|character| matches!(character, '/' | '\\' | ':' | '\0'))
 }
 
 pub fn stream_preview(root: &ResolvedRoot, path: &str) -> Result<FilePreview, String> {
@@ -617,6 +744,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::fileshare::model;
     use crate::fileshare::model::DeleteMode;
 
     struct TestDir(PathBuf);
@@ -664,6 +792,271 @@ mod tests {
                 path: root_b.path().to_path_buf(),
             },
         ]
+    }
+
+    #[test]
+    fn resolve_empty_path_returns_home() {
+        let roots = Vec::<ResolvedRoot>::new();
+        let principal_perms = model::FileSharePermissionSet::read_only();
+
+        let result = resolve_path_segments(&roots, &principal_perms, &[], &[])
+            .expect("empty path should resolve");
+
+        assert_eq!(result.kind, ResolveNodeKind::Home);
+        assert_eq!(result.root_id, None);
+        assert_eq!(result.relative_path, "");
+        assert!(result.canonical_segments.is_empty());
+    }
+
+    #[test]
+    fn resolve_root_only_returns_share_root() {
+        let dir = TestDir::new("resolve-root");
+        let roots = vec![ResolvedRoot {
+            id: "ums".into(),
+            alias: "UMS_TEMP".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        let principal_perms = model::FileSharePermissionSet::read_only();
+        let root_perms = vec![model::UserRootPermissions {
+            root_id: "ums".into(),
+            preset: model::PermissionPreset::ReadOnly,
+            permissions: model::FileSharePermissionSet::read_only(),
+        }];
+
+        let result = resolve_path_segments(
+            &roots,
+            &principal_perms,
+            &root_perms,
+            &["UMS_TEMP".to_string()],
+        )
+        .expect("share root should resolve");
+
+        assert_eq!(result.kind, ResolveNodeKind::ShareRoot);
+        assert_eq!(result.root_id.as_deref(), Some("ums"));
+        assert_eq!(result.relative_path, "");
+        assert_eq!(result.canonical_segments, vec!["UMS_TEMP".to_string()]);
+    }
+
+    #[test]
+    fn resolve_root_segment_accepts_exact_alias_with_colon() {
+        let dir = TestDir::new("resolve-root-colon");
+        let roots = vec![ResolvedRoot {
+            id: "ums".into(),
+            alias: "UMS:TEMP".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        let principal_perms = model::FileSharePermissionSet::read_only();
+        let root_perms = vec![model::UserRootPermissions {
+            root_id: "ums".into(),
+            preset: model::PermissionPreset::ReadOnly,
+            permissions: model::FileSharePermissionSet::read_only(),
+        }];
+
+        let result = resolve_path_segments(
+            &roots,
+            &principal_perms,
+            &root_perms,
+            &["UMS:TEMP".to_string()],
+        )
+        .expect("root alias with colon should resolve by exact match");
+
+        assert_eq!(result.kind, ResolveNodeKind::ShareRoot);
+        assert_eq!(result.root_id.as_deref(), Some("ums"));
+        assert_eq!(result.canonical_segments, vec!["UMS:TEMP".to_string()]);
+    }
+
+    #[test]
+    fn resolve_nested_directory_returns_canonical_segments() {
+        let dir = TestDir::new("resolve-nested");
+        fs::create_dir_all(dir.path().join("Sub").join("Leaf"))
+            .expect("nested directories should exist");
+
+        let roots = vec![ResolvedRoot {
+            id: "ums".into(),
+            alias: "UMS_TEMP".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        let principal_perms = model::FileSharePermissionSet::read_only();
+        let root_perms = vec![model::UserRootPermissions {
+            root_id: "ums".into(),
+            preset: model::PermissionPreset::ReadOnly,
+            permissions: model::FileSharePermissionSet::read_only(),
+        }];
+
+        let result = resolve_path_segments(
+            &roots,
+            &principal_perms,
+            &root_perms,
+            &["UMS_TEMP".to_string(), "Sub".to_string(), "Leaf".to_string()],
+        )
+        .expect("nested directories should resolve");
+
+        assert_eq!(result.kind, ResolveNodeKind::Directory);
+        assert_eq!(result.root_id.as_deref(), Some("ums"));
+        assert_eq!(result.relative_path, "Sub/Leaf");
+        assert_eq!(
+            result.canonical_segments,
+            vec!["UMS_TEMP".to_string(), "Sub".to_string(), "Leaf".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_corrects_subdirectory_case_from_disk() {
+        let dir = TestDir::new("resolve-case");
+        fs::create_dir_all(dir.path().join("Sub")).expect("subdirectory should exist");
+
+        let roots = vec![ResolvedRoot {
+            id: "ums".into(),
+            alias: "UMS_TEMP".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        let principal_perms = model::FileSharePermissionSet::read_only();
+        let root_perms = vec![model::UserRootPermissions {
+            root_id: "ums".into(),
+            preset: model::PermissionPreset::ReadOnly,
+            permissions: model::FileSharePermissionSet::read_only(),
+        }];
+
+        let result = resolve_path_segments(
+            &roots,
+            &principal_perms,
+            &root_perms,
+            &["UMS_TEMP".to_string(), "SUB".to_string()],
+        )
+        .expect("case-insensitive match should resolve");
+
+        assert_eq!(result.kind, ResolveNodeKind::Directory);
+        assert_eq!(result.canonical_segments, vec!["UMS_TEMP".to_string(), "Sub".to_string()]);
+        assert_eq!(result.relative_path, "Sub");
+    }
+
+    #[test]
+    fn resolve_directory_name_match_rejects_ambiguous_case_insensitive_matches() {
+        let error = resolve_directory_name_match(
+            "SUB",
+            vec!["Sub".to_string(), "sUb".to_string()],
+        )
+        .expect_err("ambiguous matches should be rejected");
+
+        assert_eq!(error, ResolveError::NotFound);
+    }
+
+    #[test]
+    fn resolve_unknown_root_returns_not_found() {
+        let roots = Vec::<ResolvedRoot>::new();
+        let principal_perms = model::FileSharePermissionSet::read_only();
+
+        let error = resolve_path_segments(&roots, &principal_perms, &[], &["nope".into()])
+            .expect_err("unknown root should not resolve");
+
+        assert_eq!(error, ResolveError::NotFound);
+    }
+
+    #[test]
+    fn resolve_missing_segment_returns_not_found() {
+        let dir = TestDir::new("resolve-missing");
+        fs::create_dir_all(dir.path().join("only")).expect("parent directory should exist");
+
+        let roots = vec![ResolvedRoot {
+            id: "ums".into(),
+            alias: "ums".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        let principal_perms = model::FileSharePermissionSet::read_only();
+        let root_perms = vec![model::UserRootPermissions {
+            root_id: "ums".into(),
+            preset: model::PermissionPreset::ReadOnly,
+            permissions: model::FileSharePermissionSet::read_only(),
+        }];
+
+        let error = resolve_path_segments(
+            &roots,
+            &principal_perms,
+            &root_perms,
+            &["ums".into(), "missing".into()],
+        )
+        .expect_err("missing segment should not resolve");
+
+        assert_eq!(error, ResolveError::NotFound);
+    }
+
+    #[test]
+    fn resolve_file_segment_returns_not_found() {
+        let dir = TestDir::new("resolve-file");
+        fs::write(dir.path().join("a.txt"), b"x").expect("file should exist");
+
+        let roots = vec![ResolvedRoot {
+            id: "ums".into(),
+            alias: "ums".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        let principal_perms = model::FileSharePermissionSet::read_only();
+        let root_perms = vec![model::UserRootPermissions {
+            root_id: "ums".into(),
+            preset: model::PermissionPreset::ReadOnly,
+            permissions: model::FileSharePermissionSet::read_only(),
+        }];
+
+        let error = resolve_path_segments(
+            &roots,
+            &principal_perms,
+            &root_perms,
+            &["ums".into(), "a.txt".into()],
+        )
+        .expect_err("file segment should not resolve");
+
+        assert_eq!(error, ResolveError::NotFound);
+    }
+
+    #[test]
+    fn resolve_rejects_path_traversal_segments() {
+        let dir = TestDir::new("resolve-traversal");
+        fs::create_dir_all(dir.path().join("safe")).expect("safe directory should exist");
+
+        let roots = vec![ResolvedRoot {
+            id: "ums".into(),
+            alias: "ums".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        let principal_perms = model::FileSharePermissionSet::read_only();
+        let root_perms = vec![model::UserRootPermissions {
+            root_id: "ums".into(),
+            preset: model::PermissionPreset::ReadOnly,
+            permissions: model::FileSharePermissionSet::read_only(),
+        }];
+
+        for bad in ["..", ".", "", "a/b", "a\\b", "C:", "with\0null"] {
+            let error = resolve_path_segments(
+                &roots,
+                &principal_perms,
+                &root_perms,
+                &["ums".into(), bad.into()],
+            )
+            .expect_err("invalid segment should not resolve");
+
+            assert_eq!(error, ResolveError::NotFound, "segment {bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn resolve_without_browse_permission_is_forbidden() {
+        let dir = TestDir::new("resolve-forbidden");
+        let roots = vec![ResolvedRoot {
+            id: "ums".into(),
+            alias: "ums".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        let principal_perms = model::FileSharePermissionSet::read_only();
+        let root_perms = vec![model::UserRootPermissions {
+            root_id: "ums".into(),
+            preset: model::PermissionPreset::Custom,
+            permissions: model::FileSharePermissionSet::deny_all(),
+        }];
+
+        let error = resolve_path_segments(&roots, &principal_perms, &root_perms, &["ums".into()])
+            .expect_err("root without browse should be forbidden");
+
+        assert_eq!(error, ResolveError::Forbidden);
     }
 
     #[test]

@@ -39,3 +39,23 @@ export function mergeRecentItems(
     limit,
   );
 }
+
+export function removeRecentItems(
+  existing: readonly string[] | null | undefined,
+  removed: readonly string[] | string,
+  limit = 10,
+): string[] {
+  const removedValues = new Set(normalizeRecentItems(
+    Array.isArray(removed) ? removed : [removed],
+    Number.POSITIVE_INFINITY,
+  ));
+  if (removedValues.size === 0) {
+    return normalizeRecentItems(existing, limit);
+  }
+
+  const current = Array.isArray(existing) ? existing : [];
+  return normalizeRecentItems(
+    current.filter(value => !removedValues.has(value)),
+    limit,
+  );
+}

@@ -61,6 +61,12 @@ export interface FileShareTreeResponse {
   children: FileShareNode[];
 }
 
+export interface FileShareResolveResponse {
+  node_id: string | null;
+  kind: FileShareTreeCurrentKind;
+  canonical_segments: string[];
+}
+
 export interface FileShareSearchResponse {
   scope: 'global' | 'subtree';
   results: FileShareNode[];

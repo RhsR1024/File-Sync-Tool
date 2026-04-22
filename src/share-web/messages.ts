@@ -19,6 +19,7 @@ export const messages = {
       createTextSuccess: 'Text file created.',
       renameSuccess: 'Name updated.',
       deleteSuccess: 'Entry deleted.',
+      forbiddenDirectory: 'You don\'t have access to this directory.',
       directoryNotFound: 'The folder could not be found. It may have been moved or deleted.',
     },
     toolbar: {
@@ -127,6 +128,7 @@ export const messages = {
       createTextSuccess: '\u6587\u672c\u6587\u4ef6\u5df2\u521b\u5efa\u3002',
       renameSuccess: '\u540d\u79f0\u5df2\u66f4\u65b0\u3002',
       deleteSuccess: '\u6761\u76ee\u5df2\u5220\u9664\u3002',
+      forbiddenDirectory: '\u65e0\u6743\u8bbf\u95ee\u8be5\u76ee\u5f55\u3002',
       directoryNotFound: '\u8be5\u76ee\u5f55\u4e0d\u5b58\u5728\uff0c\u53ef\u80fd\u5df2\u88ab\u79fb\u52a8\u6216\u5220\u9664\u3002',
     },
     toolbar: {

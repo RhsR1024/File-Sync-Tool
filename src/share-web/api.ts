@@ -1,4 +1,5 @@
 import type {
+  FileShareResolveResponse,
   FileShareSearchResponse,
   FileShareSession,
   FileShareTreeResponse,
@@ -76,6 +77,11 @@ export const fileShareApi = {
     }
     const suffix = query.size > 0 ? `?${query.toString()}` : '';
     return request<FileShareTreeResponse>(`/api/tree${suffix}`);
+  },
+  resolvePath(segments: string[]) {
+    const path = segments.map((segment) => encodeURIComponent(segment)).join('/');
+    const suffix = path.length > 0 ? `?path=${path}` : '';
+    return request<FileShareResolveResponse>(`/api/resolve${suffix}`);
   },
   search(keyword: string, nodeId?: string | null) {
     const query = new URLSearchParams({

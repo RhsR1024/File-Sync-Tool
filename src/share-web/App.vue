@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watchEffect, type Ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watchEffect, type Ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import {
@@ -20,6 +20,13 @@ import SearchBar from './components/SearchBar.vue';
 import ToolbarActions from './components/ToolbarActions.vue';
 import UploadDialog from './components/UploadDialog.vue';
 import {
+  parseHash,
+  pushPath,
+  replacePath,
+  subscribe,
+  type UrlState,
+} from './lib/url-state';
+import {
   canPreviewEntry,
   shouldPromptForAccountSwitch,
   type FileShareNode,
@@ -30,6 +37,16 @@ import {
 } from './types';
 
 const { t } = useI18n();
+
+type UrlAction = 'push' | 'replace' | 'none';
+type ViewIntent = { id: number };
+type SearchStateSnapshot = {
+  keyword: string;
+  activeKeyword: string;
+  searchScope: FileShareSearchScope;
+  activeSearchScope: FileShareSearchScope;
+  searchResults: FileShareNode[];
+};
 
 const session = ref<FileShareSession | null>(null);
 const tree = ref<FileShareTreeResponse | null>(null);
@@ -65,6 +82,12 @@ const previewTitle = ref('');
 const previewSrc = ref('');
 const renameTarget = ref<FileShareNode | null>(null);
 const deleteTarget = ref<FileShareNode | null>(null);
+let unsubscribeFromUrl: (() => void) | null = null;
+let unmounted = false;
+let latestViewIntentId = 0;
+let latestSessionRequestId = 0;
+let latestTreeRequestId = 0;
+let latestSearchRequestId = 0;
 
 const currentNodeId = computed(() => tree.value?.current.node_id ?? null);
 const currentKind = computed<FileShareTreeCurrentKind | null>(() => tree.value?.current.kind ?? null);
@@ -132,6 +155,124 @@ function defaultSearchScope(kind: FileShareTreeCurrentKind | null | undefined): 
   return kind === 'home' ? 'global' : 'current';
 }
 
+function startViewIntent(): ViewIntent {
+  latestViewIntentId += 1;
+  return {
+    id: latestViewIntentId,
+  };
+}
+
+function resolveIntent(intent?: ViewIntent): ViewIntent {
+  return intent ?? startViewIntent();
+}
+
+function isIntentCurrent(intent: ViewIntent): boolean {
+  return intent.id === latestViewIntentId;
+}
+
+function invalidateViewLifecycle() {
+  latestViewIntentId += 1;
+  latestSessionRequestId += 1;
+  latestTreeRequestId += 1;
+  latestSearchRequestId += 1;
+}
+
+function beginSessionRequest(intent: ViewIntent) {
+  latestSessionRequestId += 1;
+  const requestId = latestSessionRequestId;
+  loadingSession.value = true;
+
+  return {
+    isCurrent() {
+      return isIntentCurrent(intent) && requestId === latestSessionRequestId;
+    },
+    finish() {
+      if (requestId === latestSessionRequestId) {
+        loadingSession.value = false;
+      }
+    },
+  };
+}
+
+function beginTreeRequest(intent: ViewIntent) {
+  latestTreeRequestId += 1;
+  const requestId = latestTreeRequestId;
+  loadingEntries.value = true;
+
+  return {
+    isCurrent() {
+      return isIntentCurrent(intent) && requestId === latestTreeRequestId;
+    },
+    finish() {
+      if (requestId === latestTreeRequestId) {
+        loadingEntries.value = false;
+      }
+    },
+  };
+}
+
+function beginSearchRequest(intent: ViewIntent) {
+  latestSearchRequestId += 1;
+  const requestId = latestSearchRequestId;
+  searching.value = true;
+
+  return {
+    isCurrent() {
+      return isIntentCurrent(intent) && requestId === latestSearchRequestId;
+    },
+    finish() {
+      if (requestId === latestSearchRequestId) {
+        searching.value = false;
+      }
+    },
+  };
+}
+
+function defaultUrlScope(segments: string[]): FileShareSearchScope {
+  return segments.length > 0 ? 'current' : 'global';
+}
+
+function homeUrlState(): UrlState {
+  return {
+    segments: [],
+    q: '',
+    scope: 'global',
+  };
+}
+
+function currentUrlSegments(): string[] {
+  return breadcrumbs.value
+    .filter((crumb) => crumb.node_id !== null)
+    .map((crumb) => crumb.label);
+}
+
+function buildUrlState(segments: string[] = currentUrlSegments()): UrlState {
+  const q = activeKeyword.value;
+
+  return {
+    segments,
+    q,
+    scope: q ? activeSearchScope.value : defaultUrlScope(segments),
+  };
+}
+
+function writeUrlState(
+  action: UrlAction,
+  state: UrlState = buildUrlState(),
+  intent?: ViewIntent,
+) {
+  if (intent && !isIntentCurrent(intent)) {
+    return;
+  }
+  if (action === 'push') {
+    pushPath(state);
+    return;
+  }
+  if (action === 'replace') {
+    replacePath(state);
+  }
+}
+
 function resetSearchState(kind: FileShareTreeCurrentKind | null | undefined) {
   const nextScope = defaultSearchScope(kind);
   keyword.value = '';
@@ -163,118 +304,448 @@ function syncSearchScope(kind: FileShareTreeCurrentKind, preserveSearch: boolean
   searchScope.value = nextScope;
 }
 
+function clearSearchWithoutUrl() {
+  resetSearchState(currentKind.value);
+}
+
+function captureSearchState(): SearchStateSnapshot {
+  return {
+    keyword: keyword.value,
+    activeKeyword: activeKeyword.value,
+    searchScope: searchScope.value,
+    activeSearchScope: activeSearchScope.value,
+    searchResults: [...searchResults.value],
+  };
+}
+
+function restoreSearchState(snapshot: SearchStateSnapshot) {
+  keyword.value = snapshot.keyword;
+  activeKeyword.value = snapshot.activeKeyword;
+  searchScope.value = snapshot.searchScope;
+  activeSearchScope.value = snapshot.activeSearchScope;
+  searchResults.value = [...snapshot.searchResults];
+}
+
+function canRestoreSearch(scope: FileShareSearchScope): boolean {
+  if (scope === 'current') {
+    return currentKind.value !== 'home' && Boolean(session.value?.permissions.search_current);
+  }
+  return Boolean(session.value?.permissions.search_global);
+}
+
+function isSameUrlState(left: UrlState, right: UrlState): boolean {
+  return left.q === right.q
+    && left.scope === right.scope
+    && left.segments.length === right.segments.length
+    && left.segments.every((segment, index) => segment === right.segments[index]);
+}
+
 async function loadTree(
   nodeId: string | null = null,
-  options: { preserveSearch?: boolean; allowHomeFallback?: boolean } = {},
+  options: {
+    preserveSearch?: boolean;
+    allowHomeFallback?: boolean;
+    urlAction?: UrlAction;
+    intent?: ViewIntent;
+  } = {},
 ) {
+  const intent = resolveIntent(options.intent);
+  if (!isIntentCurrent(intent)) {
+    return;
+  }
   const preserveSearch = options.preserveSearch ?? false;
   const allowHomeFallback = options.allowHomeFallback ?? true;
+  const urlAction = options.urlAction ?? 'replace';
+  const request = beginTreeRequest(intent);
 
-  loadingEntries.value = true;
-  pageError.value = '';
+  if (request.isCurrent()) {
+    pageError.value = '';
+  }
 
   try {
     const response = await fileShareApi.getTree(nodeId);
+    if (!request.isCurrent()) {
+      return;
+    }
     tree.value = response;
     syncSearchScope(response.current.kind, preserveSearch);
   } catch (error) {
+    if (!request.isCurrent()) {
+      return;
+    }
     if (isNotFound(error) && nodeId && allowHomeFallback) {
       resetSearchState('home');
       await loadTree(null, {
         preserveSearch: false,
         allowHomeFallback: false,
+        urlAction: 'none',
+        intent,
       });
+      if (!isIntentCurrent(intent)) {
+        return;
+      }
+      writeUrlState('replace', homeUrlState(), intent);
       pageError.value = t('app.directoryNotFound');
       return;
     }
     throw error;
   } finally {
-    loadingEntries.value = false;
+    request.finish();
   }
 
   if (preserveSearch && activeKeyword.value) {
-    await rerunSearch();
+    await rerunSearch({
+      urlAction: 'none',
+      intent,
+    });
+  }
+
+  if (!isIntentCurrent(intent)) {
+    return;
+  }
+
+  if (urlAction !== 'none') {
+    writeUrlState(urlAction, buildUrlState(), intent);
+  }
+}
+
+async function loadSession(
+  options: { clearViewOnFailure?: boolean; intent?: ViewIntent } = {},
+): Promise<boolean> {
+  const intent = resolveIntent(options.intent);
+  if (!isIntentCurrent(intent)) {
+    return false;
+  }
+  const clearViewOnFailure = options.clearViewOnFailure ?? true;
+  const request = beginSessionRequest(intent);
+
+  if (request.isCurrent()) {
+    pageError.value = '';
+  }
+
+  try {
+    const nextSession = await fileShareApi.getSession();
+    if (!request.isCurrent()) {
+      return false;
+    }
+    session.value = nextSession;
+    loginOpen.value = false;
+    loginError.value = '';
+    return true;
+  } catch (error) {
+    if (!request.isCurrent()) {
+      return false;
+    }
+    session.value = null;
+
+    if (clearViewOnFailure) {
+      tree.value = null;
+      resetSearchState('home');
+    }
+
+    if (isUnauthorized(error)) {
+      loginOpen.value = true;
+      return false;
+    }
+    if (isForbidden(error)) {
+      pageError.value = t('app.forbiddenIp');
+      return false;
+    }
+    pageError.value = getErrorMessage(error);
+    return false;
+  } finally {
+    request.finish();
   }
 }
 
 async function bootstrap(
   preferredNodeId: string | null = null,
-  options: { preserveSearch?: boolean } = {},
+  options: { preserveSearch?: boolean; intent?: ViewIntent } = {},
 ) {
-  loadingSession.value = true;
-  pageError.value = '';
+  const intent = resolveIntent(options.intent);
+  const hasSession = await loadSession({
+    intent,
+  });
+  if (!isIntentCurrent(intent)) {
+    return;
+  }
+  if (!hasSession) {
+    return;
+  }
 
   try {
-    session.value = await fileShareApi.getSession();
-    loginOpen.value = false;
-    loginError.value = '';
     await loadTree(preferredNodeId, {
       preserveSearch: options.preserveSearch ?? false,
+      intent,
     });
   } catch (error) {
-    session.value = null;
-    tree.value = null;
-    searchResults.value = [];
-    activeKeyword.value = '';
-
+    if (!isIntentCurrent(intent)) {
+      return;
+    }
     if (isUnauthorized(error)) {
       loginOpen.value = true;
       return;
     }
-    if (isForbidden(error)) {
-      pageError.value = t('app.forbiddenIp');
-      return;
-    }
     pageError.value = getErrorMessage(error);
-  } finally {
-    loadingSession.value = false;
   }
 }
 
-async function executeSearch(rawKeyword: string, scope: FileShareSearchScope) {
+async function executeSearch(
+  rawKeyword: string,
+  scope: FileShareSearchScope,
+  options: {
+    urlAction?: UrlAction;
+    throwError?: boolean;
+    showPageError?: boolean;
+    intent?: ViewIntent;
+  } = {},
+) {
+  const intent = resolveIntent(options.intent);
+  if (!isIntentCurrent(intent)) {
+    return;
+  }
   const trimmed = rawKeyword.trim();
   if (!trimmed) {
-    resetSearchState(currentKind.value);
+    clearSearchWithoutUrl();
     return;
   }
 
   const effectiveScope = scope === 'current' && currentNodeId.value
     ? 'current'
     : 'global';
+  const urlAction = options.urlAction ?? 'replace';
+  const showPageError = options.showPageError ?? true;
+  const request = beginSearchRequest(intent);
 
-  searching.value = true;
-  pageError.value = '';
+  if (request.isCurrent()) {
+    pageError.value = '';
+  }
 
   try {
     const response = await fileShareApi.search(
       trimmed,
       effectiveScope === 'current' ? currentNodeId.value : null,
     );
+    if (!request.isCurrent()) {
+      return;
+    }
+    keyword.value = trimmed;
     activeKeyword.value = trimmed;
     activeSearchScope.value = effectiveScope;
     searchScope.value = effectiveScope;
     searchResults.value = response.results;
+    if (urlAction !== 'none') {
+      writeUrlState(urlAction, buildUrlState(), intent);
+    }
   } catch (error) {
-    pageError.value = getErrorMessage(error);
+    if (!request.isCurrent()) {
+      return;
+    }
+    if (showPageError) {
+      pageError.value = getErrorMessage(error);
+    }
+    if (options.throwError) {
+      throw error;
+    }
   } finally {
-    searching.value = false;
+    request.finish();
   }
 }
 
-async function rerunSearch() {
+async function rerunSearch(
+  options: {
+    urlAction?: UrlAction;
+    throwError?: boolean;
+    showPageError?: boolean;
+    intent?: ViewIntent;
+  } = {},
+) {
   if (!activeKeyword.value) {
     searchResults.value = [];
     return;
   }
-  await executeSearch(activeKeyword.value, activeSearchScope.value);
+  await executeSearch(activeKeyword.value, activeSearchScope.value, options);
 }
 
 async function handleSearch() {
-  await executeSearch(keyword.value, searchScope.value);
+  const intent = startViewIntent();
+  if (!keyword.value.trim()) {
+    clearSearch(intent);
+    return;
+  }
+  await executeSearch(keyword.value, searchScope.value, {
+    intent,
+  });
 }
 
-function clearSearch() {
-  resetSearchState(currentKind.value);
+function canonicalStateFromSegments(segments: string[]): UrlState {
+  return {
+    segments,
+    q: activeKeyword.value,
+    scope: activeKeyword.value ? activeSearchScope.value : defaultUrlScope(segments),
+  };
+}
+
+async function fallbackToHomeFromUrlError(message: string, intent: ViewIntent) {
+  try {
+    resetSearchState('home');
+    await loadTree(null, {
+      preserveSearch: false,
+      allowHomeFallback: false,
+      urlAction: 'none',
+      intent,
+    });
+    if (!isIntentCurrent(intent)) {
+      return;
+    }
+    replacePath(homeUrlState());
+    pageError.value = message;
+  } catch (error) {
+    if (!isIntentCurrent(intent)) {
+      return;
+    }
+    if (isUnauthorized(error)) {
+      loginOpen.value = true;
+      return;
+    }
+    pageError.value = getErrorMessage(error);
+  }
+}
+
+async function handleUrlStateError(error: unknown, intent: ViewIntent) {
+  if (!isIntentCurrent(intent)) {
+    return;
+  }
+  if (isUnauthorized(error)) {
+    loginOpen.value = true;
+    return;
+  }
+  if (isForbidden(error)) {
+    await fallbackToHomeFromUrlError(t('app.forbiddenDirectory'), intent);
+    return;
+  }
+  if (isNotFound(error)) {
+    await fallbackToHomeFromUrlError(t('app.directoryNotFound'), intent);
+    return;
+  }
+  pageError.value = getErrorMessage(error);
+}
+
+async function applyUrlState(
+  state: UrlState,
+  options: { skipSession?: boolean; intent?: ViewIntent } = {},
+) {
+  const intent = resolveIntent(options.intent);
+  if (!isIntentCurrent(intent)) {
+    return;
+  }
+  if (!options.skipSession) {
+    const hasSession = await loadSession({
+      clearViewOnFailure: false,
+      intent,
+    });
+    if (!isIntentCurrent(intent)) {
+      return;
+    }
+    if (!hasSession) {
+      return;
+    }
+  }
+
+  if (isIntentCurrent(intent)) {
+    pageError.value = '';
+  }
+
+  let nodeId: string | null = null;
+  let canonicalSegments: string[] = [];
+
+  if (state.segments.length > 0) {
+    const resolved = await fileShareApi.resolvePath(state.segments);
+    if (!isIntentCurrent(intent)) {
+      return;
+    }
+    nodeId = resolved.node_id;
+    canonicalSegments = resolved.canonical_segments;
+  }
+
+  await loadTree(nodeId, {
+    preserveSearch: false,
+    allowHomeFallback: false,
+    urlAction: 'none',
+    intent,
+  });
+  if (!isIntentCurrent(intent)) {
+    return;
+  }
+
+  const resolvedSegments = canonicalSegments.length > 0
+    ? canonicalSegments
+    : currentUrlSegments();
+  const restoredScope: FileShareSearchScope = state.scope === 'current' && nodeId
+    ? 'current'
+    : 'global';
+
+  if (state.q) {
+    keyword.value = state.q;
+
+    if (canRestoreSearch(restoredScope)) {
+      await executeSearch(state.q, restoredScope, {
+        urlAction: 'none',
+        throwError: true,
+        showPageError: false,
+        intent,
+      });
+    } else {
+      clearSearchWithoutUrl();
+    }
+  } else {
+    clearSearchWithoutUrl();
+  }
+
+  if (!isIntentCurrent(intent)) {
+    return;
+  }
+
+  replacePath(canonicalStateFromSegments(resolvedSegments));
+}
+
+async function bootstrapFromUrl(state: UrlState) {
+  const intent = startViewIntent();
+  const hasSession = await loadSession({
+    intent,
+  });
+  if (!isIntentCurrent(intent)) {
+    return;
+  }
+  if (!hasSession) {
+    return;
+  }
+
+  try {
+    await applyUrlState(state, {
+      skipSession: true,
+      intent,
+    });
+  } catch (error) {
+    await handleUrlStateError(error, intent);
+  }
+}
+
+async function handleExternalUrlChange(state: UrlState) {
+  const intent = startViewIntent();
+  try {
+    await applyUrlState(state, {
+      skipSession: true,
+      intent,
+    });
+  } catch (error) {
+    await handleUrlStateError(error, intent);
+  }
+}
+
+function clearSearch(intent: ViewIntent = startViewIntent()) {
+  clearSearchWithoutUrl();
+  writeUrlState('replace', buildUrlState(), intent);
 }
 
 async function handleLogin(payload: { username: string; password: string }) {
@@ -283,9 +754,7 @@ async function handleLogin(payload: { username: string; password: string }) {
 
   try {
     await fileShareApi.login(payload.username, payload.password);
-    await bootstrap(currentNodeId.value, {
-      preserveSearch: searchActive.value,
-    });
+    await bootstrapFromUrl(parseHash());
   } catch (error) {
     loginError.value = getErrorMessage(error);
   } finally {
@@ -337,8 +806,25 @@ function openPreview(node: FileShareNode) {
 
 async function openEntry(node: FileShareNode) {
   if (node.is_dir) {
-    clearSearch();
-    await loadTree(node.node_id);
+    const intent = startViewIntent();
+    const searchSnapshot = captureSearchState();
+    clearSearchWithoutUrl();
+    try {
+      await loadTree(node.node_id, {
+        allowHomeFallback: false,
+        urlAction: 'push',
+        intent,
+      });
+    } catch (error) {
+      if (isIntentCurrent(intent)) {
+        restoreSearchState(searchSnapshot);
+        if (isUnauthorized(error)) {
+          loginOpen.value = true;
+        } else {
+          pageError.value = getErrorMessage(error);
+        }
+      }
+    }
     return;
   }
 
@@ -352,8 +838,25 @@ async function openEntry(node: FileShareNode) {
 }
 
 async function navigate(nodeId: string | null) {
-  clearSearch();
-  await loadTree(nodeId);
+  const intent = startViewIntent();
+  const searchSnapshot = captureSearchState();
+  clearSearchWithoutUrl();
+  try {
+    await loadTree(nodeId, {
+      allowHomeFallback: false,
+      urlAction: 'push',
+      intent,
+    });
+  } catch (error) {
+    if (isIntentCurrent(intent)) {
+      restoreSearchState(searchSnapshot);
+      if (isUnauthorized(error)) {
+        loginOpen.value = true;
+      } else {
+        pageError.value = getErrorMessage(error);
+      }
+    }
+  }
 }
 
 function currentParentNodeId(): string | null {
@@ -545,8 +1048,39 @@ async function submitDelete() {
   }
 }
 
-onMounted(async () => {
-  await bootstrap();
+onMounted(() => {
+  unmounted = false;
+  const initialState = parseHash();
+
+  void (async () => {
+    await bootstrapFromUrl(initialState);
+    if (unmounted) {
+      return;
+    }
+
+    const currentHash = typeof window === 'undefined' ? '' : window.location.hash;
+    unsubscribeFromUrl = subscribe((state) => {
+      void handleExternalUrlChange(state);
+    }, {
+      initialHash: currentHash,
+    });
+
+    if (!session.value) {
+      return;
+    }
+
+    const currentState = parseHash(currentHash);
+    if (!isSameUrlState(currentState, buildUrlState())) {
+      void handleExternalUrlChange(currentState);
+    }
+  })();
+});
+
+onUnmounted(() => {
+  unmounted = true;
+  invalidateViewLifecycle();
+  unsubscribeFromUrl?.();
+  unsubscribeFromUrl = null;
 });
 
 watchEffect(() => {

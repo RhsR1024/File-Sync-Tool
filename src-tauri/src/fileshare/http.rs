@@ -46,6 +46,7 @@ fn build_router(state: Arc<HttpState>) -> Router {
         .route("/api/session", get(handler_session))
         .route("/api/auth/login", post(handler_login))
         .route("/api/auth/logout", post(handler_logout))
+        .route("/api/resolve", get(handler_resolve))
         .route("/api/tree", get(handler_tree))
         .route("/api/tree/search", get(handler_tree_search))
         .route("/api/nodes/directory", post(handler_node_create_directory))
@@ -65,6 +66,11 @@ fn build_router(state: Arc<HttpState>) -> Router {
 #[derive(Deserialize)]
 struct ApiTreeQuery {
     node_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApiResolveQuery {
+    path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +106,13 @@ struct ApiTreeCurrent {
 struct ApiTreeBreadcrumb {
     node_id: Option<String>,
     label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ApiResolveResponse {
+    node_id: Option<String>,
+    kind: ApiTreeCurrentKind,
+    canonical_segments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -287,6 +300,80 @@ async fn handler_logout(
         clear_cookie_header(SESSION_COOKIE_NAME).parse().unwrap(),
     );
     response
+}
+
+async fn handler_resolve(
+    AxumState(state): AxumState<Arc<HttpState>>,
+    headers: HeaderMap,
+    Query(query): Query<ApiResolveQuery>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    let principal = match require_request_permission(
+        &state,
+        &headers,
+        addr.ip(),
+        model::FileSharePermission::Browse,
+        false,
+    ) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+
+    let segments = match decode_path_query(query.path.as_deref().unwrap_or("")) {
+        Ok(segments) => segments,
+        Err(_) => return plain_response(StatusCode::NOT_FOUND, "Not Found"),
+    };
+
+    let runtime = state.request_runtime();
+    let roots = runtime.roots;
+    let permissions = principal.permissions;
+    let root_permissions = principal.root_permissions;
+    let result = match tokio::task::spawn_blocking(move || {
+        ops::resolve_path_segments(&roots, &permissions, &root_permissions, &segments)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "Resolve Failed"),
+    };
+    let node = match result {
+        Ok(node) => node,
+        Err(ops::ResolveError::NotFound) => {
+            return plain_response(StatusCode::NOT_FOUND, "Not Found")
+        }
+        Err(ops::ResolveError::Forbidden) => {
+            return plain_response(StatusCode::FORBIDDEN, "Forbidden")
+        }
+    };
+
+    let (kind, node_id) = match node.kind {
+        ops::ResolveNodeKind::Home => (ApiTreeCurrentKind::Home, None),
+        ops::ResolveNodeKind::ShareRoot => (
+            ApiTreeCurrentKind::ShareRoot,
+            node.root_id.as_ref().map(|root_id| {
+                encode_node_id(&NodeLocator::ShareRoot {
+                    root_id: root_id.clone(),
+                })
+            }),
+        ),
+        ops::ResolveNodeKind::Directory => (
+            ApiTreeCurrentKind::Directory,
+            node.root_id.as_ref().map(|root_id| {
+                encode_node_id(&NodeLocator::Directory {
+                    root_id: root_id.clone(),
+                    relative_path: node.relative_path.clone(),
+                })
+            }),
+        ),
+    };
+
+    remember_connected_ip(&state.visitor_ips, addr.ip().to_string());
+    Json(ApiResolveResponse {
+        node_id,
+        kind,
+        canonical_segments: node.canonical_segments,
+    })
+    .into_response()
 }
 
 async fn handler_tree(
@@ -1426,6 +1513,21 @@ fn decode_node_id_part(value: &str) -> Result<String, String> {
     String::from_utf8(decoded).map_err(|_| "Invalid node id".to_string())
 }
 
+fn decode_path_query(raw: &str) -> Result<Vec<String>, ()> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut segments = Vec::new();
+    for piece in raw.split('/') {
+        if piece.is_empty() {
+            return Err(());
+        }
+        segments.push(piece.to_string());
+    }
+    Ok(segments)
+}
+
 #[allow(clippy::result_large_err)]
 fn resolve_parent_directory_node(
     state: &HttpState,
@@ -1720,6 +1822,40 @@ mod tests {
         test_state_with_roots(roots, upload_body_limit_bytes)
     }
 
+    fn test_state_with_named_roots_and_permissions(
+        roots: &[(&str, &Path)],
+        upload_body_limit_bytes: usize,
+        guest_root_permissions: &[model::FileSharePermissionSet],
+    ) -> Arc<HttpState> {
+        assert_eq!(
+            roots.len(),
+            guest_root_permissions.len(),
+            "test fixture roots and permissions must align"
+        );
+        let state = test_state_with_roots(roots, upload_body_limit_bytes);
+        let mut config = state.config.clone();
+        config.guest_account.root_permissions = config
+            .roots
+            .iter()
+            .zip(guest_root_permissions.iter())
+            .map(|(root, permissions)| model::UserRootPermissions {
+                root_id: root.id.clone(),
+                preset: model::PermissionPreset::Custom,
+                permissions: permissions.clone(),
+            })
+            .collect();
+
+        Arc::new(HttpState {
+            saved_config_path: state.saved_config_path.clone(),
+            config,
+            roots: state.roots.clone(),
+            sessions: Mutex::new(auth::SessionStore::default()),
+            ip_rules: state.ip_rules.clone(),
+            upload_body_limit_bytes: state.upload_body_limit_bytes,
+            visitor_ips: state.visitor_ips.clone(),
+        })
+    }
+
     fn write_saved_config(
         roots: &[(&str, &Path)],
         permissions: model::FileSharePermissionSet,
@@ -1975,6 +2111,231 @@ mod tests {
             StatusCode::OK,
             "{request_path} should be served"
         );
+    }
+
+    #[test]
+    fn decode_path_query_empty() {
+        assert!(decode_path_query("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn decode_path_query_rejects_empty_segments_inside_non_empty_path() {
+        assert!(decode_path_query("a//b").is_err());
+    }
+
+    #[test]
+    fn decode_path_query_rejects_leading_empty_segment() {
+        assert!(decode_path_query("/a").is_err());
+    }
+
+    #[test]
+    fn decode_path_query_rejects_trailing_empty_segment() {
+        assert!(decode_path_query("a/").is_err());
+    }
+
+    #[test]
+    fn decode_path_query_preserves_literal_percent_and_plus() {
+        let segs = decode_path_query("UMS_TEMP/%/A+B").unwrap();
+        assert_eq!(
+            segs,
+            vec!["UMS_TEMP".to_string(), "%".to_string(), "A+B".to_string()]
+        );
+    }
+
+    #[test]
+    fn decode_path_query_preserves_literal_percent_segment() {
+        assert_eq!(
+            decode_path_query("UMS_TEMP/%").unwrap(),
+            vec!["UMS_TEMP".to_string(), "%".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_route_returns_canonical_directory_node() {
+        let dir = TestDir::new("resolve-route");
+        fs::create_dir_all(dir.path().join("Sub")).expect("nested directory should exist");
+        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+
+        let response = app
+            .clone()
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/resolve?path=UMS_TEMP/SUB"),
+                Body::empty(),
+            ))
+            .await
+            .expect("resolve request should complete");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("resolve body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("resolve response should be json");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["kind"].as_str(), Some("directory"));
+        assert_eq!(
+            payload["canonical_segments"],
+            serde_json::json!(["UMS_TEMP", "Sub"])
+        );
+        assert!(payload["node_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_route_returns_not_found_for_missing_directory() {
+        let dir = TestDir::new("resolve-route-missing");
+        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/resolve?path=UMS_TEMP/Missing"),
+                Body::empty(),
+            ))
+            .await
+            .expect("resolve request should complete");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_route_returns_home_for_missing_or_empty_path() {
+        let dir = TestDir::new("resolve-route-home");
+        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+
+        for uri in ["/api/resolve", "/api/resolve?path="] {
+            let response = app
+                .clone()
+                .oneshot(request_with_connect_info(
+                    Request::builder().method("GET").uri(uri),
+                    Body::empty(),
+                ))
+                .await
+                .expect("resolve request should complete");
+
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("resolve body should be readable");
+            let payload: serde_json::Value =
+                serde_json::from_slice(&body).expect("resolve response should be json");
+
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(payload["kind"].as_str(), Some("home"), "{uri}");
+            assert!(payload["node_id"].is_null(), "{uri}");
+            assert_eq!(payload["canonical_segments"], serde_json::json!([]), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_route_returns_share_root_for_root_only_path() {
+        let dir = TestDir::new("resolve-route-root-only");
+        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/resolve?path=UMS_TEMP"),
+                Body::empty(),
+            ))
+            .await
+            .expect("resolve request should complete");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("resolve body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("resolve response should be json");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["kind"].as_str(), Some("share_root"));
+        assert!(payload["node_id"].as_str().is_some());
+        assert_eq!(payload["canonical_segments"], serde_json::json!(["UMS_TEMP"]));
+    }
+
+    #[tokio::test]
+    async fn resolve_route_returns_forbidden_when_root_lacks_browse() {
+        let allowed = TestDir::new("resolve-route-forbidden-allowed");
+        let blocked = TestDir::new("resolve-route-forbidden-blocked");
+        let app = build_router(test_state_with_named_roots_and_permissions(
+            &[("allowed", allowed.path()), ("blocked", blocked.path())],
+            1024,
+            &[
+                model::FileSharePermissionSet::read_write(),
+                model::FileSharePermissionSet::deny_all(),
+            ],
+        ));
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/resolve?path=blocked"),
+                Body::empty(),
+            ))
+            .await
+            .expect("resolve request should complete");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn resolve_route_preserves_literal_percent_directory_name() {
+        let dir = TestDir::new("resolve-route-percent");
+        fs::create_dir_all(dir.path().join("%")).expect("percent directory should exist");
+        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/resolve?path=UMS_TEMP/%25"),
+                Body::empty(),
+            ))
+            .await
+            .expect("resolve request should complete");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("resolve body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("resolve response should be json");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["canonical_segments"], serde_json::json!(["UMS_TEMP", "%"]));
+    }
+
+    #[tokio::test]
+    async fn resolve_route_preserves_literal_plus_directory_name() {
+        let dir = TestDir::new("resolve-route-plus");
+        fs::create_dir_all(dir.path().join("+")).expect("plus directory should exist");
+        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/resolve?path=UMS_TEMP/%2B"),
+                Body::empty(),
+            ))
+            .await
+            .expect("resolve request should complete");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("resolve body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("resolve response should be json");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["canonical_segments"], serde_json::json!(["UMS_TEMP", "+"]));
     }
 
     #[tokio::test]

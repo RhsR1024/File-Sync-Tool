@@ -24,6 +24,7 @@ import {
   type DiskInfoItem,
   type DiskServerItem,
 } from '../lib/tauri';
+import { getSuggestedDiskCleanupHosts } from '../lib/diskCacheCleanupPresentation';
 import { mergeRecentItems, normalizeRecentItems } from '../lib/recentHistory';
 
 defineOptions({
@@ -68,16 +69,7 @@ let serversRequestSeq = 0;
 let disksRequestSeq = 0;
 
 const savedSshHosts = computed(() => {
-  if (!config.value) return [];
-
-  const unique = new Set<string>();
-  for (const server of config.value.servers ?? []) {
-    const host = server.host?.trim();
-    if (!host) continue;
-    if (recentHosts.value.includes(host)) continue;
-    unique.add(host);
-  }
-  return Array.from(unique);
+  return getSuggestedDiskCleanupHosts(config.value?.servers, recentHosts.value);
 });
 
 const selectedServer = computed(
@@ -403,17 +395,17 @@ onMounted(async () => {
 <template>
   <div class="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.14),_transparent_28%),linear-gradient(180deg,_#f8fbff_0%,_#eef4fb_40%,_#f8fafc_100%)]">
     <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 px-6 py-6 pb-10">
-      <section class="relative overflow-hidden rounded-[28px] border border-white/70 bg-white/80 px-6 py-6 shadow-[0_18px_60px_rgba(15,23,42,0.08)] backdrop-blur">
-        <div class="absolute -left-8 top-0 h-32 w-32 rounded-full bg-sky-100/70 blur-3xl"></div>
-        <div class="absolute right-0 top-0 h-40 w-40 rounded-full bg-indigo-100/80 blur-3xl"></div>
+      <section class="relative overflow-hidden rounded-[28px] border border-white/70 bg-white/85 px-6 py-6 shadow-[0_18px_60px_rgba(15,23,42,0.08)] backdrop-blur">
+        <div class="absolute -left-8 top-0 h-32 w-32 rounded-full bg-slate-100/80 blur-3xl"></div>
+        <div class="absolute right-0 top-0 h-40 w-40 rounded-full bg-amber-100/70 blur-3xl"></div>
         <div class="relative flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
           <div class="space-y-2">
             <div class="flex items-center gap-2">
-              <span class="h-1.5 w-1.5 rounded-full bg-sky-500"></span>
+              <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
               <span class="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-500">Redis Cache Ops</span>
             </div>
             <div class="flex items-start gap-3">
-              <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-500 via-blue-500 to-indigo-600 text-white shadow-lg shadow-sky-500/20">
+              <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#1E40AF] via-[#3B82F6] to-[#6366F1] text-white shadow-lg shadow-blue-500/20">
                 <HardDrive class="h-6 w-6" />
               </div>
               <div>
@@ -572,9 +564,20 @@ onMounted(async () => {
       >
         <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div class="flex-1">
-            <div class="mb-2 flex items-center gap-2">
-              <Server class="h-4 w-4 text-slate-400" />
-              <label class="text-sm font-semibold text-slate-800">{{ t('diskCacheCleanup.server.pick') }}</label>
+            <div class="mb-2 flex flex-wrap items-center justify-between gap-3">
+              <div class="flex items-center gap-2">
+                <Server class="h-4 w-4 text-slate-400" />
+                <label class="text-sm font-semibold text-slate-800">{{ t('diskCacheCleanup.server.pick') }}</label>
+              </div>
+              <button
+                type="button"
+                class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="fetchingServers || loadingDisks || !hostIp.trim()"
+                @click="fetchServers"
+              >
+                <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': fetchingServers }" />
+                {{ t('diskCacheCleanup.actions.refresh') }}
+              </button>
             </div>
             <select
               :value="pickedServerIp"

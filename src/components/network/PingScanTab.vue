@@ -3,8 +3,9 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { X as XIcon } from 'lucide-vue-next';
 import { pingScan, cancelPingScan, saveTextFile, type PingResult, type PingScanRequest } from '../../lib/tauri';
-import { mergeRecentItems, normalizeRecentItems } from '../../lib/recentHistory';
+import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../../lib/recentHistory';
 
 defineOptions({ name: 'PingScanTab' });
 
@@ -69,6 +70,14 @@ async function rememberRecentPrefix(value: string) {
     return;
   }
   await storeRecentPrefixes(mergeRecentItems(recentPrefixes.value, normalizedValue, RECENT_PREFIXES_LIMIT));
+}
+
+async function removeRecentPrefix(value: string) {
+  await storeRecentPrefixes(removeRecentItems(recentPrefixes.value, value, RECENT_PREFIXES_LIMIT));
+}
+
+async function clearRecentPrefixes() {
+  await storeRecentPrefixes([]);
 }
 
 // Load persisted config on mount
@@ -212,7 +221,6 @@ onUnmounted(() => {
 async function startScan() {
   if (!isFormValid.value || isScanning.value) return;
   const normalizedPrefix = prefix.value.trim();
-  await rememberRecentPrefix(normalizedPrefix);
   results.value = new Map();
   isScanning.value = true;
   await attachListeners();
@@ -224,6 +232,7 @@ async function startScan() {
   };
   try {
     await pingScan(request);
+    await rememberRecentPrefix(normalizedPrefix);
   } catch (err) {
     isScanning.value = false;
     detachListeners();
@@ -302,21 +311,46 @@ function hideTooltip() {
             <option v-for="item in recentPrefixes" :key="`ping-scan-recent-${item}`" :value="item" />
           </datalist>
           <p v-if="prefixError" class="mt-1 text-xs text-red-500">{{ prefixError }}</p>
-          <div v-if="recentPrefixes.length > 0" class="mt-2 flex items-center gap-2 flex-wrap">
-            <span class="text-xs font-medium text-slate-500">{{ t('history.title') }}:</span>
-            <button
-              v-for="item in recentPrefixes"
-              :key="`ping-scan-history-${item}`"
-              type="button"
-              :disabled="isScanning"
-              class="px-2.5 py-1 text-xs font-medium rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              :class="isRecentPrefixSelected(item)
-                ? 'bg-blue-600 text-white border-blue-600'
-                : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50 hover:border-slate-400'"
-              @click="selectRecentPrefix(item)"
-            >
-              <span class="font-mono">{{ item }}</span>
-            </button>
+          <div v-if="recentPrefixes.length > 0" class="mt-2 space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs font-medium text-slate-500">{{ t('networkTools.ping.recentPrefixes') }}</span>
+              <button
+                type="button"
+                :disabled="isScanning"
+                class="text-xs font-medium text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                @click="clearRecentPrefixes"
+              >
+                {{ t('networkTools.ping.clearRecentPrefixes') }}
+              </button>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span
+                v-for="item in recentPrefixes"
+                :key="`ping-scan-history-${item}`"
+                class="inline-flex items-stretch overflow-hidden rounded-full border transition-colors"
+                :class="isRecentPrefixSelected(item)
+                  ? 'border-blue-600 bg-blue-600 text-white'
+                  : 'border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50'"
+              >
+                <button
+                  type="button"
+                  :disabled="isScanning"
+                  class="px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed"
+                  @click="selectRecentPrefix(item)"
+                >
+                  <span class="font-mono">{{ item }}</span>
+                </button>
+                <button
+                  type="button"
+                  :disabled="isScanning"
+                  class="inline-flex items-center border-l border-current/10 px-2 text-current/70 transition hover:text-current disabled:cursor-not-allowed"
+                  :title="t('networkTools.ping.removeRecentPrefix')"
+                  @click.stop="removeRecentPrefix(item)"
+                >
+                  <XIcon class="h-3.5 w-3.5" />
+                </button>
+              </span>
+            </div>
           </div>
         </div>
 
