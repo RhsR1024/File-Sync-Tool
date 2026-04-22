@@ -24,6 +24,7 @@ dist-ssr
 *.sw?
 .vite
 .pnpm-store/
+.worktree/
 .worktrees/
 
 # 对标参考源码（仅本地研究，禁止提交）

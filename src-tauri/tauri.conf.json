@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "file-sync-tool",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "identifier": "com.filesync.tool",
   "build": {
     "frontendDist": "../dist",
@@ -20,12 +20,19 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**/clipboard_images/**", "$APPDATA/**/clipboard_icons/**"]
+      }
     }
   },
   "bundle": {
     "active": false,
     "targets": "all",
+    "resources": {
+      "../scripts/restore-win-v.ps1": "scripts/restore-win-v.ps1"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

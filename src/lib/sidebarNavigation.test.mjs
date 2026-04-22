@@ -17,6 +17,7 @@ assert.deepEqual(toolPaths, [
   '/tools/network',
   '/tools/screen-share',
   '/tools/file-share',
+  '/tools/clipboard',
 ]);
 
 assert.equal(

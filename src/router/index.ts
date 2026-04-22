@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 import MainConsole from '@/pages/MainConsole.vue'
 import TaskStatusPage from '@/pages/TaskStatusPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
@@ -58,10 +58,29 @@ const routes: RouteRecordRaw[] = [
     path: '/tools/file-share',
     component: () => import('../pages/FileSharePage.vue'),
   },
+  {
+    path: '/tools/clipboard',
+    component: () => import('../pages/ClipboardManagerPage.vue'),
+  },
+  {
+    path: '/clipboard-panel',
+    component: () => import('../pages/ClipboardPanelPage.vue'),
+    meta: { noLayout: true },
+  },
+  {
+    path: '/clipboard-preview/image',
+    component: () => import('../pages/ClipboardImagePreview.vue'),
+    meta: { noLayout: true },
+  },
+  {
+    path: '/clipboard-preview/text',
+    component: () => import('../pages/ClipboardTextPreview.vue'),
+    meta: { noLayout: true },
+  },
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHashHistory(),
   routes,
 })
 

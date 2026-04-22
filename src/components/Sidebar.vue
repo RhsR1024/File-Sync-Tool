@@ -2,6 +2,7 @@
 import {
   Activity,
   BarChart3,
+  Clipboard,
   Globe,
   History,
   KeyRound,
@@ -35,6 +36,7 @@ const iconMap: Record<SidebarIconKey, Component> = {
   networkTools: Globe,
   screenShare: MonitorUp,
   fileShare: Share2,
+  clipboardManager: Clipboard,
 };
 
 const sections = computed(() =>

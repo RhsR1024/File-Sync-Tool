@@ -994,9 +994,8 @@ async fn read_upload_request(
         }
 
         let text = field.text().await.map_err(|e| e.to_string())?;
-        match field_name.as_str() {
-            "parent_node_id" => parent_node_id = Some(text),
-            _ => {}
+        if field_name.as_str() == "parent_node_id" {
+            parent_node_id = Some(text);
         }
     }
 

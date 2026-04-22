@@ -48,6 +48,12 @@ interface ScopePanelState {
   expandedKeys: string[];
   error: string;
   isLoading: boolean;
+  // Cached tree-walk results, populated by syncScopeState/resetScopeState.
+  // Used to avoid O(N) recomputation on every checkbox click or render.
+  cachedLeafKeys: string[];
+  cachedLeafKeySet: Set<string>;
+  cachedEmptyDirKeys: string[];
+  selectedFileKeySet: Set<string>;
 }
 
 interface ScopePanelView {
@@ -63,6 +69,10 @@ const createScopePanelState = (): ScopePanelState => ({
   expandedKeys: [],
   error: '',
   isLoading: false,
+  cachedLeafKeys: [],
+  cachedLeafKeySet: new Set(),
+  cachedEmptyDirKeys: [],
+  selectedFileKeySet: new Set(),
 });
 
 const mode = ref<AnalysisMode>('incremental');
@@ -177,14 +187,19 @@ const defaultExpandedKeysFromTree = (nodes: ScopeTreeNode[]) =>
   nodes.filter((node) => node.kind === 'directory').map((node) => node.key);
 
 const getScopeTotalSelectableFiles = (state: ScopePanelState) =>
-  collectLeafKeysFromTree(state.tree).length;
+  state.cachedLeafKeys.length;
 
-const getScopeSelectedFileKeys = (state: ScopePanelState): string[] => {
-  const leafKeySet = new Set(collectLeafKeysFromTree(state.tree));
-  return state.selectedFilePaths.filter((key) => leafKeySet.has(key));
+const getScopeSelectedFileKeys = (state: ScopePanelState): string[] =>
+  state.selectedFilePaths.filter((key) => state.cachedLeafKeySet.has(key));
+
+const getScopeSelectedFileCount = (state: ScopePanelState) => {
+  // O(min(|selected|, |leaves|)) via two cached Sets.
+  let count = 0;
+  for (const key of state.selectedFileKeySet) {
+    if (state.cachedLeafKeySet.has(key)) count += 1;
+  }
+  return count;
 };
-
-const getScopeSelectedFileCount = (state: ScopePanelState) => getScopeSelectedFileKeys(state).length;
 
 const getScopeSummaryText = (state: ScopePanelState) => {
   const total = getScopeTotalSelectableFiles(state);
@@ -405,10 +420,15 @@ const resetScopeState = (state: ScopePanelState) => {
   state.expandedKeys = [];
   state.error = '';
   state.isLoading = false;
+  state.cachedLeafKeys = [];
+  state.cachedLeafKeySet = new Set();
+  state.cachedEmptyDirKeys = [];
+  state.selectedFileKeySet = new Set();
 };
 
 const syncScopeState = (state: ScopePanelState, tree: ScopeTreeNode[]) => {
   const allLeafKeys = collectLeafKeysFromTree(tree);
+  const allLeafKeySet = new Set(allLeafKeys);
   const allDirectoryKeys = collectDirectoryKeysFromTree(tree);
   const preserveEmptySelection =
     state.tree.length > 0 && state.selectedFilePaths.length === 0;
@@ -421,11 +441,16 @@ const syncScopeState = (state: ScopePanelState, tree: ScopeTreeNode[]) => {
 
   const emptyDirKeys = collectEmptyDirectoryKeys(tree);
   state.tree = tree;
-  state.selectedFilePaths = preserveEmptySelection
+  state.cachedLeafKeys = allLeafKeys;
+  state.cachedLeafKeySet = allLeafKeySet;
+  state.cachedEmptyDirKeys = emptyDirKeys;
+  const nextSelection = preserveEmptySelection
     ? []
     : retainedSelection.length > 0
       ? [...retainedSelection, ...emptyDirKeys.filter((k) => !previousSelection.size || previousSelection.has(k))]
       : [...allLeafKeys, ...emptyDirKeys];
+  state.selectedFilePaths = nextSelection;
+  state.selectedFileKeySet = new Set(nextSelection);
   state.expandedKeys = preserveCollapsedState
     ? []
     : retainedExpanded.length > 0
@@ -454,6 +479,10 @@ const refreshScopePanel = async (state: ScopePanelState, path: string) => {
   } catch (error) {
     state.tree = [];
     state.selectedFilePaths = [];
+    state.selectedFileKeySet = new Set();
+    state.cachedLeafKeys = [];
+    state.cachedLeafKeySet = new Set();
+    state.cachedEmptyDirKeys = [];
     state.expandedKeys = [];
     state.error = t('codeStatistics.scopeLoadFailed', {
       error: error instanceof Error ? error.message : String(error),
@@ -525,42 +554,48 @@ const toggleTreeSelection = (state: ScopePanelState, node: ScopeTreeNode) => {
   if (isAnalyzing.value) return;
 
   const targetLeafKeys = collectLeafKeysFromNode(node);
+  const selectedSet = state.selectedFileKeySet;
 
   // Empty directory: toggle the directory key itself (harmlessly ignored during analysis)
   if (targetLeafKeys.length === 0 && node.kind === 'directory') {
-    const idx = state.selectedFilePaths.indexOf(node.key);
-    if (idx >= 0) {
+    if (selectedSet.has(node.key)) {
+      selectedSet.delete(node.key);
       state.selectedFilePaths = state.selectedFilePaths.filter((k) => k !== node.key);
     } else {
+      selectedSet.add(node.key);
       state.selectedFilePaths = [...state.selectedFilePaths, node.key];
     }
     return;
   }
 
-  const selected = new Set(state.selectedFilePaths);
-  const allSelected = targetLeafKeys.every((key) => selected.has(key));
-
+  const allSelected = targetLeafKeys.every((key) => selectedSet.has(key));
   if (allSelected) {
-    for (const key of targetLeafKeys) {
-      selected.delete(key);
-    }
+    for (const key of targetLeafKeys) selectedSet.delete(key);
   } else {
-    for (const key of targetLeafKeys) {
-      selected.add(key);
-    }
+    for (const key of targetLeafKeys) selectedSet.add(key);
   }
 
-  const orderedLeafKeys = collectLeafKeysFromTree(state.tree);
-  const preservedEmptyDirKeys = collectEmptyDirectoryKeys(state.tree).filter((key) => selected.has(key));
-  state.selectedFilePaths = [...orderedLeafKeys.filter((key) => selected.has(key)), ...preservedEmptyDirKeys];
+  // Rebuild array from cached leaf order + preserved empty-dir keys. Uses
+  // cachedLeafKeys instead of walking the tree again.
+  const rebuilt: string[] = [];
+  for (const key of state.cachedLeafKeys) {
+    if (selectedSet.has(key)) rebuilt.push(key);
+  }
+  for (const key of state.cachedEmptyDirKeys) {
+    if (selectedSet.has(key)) rebuilt.push(key);
+  }
+  state.selectedFilePaths = rebuilt;
 };
 
 const selectAllScopes = (state: ScopePanelState) => {
-  state.selectedFilePaths = [...collectLeafKeysFromTree(state.tree), ...collectEmptyDirectoryKeys(state.tree)];
+  const next = [...state.cachedLeafKeys, ...state.cachedEmptyDirKeys];
+  state.selectedFilePaths = next;
+  state.selectedFileKeySet = new Set(next);
 };
 
 const clearScopeSelection = (state: ScopePanelState) => {
   state.selectedFilePaths = [];
+  state.selectedFileKeySet = new Set();
 };
 
 const expandAllScopes = (state: ScopePanelState) => {
@@ -1464,7 +1499,7 @@ onUnmounted(() => {
                   v-for="node in panel.state.tree"
                   :key="node.key"
                   :node="node"
-                  :selected-leaf-keys="panel.state.selectedFilePaths"
+                  :selected-key-set="panel.state.selectedFileKeySet"
                   :expanded-keys="panel.state.expandedKeys"
                   @toggle-selection="toggleTreeSelection(panel.state, $event)"
                   @toggle-expand="toggleExpandedScope(panel.state, $event)"

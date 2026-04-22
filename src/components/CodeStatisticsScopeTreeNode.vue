@@ -8,7 +8,7 @@ defineOptions({ name: 'CodeStatisticsScopeTreeNode' });
 const props = withDefaults(
   defineProps<{
     node: CodeCountScopeTreeNode;
-    selectedLeafKeys: string[];
+    selectedKeySet: Set<string>;
     expandedKeys: string[];
     level?: number;
   }>(),
@@ -34,14 +34,17 @@ const collectLeafKeys = (node: CodeCountScopeTreeNode): string[] => {
 
 const isDirectory = computed(() => props.node.kind === 'directory');
 const leafKeys = computed(() => collectLeafKeys(props.node));
-const selectedKeySet = computed(() => new Set(props.selectedLeafKeys));
-const selectedLeafCount = computed(() =>
-  leafKeys.value.filter((key) => selectedKeySet.value.has(key)).length,
-);
+const selectedLeafCount = computed(() => {
+  let count = 0;
+  for (const key of leafKeys.value) {
+    if (props.selectedKeySet.has(key)) count += 1;
+  }
+  return count;
+});
 const isEmptyDirectory = computed(() => isDirectory.value && leafKeys.value.length === 0);
 const isChecked = computed(() => {
   if (isEmptyDirectory.value) {
-    return props.selectedLeafKeys.includes(props.node.key);
+    return props.selectedKeySet.has(props.node.key);
   }
   return leafKeys.value.length > 0 && selectedLeafCount.value === leafKeys.value.length;
 });
@@ -128,7 +131,7 @@ const handleToggleExpand = () => {
         v-for="child in node.children"
         :key="child.key"
         :node="child"
-        :selected-leaf-keys="selectedLeafKeys"
+        :selected-key-set="selectedKeySet"
         :expanded-keys="expandedKeys"
         :level="level + 1"
         @toggle-selection="emit('toggle-selection', $event)"

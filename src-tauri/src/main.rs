@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod async_utils;
+mod clipboard;
 mod code_count;
 mod config;
 mod deploy;
@@ -37,6 +38,7 @@ use serde_json::json;
 use tauri::{Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 
 const TRAY_SHOW_ID: &str = "tray_show_main";
+const TRAY_CLIPBOARD_PANEL_ID: &str = "tray_toggle_clipboard_panel";
 const TRAY_QUIT_ID: &str = "tray_quit";
 
 struct AppState {
@@ -59,6 +61,7 @@ struct AppState {
     code_count_should_cancel: Arc<AtomicBool>,
     screen_share: Arc<screenshare::ScreenShareHandle>,
     file_share: Arc<fileshare::FileShareHandle>,
+    clipboard: Arc<clipboard::ClipboardState>,
 }
 
 #[allow(dead_code)]
@@ -1574,6 +1577,12 @@ fn set_custom_data_dir(
             return Err(format!("Directory does not exist: {}", path));
         }
     }
+
+    {
+        let conn = state.clipboard.write_db.lock();
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+
     config::set_custom_data_dir(&app_handle, path)?;
 
     // Hot-reload config from the new location into AppState
@@ -1792,11 +1801,6 @@ fn validate_cidr(value: &str) -> bool {
 
 const DEVICE_BATCH_CONCURRENCY_LIMIT: usize = 4;
 const DEVICE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const DEVICE_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-
-fn build_device_http_client() -> Result<reqwest::Client, String> {
-    build_device_http_client_with_timeout(DEVICE_HTTP_REQUEST_TIMEOUT)
-}
 
 fn build_device_http_client_with_timeout(
     request_timeout: Duration,
@@ -2254,6 +2258,7 @@ async fn change_framework_password(
     Ok(results.into_iter().flatten().collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn enable_appliance_ssh_for_target(
     client: reqwest::Client,
     target: ApplianceSshTarget,
@@ -2361,7 +2366,11 @@ async fn enable_appliance_ssh_for_target(
         }
 
         // Resolve whitelist source: user-supplied CIDR replaces auto-detected local IP.
-        let source = match whitelist_cidr.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let source = match whitelist_cidr
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             Some(cidr) => {
                 if !validate_cidr(cidr) {
                     result.whitelist_applied = Some(false);
@@ -2533,6 +2542,17 @@ async fn enable_appliance_ssh(
 }
 
 fn main() {
+    // Register an explicit AppUserModelID so Windows notifications show the app
+    // name ("File Sync Tool") rather than the launching shell ("PowerShell").
+    // Must run before any notification or WinRT call. Failures are non-fatal.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        let aumid: Vec<u16> = "com.filesync.tool\0".encode_utf16().collect();
+        let _ = SetCurrentProcessExplicitAppUserModelID(PCWSTR(aumid.as_ptr()));
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
@@ -2540,6 +2560,8 @@ fn main() {
         }))
         .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -2575,6 +2597,7 @@ fn main() {
         .setup(|app| {
             let tray_menu = MenuBuilder::new(app)
                 .text(TRAY_SHOW_ID, "显示主窗口")
+                .text(TRAY_CLIPBOARD_PANEL_ID, "Clipboard Panel")
                 .separator()
                 .text(TRAY_QUIT_ID, "退出")
                 .build()?;
@@ -2586,6 +2609,9 @@ fn main() {
                 .tooltip("File Sync Tool")
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     TRAY_SHOW_ID => show_main_window(app),
+                    TRAY_CLIPBOARD_PANEL_ID => {
+                        let _ = clipboard::commands::cb_toggle_panel_internal(app.clone());
+                    }
                     TRAY_QUIT_ID => {
                         if let Some(state) = app.try_state::<AppState>() {
                             state.is_quitting.store(true, Ordering::SeqCst);
@@ -2623,6 +2649,18 @@ fn main() {
             let _ = sync_launch_on_startup(
                 config.launch_and_auto_scan || config.launch_and_auto_start_file_share,
             );
+
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("app_data_dir: {e}"))?;
+            let clipboard_state =
+                clipboard::ClipboardState::init(&app_data_dir, config.clipboard.clone())?;
+            let clipboard_state_for_startup = clipboard_state.clone();
+            let clipboard_enabled_at_start = config.clipboard.enabled;
+            let clipboard_hotkey_at_start = config.clipboard.hotkey.clone();
+            let config_show_startup_notification = config.clipboard.show_startup_notification;
+
             app.manage(network::NetworkState::default());
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
@@ -2644,7 +2682,98 @@ fn main() {
                 code_count_should_cancel: Arc::new(AtomicBool::new(false)),
                 screen_share: Arc::new(screenshare::ScreenShareHandle::new()),
                 file_share: Arc::new(fileshare::FileShareHandle::new()),
+                clipboard: clipboard_state,
             });
+
+            // Start the clipboard watcher if the persisted config has it enabled.
+            // init() seeds is_enabled from config, but watcher thread only runs after enable().
+            if clipboard_enabled_at_start {
+                // Flip is_enabled back to false so enable() will actually spawn the watcher
+                // (enable() short-circuits when is_enabled is already true).
+                clipboard_state_for_startup
+                    .is_enabled
+                    .store(false, Ordering::SeqCst);
+                clipboard_state_for_startup.enable(app.handle().clone());
+            }
+
+            // Create clipboard panel window (hidden by default; shown on demand via cb_toggle_panel or hotkey).
+            let panel = tauri::WebviewWindowBuilder::new(
+                app,
+                "clipboard-panel",
+                tauri::WebviewUrl::App("index.html#/clipboard-panel".into()),
+            )
+            .title("Clipboard")
+            .inner_size(420.0, 720.0)
+            .decorations(false)
+            .resizable(false)
+            .skip_taskbar(true)
+            .always_on_top(true)
+            .visible(false)
+            .build()?;
+
+            // Auto-hide on focus loss. We debounce by 150ms and re-check
+            // `is_focused()` because calling `startDragging()` from the header
+            // causes a transient Focused(false) -> Focused(true) flicker
+            // during the WM_NCLBUTTONDOWN drag modal loop. Without this guard
+            // the panel would hide the instant the user pressed the header.
+            // Skip auto-hide entirely when the user pinned the panel.
+            let panel_clone = panel.clone();
+            let preview_app_handle = panel.app_handle().clone();
+            let pinned_flag = clipboard_state_for_startup.clone();
+            panel.on_window_event(move |ev| {
+                if let tauri::WindowEvent::Focused(false) = ev {
+                    if pinned_flag
+                        .panel_pinned
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return;
+                    }
+                    let panel = panel_clone.clone();
+                    let preview_app_handle = preview_app_handle.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                        if !panel.is_focused().unwrap_or(false)
+                            && !clipboard::preview::preview_window_is_focused(&preview_app_handle)
+                        {
+                            clipboard::preview::hide_preview_windows(&preview_app_handle);
+                            let _ = panel.hide();
+                        }
+                    });
+                }
+            });
+
+            clipboard::preview::ensure_preview_windows(app)?;
+
+            // Register the clipboard global shortcut (default Alt+C) when the feature is on.
+            if clipboard_enabled_at_start {
+                match clipboard::hotkey::register(app.handle().clone(), &clipboard_hotkey_at_start)
+                {
+                    Ok(handle) => {
+                        *clipboard_state_for_startup.hotkey_handle.lock() = Some(handle);
+                    }
+                    Err(e) => {
+                        eprintln!("[clipboard] hotkey register failed: {e}");
+                    }
+                }
+            }
+
+            // Fire a startup toast so users know the watcher is live and how to open the panel.
+            // Delayed 500ms so the notification plugin + tray finish initializing first.
+            if clipboard_enabled_at_start && config_show_startup_notification {
+                use tauri_plugin_notification::NotificationExt;
+                let handle = app.handle().clone();
+                let hotkey_display = clipboard_hotkey_at_start.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let _ = handle
+                        .notification()
+                        .builder()
+                        .title("File-Sync-Tool 剪贴板")
+                        .body(format!("剪贴板监听已启动，按 {hotkey_display} 呼出面板"))
+                        .show();
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2704,7 +2833,58 @@ fn main() {
             fileshare::file_share_start,
             fileshare::file_share_stop,
             fileshare::file_share_get_status,
-            confirm_quit
+            confirm_quit,
+            clipboard::commands::cb_is_enabled,
+            clipboard::commands::cb_enable,
+            clipboard::commands::cb_disable,
+            clipboard::commands::cb_list,
+            clipboard::commands::cb_get,
+            clipboard::commands::cb_delete,
+            clipboard::commands::cb_delete_batch,
+            clipboard::commands::cb_clear,
+            clipboard::commands::cb_toggle_favorite,
+            clipboard::commands::cb_toggle_pin,
+            clipboard::commands::cb_groups_list,
+            clipboard::commands::cb_groups_create,
+            clipboard::commands::cb_groups_rename,
+            clipboard::commands::cb_groups_delete,
+            clipboard::commands::cb_move_to_group,
+            clipboard::commands::cb_toggle_panel,
+            clipboard::commands::cb_set_hotkey,
+            clipboard::commands::cb_paste,
+            clipboard::commands::cb_paste_plain,
+            clipboard::commands::cb_copy,
+            clipboard::commands::cb_paste_as_files,
+            clipboard::commands::cb_paste_as_path,
+            clipboard::commands::cb_check_file_paths,
+            clipboard::commands::cb_save_image_as,
+            clipboard::commands::cb_open_in_explorer,
+            clipboard::commands::cb_merge_paste,
+            clipboard::commands::cb_show_image_preview,
+            clipboard::commands::cb_show_text_preview,
+            clipboard::commands::cb_hide_preview,
+            clipboard::commands::cb_reorder_favorites,
+            clipboard::commands::cb_stats,
+            clipboard::commands::cb_get_settings,
+            clipboard::commands::cb_save_settings,
+            clipboard::commands::cb_export,
+            clipboard::commands::cb_import,
+            clipboard::commands::cb_db_optimize,
+            clipboard::commands::cb_db_vacuum,
+            clipboard::commands::cb_reset_config,
+            clipboard::commands::cb_reset_all,
+            clipboard::commands::cb_enable_win_v,
+            clipboard::commands::cb_disable_win_v,
+            clipboard::commands::cb_is_win_v_enabled,
+            clipboard::commands::cb_is_elevated,
+            clipboard::commands::cb_is_run_as_admin_enabled,
+            clipboard::commands::cb_admin_task_status,
+            clipboard::commands::cb_admin_task_create,
+            clipboard::commands::cb_admin_task_remove,
+            clipboard::commands::cb_set_run_as_admin,
+            clipboard::commands::cb_set_panel_pinned,
+            clipboard::commands::cb_is_panel_pinned,
+            clipboard::commands::cb_open_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,5 +1,22 @@
 import { invoke } from '@tauri-apps/api/core';
 
+import type {
+  ClipboardGroup,
+  ClipboardItem,
+  ClipboardListQuery,
+  ClipboardListResult,
+  ClipboardSettings,
+  ClipboardStats,
+  FilePathStatus,
+} from './clipboardTypes';
+
+export type {
+  ClipboardGroup,
+  ClipboardSearchFilters,
+  ClipboardSearchPayload,
+  FilePathStatus,
+} from './clipboardTypes';
+
 export interface CommandGroup {
   id: string;
   name: string;
@@ -104,6 +121,9 @@ export interface AppConfig {
 
   /** HTTP request timeout in seconds for the framework password API. Default: 5. */
   framework_password_api_timeout_secs: number;
+
+  /** Clipboard manager settings mirrored from Rust AppConfig. */
+  clipboard: ClipboardSettings;
 }
 
 export type TaskSourceType = 'scheduled' | 'manual';
@@ -890,3 +910,86 @@ export async function fileShareStop(): Promise<void> {
 export async function fileShareGetStatus(): Promise<FileShareStatus> {
   return await invoke<FileShareStatus>('file_share_get_status');
 }
+
+export interface AdminTaskStatus {
+  installed: boolean;
+  path_valid: boolean;
+  last_error: string | null;
+}
+
+export type ClipboardImportMode = 'replace' | 'merge';
+
+export interface ClipboardImportReport {
+  imported_items: number;
+  imported_groups: number;
+  backup_path: string | null;
+}
+
+// ─── Clipboard Manager ────────────────────────────────────
+
+export const clipboardApi = {
+  isEnabled: () => invoke<boolean>('cb_is_enabled'),
+  enable: () => invoke<void>('cb_enable'),
+  disable: () => invoke<void>('cb_disable'),
+  list: (query: ClipboardListQuery) =>
+    invoke<ClipboardListResult>('cb_list', { query }),
+  get: (id: number) => invoke<ClipboardItem>('cb_get', { id }),
+  delete: (id: number) => invoke<void>('cb_delete', { id }),
+  deleteBatch: (ids: number[]) => invoke<void>('cb_delete_batch', { ids }),
+  clear: (keepFavorites: boolean) =>
+    invoke<number>('cb_clear', { keepFavorites }),
+  toggleFavorite: (id: number) =>
+    invoke<ClipboardItem>('cb_toggle_favorite', { id }),
+  togglePin: (id: number) => invoke<ClipboardItem>('cb_toggle_pin', { id }),
+  listGroups: () => invoke<ClipboardGroup[]>('cb_groups_list'),
+  createGroup: (name: string) => invoke<ClipboardGroup>('cb_groups_create', { name }),
+  renameGroup: (id: number, name: string) =>
+    invoke<ClipboardGroup>('cb_groups_rename', { id, name }),
+  deleteGroup: (id: number) => invoke<void>('cb_groups_delete', { id }),
+  moveToGroup: (itemId: number, groupId: number | null) =>
+    invoke<ClipboardItem>('cb_move_to_group', { itemId, groupId }),
+  reorderFavorites: (ids: number[]) => invoke<void>('cb_reorder_favorites', { ids }),
+  paste: (id: number) => invoke<void>('cb_paste', { id }),
+  pastePlain: (id: number) => invoke<void>('cb_paste_plain', { id }),
+  copy: (id: number) => invoke<void>('cb_copy', { id }),
+  pasteAsFiles: (id: number) => invoke<void>('cb_paste_as_files', { id }),
+  pasteAsPath: (id: number) => invoke<void>('cb_paste_as_path', { id }),
+  checkFilePaths: (ids: number[]) =>
+    invoke<FilePathStatus[]>('cb_check_file_paths', { ids }),
+  saveImageAs: (id: number, targetPath: string) =>
+    invoke<void>('cb_save_image_as', { id, targetPath }),
+  openInExplorer: (path: string) => invoke<void>('cb_open_in_explorer', { path }),
+  mergePaste: (ids: number[], separator?: string | null) =>
+    invoke<void>('cb_merge_paste', { ids, separator: separator ?? null }),
+  showImagePreview: (id: number) => invoke<void>('cb_show_image_preview', { id }),
+  showTextPreview: (id: number) => invoke<void>('cb_show_text_preview', { id }),
+  hidePreview: () => invoke<void>('cb_hide_preview'),
+  togglePanel: () => invoke<void>('cb_toggle_panel'),
+  stats: () => invoke<ClipboardStats>('cb_stats'),
+  getSettings: () => invoke<ClipboardSettings>('cb_get_settings'),
+  saveSettings: (settings: ClipboardSettings) =>
+    invoke<ClipboardSettings>('cb_save_settings', { settings }),
+  exportData: (path: string, includeImages: boolean) =>
+    invoke<void>('cb_export', { path, includeImages }),
+  importData: (path: string, mode: ClipboardImportMode) =>
+    invoke<ClipboardImportReport>('cb_import', { path, mode }),
+  dbOptimize: () => invoke<void>('cb_db_optimize'),
+  dbVacuum: () => invoke<void>('cb_db_vacuum'),
+  resetConfig: () => invoke<ClipboardSettings>('cb_reset_config'),
+  resetAll: () => invoke<ClipboardSettings>('cb_reset_all'),
+  setHotkey: (hotkey: string) => invoke<void>('cb_set_hotkey', { hotkey }),
+  enableWinV: () => invoke<void>('cb_enable_win_v'),
+  disableWinV: () => invoke<void>('cb_disable_win_v'),
+  isWinVEnabled: () => invoke<boolean>('cb_is_win_v_enabled'),
+  isElevated: () => invoke<boolean>('cb_is_elevated'),
+  isRunAsAdminEnabled: () => invoke<boolean>('cb_is_run_as_admin_enabled'),
+  adminTaskStatus: () => invoke<AdminTaskStatus>('cb_admin_task_status'),
+  adminTaskCreate: () => invoke<AdminTaskStatus>('cb_admin_task_create'),
+  adminTaskRemove: () => invoke<AdminTaskStatus>('cb_admin_task_remove'),
+  setRunAsAdmin: (enable: boolean) =>
+    invoke<AdminTaskStatus>('cb_set_run_as_admin', { enable }),
+  setPanelPinned: (pinned: boolean) =>
+    invoke<void>('cb_set_panel_pinned', { pinned }),
+  isPanelPinned: () => invoke<boolean>('cb_is_panel_pinned'),
+  openSettings: () => invoke<void>('cb_open_settings'),
+};

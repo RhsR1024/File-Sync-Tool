@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import Sidebar from '@/components/Sidebar.vue';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { onMounted, onUnmounted, watch } from 'vue';
-import { RouterView } from 'vue-router';
+import { RouterView, useRouter } from 'vue-router';
 
 import { startScheduler } from '@/lib/scheduler';
 import { appStore, addLog, setToolRuntime, startLiveTicker, stopLiveTicker } from '@/lib/store';
@@ -30,7 +31,10 @@ let unlistenTaskLog: (() => void) | null = null;
 let unlistenBeforeQuit: (() => void) | null = null;
 let unlistenScreenShareStatus: (() => void) | null = null;
 let unlistenFileShareStatus: (() => void) | null = null;
+let unlistenOpenClipboardSettings: (() => void) | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+const router = useRouter();
 
 function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
@@ -59,6 +63,12 @@ async function hydrateToolRuntime() {
 }
 
 onMounted(async () => {
+  // Skip main-window init in auxiliary windows (e.g. clipboard-panel):
+  // those windows only render their own page and must not duplicate event
+  // listeners, scheduler auto-start, or before-quit handling.
+  const label = getCurrentWindow().label;
+  if (label !== 'main') return;
+
   startLiveTicker();
   let cfg = null;
   try {
@@ -157,6 +167,12 @@ onMounted(async () => {
     setToolRuntime('fileShare', event.payload.is_active);
   });
 
+  unlistenOpenClipboardSettings = await listen('clipboard-open-settings', () => {
+    if (router.currentRoute.value.path !== '/tools/clipboard') {
+      void router.push('/tools/clipboard');
+    }
+  });
+
   if (cfg?.launch_and_auto_scan && !appStore.isRunning) {
     try {
       await startScheduler();
@@ -188,11 +204,13 @@ onUnmounted(() => {
   if (unlistenBeforeQuit) unlistenBeforeQuit();
   if (unlistenScreenShareStatus) unlistenScreenShareStatus();
   if (unlistenFileShareStatus) unlistenFileShareStatus();
+  if (unlistenOpenClipboardSettings) unlistenOpenClipboardSettings();
 });
 </script>
 
 <template>
-  <div class="flex h-screen bg-slate-50 font-sans text-slate-900">
+  <router-view v-if="$route.meta?.noLayout" />
+  <div v-else class="flex h-screen bg-slate-50 font-sans text-slate-900">
     <Sidebar />
     <main class="flex flex-1 flex-col overflow-hidden">
       <router-view v-slot="{ Component }">

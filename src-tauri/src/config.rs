@@ -3,6 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
 
+use crate::clipboard::models::ClipboardSettings;
+
 pub const MIN_SCAN_INTERVAL_MINS: u64 = 5;
 pub const MIN_STABILITY_CHECK_SECS: u64 = 60;
 pub const MIN_RECENT_FILE_GUARD_MINS: u64 = 3;
@@ -163,6 +165,10 @@ pub struct AppConfig {
     /// Default: 5.
     #[serde(default = "default_framework_password_api_timeout_secs")]
     pub framework_password_api_timeout_secs: u64,
+
+    /// Clipboard manager settings (spec §2026-04-19-clipboard-manager §7.1).
+    #[serde(default)]
+    pub clipboard: ClipboardSettings,
 }
 
 fn default_stability_secs() -> u64 {
@@ -185,6 +191,10 @@ fn default_appliance_ssh_api_timeout_secs() -> u64 {
 }
 fn default_framework_password_api_timeout_secs() -> u64 {
     5
+}
+
+fn default_clipboard_settings() -> ClipboardSettings {
+    ClipboardSettings::default()
 }
 
 impl Default for AppConfig {
@@ -210,6 +220,7 @@ impl Default for AppConfig {
             max_task_records: 100,
             appliance_ssh_api_timeout_secs: 5,
             framework_password_api_timeout_secs: 5,
+            clipboard: default_clipboard_settings(),
         }
     }
 }
@@ -322,6 +333,9 @@ pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Resul
     } else {
         Some(PathBuf::from(&path))
     };
+    if let Some(target_dir) = &new_dir {
+        fs::create_dir_all(target_dir).map_err(|e| e.to_string())?;
+    }
 
     // Write the pivot file
     let pivot_file = pivot_path(app_handle);
@@ -361,6 +375,7 @@ pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Resul
         "history.json",
         "ui_state.json",
         "task_state.json",
+        "clipboard.db",
     ];
     for name in &data_files {
         let src = old_data_dir.join(name);
@@ -371,20 +386,16 @@ pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Resul
     // Migrate kv/ directory
     let old_kv = old_data_dir.join("kv");
     let new_kv = new_data_dir.join("kv");
-    if old_kv.is_dir() {
-        let _ = fs::create_dir_all(&new_kv);
-        if let Ok(entries) = fs::read_dir(&old_kv) {
-            for entry in entries.flatten() {
-                let src = entry.path();
-                if src.is_file() {
-                    if let Some(fname) = src.file_name() {
-                        let dst = new_kv.join(fname);
-                        migrate_file(&src, &dst);
-                    }
-                }
-            }
-        }
-    }
+    migrate_dir_contents(&old_kv, &new_kv);
+
+    migrate_dir_contents(
+        &old_data_dir.join("clipboard_images"),
+        &new_data_dir.join("clipboard_images"),
+    );
+    migrate_dir_contents(
+        &old_data_dir.join("clipboard_icons"),
+        &new_data_dir.join("clipboard_icons"),
+    );
 
     Ok(())
 }
@@ -399,10 +410,28 @@ fn migrate_file(src: &PathBuf, dst: &PathBuf) {
     }
 }
 
+fn migrate_dir_contents(src_dir: &PathBuf, dst_dir: &PathBuf) {
+    if !src_dir.is_dir() {
+        return;
+    }
+
+    let _ = fs::create_dir_all(dst_dir);
+    if let Ok(entries) = fs::read_dir(src_dir) {
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let dst = dst_dir.join(entry.file_name());
+            if src.is_dir() {
+                migrate_dir_contents(&src, &dst);
+            } else if src.is_file() {
+                migrate_file(&src, &dst);
+            }
+        }
+    }
+}
+
 /// Returns the effective data directory: custom_data_dir if set, otherwise app_data_dir.
 pub fn get_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
-    get_custom_data_dir(app_handle)
-        .unwrap_or_else(|| app_handle.path().app_data_dir().unwrap())
+    get_custom_data_dir(app_handle).unwrap_or_else(|| app_handle.path().app_data_dir().unwrap())
 }
 
 pub fn get_log_path(app_handle: &tauri::AppHandle) -> PathBuf {
@@ -420,12 +449,42 @@ pub fn get_config_path(app_handle: &tauri::AppHandle) -> PathBuf {
     }
 }
 
-/// Returns the default (non-custom) data directory.
-pub fn get_default_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
-    app_handle.path().app_data_dir().unwrap()
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
 
-/// Returns the default (non-custom) config directory.
-pub fn get_default_config_dir(app_handle: &tauri::AppHandle) -> PathBuf {
-    app_handle.path().app_config_dir().unwrap()
+    #[test]
+    fn app_config_deserializes_legacy_clipboard_settings_with_new_nested_defaults() {
+        let config: AppConfig = serde_json::from_value(json!({
+            "tasks": [],
+            "local_path": "E:/UMS_TEMP",
+            "interval_minutes": 10,
+            "time_ranges": [],
+            "file_extensions": [],
+            "filename_includes": [],
+            "deploy_enabled": false,
+            "servers": [],
+            "command_groups": [],
+            "local_command_groups": [],
+            "clipboard": {
+                "enabled": true,
+                "toolbar": {
+                    "items": ["search", "filter"]
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(config.clipboard.toolbar.visible);
+        assert_eq!(
+            config.clipboard.toolbar.items,
+            vec!["search".to_string(), "filter".to_string()]
+        );
+        assert!(config.clipboard.panel.follow_cursor);
+        assert!(!config.clipboard.panel.remember_position);
+        assert!(config.clipboard.panel.animate);
+        assert!(config.clipboard.panel.use_mica);
+        assert!(config.clipboard.navigation.enabled);
+    }
 }

@@ -27,6 +27,7 @@ pub struct SearchNodeMatch {
     pub display_path: String,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SearchResult {
     pub root_id: String,
@@ -38,6 +39,7 @@ pub struct SearchResult {
     pub modified: String,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn search_current_directory(
     path: &Path,
     current_relative_path: &str,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { ArrowRight, BarChart3, Globe, KeyRound, MonitorUp, Share2, Shield, type LucideIcon } from 'lucide-vue-next';
+import { ArrowRight, BarChart3, Clipboard, Globe, KeyRound, MonitorUp, Share2, Shield, type LucideIcon } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
 import { appStore } from '@/lib/store';
 
@@ -89,6 +89,15 @@ const toolCards = computed<ToolCard[]>(() => [
     iconClasses: 'from-cyan-500 to-teal-600 shadow-cyan-500/20',
     chipKey: 'toolsHub.cards.fileShare.chip',
   },
+  {
+    key: 'clipboard-manager',
+    titleKey: 'sidebar.clipboardManager',
+    descriptionKey: 'toolsHub.cards.clipboardManager.description',
+    path: '/tools/clipboard',
+    icon: markRaw(Clipboard as LucideIcon),
+    iconClasses: 'from-rose-500 to-pink-600 shadow-rose-500/20',
+    chipKey: 'toolsHub.cards.clipboardManager.chip',
+  },
 ]);
 </script>
 
@@ -129,6 +138,9 @@ const toolCards = computed<ToolCard[]>(() => [
             </div>
             <div class="flex h-11 w-11 items-center justify-center rounded-[14px] bg-gradient-to-br from-cyan-500 to-teal-500 shadow-lg shadow-cyan-500/25">
               <Share2 class="h-5 w-5 text-white" />
+            </div>
+            <div class="flex h-11 w-11 items-center justify-center rounded-[14px] bg-gradient-to-br from-rose-500 to-pink-600 shadow-lg shadow-rose-500/25">
+              <Clipboard class="h-5 w-5 text-white" />
             </div>
           </div>
         </div>

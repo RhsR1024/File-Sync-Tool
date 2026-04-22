@@ -310,8 +310,7 @@ impl TaskGroup {
         if self.finished_at.is_none() && self.summary_status == TaskSummaryStatus::Interrupted {
             self.finished_at = Some(finished_at.to_string());
         }
-        let total_elapsed =
-            compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
+        let total_elapsed = compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
         // Subtract any time the task was paused (including current pause if ongoing)
         let mut paused_duration = self.accumulated_paused_seconds;
         if let Some(paused_at_str) = &self.paused_at {
@@ -383,8 +382,7 @@ impl TaskGroup {
                     .iter()
                     .any(|attempt| attempt.status == AttemptStatus::Failed)
         });
-        let total_elapsed =
-            compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
+        let total_elapsed = compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
         // Subtract any time the task was paused (including current pause if ongoing)
         let mut paused_duration = self.accumulated_paused_seconds;
         if let Some(paused_at_str) = &self.paused_at {

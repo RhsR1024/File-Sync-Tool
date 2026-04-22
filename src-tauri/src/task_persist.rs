@@ -1,7 +1,6 @@
 use crate::task_domain::TaskState;
 use std::fs;
 use std::path::PathBuf;
-use tauri::Manager;
 
 const TASK_STATE_FILE_NAME: &str = "task_state.json";
 
