@@ -10,6 +10,7 @@ export type SidebarIconKey =
   | 'networkTools'
   | 'screenShare'
   | 'fileShare'
+  | 'diskCacheCleanup'
   | 'clipboardManager';
 
 export type SidebarMatchMode = 'exact' | 'prefix';
@@ -112,6 +113,13 @@ export const SIDEBAR_NAV_SECTIONS = [
         iconKey: 'fileShare',
         matchMode: 'prefix',
         runtimeKey: 'fileShare',
+      },
+      {
+        key: 'disk-cache-cleanup',
+        labelKey: 'sidebar.diskCacheCleanup',
+        path: '/tools/disk-cache-cleanup',
+        iconKey: 'diskCacheCleanup',
+        matchMode: 'prefix',
       },
       {
         key: 'clipboard-manager',

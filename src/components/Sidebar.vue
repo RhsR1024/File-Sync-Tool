@@ -4,6 +4,7 @@ import {
   BarChart3,
   Clipboard,
   Globe,
+  HardDrive,
   History,
   KeyRound,
   ListChecks,
@@ -36,6 +37,7 @@ const iconMap: Record<SidebarIconKey, Component> = {
   networkTools: Globe,
   screenShare: MonitorUp,
   fileShare: Share2,
+  diskCacheCleanup: HardDrive,
   clipboardManager: Clipboard,
 };
 

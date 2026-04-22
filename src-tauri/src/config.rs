@@ -165,6 +165,8 @@ pub struct AppConfig {
     /// Default: 5.
     #[serde(default = "default_framework_password_api_timeout_secs")]
     pub framework_password_api_timeout_secs: u64,
+    #[serde(default = "default_disk_cleanup_http_timeout_secs")]
+    pub disk_cleanup_http_timeout_secs: u64,
 
     /// Clipboard manager settings (spec §2026-04-19-clipboard-manager §7.1).
     #[serde(default)]
@@ -190,6 +192,9 @@ fn default_appliance_ssh_api_timeout_secs() -> u64 {
     5
 }
 fn default_framework_password_api_timeout_secs() -> u64 {
+    5
+}
+fn default_disk_cleanup_http_timeout_secs() -> u64 {
     5
 }
 
@@ -220,6 +225,7 @@ impl Default for AppConfig {
             max_task_records: 100,
             appliance_ssh_api_timeout_secs: 5,
             framework_password_api_timeout_secs: 5,
+            disk_cleanup_http_timeout_secs: 5,
             clipboard: default_clipboard_settings(),
         }
     }

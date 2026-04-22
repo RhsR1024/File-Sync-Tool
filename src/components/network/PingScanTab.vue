@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { pingScan, cancelPingScan, saveTextFile, type PingResult, type PingScanRequest } from '../../lib/tauri';
+import { mergeRecentItems, normalizeRecentItems } from '../../lib/recentHistory';
 
 defineOptions({ name: 'PingScanTab' });
 
@@ -12,6 +13,8 @@ const { t } = useI18n();
 // ── Persistence helpers ───────────────────────────────────────────────────
 
 const KV_KEY = 'networkTools.pingScanConfig';
+const RECENT_PREFIXES_KEY = 'networkTools.pingScan.recentPrefixes';
+const RECENT_PREFIXES_LIMIT = 10;
 
 async function saveConfig() {
   try {
@@ -28,6 +31,45 @@ const prefix = ref('192.168.1');
 const start = ref(1);
 const end = ref(254);
 const timeoutMs = ref(1000);
+const recentPrefixes = ref<string[]>([]);
+
+function isValidPrefixValue(value: string) {
+  if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value)) return false;
+  const octets = value.split('.').map(Number);
+  return octets.every(octet => octet >= 0 && octet <= 255);
+}
+
+function isRecentPrefixSelected(value: string) {
+  return prefix.value.trim() === value;
+}
+
+function selectRecentPrefix(value: string) {
+  if (isScanning.value) {
+    return;
+  }
+  prefix.value = value;
+}
+
+async function storeRecentPrefixes(items: readonly string[]) {
+  const normalized = normalizeRecentItems(items, RECENT_PREFIXES_LIMIT);
+  recentPrefixes.value = normalized;
+  try {
+    await invoke('save_kv', {
+      key: RECENT_PREFIXES_KEY,
+      value: normalized,
+    });
+  } catch {
+    /* Recent prefixes are best-effort only. */
+  }
+}
+
+async function rememberRecentPrefix(value: string) {
+  const normalizedValue = value.trim();
+  if (!isValidPrefixValue(normalizedValue)) {
+    return;
+  }
+  await storeRecentPrefixes(mergeRecentItems(recentPrefixes.value, normalizedValue, RECENT_PREFIXES_LIMIT));
+}
 
 // Load persisted config on mount
 onMounted(async () => {
@@ -40,6 +82,13 @@ onMounted(async () => {
       if (saved.timeoutMs !== undefined) timeoutMs.value = saved.timeoutMs;
     }
   } catch { /* ignore */ }
+
+  try {
+    const saved = await invoke<string[] | null>('load_kv', { key: RECENT_PREFIXES_KEY });
+    recentPrefixes.value = normalizeRecentItems(saved, RECENT_PREFIXES_LIMIT);
+  } catch {
+    /* Ignore malformed recent prefixes from older builds. */
+  }
 });
 
 // Persist on change
@@ -53,10 +102,7 @@ const tableFilter = ref<'all' | 'online' | 'offline'>('all');
 
 const prefixError = computed(() => {
   const v = prefix.value.trim();
-  if (!v) return t('networkTools.ping.prefixError');
-  if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v)) return t('networkTools.ping.prefixError');
-  const octets = v.split('.').map(Number);
-  if (octets.some(o => o < 0 || o > 255)) return t('networkTools.ping.prefixError');
+  if (!v || !isValidPrefixValue(v)) return t('networkTools.ping.prefixError');
   return '';
 });
 
@@ -165,11 +211,13 @@ onUnmounted(() => {
 
 async function startScan() {
   if (!isFormValid.value || isScanning.value) return;
+  const normalizedPrefix = prefix.value.trim();
+  await rememberRecentPrefix(normalizedPrefix);
   results.value = new Map();
   isScanning.value = true;
   await attachListeners();
   const request: PingScanRequest = {
-    prefix: prefix.value.trim(),
+    prefix: normalizedPrefix,
     start: start.value,
     end: end.value,
     timeoutMs: timeoutMs.value,
@@ -238,6 +286,7 @@ function hideTooltip() {
             <input
               v-model="prefix"
               type="text"
+              list="ping-scan-recent-prefixes"
               :placeholder="t('networkTools.ping.prefixPlaceholder')"
               :disabled="isScanning"
               :class="[
@@ -249,7 +298,26 @@ function hideTooltip() {
               .{{ start }}–.{{ end }}
             </span>
           </div>
+          <datalist id="ping-scan-recent-prefixes">
+            <option v-for="item in recentPrefixes" :key="`ping-scan-recent-${item}`" :value="item" />
+          </datalist>
           <p v-if="prefixError" class="mt-1 text-xs text-red-500">{{ prefixError }}</p>
+          <div v-if="recentPrefixes.length > 0" class="mt-2 flex items-center gap-2 flex-wrap">
+            <span class="text-xs font-medium text-slate-500">{{ t('history.title') }}:</span>
+            <button
+              v-for="item in recentPrefixes"
+              :key="`ping-scan-history-${item}`"
+              type="button"
+              :disabled="isScanning"
+              class="px-2.5 py-1 text-xs font-medium rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              :class="isRecentPrefixSelected(item)
+                ? 'bg-blue-600 text-white border-blue-600'
+                : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50 hover:border-slate-400'"
+              @click="selectRecentPrefix(item)"
+            >
+              <span class="font-mono">{{ item }}</span>
+            </button>
+          </div>
         </div>
 
         <!-- Start -->

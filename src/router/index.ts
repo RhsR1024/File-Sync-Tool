@@ -59,6 +59,10 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../pages/FileSharePage.vue'),
   },
   {
+    path: '/tools/disk-cache-cleanup',
+    component: () => import('../pages/DiskCacheCleanupPage.vue'),
+  },
+  {
     path: '/tools/clipboard',
     component: () => import('../pages/ClipboardManagerPage.vue'),
   },

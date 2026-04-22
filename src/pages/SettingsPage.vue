@@ -41,6 +41,7 @@ const config = ref<AppConfig>({
   max_task_records: 100,
   appliance_ssh_api_timeout_secs: 5,
   framework_password_api_timeout_secs: 5,
+  disk_cleanup_http_timeout_secs: 5,
   clipboard: createDefaultClipboardSettings(),
 });
 

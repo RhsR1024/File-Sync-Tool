@@ -122,6 +122,9 @@ export interface AppConfig {
   /** HTTP request timeout in seconds for the framework password API. Default: 5. */
   framework_password_api_timeout_secs: number;
 
+  /** HTTP request timeout in seconds for disk cache cleanup API. Default: 5. */
+  disk_cleanup_http_timeout_secs: number;
+
   /** Clipboard manager settings mirrored from Rust AppConfig. */
   clipboard: ClipboardSettings;
 }
@@ -632,6 +635,87 @@ export async function changeFrameworkPassword(
 
 export async function enableApplianceSsh(request: EnableApplianceSshRequest): Promise<ApplianceSshResult[]> {
   return await invoke<ApplianceSshResult[]>('enable_appliance_ssh', { request });
+}
+
+// Disk Cache Cleanup
+export interface DiskServerItem {
+  serverName: string;
+  serverIp: string;
+  role: string;
+  serial: string;
+  haType: number;
+  serverCode: number;
+}
+
+export interface Wwn {
+  wwn: string;
+  blockSize: number;
+}
+
+export interface DiskInfoItem {
+  storageId: string;
+  storageType: number;
+  slot: number;
+  enclosureIndex: number;
+  storageStatus: number;
+  totalCapacity: number;
+  usage: number;
+  deviceName: string;
+  worldWideNameList: Wwn[];
+}
+
+export interface CacheCheckResult {
+  present_ids: string[];
+  redis_available: boolean;
+  error: string | null;
+}
+
+export interface CacheDeleteResult {
+  deleted_count: number;
+  redis_available: boolean;
+  error: string | null;
+}
+
+export async function diskCleanupListServers(
+  host: string,
+  timeoutSecs: number,
+): Promise<DiskServerItem[]> {
+  return await invoke<DiskServerItem[]>('disk_cleanup_list_servers', {
+    host,
+    timeoutSecs,
+  });
+}
+
+export async function diskCleanupListDisks(
+  host: string,
+  serverIp: string,
+  timeoutSecs: number,
+): Promise<DiskInfoItem[]> {
+  return await invoke<DiskInfoItem[]>('disk_cleanup_list_disks', {
+    host,
+    serverIp,
+    timeoutSecs,
+  });
+}
+
+export async function diskCleanupCheckRedis(
+  host: string,
+  storageIds: string[],
+): Promise<CacheCheckResult> {
+  return await invoke<CacheCheckResult>('disk_cleanup_check_redis', {
+    host,
+    storageIds,
+  });
+}
+
+export async function diskCleanupDeleteCache(
+  host: string,
+  storageIds: string[],
+): Promise<CacheDeleteResult> {
+  return await invoke<CacheDeleteResult>('disk_cleanup_delete_cache', {
+    host,
+    storageIds,
+  });
 }
 
 // ─── Network Tools ─────────────────────────────────────

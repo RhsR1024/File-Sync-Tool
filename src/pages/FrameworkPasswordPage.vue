@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { invoke } from '@tauri-apps/api/core';
 import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { AlertCircle, CheckCircle2, Globe, KeyRound, Loader, Server } from 'lucide-vue-next';
 import { changeFrameworkPassword, getConfig, saveConfig, type AppConfig, type FrameworkPasswordResult } from '../lib/tauri';
+import { mergeRecentItems, normalizeRecentItems } from '../lib/recentHistory';
 
 const { t } = useI18n();
 
@@ -11,12 +13,15 @@ const selectedIps = ref<string[]>([]);
 const manualIpTags = ref<string[]>([]);
 const manualIpInput = ref<string>('');
 const fpIpInputRef = ref<HTMLInputElement | null>(null);
+const recentIps = ref<string[]>([]);
 const oldPassword = ref<string>('123456');
 const newPassword = ref<string>('admin_123');
 const apiTimeoutSecs = ref<number>(5);
 const isLoading = ref<boolean>(false);
 const results = ref<FrameworkPasswordResult[]>([]);
 const currentProgress = ref<{ current: number; total: number } | null>(null);
+const RECENT_IPS_KEY = 'frameworkPassword.recentIps';
+const RECENT_IPS_LIMIT = 10;
 
 const serverOptions = computed(() => {
   if (!config.value) return [];
@@ -101,6 +106,37 @@ const allSelectedIps = computed(() => {
   return Array.from(ips);
 });
 
+const isRecentIpSelected = (ip: string) => allSelectedIps.value.includes(ip);
+
+const applyRecentIp = (ip: string) => {
+  if (isLoading.value || isRecentIpSelected(ip)) {
+    return;
+  }
+  manualIpInput.value = '';
+  addManualIpTag(ip);
+  nextTick(() => fpIpInputRef.value?.focus());
+};
+
+const storeRecentIps = async (items: readonly string[]) => {
+  const normalized = normalizeRecentItems(items, RECENT_IPS_LIMIT);
+  recentIps.value = normalized;
+  try {
+    await invoke('save_kv', {
+      key: RECENT_IPS_KEY,
+      value: normalized,
+    });
+  } catch {
+    // Recent history is best-effort only.
+  }
+};
+
+const rememberRecentIps = async (items: readonly string[]) => {
+  if (items.length === 0) {
+    return;
+  }
+  await storeRecentIps(mergeRecentItems(recentIps.value, items, RECENT_IPS_LIMIT));
+};
+
 const isFormValid = computed(() => {
   return allSelectedIps.value.length > 0 && !isLoading.value;
 });
@@ -111,6 +147,13 @@ onMounted(async () => {
     apiTimeoutSecs.value = config.value.framework_password_api_timeout_secs ?? 5;
   } catch (e) {
     console.error('Failed to load config:', e);
+  }
+
+  try {
+    const saved = await invoke<string[] | null>('load_kv', { key: RECENT_IPS_KEY });
+    recentIps.value = normalizeRecentItems(saved, RECENT_IPS_LIMIT);
+  } catch {
+    // Ignore malformed recent history from older builds.
   }
 });
 
@@ -132,10 +175,12 @@ const handleExecute = async () => {
 
   isLoading.value = true;
   results.value = [];
+  const recentValidIps = allSelectedIps.value.filter(isValidIp);
 
   try {
     const ipList = allSelectedIps.value;
     currentProgress.value = { current: 0, total: ipList.length };
+    await rememberRecentIps(recentValidIps);
 
     const response = await changeFrameworkPassword(
       ipList,
@@ -299,6 +344,7 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
                 ref="fpIpInputRef"
                 v-model="manualIpInput"
                 type="text"
+                list="framework-password-recent-ips"
                 :placeholder="manualIpTags.length === 0 ? t('tools.frameworkPassword.manualIpPlaceholder') : ''"
                 :disabled="isLoading"
                 class="flex-1 min-w-[120px] text-sm bg-transparent outline-none disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 py-0.5"
@@ -308,7 +354,26 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
                 @blur="handleIpBlur"
               />
             </div>
+            <datalist id="framework-password-recent-ips">
+              <option v-for="ip in recentIps" :key="`framework-password-recent-${ip}`" :value="ip" />
+            </datalist>
             <p class="text-xs text-slate-400">{{ t('tools.frameworkPassword.manualIpHint') }}</p>
+            <div v-if="recentIps.length > 0" class="flex items-center gap-2 flex-wrap">
+              <span class="text-xs font-medium text-slate-500">{{ t('history.title') }}:</span>
+              <button
+                v-for="ip in recentIps"
+                :key="`framework-password-history-${ip}`"
+                type="button"
+                :disabled="isLoading"
+                class="px-2.5 py-1 text-xs font-medium rounded-full border transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                :class="isRecentIpSelected(ip)
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50 hover:border-slate-400'"
+                @click="applyRecentIp(ip)"
+              >
+                <span class="font-mono">{{ ip }}</span>
+              </button>
+            </div>
           </div>
         </div>
 

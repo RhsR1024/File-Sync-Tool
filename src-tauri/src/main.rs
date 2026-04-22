@@ -6,6 +6,7 @@ mod clipboard;
 mod code_count;
 mod config;
 mod deploy;
+mod disk_cleanup;
 mod fileshare;
 mod history;
 mod local_exec;
@@ -2805,6 +2806,10 @@ fn main() {
             save_text_file,
             change_framework_password,
             enable_appliance_ssh,
+            disk_cleanup::disk_cleanup_list_servers,
+            disk_cleanup::disk_cleanup_list_disks,
+            disk_cleanup::disk_cleanup_check_redis,
+            disk_cleanup::disk_cleanup_delete_cache,
             code_count::code_count_analyze,
             code_count::code_count_cancel,
             code_count::code_count_list_scope_tree,
