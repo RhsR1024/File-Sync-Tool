@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod commands;
+pub mod data_transfer;
 pub mod db;
 pub mod hotkey;
 pub mod icon_store;

@@ -1547,6 +1547,12 @@ fn set_custom_data_dir(
             return Err(format!("Directory does not exist: {}", path));
         }
     }
+
+    {
+        let conn = state.clipboard.write_db.lock();
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+
     config::set_custom_data_dir(&app_handle, path)?;
 
     // Hot-reload config from the new location into AppState
@@ -2899,6 +2905,12 @@ fn main() {
             clipboard::commands::cb_stats,
             clipboard::commands::cb_get_settings,
             clipboard::commands::cb_save_settings,
+            clipboard::commands::cb_export,
+            clipboard::commands::cb_import,
+            clipboard::commands::cb_db_optimize,
+            clipboard::commands::cb_db_vacuum,
+            clipboard::commands::cb_reset_config,
+            clipboard::commands::cb_reset_all,
             clipboard::commands::cb_enable_win_v,
             clipboard::commands::cb_disable_win_v,
             clipboard::commands::cb_is_win_v_enabled,

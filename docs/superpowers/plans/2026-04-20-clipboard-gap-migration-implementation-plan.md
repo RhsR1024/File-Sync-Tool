@@ -935,14 +935,14 @@ Status 2026-04-21:
 
 **Depends on:** Task 12
 
-- [ ] **Step 13.1: Write failing tests for export/import round-trip helpers**
+- [x] **Step 13.1: Write failing tests for export/import round-trip helpers**
 
 Cover:
 - replace import
 - merge import
 - backup naming / rollback paths if feasible
 
-- [ ] **Step 13.2: Implement ZIP export/import**
+- [x] **Step 13.2: Implement ZIP export/import**
 
 Include:
 - DB file
@@ -950,11 +950,11 @@ Include:
 - schema validation
 - replace vs merge behavior
 
-- [ ] **Step 13.3: Align custom data-dir migration with clipboard assets**
+- [x] **Step 13.3: Align custom data-dir migration with clipboard assets**
 
 `config.rs` already has generic custom data-dir migration support; extend it so clipboard DB, images, and icons migrate correctly.
 
-- [ ] **Step 13.4: Add DB optimize/vacuum and cleanup actions**
+- [x] **Step 13.4: Add DB optimize/vacuum and cleanup actions**
 
 Backend command surface and settings UI should expose:
 - optimize
@@ -963,7 +963,7 @@ Backend command surface and settings UI should expose:
 - reset config
 - reset all
 
-- [ ] **Step 13.5: Run tests**
+- [x] **Step 13.5: Run tests**
 
 ```powershell
 cargo test clipboard::data_transfer --manifest-path src-tauri\Cargo.toml
@@ -976,6 +976,22 @@ cmd /c pnpm check
 git add src-tauri/src/clipboard/data_transfer.rs src-tauri/src/clipboard/commands.rs src-tauri/src/config.rs src/components/clipboard/ClipboardImportExportDialog.vue src/components/clipboard-settings/DataTab.vue src/lib/tauri.ts
 git commit -m "feat(clipboard): add import export and maintenance tooling"
 ```
+
+Status 2026-04-22:
+- Task 13 implementation and verification are complete; checkpoint commit is pending.
+- Added `src-tauri/src/clipboard/data_transfer.rs` with TDD coverage for backup naming, replace import, and merge import, then implemented ZIP-based export/import for the clipboard DB plus image/icon assets.
+- Export now checkpoints the live SQLite database before bundling so WAL-backed data is not dropped, and import supports both `replace` and duplicate-hash-aware `merge` modes with optional backup creation.
+- `src-tauri/src/clipboard/commands.rs`, `src-tauri/src/main.rs`, and `src/lib/tauri.ts` now expose `cb_export`, `cb_import`, `cb_db_optimize`, `cb_db_vacuum`, `cb_reset_config`, and `cb_reset_all`, while the existing `cb_clear` surface is reused for clear-history maintenance.
+- `src-tauri/src/config.rs` and the generic custom data-dir migration path now carry `clipboard.db`, `clipboard_images/`, and `clipboard_icons/`, including a clipboard DB checkpoint before migration.
+- `src/components/clipboard-settings/DataTab.vue` and `src/components/clipboard/ClipboardImportExportDialog.vue` now provide stats, import/export UI, data-directory migration controls, dedup strategy selection, and maintenance/reset actions in settings.
+- Verification passed with:
+
+```powershell
+$env:CARGO_TARGET_DIR='C:\WorkSpace\File-Sync-Tool\src-tauri\target'; $env:RUSTFLAGS='-C debuginfo=0'; cargo test clipboard::data_transfer --manifest-path src-tauri\Cargo.toml
+cmd /c pnpm check
+```
+
+Observed: `3` `clipboard::data_transfer` tests passed, `cmd /c pnpm check` completed successfully, and the crate compiled cleanly for the new backend command/config wiring aside from pre-existing unrelated warnings elsewhere in the app.
 
 ### Task 14: Groups, Pinned/Favorite Split, And Grouped UI
 

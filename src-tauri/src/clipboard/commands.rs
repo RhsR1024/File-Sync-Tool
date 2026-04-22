@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewWindow};
 
 use crate::clipboard::db;
+use crate::clipboard::data_transfer::{ImportMode, ImportReport};
 use crate::clipboard::models::{
     ClipboardItem, ClipboardListQuery, ClipboardListResult, ClipboardSettings, ClipboardStats,
     FilePathStatus,
@@ -163,6 +164,51 @@ fn open_and_select_in_explorer(path: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn reset_clipboard_config_internal(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<ClipboardSettings, String> {
+    let old = state.clipboard.settings.read().clone();
+    let defaults = ClipboardSettings::default();
+
+    if old.hotkey != defaults.hotkey {
+        crate::clipboard::hotkey::change(
+            app.clone(),
+            &state.clipboard.hotkey_handle,
+            &defaults.hotkey,
+        )?;
+    }
+
+    if defaults.enabled && !old.enabled {
+        state.clipboard.enable(app.clone());
+    } else if !defaults.enabled && old.enabled {
+        state.clipboard.disable();
+    }
+
+    if old.use_win_v_replacement && !defaults.use_win_v_replacement {
+        crate::clipboard::win_v::disable_win_v_replacement()?;
+        crate::clipboard::hotkey::change(app.clone(), &state.clipboard.hotkey_handle, &defaults.hotkey)?;
+    }
+
+    if old.run_as_admin && !defaults.run_as_admin {
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+        let exe_path = exe.to_string_lossy().to_string();
+        let _ = crate::clipboard::admin::set_autostart_as_admin(&exe_path, false)?;
+    }
+
+    *state.clipboard.settings.write() = defaults.clone();
+    {
+        let mut cfg = state
+            .config
+            .lock()
+            .map_err(|e| format!("lock config: {e}"))?;
+        cfg.clipboard = defaults.clone();
+        crate::config::save_config(app, &cfg)?;
+    }
+
+    Ok(defaults)
 }
 
 #[tauri::command]
@@ -328,6 +374,83 @@ pub fn cb_save_settings(
         crate::config::save_config(&app, &cfg)?;
     }
 
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn cb_export(
+    state: State<'_, AppState>,
+    path: String,
+    include_images: bool,
+) -> Result<(), String> {
+    {
+        let conn = state.clipboard.write_db.lock();
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+
+    crate::clipboard::data_transfer::export_bundle(
+        &state.clipboard.db_path,
+        &state.clipboard.image_dir,
+        &state.clipboard.icon_dir,
+        PathBuf::from(path).as_path(),
+        include_images,
+    )
+}
+
+#[tauri::command]
+pub fn cb_import(
+    state: State<'_, AppState>,
+    path: String,
+    mode: ImportMode,
+) -> Result<ImportReport, String> {
+    let report = {
+        let conn = state.clipboard.write_db.lock();
+        crate::clipboard::data_transfer::import_bundle(
+            &conn,
+            &state.clipboard.db_path,
+            &state.clipboard.image_dir,
+            &state.clipboard.icon_dir,
+            PathBuf::from(path).as_path(),
+            mode,
+        )?
+    };
+
+    state.clipboard.cleanup_orphan_assets();
+    Ok(report)
+}
+
+#[tauri::command]
+pub fn cb_db_optimize(state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.clipboard.write_db.lock();
+    db::db_optimize(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cb_db_vacuum(state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.clipboard.write_db.lock();
+    db::db_vacuum(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cb_reset_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ClipboardSettings, String> {
+    reset_clipboard_config_internal(&app, state.inner())
+}
+
+#[tauri::command]
+pub fn cb_reset_all(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ClipboardSettings, String> {
+    let settings = reset_clipboard_config_internal(&app, state.inner())?;
+    {
+        let conn = state.clipboard.write_db.lock();
+        db::clear_all(&conn, false).map_err(|e| e.to_string())?;
+    }
+    crate::history::clear_history(app)?;
+    state.clipboard.cleanup_orphan_assets();
     Ok(settings)
 }
 

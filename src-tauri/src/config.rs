@@ -333,6 +333,9 @@ pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Resul
     } else {
         Some(PathBuf::from(&path))
     };
+    if let Some(target_dir) = &new_dir {
+        fs::create_dir_all(target_dir).map_err(|e| e.to_string())?;
+    }
 
     // Write the pivot file
     let pivot_file = pivot_path(app_handle);
@@ -372,6 +375,7 @@ pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Resul
         "history.json",
         "ui_state.json",
         "task_state.json",
+        "clipboard.db",
     ];
     for name in &data_files {
         let src = old_data_dir.join(name);
@@ -382,20 +386,16 @@ pub fn set_custom_data_dir(app_handle: &tauri::AppHandle, path: String) -> Resul
     // Migrate kv/ directory
     let old_kv = old_data_dir.join("kv");
     let new_kv = new_data_dir.join("kv");
-    if old_kv.is_dir() {
-        let _ = fs::create_dir_all(&new_kv);
-        if let Ok(entries) = fs::read_dir(&old_kv) {
-            for entry in entries.flatten() {
-                let src = entry.path();
-                if src.is_file() {
-                    if let Some(fname) = src.file_name() {
-                        let dst = new_kv.join(fname);
-                        migrate_file(&src, &dst);
-                    }
-                }
-            }
-        }
-    }
+    migrate_dir_contents(&old_kv, &new_kv);
+
+    migrate_dir_contents(
+        &old_data_dir.join("clipboard_images"),
+        &new_data_dir.join("clipboard_images"),
+    );
+    migrate_dir_contents(
+        &old_data_dir.join("clipboard_icons"),
+        &new_data_dir.join("clipboard_icons"),
+    );
 
     Ok(())
 }
@@ -407,6 +407,25 @@ fn migrate_file(src: &PathBuf, dst: &PathBuf) {
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::copy(src, dst);
+    }
+}
+
+fn migrate_dir_contents(src_dir: &PathBuf, dst_dir: &PathBuf) {
+    if !src_dir.is_dir() {
+        return;
+    }
+
+    let _ = fs::create_dir_all(dst_dir);
+    if let Ok(entries) = fs::read_dir(src_dir) {
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let dst = dst_dir.join(entry.file_name());
+            if src.is_dir() {
+                migrate_dir_contents(&src, &dst);
+            } else if src.is_file() {
+                migrate_file(&src, &dst);
+            }
+        }
     }
 }
 

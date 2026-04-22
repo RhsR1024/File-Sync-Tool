@@ -916,6 +916,14 @@ export interface AdminTaskStatus {
   last_error: string | null;
 }
 
+export type ClipboardImportMode = 'replace' | 'merge';
+
+export interface ClipboardImportReport {
+  imported_items: number;
+  imported_groups: number;
+  backup_path: string | null;
+}
+
 // ─── Clipboard Manager ────────────────────────────────────
 
 export const clipboardApi = {
@@ -952,6 +960,14 @@ export const clipboardApi = {
   getSettings: () => invoke<ClipboardSettings>('cb_get_settings'),
   saveSettings: (settings: ClipboardSettings) =>
     invoke<ClipboardSettings>('cb_save_settings', { settings }),
+  exportData: (path: string, includeImages: boolean) =>
+    invoke<void>('cb_export', { path, includeImages }),
+  importData: (path: string, mode: ClipboardImportMode) =>
+    invoke<ClipboardImportReport>('cb_import', { path, mode }),
+  dbOptimize: () => invoke<void>('cb_db_optimize'),
+  dbVacuum: () => invoke<void>('cb_db_vacuum'),
+  resetConfig: () => invoke<ClipboardSettings>('cb_reset_config'),
+  resetAll: () => invoke<ClipboardSettings>('cb_reset_all'),
   setHotkey: (hotkey: string) => invoke<void>('cb_set_hotkey', { hotkey }),
   enableWinV: () => invoke<void>('cb_enable_win_v'),
   disableWinV: () => invoke<void>('cb_disable_win_v'),
