@@ -6,6 +6,8 @@ use std::time::Duration;
 
 const DISK_SERVER_LIST_PATH: &str = "/openAPI/system/v1/disk/server/list";
 const DISK_LIST_PATH: &str = "/openAPI/system/v1/disk/list";
+const RAW_DISK_LIST_PATH: &str = "/openAPI/system/v1/raw-disk/list";
+const IPSAN_LIST_PATH: &str = "/openAPI/system/v1/IPSAN/list";
 const REDIS_PORT: u16 = 6379;
 const REDIS_PASSWORD: &str = "ums@redis_service";
 const REDIS_OP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -57,15 +59,63 @@ pub struct DiskInfoItem {
     pub world_wide_name_list: Vec<Wwn>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WindowsPartitionItem {
+    #[serde(rename = "partitionSeq")]
+    pub partition_seq: i32,
+    #[serde(rename = "partitionGUID")]
+    pub partition_guid: String,
+    #[serde(rename = "partitionOffset", default)]
+    pub partition_offset: String,
+    #[serde(default)]
+    pub capacity: f64,
+    #[serde(rename = "partitionStatus", default)]
+    pub partition_status: i32,
+    #[serde(default = "default_usage")]
+    pub usage: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WindowsDiskItem {
+    #[serde(rename = "diskId")]
+    pub disk_id: String,
+    #[serde(rename = "diskNumber", default)]
+    pub disk_number: i32,
+    #[serde(rename = "diskName", default)]
+    pub disk_name: String,
+    #[serde(rename = "totalCapacity", default)]
+    pub total_capacity: f64,
+    #[serde(rename = "partitionList", default)]
+    pub partition_list: Vec<WindowsPartitionItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IpsanItem {
+    #[serde(rename = "IPSANId")]
+    pub ipsan_id: String,
+    #[serde(rename = "IPSANName", default)]
+    pub ipsan_name: String,
+    #[serde(rename = "IPSANType", default)]
+    pub ipsan_type: i32,
+    #[serde(rename = "IPSANIp", default)]
+    pub ipsan_ip: String,
+    #[serde(rename = "IPSANStatus", default)]
+    pub ipsan_status: i32,
+    #[serde(rename = "totalCapacity", default)]
+    pub total_capacity: f64,
+    #[serde(default = "default_usage")]
+    pub usage: i32,
+}
+
 #[derive(Debug, Serialize, Clone)]
-pub struct CacheCheckResult {
-    pub present_ids: Vec<String>,
+pub struct CacheKeyCheckResult {
+    pub present_keys: Vec<String>,
     pub redis_available: bool,
     pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct CacheDeleteResult {
+pub struct CacheKeyDeleteResult {
     pub deleted_count: i64,
     pub redis_available: bool,
     pub error: Option<String>,
@@ -88,6 +138,18 @@ struct ServerListData {
 struct DiskListData {
     #[serde(rename = "storageInfoList", default)]
     storage_info_list: Vec<DiskInfoItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WindowsRawDiskListData {
+    #[serde(rename = "diskInfoList", default)]
+    disk_info_list: Vec<WindowsDiskItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IpsanListData {
+    #[serde(rename = "IPSANInfoList", default)]
+    ipsan_info_list: Vec<IpsanItem>,
 }
 
 fn default_usage() -> i32 {
@@ -116,6 +178,28 @@ fn normalize_storage_ids(storage_ids: Vec<String>) -> Vec<String> {
     }
 
     normalized
+}
+
+fn normalize_cache_keys(keys: Vec<String>) -> Result<Vec<String>, String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for raw_key in keys {
+        let key = raw_key.trim();
+        if key.is_empty() || seen.contains(key) {
+            continue;
+        }
+        if !key.starts_with(STORAGE_KEY_PREFIX) {
+            return Err(format!(
+                "Redis key 必须以 {} 开头: {}",
+                STORAGE_KEY_PREFIX, key
+            ));
+        }
+        seen.insert(key.to_string());
+        normalized.push(key.to_string());
+    }
+
+    Ok(normalized)
 }
 
 fn build_disk_cleanup_url(host: &str, path: &str) -> String {
@@ -156,9 +240,11 @@ fn parse_api_payload<T: DeserializeOwned>(
         .map_err(|e| format!("接口响应解析失败: {}", e))?;
 
     if parsed.code != 0 {
-        return Err(parsed
-            .message
-            .unwrap_or_else(|| format!("接口返回错误码 {}", parsed.code)));
+        return Err(
+            parsed
+                .message
+                .unwrap_or_else(|| format!("接口返回错误码: {}", parsed.code)),
+        );
     }
 
     parsed.data.ok_or_else(|| "接口返回缺少 data".to_string())
@@ -206,7 +292,7 @@ async fn connect_redis(host: &str) -> Result<MultiplexedConnection, String> {
 }
 
 #[tauri::command]
-pub async fn disk_cleanup_list_servers(
+pub async fn disk_cleanup_list_linux_servers(
     host: String,
     timeout_secs: u32,
 ) -> Result<Vec<DiskServerItem>, String> {
@@ -218,7 +304,7 @@ pub async fn disk_cleanup_list_servers(
 }
 
 #[tauri::command]
-pub async fn disk_cleanup_list_disks(
+pub async fn disk_cleanup_list_linux_disks(
     host: String,
     server_ip: String,
     timeout_secs: u32,
@@ -241,25 +327,59 @@ pub async fn disk_cleanup_list_disks(
 }
 
 #[tauri::command]
-pub async fn disk_cleanup_check_redis(
+pub async fn disk_cleanup_list_windows_disks(
     host: String,
-    storage_ids: Vec<String>,
-) -> CacheCheckResult {
+    timeout_secs: u32,
+) -> Result<Vec<WindowsDiskItem>, String> {
+    let host = normalize_host(&host)?;
+    let client = build_http_client(timeout_secs)?;
+    let url = build_disk_cleanup_url(&host, RAW_DISK_LIST_PATH);
+    let data: WindowsRawDiskListData = post_json(&client, &url, serde_json::json!({})).await?;
+    Ok(data.disk_info_list)
+}
+
+#[tauri::command]
+pub async fn disk_cleanup_list_ipsans(
+    host: String,
+    timeout_secs: u32,
+) -> Result<Vec<IpsanItem>, String> {
+    let host = normalize_host(&host)?;
+    let client = build_http_client(timeout_secs)?;
+    let url = build_disk_cleanup_url(&host, IPSAN_LIST_PATH);
+    let data: IpsanListData = post_json(&client, &url, serde_json::json!({})).await?;
+    Ok(data.ipsan_info_list)
+}
+
+#[tauri::command]
+pub async fn disk_cleanup_check_cache_keys(
+    host: String,
+    keys: Vec<String>,
+) -> CacheKeyCheckResult {
     let host = match normalize_host(&host) {
         Ok(host) => host,
         Err(error) => {
-            return CacheCheckResult {
-                present_ids: vec![],
+            return CacheKeyCheckResult {
+                present_keys: vec![],
                 redis_available: false,
                 error: Some(error),
             };
         }
     };
-    let storage_ids = normalize_storage_ids(storage_ids);
 
-    if storage_ids.is_empty() {
-        return CacheCheckResult {
-            present_ids: vec![],
+    let keys = match normalize_cache_keys(keys) {
+        Ok(keys) => keys,
+        Err(error) => {
+            return CacheKeyCheckResult {
+                present_keys: vec![],
+                redis_available: false,
+                error: Some(error),
+            };
+        }
+    };
+
+    if keys.is_empty() {
+        return CacheKeyCheckResult {
+            present_keys: vec![],
             redis_available: true,
             error: None,
         };
@@ -268,8 +388,8 @@ pub async fn disk_cleanup_check_redis(
     let mut conn = match connect_redis(&host).await {
         Ok(conn) => conn,
         Err(error) => {
-            return CacheCheckResult {
-                present_ids: vec![],
+            return CacheKeyCheckResult {
+                present_keys: vec![],
                 redis_available: false,
                 error: Some(error),
             };
@@ -277,8 +397,8 @@ pub async fn disk_cleanup_check_redis(
     };
 
     let mut pipe = redis::pipe();
-    for storage_id in &storage_ids {
-        pipe.cmd("EXISTS").arg(build_storage_key(storage_id));
+    for key in &keys {
+        pipe.cmd("EXISTS").arg(key);
     }
 
     let exec = tokio::time::timeout(
@@ -288,24 +408,24 @@ pub async fn disk_cleanup_check_redis(
     .await;
 
     match exec {
-        Err(_) => CacheCheckResult {
-            present_ids: vec![],
+        Err(_) => CacheKeyCheckResult {
+            present_keys: vec![],
             redis_available: false,
             error: Some("Redis 查询超时".to_string()),
         },
-        Ok(Err(error)) => CacheCheckResult {
-            present_ids: vec![],
+        Ok(Err(error)) => CacheKeyCheckResult {
+            present_keys: vec![],
             redis_available: false,
             error: Some(format!("Redis EXISTS 失败: {}", error)),
         },
         Ok(Ok(flags)) => {
-            let present_ids = storage_ids
+            let present_keys = keys
                 .into_iter()
-                .zip(flags.into_iter())
-                .filter_map(|(storage_id, flag)| if flag == 1 { Some(storage_id) } else { None })
+                .zip(flags)
+                .filter_map(|(key, flag)| if flag == 1 { Some(key) } else { None })
                 .collect();
-            CacheCheckResult {
-                present_ids,
+            CacheKeyCheckResult {
+                present_keys,
                 redis_available: true,
                 error: None,
             }
@@ -314,24 +434,34 @@ pub async fn disk_cleanup_check_redis(
 }
 
 #[tauri::command]
-pub async fn disk_cleanup_delete_cache(
+pub async fn disk_cleanup_delete_cache_keys(
     host: String,
-    storage_ids: Vec<String>,
-) -> CacheDeleteResult {
+    keys: Vec<String>,
+) -> CacheKeyDeleteResult {
     let host = match normalize_host(&host) {
         Ok(host) => host,
         Err(error) => {
-            return CacheDeleteResult {
+            return CacheKeyDeleteResult {
                 deleted_count: 0,
                 redis_available: false,
                 error: Some(error),
             };
         }
     };
-    let storage_ids = normalize_storage_ids(storage_ids);
 
-    if storage_ids.is_empty() {
-        return CacheDeleteResult {
+    let keys = match normalize_cache_keys(keys) {
+        Ok(keys) => keys,
+        Err(error) => {
+            return CacheKeyDeleteResult {
+                deleted_count: 0,
+                redis_available: false,
+                error: Some(error),
+            };
+        }
+    };
+
+    if keys.is_empty() {
+        return CacheKeyDeleteResult {
             deleted_count: 0,
             redis_available: true,
             error: None,
@@ -341,18 +471,13 @@ pub async fn disk_cleanup_delete_cache(
     let mut conn = match connect_redis(&host).await {
         Ok(conn) => conn,
         Err(error) => {
-            return CacheDeleteResult {
+            return CacheKeyDeleteResult {
                 deleted_count: 0,
                 redis_available: false,
                 error: Some(error),
             };
         }
     };
-
-    let keys: Vec<String> = storage_ids
-        .iter()
-        .map(|storage_id| build_storage_key(storage_id))
-        .collect();
 
     let exec = tokio::time::timeout(
         REDIS_OP_TIMEOUT,
@@ -361,17 +486,17 @@ pub async fn disk_cleanup_delete_cache(
     .await;
 
     match exec {
-        Err(_) => CacheDeleteResult {
+        Err(_) => CacheKeyDeleteResult {
             deleted_count: 0,
             redis_available: false,
             error: Some("Redis 删除超时".to_string()),
         },
-        Ok(Err(error)) => CacheDeleteResult {
+        Ok(Err(error)) => CacheKeyDeleteResult {
             deleted_count: 0,
             redis_available: false,
             error: Some(format!("Redis DEL 失败: {}", error)),
         },
-        Ok(Ok(deleted_count)) => CacheDeleteResult {
+        Ok(Ok(deleted_count)) => CacheKeyDeleteResult {
             deleted_count,
             redis_available: true,
             error: None,
@@ -382,8 +507,8 @@ pub async fn disk_cleanup_delete_cache(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_disk_cleanup_url, build_storage_key, normalize_storage_ids, parse_api_payload,
-        DiskListData, DISK_LIST_PATH,
+        build_disk_cleanup_url, build_storage_key, normalize_cache_keys, normalize_storage_ids,
+        parse_api_payload, DiskListData, IpsanListData, WindowsRawDiskListData, DISK_LIST_PATH,
     };
     use reqwest::StatusCode;
 
@@ -416,6 +541,27 @@ mod tests {
     }
 
     #[test]
+    fn normalize_cache_keys_trims_dedupes_and_keeps_storage_prefix() {
+        let keys = normalize_cache_keys(vec![
+            " Storage:disk-a ".to_string(),
+            "Storage:disk-a".to_string(),
+            "Storage:disk-b".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            keys,
+            vec!["Storage:disk-a".to_string(), "Storage:disk-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_cache_keys_rejects_non_storage_prefix() {
+        let error = normalize_cache_keys(vec!["Partition:{foo}".to_string()]).unwrap_err();
+        assert!(error.contains("Storage:"));
+    }
+
+    #[test]
     fn parse_api_payload_returns_data_on_success() {
         let body = r#"{
             "code": 0,
@@ -434,6 +580,62 @@ mod tests {
         assert_eq!(parsed.storage_info_list.len(), 1);
         assert_eq!(parsed.storage_info_list[0].storage_id, "disk-a");
         assert_eq!(parsed.storage_info_list[0].usage, -1);
+    }
+
+    #[test]
+    fn parse_raw_disk_payload_returns_partition_list() {
+        let body = r#"{
+            "code": 0,
+            "message": "Success",
+            "data": {
+                "diskInfoList": [
+                    {
+                        "diskId": "302375165793144832",
+                        "diskNumber": 6,
+                        "diskName": "ST4000VX000-2AG166",
+                        "totalCapacity": 3726.02,
+                        "partitionList": [
+                            {
+                                "partitionSeq": 1,
+                                "partitionGUID": "{6042cce1-3fa4-45a4-998d-57d44d6f8da1}",
+                                "capacity": 976.56,
+                                "partitionStatus": 1,
+                                "usage": -1
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let parsed = parse_api_payload::<WindowsRawDiskListData>(StatusCode::OK, body).unwrap();
+        assert_eq!(
+            parsed.disk_info_list[0].partition_list[0].partition_guid,
+            "{6042cce1-3fa4-45a4-998d-57d44d6f8da1}"
+        );
+    }
+
+    #[test]
+    fn parse_ipsan_payload_returns_usage_field() {
+        let body = r#"{
+            "code": 0,
+            "message": "Success",
+            "data": {
+                "IPSANInfoList": [
+                    {
+                        "IPSANId": "436856425541537792",
+                        "IPSANName": "192.115.2.29",
+                        "IPSANIp": "192.115.2.29",
+                        "IPSANStatus": 1,
+                        "totalCapacity": 600,
+                        "usage": 5
+                    }
+                ]
+            }
+        }"#;
+
+        let parsed = parse_api_payload::<IpsanListData>(StatusCode::OK, body).unwrap();
+        assert_eq!(parsed.ipsan_info_list[0].usage, 5);
     }
 
     #[test]
