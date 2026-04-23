@@ -78,6 +78,7 @@ export interface ClipboardSettings {
   run_as_admin: boolean;
   show_startup_notification: boolean;
   dedup_strategy: ClipboardDedupStrategy;
+  reinsert_on_self_copy: boolean;
   display: ClipboardDisplaySettings;
   preview: ClipboardPreviewSettings;
   panel: ClipboardPanelSettings;
@@ -108,6 +109,7 @@ const DEFAULT_CLIPBOARD_SETTINGS: ClipboardSettings = {
   run_as_admin: false,
   show_startup_notification: true,
   dedup_strategy: 'move_to_top',
+  reinsert_on_self_copy: false,
   display: {
     density: 'standard',
     preview_lines: 3,
@@ -272,6 +274,7 @@ export interface ClipboardItem {
   hash: string;
   source_app: string | null;
   source_app_icon: string | null;
+  from_self: boolean;
   group_id: number | null;
   is_favorite: boolean;
   is_pinned: boolean;

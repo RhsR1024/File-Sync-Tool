@@ -19,6 +19,7 @@ use crate::clipboard::models::ContentKind;
 use crate::clipboard::{icon_store, image_store, source, ClipboardState};
 
 const PREVIEW_LIMIT: usize = 200;
+const SELF_WRITE_WINDOW_MS: u64 = 500;
 
 pub struct WatcherHandle {
     stop_flag: Arc<AtomicBool>,
@@ -79,6 +80,13 @@ enum CaptureKind {
     Text,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelfWriteDecision {
+    None,
+    Skip,
+    CaptureAsSelf,
+}
+
 impl ClipboardHandler for Handler {
     fn on_clipboard_change(&mut self) -> CallbackResult {
         if self.stop_flag.load(Ordering::Acquire) {
@@ -101,12 +109,6 @@ impl ClipboardHandler for Handler {
 
 fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
     let source_info = source::get_clipboard_source_app();
-    let app_filter = state.settings.read().app_filter.clone();
-    if !source::should_capture_source_app(source_info.as_ref(), &app_filter) {
-        // Skip before touching heavier clipboard payload APIs when the source app is excluded.
-        return Ok(());
-    }
-
     let rtf = source::read_clipboard_rtf().and_then(normalize_optional_text);
 
     let mut clipboard = Clipboard::new().map_err(|err| format!("clipboard init: {err}"))?;
@@ -161,21 +163,55 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
     };
 
     let hash_hex = match kind {
-        CaptureKind::Rtf => hex(&compute_hash(b"rtf", rtf.as_deref().unwrap().as_bytes())),
-        CaptureKind::Html => hex(&compute_hash(b"html", html.as_deref().unwrap().as_bytes())),
-        CaptureKind::File => hex(&compute_hash(
+        CaptureKind::Rtf => crate::clipboard::capture_hash(b"rtf", rtf.as_deref().unwrap().as_bytes()),
+        CaptureKind::Html => {
+            crate::clipboard::capture_hash(b"html", html.as_deref().unwrap().as_bytes())
+        }
+        CaptureKind::File => crate::clipboard::capture_hash(
             b"files",
             files.as_ref().unwrap().join("\0").as_bytes(),
-        )),
-        CaptureKind::Image => hex(&compute_hash(
+        ),
+        CaptureKind::Image => crate::clipboard::capture_hash(
             b"image",
             image.as_ref().unwrap().rgba.as_slice(),
-        )),
-        CaptureKind::Text => hex(&compute_hash(b"text", text.as_deref().unwrap().as_bytes())),
+        ),
+        CaptureKind::Text => {
+            crate::clipboard::capture_hash(b"text", text.as_deref().unwrap().as_bytes())
+        }
     };
 
-    let source_capture = build_source_capture(state, source_info);
-    let item = match kind {
+    let self_write_decision = {
+        let pending = state.pending_self_write.lock().take();
+        let settings = state.settings.read();
+        resolve_self_write_match(
+            pending,
+            &hash_hex,
+            settings.reinsert_on_self_copy,
+            std::time::Instant::now(),
+        )
+    };
+
+    if matches!(self_write_decision, SelfWriteDecision::Skip) {
+        return Ok(());
+    }
+
+    if matches!(self_write_decision, SelfWriteDecision::None) {
+        let app_filter = state.settings.read().app_filter.clone();
+        if !source::should_capture_source_app(source_info.as_ref(), &app_filter) {
+            // Skip before touching heavier clipboard payload APIs when the source app is excluded.
+            return Ok(());
+        }
+    }
+
+    let source_capture = if matches!(self_write_decision, SelfWriteDecision::CaptureAsSelf) {
+        CaptureSource {
+            source_app: None,
+            source_app_icon: None,
+        }
+    } else {
+        build_source_capture(state, source_info)
+    };
+    let mut item = match kind {
         CaptureKind::Rtf => build_rtf_item(rtf.unwrap(), text.clone(), hash_hex, &source_capture),
         CaptureKind::Html => {
             build_html_item(html.unwrap(), text.clone(), hash_hex, &source_capture)
@@ -201,6 +237,9 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
         }
         CaptureKind::Text => build_text_item(text.unwrap(), hash_hex, &source_capture),
     };
+    if matches!(self_write_decision, SelfWriteDecision::CaptureAsSelf) {
+        item.from_self = true;
+    }
 
     upsert_item(state, item)?;
     notify_added(app);
@@ -257,6 +296,29 @@ fn build_text_item(text: String, hash: String, source: &CaptureSource) -> NewIte
         hash,
         source_app: source.source_app.clone(),
         source_app_icon: source.source_app_icon.clone(),
+        from_self: false,
+    }
+}
+
+fn resolve_self_write_match(
+    pending: Option<(String, std::time::Instant)>,
+    captured_hash: &str,
+    reinsert_on_self_copy: bool,
+    now: std::time::Instant,
+) -> SelfWriteDecision {
+    let Some((pending_hash, created_at)) = pending else {
+        return SelfWriteDecision::None;
+    };
+    if now.duration_since(created_at) > std::time::Duration::from_millis(SELF_WRITE_WINDOW_MS) {
+        return SelfWriteDecision::None;
+    }
+    if pending_hash != captured_hash {
+        return SelfWriteDecision::None;
+    }
+    if reinsert_on_self_copy {
+        SelfWriteDecision::CaptureAsSelf
+    } else {
+        SelfWriteDecision::Skip
     }
 }
 
@@ -283,6 +345,7 @@ fn build_html_item(
         hash,
         source_app: source.source_app.clone(),
         source_app_icon: source.source_app_icon.clone(),
+        from_self: false,
     }
 }
 
@@ -309,6 +372,7 @@ fn build_rtf_item(
         hash,
         source_app: source.source_app.clone(),
         source_app_icon: source.source_app_icon.clone(),
+        from_self: false,
     }
 }
 
@@ -333,6 +397,7 @@ fn build_file_item(paths: Vec<String>, hash: String, source: &CaptureSource) -> 
         hash,
         source_app: source.source_app.clone(),
         source_app_icon: source.source_app_icon.clone(),
+        from_self: false,
     }
 }
 
@@ -358,6 +423,7 @@ fn build_image_item(
         hash,
         source_app: source.source_app.clone(),
         source_app_icon: source.source_app_icon.clone(),
+        from_self: false,
     }
 }
 
@@ -404,23 +470,6 @@ fn strip_html_to_text(html: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn compute_hash(prefix: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(prefix);
-    hasher.update(data);
-    *hasher.finalize().as_bytes()
-}
-
-fn hex(bytes: &[u8; 32]) -> String {
-    use std::fmt::Write;
-
-    let mut text = String::with_capacity(64);
-    for byte in bytes {
-        let _ = write!(text, "{byte:02x}");
-    }
-    text
 }
 
 fn upsert_item(state: &ClipboardState, item: NewItem) -> Result<(), String> {
@@ -531,6 +580,51 @@ mod tests {
         );
         assert_eq!(stripped.content_preview, "Hello World");
         assert_eq!(stripped.content_full.as_deref(), Some("Hello World"));
+    }
+
+    #[test]
+    fn resolve_self_write_match_skips_capture_when_setting_is_disabled() {
+        let now = std::time::Instant::now();
+
+        let decision = resolve_self_write_match(
+            Some(("same-hash".to_string(), now)),
+            "same-hash",
+            false,
+            now,
+        );
+
+        assert_eq!(decision, SelfWriteDecision::Skip);
+    }
+
+    #[test]
+    fn resolve_self_write_match_marks_capture_as_self_when_setting_is_enabled() {
+        let now = std::time::Instant::now();
+
+        let decision = resolve_self_write_match(
+            Some(("same-hash".to_string(), now)),
+            "same-hash",
+            true,
+            now,
+        );
+
+        assert_eq!(decision, SelfWriteDecision::CaptureAsSelf);
+    }
+
+    #[test]
+    fn resolve_self_write_match_ignores_stale_marker() {
+        let now = std::time::Instant::now();
+
+        let decision = resolve_self_write_match(
+            Some((
+                "same-hash".to_string(),
+                now - std::time::Duration::from_millis(900),
+            )),
+            "same-hash",
+            true,
+            now,
+        );
+
+        assert_eq!(decision, SelfWriteDecision::None);
     }
 
     #[test]

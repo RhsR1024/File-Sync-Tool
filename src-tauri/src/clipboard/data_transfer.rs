@@ -42,6 +42,7 @@ struct ImportedItem {
     hash: String,
     source_app: Option<String>,
     source_app_icon: Option<String>,
+    from_self: bool,
     group_id: Option<i64>,
     is_favorite: bool,
     is_pinned: bool,
@@ -271,15 +272,20 @@ fn extract_bundle(archive_path: &Path) -> Result<ExtractedBundle, String> {
 }
 
 fn load_imported_items(conn: &Connection) -> Result<Vec<ImportedItem>, String> {
+    let from_self_select = if table_has_column(conn, "clipboard_items", "from_self")? {
+        "from_self"
+    } else {
+        "0"
+    };
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT kind, content_preview, content_full, rtf_content, html, image_path, image_width,
                     image_height, file_paths_json, byte_size, char_count, hash, source_app,
-                    source_app_icon, group_id, is_favorite, is_pinned, favorite_sort_index,
-                    created_at, updated_at
+                    source_app_icon, {from_self_select} AS from_self, group_id, is_favorite,
+                    is_pinned, favorite_sort_index, created_at, updated_at
              FROM clipboard_items
-             ORDER BY created_at ASC, id ASC",
-        )
+             ORDER BY created_at ASC, id ASC"
+        ))
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
@@ -302,12 +308,13 @@ fn load_imported_items(conn: &Connection) -> Result<Vec<ImportedItem>, String> {
                 hash: row.get(11)?,
                 source_app: row.get(12)?,
                 source_app_icon: row.get(13)?,
-                group_id: row.get(14)?,
-                is_favorite: row.get(15)?,
-                is_pinned: row.get(16)?,
-                favorite_sort_index: row.get(17)?,
-                created_at: row.get(18)?,
-                updated_at: row.get(19)?,
+                from_self: row.get::<_, i64>(14)? != 0,
+                group_id: row.get(15)?,
+                is_favorite: row.get::<_, i64>(16)? != 0,
+                is_pinned: row.get::<_, i64>(17)? != 0,
+                favorite_sort_index: row.get(18)?,
+                created_at: row.get(19)?,
+                updated_at: row.get(20)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -398,9 +405,9 @@ fn insert_imported_item(
     conn.execute(
         "INSERT INTO clipboard_items
           (kind, content_preview, content_full, rtf_content, html, image_path, image_width, image_height,
-           file_paths_json, byte_size, char_count, hash, source_app, source_app_icon, group_id,
-           is_favorite, is_pinned, favorite_sort_index, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+           file_paths_json, byte_size, char_count, hash, source_app, source_app_icon, from_self,
+           group_id, is_favorite, is_pinned, favorite_sort_index, created_at, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
         params![
             item.kind.as_sql(),
             item.content_preview,
@@ -416,6 +423,7 @@ fn insert_imported_item(
             item.hash,
             item.source_app,
             icon_path,
+            item.from_self,
             group_id,
             item.is_favorite,
             item.is_pinned,
@@ -427,6 +435,14 @@ fn insert_imported_item(
     .map_err(|e| e.to_string())?;
 
     Ok(true)
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
+    let exists: i64 = conn
+        .query_row(&sql, params![column], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(exists > 0)
 }
 
 fn import_asset_path(
@@ -525,6 +541,7 @@ mod tests {
             hash: hash.into(),
             source_app: Some("Notepad".into()),
             source_app_icon: None,
+            from_self: false,
         }
     }
 
@@ -591,6 +608,45 @@ mod tests {
         assert_eq!(items[0].hash, "export-row");
         assert!(report.backup_path.is_some());
         assert!(Path::new(report.backup_path.as_deref().unwrap()).exists());
+    }
+
+    #[test]
+    fn replace_import_preserves_from_self_flag() {
+        let export_dir = TempDir::new().unwrap();
+        let export_db_path = export_dir.path().join("clipboard.db");
+        let export_conn = db::open(&export_db_path).unwrap();
+
+        let mut item = sample_text_item("self-row");
+        item.from_self = true;
+        db::insert_item(&export_conn, &item).unwrap();
+
+        let archive_path = export_dir.path().join("clipboard-export.zip");
+        export_bundle(
+            &export_db_path,
+            &export_dir.path().join("clipboard_images"),
+            &export_dir.path().join("clipboard_icons"),
+            &archive_path,
+            false,
+        )
+        .unwrap();
+
+        let import_dir = TempDir::new().unwrap();
+        let import_db_path = import_dir.path().join("clipboard.db");
+        let import_conn = db::open(&import_db_path).unwrap();
+
+        import_bundle(
+            &import_conn,
+            &import_db_path,
+            &import_dir.path().join("clipboard_images"),
+            &import_dir.path().join("clipboard_icons"),
+            &archive_path,
+            ImportMode::Replace,
+        )
+        .unwrap();
+
+        let imported = list_all_items(&import_conn);
+        assert_eq!(imported[0].hash, "self-row");
+        assert!(imported[0].from_self);
     }
 
     #[test]

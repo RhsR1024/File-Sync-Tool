@@ -251,6 +251,8 @@ pub struct ClipboardSettings {
     pub show_startup_notification: bool,
     pub dedup_strategy: ClipboardDedupStrategy,
     #[serde(default)]
+    pub reinsert_on_self_copy: bool,
+    #[serde(default)]
     pub display: ClipboardDisplaySettings,
     #[serde(default)]
     pub preview: ClipboardPreviewSettings,
@@ -282,6 +284,7 @@ impl Default for ClipboardSettings {
             run_as_admin: false,
             show_startup_notification: true,
             dedup_strategy: ClipboardDedupStrategy::MoveToTop,
+            reinsert_on_self_copy: false,
             display: ClipboardDisplaySettings::default(),
             preview: ClipboardPreviewSettings::default(),
             panel: ClipboardPanelSettings::default(),
@@ -311,6 +314,8 @@ pub struct ClipboardItem {
     pub hash: String,
     pub source_app: Option<String>,
     pub source_app_icon: Option<String>,
+    #[serde(default)]
+    pub from_self: bool,
     pub group_id: Option<i64>,
     pub is_favorite: bool,
     pub is_pinned: bool,
@@ -456,6 +461,13 @@ mod tests {
         assert!(settings.panel.use_mica);
         assert!(settings.navigation.enabled);
         assert!(settings.toolbar.visible);
+    }
+
+    #[test]
+    fn clipboard_settings_default_disables_self_reinsert() {
+        let settings = ClipboardSettings::default();
+
+        assert!(!settings.reinsert_on_self_copy);
     }
 
     #[test]

@@ -73,6 +73,7 @@ mod tests {
                     hash: format!("h{i}"),
                     source_app: None,
                     source_app_icon: None,
+                    from_self: false,
                 },
             )
             .unwrap();

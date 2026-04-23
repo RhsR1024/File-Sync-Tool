@@ -6,6 +6,7 @@ import {
   TEXT_PREVIEW_UPDATE_EVENT,
   type ClipboardTextPreviewPayload,
 } from '@/lib/clipboardPreviewHelpers';
+import { clipboardApi } from '@/lib/tauri';
 
 defineOptions({ name: 'ClipboardTextPreview' });
 
@@ -22,6 +23,11 @@ onMounted(async () => {
       payload.value = event.payload;
     },
   );
+
+  const cachedPayload = await clipboardApi.getTextPreviewPayload();
+  if (cachedPayload) {
+    payload.value = cachedPayload;
+  }
 });
 
 onBeforeUnmount(() => {

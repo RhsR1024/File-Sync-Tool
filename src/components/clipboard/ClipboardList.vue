@@ -4,14 +4,14 @@ import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller';
 import { VueDraggable } from 'vue-draggable-plus';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { Ellipsis, Pin, Star, Trash2 } from 'lucide-vue-next';
+import { Ellipsis, Package, Pin, Star, Trash2 } from 'lucide-vue-next';
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
 
 import ClipboardAppIcon from '@/components/clipboard/ClipboardAppIcon.vue';
 import ClipboardHighlightText from '@/components/clipboard/ClipboardHighlightText.vue';
 import {
   formatClipboardTimeLabel,
-  resolveSourceAppPresentation,
+  resolveClipboardSourceBadge,
 } from '@/lib/clipboardListPresentation';
 import {
   createDefaultClipboardSettings,
@@ -185,11 +185,10 @@ function imageStyle(): Record<string, string> {
     : { height: maxHeight, maxHeight };
 }
 
-function sourceAppPresentation(item: ClipboardItem) {
-  return resolveSourceAppPresentation(
+function sourceBadge(item: ClipboardItem) {
+  return resolveClipboardSourceBadge(
     displaySettings.value.show_source_app,
-    item.source_app,
-    item.source_app_icon,
+    item,
   );
 }
 
@@ -352,18 +351,26 @@ function onReorderEnd() {
 
         <div class="flex shrink-0 items-center gap-1.5">
           <span
-            v-if="sourceAppPresentation(item).showIcon || sourceAppPresentation(item).showName"
+            v-if="sourceBadge(item).kind === 'self'"
+            class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-slate-700"
+            :class="densityClasses.badge"
+          >
+            <Package class="h-3 w-3" />
+            {{ t('clipboard.source.self') }}
+          </span>
+          <span
+            v-else-if="sourceBadge(item).kind === 'app'"
             class="flex items-center gap-1 text-slate-500"
           >
             <ClipboardAppIcon
-              v-if="sourceAppPresentation(item).showIcon"
+              v-if="sourceBadge(item).showIcon"
               :icon-path="item.source_app_icon"
               :source-app="item.source_app"
             />
             <span
-              v-if="sourceAppPresentation(item).showName"
+              v-if="sourceBadge(item).showName"
               class="max-w-[96px] truncate"
-            >{{ item.source_app }}</span>
+            >{{ sourceBadge(item).label }}</span>
           </span>
           <span
             class="inline-flex min-w-[20px] items-center justify-center rounded-full bg-slate-100 px-1.5 font-semibold text-slate-500"
@@ -536,18 +543,26 @@ function onReorderEnd() {
 
             <div class="flex shrink-0 items-center gap-1.5">
               <span
-                v-if="sourceAppPresentation(item).showIcon || sourceAppPresentation(item).showName"
+                v-if="sourceBadge(item).kind === 'self'"
+                class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-slate-700"
+                :class="densityClasses.badge"
+              >
+                <Package class="h-3 w-3" />
+                {{ t('clipboard.source.self') }}
+              </span>
+              <span
+                v-else-if="sourceBadge(item).kind === 'app'"
                 class="flex items-center gap-1 text-slate-500"
               >
                 <ClipboardAppIcon
-                  v-if="sourceAppPresentation(item).showIcon"
+                  v-if="sourceBadge(item).showIcon"
                   :icon-path="item.source_app_icon"
                   :source-app="item.source_app"
                 />
                 <span
-                  v-if="sourceAppPresentation(item).showName"
+                  v-if="sourceBadge(item).showName"
                   class="max-w-[96px] truncate"
-                >{{ item.source_app }}</span>
+                >{{ sourceBadge(item).label }}</span>
               </span>
               <span
                 class="inline-flex min-w-[20px] items-center justify-center rounded-full bg-slate-100 px-1.5 font-semibold text-slate-500"

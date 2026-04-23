@@ -2873,6 +2873,8 @@ fn main() {
             clipboard::commands::cb_merge_paste,
             clipboard::commands::cb_show_image_preview,
             clipboard::commands::cb_show_text_preview,
+            clipboard::commands::cb_get_image_preview_payload,
+            clipboard::commands::cb_get_text_preview_payload,
             clipboard::commands::cb_hide_preview,
             clipboard::commands::cb_reorder_favorites,
             clipboard::commands::cb_stats,

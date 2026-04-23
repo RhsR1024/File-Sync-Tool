@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   buildClipboardHighlightParts,
   extractClipboardSearchKeywords,
+  resolveClipboardSourceBadge,
   resolveSourceAppPresentation,
 } from './clipboardListPresentation.ts';
 
@@ -44,4 +45,20 @@ test('resolveSourceAppPresentation follows the configured source-app display mod
     showIcon: false,
     showName: false,
   });
+});
+
+test('resolveClipboardSourceBadge prefers the self-tool badge over app metadata', () => {
+  assert.deepEqual(
+    resolveClipboardSourceBadge('both', {
+      from_self: true,
+      source_app: 'Code',
+      source_app_icon: 'C:/icons/code.png',
+    }),
+    {
+      kind: 'self',
+      showIcon: true,
+      showName: true,
+      label: 'This tool',
+    },
+  );
 });

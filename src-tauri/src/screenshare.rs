@@ -1336,7 +1336,7 @@ fn viewer_html() -> String {
 html,body{height:100%;background:#060911;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}
 .wrap{display:flex;flex-direction:column;height:100%;position:relative}
 .view{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#060911;position:relative}
-#screen{max-width:100%;max-height:100%;object-fit:contain;display:block}
+#screen{max-width:100%;max-height:100%;object-fit:contain;display:block;transform:translateZ(0);will-change:transform;backface-visibility:hidden}
 .paused-overlay{display:none;position:absolute;inset:0;background:rgba(6,9,17,.75);backdrop-filter:blur(4px);align-items:center;justify-content:center;z-index:5}
 .paused-overlay.show{display:flex}
 .paused-badge{display:flex;align-items:center;gap:10px;background:rgba(15,23,42,.9);border:1px solid rgba(255,255,255,.08);padding:14px 28px;border-radius:14px;font-size:16px;font-weight:600;color:#94a3b8;letter-spacing:.02em}
@@ -1487,11 +1487,14 @@ let initialTimer=setTimeout(()=>{
 // ── Heartbeat: detect stream loss via /status polling ──
 // MJPEG streams don't fire onerror when the TCP connection drops mid-stream.
 // This heartbeat detects that and triggers reconnection.
+// Tolerances are tuned to survive Edge's Efficiency Mode / SDSM, which can
+// delay fetch() long enough to trip short timeouts even when the stream is fine.
 let heartbeatFails=0;
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)heartbeatFails=0;});
 setInterval(async()=>{
-  if(paused)return;
+  if(paused||document.hidden)return;
   try{
-    const r=await fetch('/status',{signal:AbortSignal.timeout(3000)});
+    const r=await fetch('/status',{signal:AbortSignal.timeout(6000),cache:'no-store'});
     if(r.ok){
       const d=await r.json();
       heartbeatFails=0;
@@ -1508,8 +1511,10 @@ setInterval(async()=>{
   }catch{
     heartbeatFails++;
   }
-  // If heartbeat fails 2+ times in a row and we think we're alive, reconnect
-  if(heartbeatFails>=2&&alive){
+  // If heartbeat fails 4+ times in a row and we think we're alive, reconnect.
+  // Raised from 2 → 4 to avoid false positives under Edge throttling; real
+  // TCP drops still fire img.onerror and recover independently.
+  if(heartbeatFails>=4&&alive){
     setDisconnected();
     disconnectStream();
     tryReconnect();

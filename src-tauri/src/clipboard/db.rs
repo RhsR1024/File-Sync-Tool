@@ -9,7 +9,7 @@ use crate::clipboard::models::{
     ClipboardListResult, ContentKind,
 };
 
-const CLIPBOARD_SCHEMA_VERSION: i64 = 2;
+const CLIPBOARD_SCHEMA_VERSION: i64 = 3;
 const WRITE_CACHE_SIZE_KIB: i64 = -65_536;
 const READ_CACHE_SIZE_KIB: i64 = -32_768;
 const MMAP_SIZE_BYTES: i64 = 268_435_456;
@@ -61,14 +61,23 @@ pub fn migrate(conn: &Connection) -> SqlResult<()> {
         "#,
     )?;
     ensure_clipboard_groups_table(conn)?;
-    let version = read_schema_version(conn)?;
+    let mut version = read_schema_version(conn)?;
     let needs_rebuild = clipboard_items_needs_rebuild(conn)?;
-    if version < CLIPBOARD_SCHEMA_VERSION || needs_rebuild {
+    if version < 2 || needs_rebuild {
         migrate_clipboard_items_v2(conn)?;
-        set_schema_version(conn, CLIPBOARD_SCHEMA_VERSION)?;
-    } else {
-        ensure_clipboard_indexes(conn)?;
+        version = 2;
+        set_schema_version(conn, version)?;
     }
+    if version < 3 && !table_has_column(conn, "clipboard_items", "from_self")? {
+        conn.execute(
+            "ALTER TABLE clipboard_items ADD COLUMN from_self INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if version < CLIPBOARD_SCHEMA_VERSION {
+        set_schema_version(conn, CLIPBOARD_SCHEMA_VERSION)?;
+    }
+    ensure_clipboard_indexes(conn)?;
     Ok(())
 }
 
@@ -197,6 +206,7 @@ fn create_clipboard_items_table(conn: &Connection) -> SqlResult<()> {
             hash                TEXT NOT NULL UNIQUE,
             source_app          TEXT,
             source_app_icon     TEXT,
+            from_self           INTEGER NOT NULL DEFAULT 0,
             group_id            INTEGER REFERENCES clipboard_groups(id) ON DELETE SET NULL,
             is_favorite         INTEGER NOT NULL DEFAULT 0,
             is_pinned           INTEGER NOT NULL DEFAULT 0,
@@ -223,6 +233,7 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
     let legacy_has_rtf = table_has_column(conn, "clipboard_items", "rtf_content")?;
     let legacy_has_char_count = table_has_column(conn, "clipboard_items", "char_count")?;
     let legacy_has_source_app_icon = table_has_column(conn, "clipboard_items", "source_app_icon")?;
+    let legacy_has_from_self = table_has_column(conn, "clipboard_items", "from_self")?;
     let legacy_has_group_id = table_has_column(conn, "clipboard_items", "group_id")?;
     let legacy_has_is_pinned = table_has_column(conn, "clipboard_items", "is_pinned")?;
 
@@ -235,6 +246,11 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
         "source_app_icon"
     } else {
         "NULL"
+    };
+    let from_self_select = if legacy_has_from_self {
+        "from_self"
+    } else {
+        "0"
     };
     let group_id_select = if legacy_has_group_id {
         "CASE WHEN group_id IS NOT NULL AND EXISTS (SELECT 1 FROM clipboard_groups WHERE id = group_id) THEN group_id ELSE NULL END"
@@ -272,6 +288,7 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
             hash                TEXT NOT NULL UNIQUE,
             source_app          TEXT,
             source_app_icon     TEXT,
+            from_self           INTEGER NOT NULL DEFAULT 0,
             group_id            INTEGER REFERENCES clipboard_groups(id) ON DELETE SET NULL,
             is_favorite         INTEGER NOT NULL DEFAULT 0,
             is_pinned           INTEGER NOT NULL DEFAULT 0,
@@ -282,14 +299,15 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
         INSERT INTO clipboard_items (
             id, kind, content_preview, content_full, rtf_content, html, image_path,
             image_width, image_height, file_paths_json, byte_size, char_count, hash,
-            source_app, source_app_icon, group_id, is_favorite, is_pinned,
+            source_app, source_app_icon, from_self, group_id, is_favorite, is_pinned,
             favorite_sort_index, created_at, updated_at
         )
         SELECT
             id, kind, content_preview, content_full, {rtf_select}, html, image_path,
             image_width, image_height, file_paths_json, byte_size,
             {char_count_select},
-            hash, source_app, {source_app_icon_select}, {group_id_select}, is_favorite, {is_pinned_select},
+            hash, source_app, {source_app_icon_select}, {from_self_select}, {group_id_select},
+            is_favorite, {is_pinned_select},
             favorite_sort_index, created_at, updated_at
         FROM clipboard_items_legacy;
         DROP TABLE clipboard_items_legacy;
@@ -315,6 +333,7 @@ pub struct NewItem {
     pub hash: String,
     pub source_app: Option<String>,
     pub source_app_icon: Option<String>,
+    pub from_self: bool,
 }
 
 fn now_ms() -> i64 {
@@ -336,9 +355,9 @@ fn insert_item_with_hash(conn: &Connection, item: &NewItem, stored_hash: &str) -
     conn.execute(
         "INSERT INTO clipboard_items
           (kind, content_preview, content_full, rtf_content, html, image_path, image_width, image_height,
-           file_paths_json, byte_size, char_count, hash, source_app, source_app_icon, group_id,
-           is_favorite, is_pinned, favorite_sort_index, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,0,0,NULL,?15,?15)",
+           file_paths_json, byte_size, char_count, hash, source_app, source_app_icon, from_self,
+           group_id, is_favorite, is_pinned, favorite_sort_index, created_at, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,NULL,0,0,NULL,?16,?16)",
         params![
             item.kind.as_sql(),
             item.content_preview,
@@ -354,6 +373,7 @@ fn insert_item_with_hash(conn: &Connection, item: &NewItem, stored_hash: &str) -
             stored_hash,
             item.source_app,
             item.source_app_icon,
+            item.from_self,
             now,
         ],
     )?;
@@ -378,16 +398,22 @@ fn refresh_duplicate_item_by_hash(
     let affected = if touch_updated_at {
         conn.execute(
             "UPDATE clipboard_items
-             SET updated_at = ?1, source_app = ?2, source_app_icon = ?3
-             WHERE hash = ?4",
-            params![now_ms(), item.source_app, item.source_app_icon, item.hash],
+             SET updated_at = ?1, source_app = ?2, source_app_icon = ?3, from_self = ?4
+             WHERE hash = ?5",
+            params![
+                now_ms(),
+                item.source_app,
+                item.source_app_icon,
+                item.from_self,
+                item.hash
+            ],
         )?
     } else {
         conn.execute(
             "UPDATE clipboard_items
-             SET source_app = ?1, source_app_icon = ?2
-             WHERE hash = ?3",
-            params![item.source_app, item.source_app_icon, item.hash],
+             SET source_app = ?1, source_app_icon = ?2, from_self = ?3
+             WHERE hash = ?4",
+            params![item.source_app, item.source_app_icon, item.from_self, item.hash],
         )?
     };
     Ok(affected > 0)
@@ -420,7 +446,8 @@ pub fn list_items(conn: &Connection, q: &ClipboardListQuery) -> SqlResult<Clipbo
     let list_sql = format!(
         "SELECT id, kind, content_preview, content_full, rtf_content, html, image_path, image_width,
                 image_height, file_paths_json, byte_size, char_count, hash, source_app,
-                source_app_icon, group_id, is_favorite, is_pinned, favorite_sort_index, created_at, updated_at
+                source_app_icon, from_self, group_id, is_favorite, is_pinned, favorite_sort_index,
+                created_at, updated_at
          FROM clipboard_items
          WHERE {where_sql}
          ORDER BY {order_sql}
@@ -641,12 +668,13 @@ fn row_to_item(r: &rusqlite::Row) -> SqlResult<ClipboardItem> {
         hash: r.get(12)?,
         source_app: r.get(13)?,
         source_app_icon: r.get(14)?,
-        group_id: r.get(15)?,
-        is_favorite: r.get::<_, i64>(16)? != 0,
-        is_pinned: r.get::<_, i64>(17)? != 0,
-        favorite_sort_index: r.get(18)?,
-        created_at: r.get(19)?,
-        updated_at: r.get(20)?,
+        from_self: r.get::<_, i64>(15)? != 0,
+        group_id: r.get(16)?,
+        is_favorite: r.get::<_, i64>(17)? != 0,
+        is_pinned: r.get::<_, i64>(18)? != 0,
+        favorite_sort_index: r.get(19)?,
+        created_at: r.get(20)?,
+        updated_at: r.get(21)?,
     })
 }
 
@@ -654,7 +682,8 @@ pub fn get_item(conn: &Connection, id: i64) -> SqlResult<ClipboardItem> {
     conn.query_row(
         "SELECT id, kind, content_preview, content_full, rtf_content, html, image_path, image_width,
                 image_height, file_paths_json, byte_size, char_count, hash, source_app,
-                source_app_icon, group_id, is_favorite, is_pinned, favorite_sort_index, created_at, updated_at
+                source_app_icon, from_self, group_id, is_favorite, is_pinned, favorite_sort_index,
+                created_at, updated_at
          FROM clipboard_items WHERE id=?1",
         params![id],
         row_to_item,
@@ -665,7 +694,8 @@ fn get_item_by_hash(conn: &Connection, hash: &str) -> SqlResult<ClipboardItem> {
     conn.query_row(
         "SELECT id, kind, content_preview, content_full, rtf_content, html, image_path, image_width,
                 image_height, file_paths_json, byte_size, char_count, hash, source_app,
-                source_app_icon, group_id, is_favorite, is_pinned, favorite_sort_index, created_at, updated_at
+                source_app_icon, from_self, group_id, is_favorite, is_pinned, favorite_sort_index,
+                created_at, updated_at
          FROM clipboard_items
          WHERE hash = ?1
          ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
@@ -931,6 +961,7 @@ mod tests {
             hash: hash.into(),
             source_app: None,
             source_app_icon: None,
+            from_self: false,
         }
     }
 
@@ -945,7 +976,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v, "2");
+        assert_eq!(v, "3");
 
         let group_tables: i64 = conn
             .query_row(
@@ -1006,7 +1037,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
 
         let has_rtf_column: i64 = conn
             .query_row(
@@ -1089,7 +1120,8 @@ mod tests {
             .query_row(
                 "SELECT id, kind, content_preview, content_full, rtf_content, html, image_path, image_width,
                         image_height, file_paths_json, byte_size, char_count, hash, source_app,
-                        source_app_icon, group_id, is_favorite, is_pinned, favorite_sort_index, created_at, updated_at
+                        source_app_icon, from_self, group_id, is_favorite, is_pinned, favorite_sort_index,
+                        created_at, updated_at
                  FROM clipboard_items WHERE hash='broken_hash'",
                 [],
                 row_to_item,
@@ -1097,7 +1129,62 @@ mod tests {
             .unwrap();
         assert_eq!(repaired.content_preview, "broken");
         assert_eq!(repaired.char_count, 11);
+        assert!(!repaired.from_self);
         assert!(!repaired.is_pinned);
+    }
+
+    #[test]
+    fn migrate_adds_from_self_column_with_zero_default_for_existing_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_meta(key, value) VALUES ('version', '2');
+            CREATE TABLE clipboard_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                sort_index INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE clipboard_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                content_preview TEXT NOT NULL,
+                content_full TEXT,
+                rtf_content TEXT,
+                html TEXT,
+                image_path TEXT,
+                image_width INTEGER,
+                image_height INTEGER,
+                file_paths_json TEXT,
+                byte_size INTEGER NOT NULL DEFAULT 0,
+                char_count INTEGER NOT NULL DEFAULT 0,
+                hash TEXT NOT NULL UNIQUE,
+                source_app TEXT,
+                source_app_icon TEXT,
+                group_id INTEGER,
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                favorite_sort_index INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO clipboard_items(kind, content_preview, byte_size, char_count, hash, created_at, updated_at)
+            VALUES ('text', 'legacy', 6, 6, 'legacy-hash', 1, 1);
+            "#,
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let from_self: i64 = conn
+            .query_row(
+                "SELECT from_self FROM clipboard_items WHERE hash = 'legacy-hash'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(from_self, 0);
     }
 
     #[test]
@@ -1223,6 +1310,7 @@ mod tests {
 
         item.source_app = Some("Excel".into());
         item.source_app_icon = Some("C:\\icons\\excel.png".into());
+        item.from_self = true;
         let second =
             upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::MoveToTop).unwrap();
 
@@ -1232,6 +1320,7 @@ mod tests {
             second.source_app_icon.as_deref(),
             Some("C:\\icons\\excel.png")
         );
+        assert!(second.from_self);
     }
 
     #[test]
@@ -1264,6 +1353,7 @@ mod tests {
 
         item.source_app = Some("Excel".into());
         item.source_app_icon = Some("C:\\icons\\excel.png".into());
+        item.from_self = true;
         let second = upsert_item_with_dedup(&conn, &item, ClipboardDedupStrategy::Ignore).unwrap();
 
         assert_eq!(first.id, second.id);
@@ -1273,6 +1363,7 @@ mod tests {
             second.source_app_icon.as_deref(),
             Some("C:\\icons\\excel.png")
         );
+        assert!(second.from_self);
     }
 
     #[test]
@@ -1333,6 +1424,7 @@ mod tests {
                 hash: "pin_hash".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1384,6 +1476,7 @@ mod tests {
                 hash: "pin_toggle".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1425,6 +1518,7 @@ mod tests {
                 hash: "group_item".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1467,6 +1561,7 @@ mod tests {
                 hash: "update_me".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1518,6 +1613,7 @@ mod tests {
                 hash: "html_hash".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1537,6 +1633,7 @@ mod tests {
                 hash: "rtf_hash".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1556,6 +1653,7 @@ mod tests {
                 hash: "file_hash".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1622,6 +1720,7 @@ mod tests {
                 hash: "task4-html".into(),
                 source_app: Some("Chrome".into()),
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1642,6 +1741,7 @@ mod tests {
                 hash: "task4-rtf".into(),
                 source_app: Some("Word".into()),
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1662,6 +1762,7 @@ mod tests {
                 hash: "task4-file".into(),
                 source_app: Some("Explorer".into()),
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1733,6 +1834,7 @@ mod tests {
             hash: "abc".into(),
             source_app: None,
             source_app_icon: None,
+            from_self: false,
         };
         let id = insert_item(&conn, &item).unwrap();
         assert!(id > 0);
@@ -1785,6 +1887,7 @@ mod tests {
                     hash: format!("hash_{i}"),
                     source_app: None,
                     source_app_icon: None,
+                    from_self: false,
                 },
             )
             .unwrap();
@@ -1831,6 +1934,7 @@ mod tests {
                 hash: "h_fav".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1864,6 +1968,7 @@ mod tests {
                     hash: format!("h_{i}"),
                     source_app: None,
                     source_app_icon: None,
+                    from_self: false,
                 },
             )
             .unwrap();
@@ -1917,6 +2022,7 @@ mod tests {
                 hash: "ha".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1936,6 +2042,7 @@ mod tests {
                 hash: "hb".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -1986,6 +2093,7 @@ mod tests {
                 hash: "hx".into(),
                 source_app: None,
                 source_app_icon: None,
+                from_self: false,
             },
         )
         .unwrap();
@@ -2022,6 +2130,7 @@ mod tests {
             hash: hash.into(),
             source_app: None,
             source_app_icon: None,
+            from_self: false,
         };
         insert_item(&conn, &mk(ContentKind::Text, "t1", 100)).unwrap();
         insert_item(&conn, &mk(ContentKind::Image, "i1", 5_000)).unwrap();

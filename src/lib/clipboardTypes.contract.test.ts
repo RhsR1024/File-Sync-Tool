@@ -18,6 +18,7 @@ export const clipboardSettingsContract: ClipboardSettings = {
   run_as_admin: false,
   show_startup_notification: true,
   dedup_strategy: 'move_to_top',
+  reinsert_on_self_copy: false,
   display: {
     density: 'standard',
     preview_lines: 3,
@@ -87,6 +88,7 @@ export const clipboardItemContract: ClipboardItem = {
   hash: 'hash-1',
   source_app: 'code.exe',
   source_app_icon: null,
+  from_self: false,
   group_id: 7,
   is_favorite: false,
   is_pinned: true,

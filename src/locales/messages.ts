@@ -1116,7 +1116,7 @@ export const messages = {
     clipboard: {
       tool: {
         title: 'Clipboard Manager',
-        description: 'Monitor the system clipboard, persist history locally, and press Alt+C to open the quick panel.',
+        description: 'Press Alt+C to open the clipboard quick panel. Use this page to configure clipboard behavior.',
         placeholder: 'Clipboard manager is being prepared — core listener and storage will be available in milestone M2.',
       },
       filter: { all: 'All', text: 'Text', image: 'Image', file: 'File', favorite: 'Favorite', pinned: 'Pinned' },
@@ -1171,6 +1171,9 @@ export const messages = {
       },
       pinnedSection: {
         title: 'Pinned',
+      },
+      source: {
+        self: 'This tool',
       },
       time: {
         justNow: 'Just now',
@@ -1309,6 +1312,9 @@ export const messages = {
           rememberPosition: 'Remember panel position',
           animate: 'Animate panel show and hide',
           useMica: 'Use Mica-style panel surface',
+          reinsertOnSelfCopy: 'Re-insert as newest record after self-copy',
+          reinsertOnSelfCopyHint:
+            'Off: copying from the quick panel does not change history order. On: the item is re-captured at the top and tagged as "This tool".',
         },
         display: {
           density: 'Card density',
@@ -2579,7 +2585,7 @@ export const messages = {
     clipboard: {
       tool: {
         title: '剪贴板管理',
-        description: '监听系统剪贴板，历史本地持久化，按 Alt+C 呼出快速面板。',
+        description: '按 Alt+C 打开剪贴板快捷面板；此页面仅用于配置剪贴板行为。',
         placeholder: '剪贴板管理器准备中——核心监听与存储能力将在 M2 里程碑就绪。',
       },
       filter: { all: '全部', text: '文本', image: '图片', file: '文件', favorite: '收藏', pinned: '置顶' },
@@ -2634,6 +2640,9 @@ export const messages = {
       },
       pinnedSection: {
         title: '置顶',
+      },
+      source: {
+        self: '本工具',
       },
       time: {
         justNow: '刚刚',
@@ -2767,6 +2776,9 @@ export const messages = {
           rememberPosition: '记住面板位置',
           animate: '显示与隐藏动画',
           useMica: '使用 Mica 面板质感',
+          reinsertOnSelfCopy: '自复制后回写为最新记录',
+          reinsertOnSelfCopyHint:
+            '关闭时：在快捷面板里复制不会改变历史顺序。开启时：条目会重新回到顶部，并标记为“本工具”。',
         },
         display: {
           density: '卡片密度',

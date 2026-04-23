@@ -188,6 +188,22 @@ watch(
               @change="patch({ panel: { use_mica: ($event.target as HTMLInputElement).checked } })"
             >
           </label>
+
+          <label class="flex items-start justify-between gap-4">
+            <div>
+              <div class="text-sm text-slate-700">
+                {{ t('clipboard.settings.general.reinsertOnSelfCopy') }}
+              </div>
+              <div class="mt-1 text-xs leading-5 text-slate-500">
+                {{ t('clipboard.settings.general.reinsertOnSelfCopyHint') }}
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              :checked="props.settings.reinsert_on_self_copy"
+              @change="patch({ reinsert_on_self_copy: ($event.target as HTMLInputElement).checked })"
+            >
+          </label>
         </div>
       </div>
 
@@ -200,7 +216,7 @@ watch(
               <div class="text-sm font-medium text-slate-800">{{ t('clipboard.settings.adminLabel') }}</div>
               <div class="mt-2">
                 <span
-                  class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em]"
+                  class="shrink-0 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[10px] font-semibold uppercase leading-none tracking-[0.12em]"
                   :class="props.isElevated ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'"
                 >
                   {{
@@ -229,7 +245,7 @@ watch(
                 </div>
               </div>
               <span
-                class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em]"
+                class="shrink-0 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[10px] font-semibold uppercase leading-none tracking-[0.12em]"
                 :class="taskStatusBadgeClass"
               >
                 {{ t(taskStatusLabelKey) }}

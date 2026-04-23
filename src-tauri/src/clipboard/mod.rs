@@ -38,6 +38,7 @@ pub struct ClipboardState {
     /// the lock-window toolbar button on the panel.
     pub panel_pinned: AtomicBool,
     pub settings: Arc<RwLock<ClipboardSettings>>,
+    pub pending_self_write: Mutex<Option<(String, std::time::Instant)>>,
     pub watcher_handle: Mutex<Option<watcher::WatcherHandle>>,
     pub hotkey_handle: Mutex<Option<hotkey::HotkeyHandle>>,
 }
@@ -68,6 +69,7 @@ impl ClipboardState {
             is_enabled: std::sync::atomic::AtomicBool::new(settings.enabled),
             panel_pinned: std::sync::atomic::AtomicBool::new(false),
             settings: std::sync::Arc::new(parking_lot::RwLock::new(settings)),
+            pending_self_write: parking_lot::Mutex::new(None),
             watcher_handle: parking_lot::Mutex::new(None),
             hotkey_handle: parking_lot::Mutex::new(None),
         });
@@ -132,4 +134,11 @@ impl ClipboardState {
             eprintln!("[clipboard] orphan icon cleanup failed: {err}");
         }
     }
+}
+
+pub(crate) fn capture_hash(prefix: &[u8], data: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(prefix);
+    hasher.update(data);
+    hasher.finalize().to_hex().to_string()
 }

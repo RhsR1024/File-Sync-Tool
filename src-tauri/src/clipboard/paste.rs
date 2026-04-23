@@ -17,36 +17,50 @@ use enigo::{
 };
 use tauri::{AppHandle, Manager};
 
+use crate::clipboard::ClipboardState;
 use crate::clipboard::models::{ClipboardItem, ContentKind};
 
 /// Paste an item. If `plain_text` is true, rich items are written as plain text.
-pub fn paste_item(app: &AppHandle, item: &ClipboardItem, plain_text: bool) -> Result<(), String> {
-    write_to_clipboard(item, plain_text)?;
+pub fn paste_item(
+    app: &AppHandle,
+    clipboard: &ClipboardState,
+    item: &ClipboardItem,
+    plain_text: bool,
+) -> Result<(), String> {
+    write_to_clipboard(clipboard, item, plain_text)?;
     finish_paste(app)
 }
 
 /// Explicit actual-files paste path for file items.
-pub fn paste_file_item(app: &AppHandle, item: &ClipboardItem) -> Result<(), String> {
+pub fn paste_file_item(
+    app: &AppHandle,
+    clipboard: &ClipboardState,
+    item: &ClipboardItem,
+) -> Result<(), String> {
     if item.kind != ContentKind::File {
         return Err("clipboard item is not a file kind".to_string());
     }
-    paste_item(app, item, false)
+    paste_item(app, clipboard, item, false)
 }
 
 /// Copy an item into the system clipboard without simulating paste.
-pub fn copy_item(item: &ClipboardItem) -> Result<(), String> {
-    write_to_clipboard(item, false)
+pub fn copy_item(clipboard: &ClipboardState, item: &ClipboardItem) -> Result<(), String> {
+    write_to_clipboard(clipboard, item, false)
 }
 
 /// Paste file items as newline-joined paths.
-pub fn paste_file_paths_as_text(app: &AppHandle, item: &ClipboardItem) -> Result<(), String> {
+pub fn paste_file_paths_as_text(
+    app: &AppHandle,
+    clipboard: &ClipboardState,
+    item: &ClipboardItem,
+) -> Result<(), String> {
     let text = file_paths_as_text(item)?;
-    paste_text(app, &text)
+    paste_text(app, clipboard, &text)
 }
 
 /// Paste plain text directly.
-pub fn paste_text(app: &AppHandle, text: &str) -> Result<(), String> {
-    write_text_to_clipboard(text)?;
+pub fn paste_text(app: &AppHandle, clipboard: &ClipboardState, text: &str) -> Result<(), String> {
+    write_text_to_clipboard_with_marker(clipboard, text)?;
     finish_paste(app)
 }
 
@@ -120,32 +134,42 @@ pub fn save_image_item_to_path(item: &ClipboardItem, target_path: &str) -> Resul
     Ok(())
 }
 
-fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), String> {
-    match item.kind {
+fn write_to_clipboard(
+    clipboard: &ClipboardState,
+    item: &ClipboardItem,
+    plain_text: bool,
+) -> Result<(), String> {
+    mark_pending_write(clipboard, clipboard_write_hash(item, plain_text)?);
+
+    let result = match item.kind {
         ContentKind::Text => {
             write_text_to_clipboard(preferred_text(item))?;
+            Ok(())
         }
         ContentKind::Html => {
             let text = preferred_text(item);
             if plain_text {
                 write_text_to_clipboard(text)?;
+                Ok(())
             } else {
                 let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
                 let html = item.html.as_deref().unwrap_or(text);
                 cb.set_html(html, Some(text))
-                    .map_err(|e| format!("set html: {e}"))?;
+                    .map_err(|e| format!("set html: {e}"))
             }
         }
         ContentKind::Rtf => {
             let text = preferred_rich_text(item);
             if plain_text {
                 write_text_to_clipboard(text)?;
+                Ok(())
             } else if let Some(rich_text) =
                 item.rtf_content.as_deref().filter(|rtf| !rtf.is_empty())
             {
-                write_rtf_to_clipboard(text, rich_text)?;
+                write_rtf_to_clipboard(text, rich_text)
             } else {
                 write_text_to_clipboard(text)?;
+                Ok(())
             }
         }
         ContentKind::Image => {
@@ -163,27 +187,115 @@ fn write_to_clipboard(item: &ClipboardItem, plain_text: bool) -> Result<(), Stri
                 bytes: Cow::Owned(bytes),
             };
             let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
-            cb.set_image(data).map_err(|e| format!("set image: {e}"))?;
+            cb.set_image(data).map_err(|e| format!("set image: {e}"))
         }
         ContentKind::File => {
             if plain_text {
                 write_text_to_clipboard(&file_paths_as_text(item)?)?;
+                Ok(())
             } else {
                 let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
                 let file_paths = resolve_file_list_paths(item)?;
                 cb.set()
                     .file_list(&file_paths)
-                    .map_err(|e| format!("set files: {e}"))?;
+                    .map_err(|e| format!("set files: {e}"))
             }
         }
+    };
+
+    if result.is_err() {
+        clear_pending_write(clipboard);
     }
 
-    Ok(())
+    result
 }
 
 fn write_text_to_clipboard(text: &str) -> Result<(), String> {
     let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
     cb.set_text(text).map_err(|e| format!("set text: {e}"))
+}
+
+fn write_text_to_clipboard_with_marker(
+    clipboard: &ClipboardState,
+    text: &str,
+) -> Result<(), String> {
+    mark_pending_write(
+        clipboard,
+        crate::clipboard::capture_hash(b"text", text.as_bytes()),
+    );
+
+    let result = write_text_to_clipboard(text);
+    if result.is_err() {
+        clear_pending_write(clipboard);
+    }
+    result
+}
+
+fn clipboard_write_hash(item: &ClipboardItem, plain_text: bool) -> Result<String, String> {
+    match item.kind {
+        ContentKind::Text => Ok(crate::clipboard::capture_hash(
+            b"text",
+            preferred_text(item).as_bytes(),
+        )),
+        ContentKind::Html => {
+            let text = preferred_text(item);
+            if plain_text {
+                Ok(crate::clipboard::capture_hash(b"text", text.as_bytes()))
+            } else {
+                Ok(crate::clipboard::capture_hash(
+                    b"html",
+                    item.html.as_deref().unwrap_or(text).as_bytes(),
+                ))
+            }
+        }
+        ContentKind::Rtf => {
+            let text = preferred_rich_text(item);
+            if plain_text {
+                Ok(crate::clipboard::capture_hash(b"text", text.as_bytes()))
+            } else if let Some(rich_text) =
+                item.rtf_content.as_deref().filter(|rtf| !rtf.is_empty())
+            {
+                Ok(crate::clipboard::capture_hash(b"rtf", rich_text.as_bytes()))
+            } else {
+                Ok(crate::clipboard::capture_hash(b"text", text.as_bytes()))
+            }
+        }
+        ContentKind::Image => {
+            let path = item
+                .image_path
+                .as_deref()
+                .ok_or_else(|| "image path missing".to_string())?;
+            let rgba = image::open(path)
+                .map_err(|e| format!("open image: {e}"))?
+                .to_rgba8()
+                .into_raw();
+            Ok(crate::clipboard::capture_hash(b"image", rgba.as_slice()))
+        }
+        ContentKind::File => {
+            if plain_text {
+                let text = file_paths_as_text(item)?;
+                Ok(crate::clipboard::capture_hash(b"text", text.as_bytes()))
+            } else {
+                let paths = item
+                    .file_paths
+                    .as_ref()
+                    .filter(|paths| !paths.is_empty())
+                    .ok_or_else(|| "file paths missing".to_string())?;
+                Ok(crate::clipboard::capture_hash(
+                    b"files",
+                    paths.join("\0").as_bytes(),
+                ))
+            }
+        }
+    }
+}
+
+fn mark_pending_write(clipboard: &ClipboardState, hash: String) {
+    *clipboard.pending_self_write.lock() = Some((hash, std::time::Instant::now()));
+}
+
+fn clear_pending_write(clipboard: &ClipboardState) {
+    clipboard.pending_self_write.lock().take();
 }
 
 fn finish_paste(app: &AppHandle) -> Result<(), String> {
@@ -365,6 +477,7 @@ mod tests {
             hash: "hash-1".into(),
             source_app: Some("Explorer".into()),
             source_app_icon: None,
+            from_self: false,
             group_id: None,
             is_favorite: false,
             is_pinned: false,
@@ -404,6 +517,16 @@ mod tests {
         let text = file_paths_as_text(&item).unwrap();
 
         assert_eq!(text, "C:\\alpha.txt\nD:\\beta.png");
+    }
+
+    #[test]
+    fn clipboard_write_hash_matches_plain_text_payload_for_file_path_paste() {
+        let item = sample_item(ContentKind::File);
+
+        assert_eq!(
+            clipboard_write_hash(&item, true).unwrap(),
+            crate::clipboard::capture_hash(b"text", b"C:\\alpha.txt\nD:\\beta.png")
+        );
     }
 
     #[test]

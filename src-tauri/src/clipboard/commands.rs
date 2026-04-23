@@ -540,7 +540,7 @@ pub fn cb_paste(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(
         let conn = state.clipboard.db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
-    crate::clipboard::paste::paste_item(&app, &item, false)
+    crate::clipboard::paste::paste_item(&app, state.clipboard.as_ref(), &item, false)
 }
 
 #[tauri::command]
@@ -549,7 +549,7 @@ pub fn cb_paste_plain(app: AppHandle, state: State<'_, AppState>, id: i64) -> Re
         let conn = state.clipboard.db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
-    crate::clipboard::paste::paste_item(&app, &item, true)
+    crate::clipboard::paste::paste_item(&app, state.clipboard.as_ref(), &item, true)
 }
 
 /// Copy an item to the system clipboard without simulating Ctrl+V. Used by the manager
@@ -560,7 +560,7 @@ pub fn cb_copy(state: State<'_, AppState>, id: i64) -> Result<(), String> {
         let conn = state.clipboard.db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
-    crate::clipboard::paste::copy_item(&item)
+    crate::clipboard::paste::copy_item(state.clipboard.as_ref(), &item)
 }
 
 #[tauri::command]
@@ -573,7 +573,7 @@ pub fn cb_paste_as_files(
         let conn = state.clipboard.db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
-    crate::clipboard::paste::paste_file_item(&app, &item)
+    crate::clipboard::paste::paste_file_item(&app, state.clipboard.as_ref(), &item)
 }
 
 #[tauri::command]
@@ -582,7 +582,7 @@ pub fn cb_paste_as_path(app: AppHandle, state: State<'_, AppState>, id: i64) -> 
         let conn = state.clipboard.db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
-    crate::clipboard::paste::paste_file_paths_as_text(&app, &item)
+    crate::clipboard::paste::paste_file_paths_as_text(&app, state.clipboard.as_ref(), &item)
 }
 
 #[tauri::command]
@@ -633,7 +633,7 @@ pub fn cb_merge_paste(
     };
 
     let merged = crate::clipboard::paste::merge_items_text(&items, separator.as_deref())?;
-    crate::clipboard::paste::paste_text(&app, &merged)
+    crate::clipboard::paste::paste_text(&app, state.clipboard.as_ref(), &merged)
 }
 
 #[tauri::command]
@@ -668,6 +668,16 @@ pub fn cb_show_text_preview(
     };
     let settings = state.clipboard.settings.read().clone();
     crate::clipboard::preview::show_text_preview(&app, &settings, &item)
+}
+
+#[tauri::command]
+pub fn cb_get_image_preview_payload() -> Option<crate::clipboard::preview::ImagePreviewPayload> {
+    crate::clipboard::preview::current_image_preview_payload()
+}
+
+#[tauri::command]
+pub fn cb_get_text_preview_payload() -> Option<crate::clipboard::preview::TextPreviewPayload> {
+    crate::clipboard::preview::current_text_preview_payload()
 }
 
 #[tauri::command]
@@ -849,6 +859,7 @@ mod tests {
             hash: hash.into(),
             source_app: Some("Word".into()),
             source_app_icon: icon_path,
+            from_self: false,
         }
     }
 
@@ -869,6 +880,7 @@ mod tests {
             hash: "files-hash".into(),
             source_app: Some("Explorer".into()),
             source_app_icon: None,
+            from_self: false,
             group_id: None,
             is_favorite: false,
             is_pinned: false,
@@ -895,6 +907,7 @@ mod tests {
             hash: "text-hash".into(),
             source_app: Some("Notepad".into()),
             source_app_icon: None,
+            from_self: false,
             group_id: None,
             is_favorite: false,
             is_pinned: false,

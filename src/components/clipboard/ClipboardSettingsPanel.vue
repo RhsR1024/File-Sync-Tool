@@ -192,14 +192,6 @@ void load();
 
 <template>
   <section class="rounded-2xl border border-slate-200 bg-white">
-    <div class="flex items-center justify-between border-b border-slate-100 px-5 py-4">
-      <div>
-        <h3 class="text-lg font-semibold text-slate-900">{{ t('clipboard.settings.title') }}</h3>
-        <p class="mt-1 text-xs text-slate-500">{{ t(`clipboard.settings.tabs.${activeTab}`) }}</p>
-      </div>
-      <span v-if="saving" class="text-xs text-slate-400">{{ t('clipboard.settings.saving') }}</span>
-    </div>
-
     <div v-if="error" class="mx-5 mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">
       {{ error }}
     </div>
@@ -209,33 +201,37 @@ void load();
     </div>
 
     <div v-else class="flex flex-col gap-4 p-4">
-      <nav
-        class="mx-auto flex w-fit max-w-full items-center gap-0.5 overflow-x-auto rounded-full border border-slate-200/70 bg-slate-100/80 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.7),inset_0_-1px_0_rgba(15,23,42,0.04)] backdrop-blur-sm"
-        role="tablist"
-      >
-        <button
-          v-for="tab in CLIPBOARD_SETTINGS_TABS"
-          :key="tab.id"
-          type="button"
-          role="tab"
-          :aria-selected="activeTab === tab.id"
-          class="group relative flex shrink-0 items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition-all duration-200 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/30"
-          :class="activeTab === tab.id
-            ? 'bg-white text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.08),0_2px_8px_rgba(15,23,42,0.06)] ring-1 ring-slate-200/60'
-            : 'text-slate-500 hover:text-slate-700'"
-          @click="activeTab = tab.id"
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <nav
+          class="flex max-w-full items-center gap-1 overflow-x-auto rounded-full border border-slate-200/70 bg-slate-100/80 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.7),inset_0_-1px_0_rgba(15,23,42,0.04)] backdrop-blur-sm"
+          role="tablist"
         >
-          <component
-            :is="tab.icon"
-            class="h-3.5 w-3.5 transition-colors"
+          <button
+            v-for="tab in CLIPBOARD_SETTINGS_TABS"
+            :key="tab.id"
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === tab.id"
+            class="group relative flex shrink-0 items-center gap-2 rounded-full px-4 py-2 text-base font-semibold transition-all duration-200 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/30"
             :class="activeTab === tab.id
-              ? 'text-slate-900'
-              : 'text-slate-400 group-hover:text-slate-500'"
-            :stroke-width="activeTab === tab.id ? 2.25 : 2"
-          />
-          <span class="whitespace-nowrap tracking-[0.01em]">{{ t(tab.labelKey) }}</span>
-        </button>
-      </nav>
+              ? 'bg-white text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.08),0_2px_8px_rgba(15,23,42,0.06)] ring-1 ring-slate-200/60'
+              : 'text-slate-500 hover:text-slate-700'"
+            @click="activeTab = tab.id"
+          >
+            <component
+              :is="tab.icon"
+              class="h-4 w-4 transition-colors"
+              :class="activeTab === tab.id
+                ? 'text-slate-900'
+                : 'text-slate-400 group-hover:text-slate-500'"
+              :stroke-width="activeTab === tab.id ? 2.25 : 2"
+            />
+            <span class="whitespace-nowrap tracking-[0.01em]">{{ t(tab.labelKey) }}</span>
+          </button>
+        </nav>
+
+        <span v-if="saving" class="shrink-0 text-xs text-slate-400">{{ t('clipboard.settings.saving') }}</span>
+      </div>
 
       <component
         :is="currentTabComponent"

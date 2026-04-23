@@ -9,6 +9,10 @@ import type {
   ClipboardStats,
   FilePathStatus,
 } from './clipboardTypes';
+import type {
+  ClipboardImagePreviewPayload,
+  ClipboardTextPreviewPayload,
+} from './clipboardPreviewHelpers';
 
 export type {
   ClipboardGroup,
@@ -1094,6 +1098,10 @@ export const clipboardApi = {
     invoke<void>('cb_merge_paste', { ids, separator: separator ?? null }),
   showImagePreview: (id: number) => invoke<void>('cb_show_image_preview', { id }),
   showTextPreview: (id: number) => invoke<void>('cb_show_text_preview', { id }),
+  getImagePreviewPayload: () =>
+    invoke<ClipboardImagePreviewPayload | null>('cb_get_image_preview_payload'),
+  getTextPreviewPayload: () =>
+    invoke<ClipboardTextPreviewPayload | null>('cb_get_text_preview_payload'),
   hidePreview: () => invoke<void>('cb_hide_preview'),
   togglePanel: () => invoke<void>('cb_toggle_panel'),
   stats: () => invoke<ClipboardStats>('cb_stats'),

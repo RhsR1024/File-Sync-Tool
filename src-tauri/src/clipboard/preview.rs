@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::{Mutex, OnceLock};
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Size, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
@@ -70,20 +71,69 @@ enum PreviewKind {
     Text,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct ImagePreviewPayload {
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ImagePreviewPayload {
     id: i64,
     image_path: String,
     zoom_step: u8,
     source_app: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct TextPreviewPayload {
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TextPreviewPayload {
     id: i64,
     kind: &'static str,
     content: String,
     source_app: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct PreviewPayloadCache {
+    image: Option<ImagePreviewPayload>,
+    text: Option<TextPreviewPayload>,
+}
+
+fn preview_payload_cache() -> &'static Mutex<PreviewPayloadCache> {
+    static CACHE: OnceLock<Mutex<PreviewPayloadCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(PreviewPayloadCache::default()))
+}
+
+fn cache_image_preview_payload(payload: ImagePreviewPayload) {
+    let mut cache = preview_payload_cache()
+        .lock()
+        .expect("preview payload cache lock poisoned");
+    cache.image = Some(payload);
+}
+
+fn cache_text_preview_payload(payload: TextPreviewPayload) {
+    let mut cache = preview_payload_cache()
+        .lock()
+        .expect("preview payload cache lock poisoned");
+    cache.text = Some(payload);
+}
+
+pub fn current_image_preview_payload() -> Option<ImagePreviewPayload> {
+    preview_payload_cache()
+        .lock()
+        .expect("preview payload cache lock poisoned")
+        .image
+        .clone()
+}
+
+pub fn current_text_preview_payload() -> Option<TextPreviewPayload> {
+    preview_payload_cache()
+        .lock()
+        .expect("preview payload cache lock poisoned")
+        .text
+        .clone()
+}
+
+pub fn clear_cached_preview_payloads() {
+    let mut cache = preview_payload_cache()
+        .lock()
+        .expect("preview payload cache lock poisoned");
+    cache.image = None;
+    cache.text = None;
 }
 
 pub fn ensure_preview_windows<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<()> {
@@ -111,6 +161,7 @@ pub fn ensure_preview_windows<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> 
 }
 
 pub fn hide_preview_windows<R: tauri::Runtime>(app: &AppHandle<R>) {
+    clear_cached_preview_payloads();
     for label in [IMAGE_PREVIEW_WINDOW_LABEL, TEXT_PREVIEW_WINDOW_LABEL] {
         if let Some(window) = app.get_webview_window(label) {
             let _ = window.hide();
@@ -152,7 +203,9 @@ pub fn show_image_preview<R: tauri::Runtime>(
     };
 
     let desired_size = desired_image_preview_size(item);
-    show_preview_window(app, settings, PreviewKind::Image, desired_size, &payload)
+    show_preview_window(app, settings, PreviewKind::Image, desired_size, &payload)?;
+    cache_image_preview_payload(payload);
+    Ok(())
 }
 
 pub fn show_text_preview<R: tauri::Runtime>(
@@ -193,7 +246,9 @@ pub fn show_text_preview<R: tauri::Runtime>(
         height: DEFAULT_TEXT_PREVIEW_HEIGHT,
     };
 
-    show_preview_window(app, settings, PreviewKind::Text, desired_size, &payload)
+    show_preview_window(app, settings, PreviewKind::Text, desired_size, &payload)?;
+    cache_text_preview_payload(payload);
+    Ok(())
 }
 
 pub fn calculate_preview_placement(
@@ -463,5 +518,63 @@ mod tests {
 
         assert_eq!(placement.side, PreviewSide::Left);
         assert_eq!(placement.y, 1080 - 320);
+    }
+
+    #[test]
+    fn cached_preview_payloads_can_be_retrieved_after_the_latest_update() {
+        clear_cached_preview_payloads();
+
+        cache_image_preview_payload(ImagePreviewPayload {
+            id: 11,
+            image_path: "C:/preview.png".into(),
+            zoom_step: 20,
+            source_app: Some("Explorer".into()),
+        });
+        cache_text_preview_payload(TextPreviewPayload {
+            id: 12,
+            kind: "text",
+            content: "hello".into(),
+            source_app: Some("Notepad".into()),
+        });
+
+        assert_eq!(
+            current_image_preview_payload(),
+            Some(ImagePreviewPayload {
+                id: 11,
+                image_path: "C:/preview.png".into(),
+                zoom_step: 20,
+                source_app: Some("Explorer".into()),
+            }),
+        );
+        assert_eq!(
+            current_text_preview_payload(),
+            Some(TextPreviewPayload {
+                id: 12,
+                kind: "text",
+                content: "hello".into(),
+                source_app: Some("Notepad".into()),
+            }),
+        );
+    }
+
+    #[test]
+    fn clearing_cached_preview_payloads_drops_both_preview_kinds() {
+        cache_image_preview_payload(ImagePreviewPayload {
+            id: 21,
+            image_path: "C:/preview.png".into(),
+            zoom_step: 15,
+            source_app: None,
+        });
+        cache_text_preview_payload(TextPreviewPayload {
+            id: 22,
+            kind: "html",
+            content: "<b>hello</b>".into(),
+            source_app: None,
+        });
+
+        clear_cached_preview_payloads();
+
+        assert_eq!(current_image_preview_payload(), None);
+        assert_eq!(current_text_preview_payload(), None);
     }
 }

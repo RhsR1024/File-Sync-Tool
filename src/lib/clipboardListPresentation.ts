@@ -21,6 +21,13 @@ export interface ClipboardSourceAppPresentation {
   showName: boolean;
 }
 
+export interface ClipboardSourceBadge {
+  kind: 'none' | 'app' | 'self';
+  showIcon: boolean;
+  showName: boolean;
+  label: string | null;
+}
+
 export function extractClipboardSearchKeywords(search: string): string[] {
   return parseSearch(search)
     .keywords
@@ -121,6 +128,41 @@ export function resolveSourceAppPresentation(
         showName: hasName,
       };
   }
+}
+
+export function resolveClipboardSourceBadge(
+  mode: ClipboardSourceAppDisplay,
+  item: {
+    from_self: boolean;
+    source_app: string | null;
+    source_app_icon: string | null;
+  },
+): ClipboardSourceBadge {
+  if (item.from_self) {
+    return {
+      kind: 'self',
+      showIcon: true,
+      showName: true,
+      label: 'This tool',
+    };
+  }
+
+  const presentation = resolveSourceAppPresentation(mode, item.source_app, item.source_app_icon);
+  if (!presentation.showIcon && !presentation.showName) {
+    return {
+      kind: 'none',
+      showIcon: false,
+      showName: false,
+      label: null,
+    };
+  }
+
+  return {
+    kind: 'app',
+    showIcon: presentation.showIcon,
+    showName: presentation.showName,
+    label: item.source_app,
+  };
 }
 
 export function formatClipboardTimeLabel(

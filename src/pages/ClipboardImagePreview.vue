@@ -10,6 +10,7 @@ import {
   stepImagePreviewScale,
   type ClipboardImagePreviewPayload,
 } from '@/lib/clipboardPreviewHelpers';
+import { clipboardApi } from '@/lib/tauri';
 
 defineOptions({ name: 'ClipboardImagePreview' });
 
@@ -54,6 +55,11 @@ onMounted(async () => {
       applyPayload(event.payload);
     },
   );
+
+  const cachedPayload = await clipboardApi.getImagePreviewPayload();
+  if (cachedPayload) {
+    applyPayload(cachedPayload);
+  }
 });
 
 onBeforeUnmount(() => {
