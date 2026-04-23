@@ -243,7 +243,7 @@ fn parse_api_payload<T: DeserializeOwned>(
         return Err(
             parsed
                 .message
-                .unwrap_or_else(|| format!("接口返回错误码: {}", parsed.code)),
+                .unwrap_or_else(|| format!("接口返回错误码 {}", parsed.code)),
         );
     }
 
