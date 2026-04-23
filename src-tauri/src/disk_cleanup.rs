@@ -121,6 +121,20 @@ pub struct CacheKeyDeleteResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct CacheCheckResult {
+    pub present_ids: Vec<String>,
+    pub redis_available: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CacheDeleteResult {
+    pub deleted_count: i64,
+    pub redis_available: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ApiEnvelope<T> {
     code: i32,
@@ -200,6 +214,20 @@ fn normalize_cache_keys(keys: Vec<String>) -> Result<Vec<String>, String> {
     }
 
     Ok(normalized)
+}
+
+fn legacy_storage_ids_to_cache_keys(storage_ids: Vec<String>) -> Vec<String> {
+    normalize_storage_ids(storage_ids)
+        .into_iter()
+        .map(|storage_id| build_storage_key(&storage_id))
+        .collect()
+}
+
+fn legacy_present_keys_to_storage_ids(present_keys: Vec<String>) -> Vec<String> {
+    present_keys
+        .into_iter()
+        .filter_map(|key| key.strip_prefix(STORAGE_KEY_PREFIX).map(|id| id.to_string()))
+        .collect()
 }
 
 fn build_disk_cleanup_url(host: &str, path: &str) -> String {
@@ -324,6 +352,23 @@ pub async fn disk_cleanup_list_linux_disks(
     )
     .await?;
     Ok(data.storage_info_list)
+}
+
+#[tauri::command]
+pub async fn disk_cleanup_list_servers(
+    host: String,
+    timeout_secs: u32,
+) -> Result<Vec<DiskServerItem>, String> {
+    disk_cleanup_list_linux_servers(host, timeout_secs).await
+}
+
+#[tauri::command]
+pub async fn disk_cleanup_list_disks(
+    host: String,
+    server_ip: String,
+    timeout_secs: u32,
+) -> Result<Vec<DiskInfoItem>, String> {
+    disk_cleanup_list_linux_disks(host, server_ip, timeout_secs).await
 }
 
 #[tauri::command]
@@ -504,10 +549,38 @@ pub async fn disk_cleanup_delete_cache_keys(
     }
 }
 
+#[tauri::command]
+pub async fn disk_cleanup_check_redis(host: String, storage_ids: Vec<String>) -> CacheCheckResult {
+    let keys = legacy_storage_ids_to_cache_keys(storage_ids);
+    let result = disk_cleanup_check_cache_keys(host, keys).await;
+
+    CacheCheckResult {
+        present_ids: legacy_present_keys_to_storage_ids(result.present_keys),
+        redis_available: result.redis_available,
+        error: result.error,
+    }
+}
+
+#[tauri::command]
+pub async fn disk_cleanup_delete_cache(
+    host: String,
+    storage_ids: Vec<String>,
+) -> CacheDeleteResult {
+    let keys = legacy_storage_ids_to_cache_keys(storage_ids);
+    let result = disk_cleanup_delete_cache_keys(host, keys).await;
+
+    CacheDeleteResult {
+        deleted_count: result.deleted_count,
+        redis_available: result.redis_available,
+        error: result.error,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_disk_cleanup_url, build_storage_key, normalize_cache_keys, normalize_storage_ids,
+        build_disk_cleanup_url, build_storage_key, legacy_present_keys_to_storage_ids,
+        legacy_storage_ids_to_cache_keys, normalize_cache_keys, normalize_storage_ids,
         parse_api_payload, DiskListData, IpsanListData, WindowsRawDiskListData, DISK_LIST_PATH,
     };
     use reqwest::StatusCode;
@@ -559,6 +632,34 @@ mod tests {
     fn normalize_cache_keys_rejects_non_storage_prefix() {
         let error = normalize_cache_keys(vec!["Partition:{foo}".to_string()]).unwrap_err();
         assert!(error.contains("Storage:"));
+    }
+
+    #[test]
+    fn legacy_storage_ids_to_cache_keys_trims_dedupes_and_prefixes() {
+        assert_eq!(
+            legacy_storage_ids_to_cache_keys(vec![
+                "  ".to_string(),
+                "disk-a".to_string(),
+                " disk-b ".to_string(),
+                "disk-a".to_string(),
+            ]),
+            vec![
+                "Storage:disk-a".to_string(),
+                "Storage:disk-b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_present_keys_to_storage_ids_strips_prefix_and_drops_invalid_keys() {
+        assert_eq!(
+            legacy_present_keys_to_storage_ids(vec![
+                "Storage:disk-a".to_string(),
+                "Partition:disk-b".to_string(),
+                "Storage:disk-c".to_string(),
+            ]),
+            vec!["disk-a".to_string(), "disk-c".to_string()]
+        );
     }
 
     #[test]
@@ -648,6 +749,17 @@ mod tests {
 
         let error = parse_api_payload::<DiskListData>(StatusCode::OK, body).unwrap_err();
         assert_eq!(error, "device busy");
+    }
+
+    #[test]
+    fn parse_api_payload_uses_original_fallback_error_text_when_message_missing() {
+        let body = r#"{
+            "code": 5001,
+            "data": null
+        }"#;
+
+        let error = parse_api_payload::<DiskListData>(StatusCode::OK, body).unwrap_err();
+        assert_eq!(error, "接口返回错误码 5001");
     }
 
     #[test]
