@@ -497,7 +497,7 @@ export interface EnableApplianceSshRequest {
 }
 
 // Internal: Login API response (used by backend)
-interface LoginResponse {
+interface _LoginResponse {
   code: number;
   message: string;
   data?: {
@@ -507,7 +507,7 @@ interface LoginResponse {
 }
 
 // Internal: ChangePasswd API response (used by backend)
-interface ChangePasswdResponse {
+interface _ChangePasswdResponse {
   code: number;
   message: string;
 }
@@ -691,18 +691,6 @@ export interface IpsanItem {
   usage: number;
 }
 
-export interface CacheCheckResult {
-  present_ids: string[];
-  redis_available: boolean;
-  error: string | null;
-}
-
-export interface CacheDeleteResult {
-  deleted_count: number;
-  redis_available: boolean;
-  error: string | null;
-}
-
 export interface CacheKeyCheckResult {
   present_keys: string[];
   redis_available: boolean;
@@ -713,48 +701,6 @@ export interface CacheKeyDeleteResult {
   deleted_count: number;
   redis_available: boolean;
   error: string | null;
-}
-
-export async function diskCleanupListServers(
-  host: string,
-  timeoutSecs: number,
-): Promise<DiskServerItem[]> {
-  return await invoke<DiskServerItem[]>('disk_cleanup_list_servers', {
-    host,
-    timeoutSecs,
-  });
-}
-
-export async function diskCleanupListDisks(
-  host: string,
-  serverIp: string,
-  timeoutSecs: number,
-): Promise<DiskInfoItem[]> {
-  return await invoke<DiskInfoItem[]>('disk_cleanup_list_disks', {
-    host,
-    serverIp,
-    timeoutSecs,
-  });
-}
-
-export async function diskCleanupCheckRedis(
-  host: string,
-  storageIds: string[],
-): Promise<CacheCheckResult> {
-  return await invoke<CacheCheckResult>('disk_cleanup_check_redis', {
-    host,
-    storageIds,
-  });
-}
-
-export async function diskCleanupDeleteCache(
-  host: string,
-  storageIds: string[],
-): Promise<CacheDeleteResult> {
-  return await invoke<CacheDeleteResult>('disk_cleanup_delete_cache', {
-    host,
-    storageIds,
-  });
 }
 
 export async function diskCleanupListLinuxServers(
