@@ -664,6 +664,33 @@ export interface DiskInfoItem {
   worldWideNameList: Wwn[];
 }
 
+export interface WindowsPartitionItem {
+  partitionSeq: number;
+  partitionGUID: string;
+  partitionOffset: string;
+  capacity: number;
+  partitionStatus: number;
+  usage: number;
+}
+
+export interface WindowsDiskItem {
+  diskId: string;
+  diskNumber: number;
+  diskName: string;
+  totalCapacity: number;
+  partitionList: WindowsPartitionItem[];
+}
+
+export interface IpsanItem {
+  IPSANId: string;
+  IPSANName: string;
+  IPSANType: number;
+  IPSANIp: string;
+  IPSANStatus: number;
+  totalCapacity: number;
+  usage: number;
+}
+
 export interface CacheCheckResult {
   present_ids: string[];
   redis_available: boolean;
@@ -671,6 +698,18 @@ export interface CacheCheckResult {
 }
 
 export interface CacheDeleteResult {
+  deleted_count: number;
+  redis_available: boolean;
+  error: string | null;
+}
+
+export interface CacheKeyCheckResult {
+  present_keys: string[];
+  redis_available: boolean;
+  error: string | null;
+}
+
+export interface CacheKeyDeleteResult {
   deleted_count: number;
   redis_available: boolean;
   error: string | null;
@@ -715,6 +754,68 @@ export async function diskCleanupDeleteCache(
   return await invoke<CacheDeleteResult>('disk_cleanup_delete_cache', {
     host,
     storageIds,
+  });
+}
+
+export async function diskCleanupListLinuxServers(
+  host: string,
+  timeoutSecs: number,
+): Promise<DiskServerItem[]> {
+  return await invoke<DiskServerItem[]>('disk_cleanup_list_linux_servers', {
+    host,
+    timeoutSecs,
+  });
+}
+
+export async function diskCleanupListLinuxDisks(
+  host: string,
+  serverIp: string,
+  timeoutSecs: number,
+): Promise<DiskInfoItem[]> {
+  return await invoke<DiskInfoItem[]>('disk_cleanup_list_linux_disks', {
+    host,
+    serverIp,
+    timeoutSecs,
+  });
+}
+
+export async function diskCleanupListWindowsDisks(
+  host: string,
+  timeoutSecs: number,
+): Promise<WindowsDiskItem[]> {
+  return await invoke<WindowsDiskItem[]>('disk_cleanup_list_windows_disks', {
+    host,
+    timeoutSecs,
+  });
+}
+
+export async function diskCleanupListIpsans(
+  host: string,
+  timeoutSecs: number,
+): Promise<IpsanItem[]> {
+  return await invoke<IpsanItem[]>('disk_cleanup_list_ipsans', {
+    host,
+    timeoutSecs,
+  });
+}
+
+export async function diskCleanupCheckCacheKeys(
+  host: string,
+  keys: string[],
+): Promise<CacheKeyCheckResult> {
+  return await invoke<CacheKeyCheckResult>('disk_cleanup_check_cache_keys', {
+    host,
+    keys,
+  });
+}
+
+export async function diskCleanupDeleteCacheKeys(
+  host: string,
+  keys: string[],
+): Promise<CacheKeyDeleteResult> {
+  return await invoke<CacheKeyDeleteResult>('disk_cleanup_delete_cache_keys', {
+    host,
+    keys,
   });
 }
 

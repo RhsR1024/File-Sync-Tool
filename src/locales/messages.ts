@@ -662,7 +662,47 @@ export const messages = {
     },
     diskCacheCleanup: {
       title: 'Disk Cache Cleanup',
-      description: 'Inspect appliance disks and remove residual Redis cache entries keyed by Storage:* before cleanup or replacement work.',
+      description: 'Inspect local disks and IPSAN devices, compare Redis Storage:* cache entries, and remove stale keys before cleanup or replacement work.',
+      localDisk: {
+        title: 'Local Disk',
+        tabs: {
+          windows: 'Windows',
+          linux: 'Linux',
+        },
+        actions: {
+          refresh: 'Refresh',
+          cleanAll: 'Clean All ({count})',
+        },
+      },
+      ipsan: {
+        title: 'IPSAN',
+        description: 'Inspect IPSAN rows, check Redis Storage:{IPSANId} keys, and clean stale cache entries one by one or in bulk.',
+        actions: {
+          refresh: 'Refresh',
+          cleanAll: 'Clean All ({count})',
+        },
+        columns: {
+          name: 'Name',
+          id: 'ID',
+          status: 'Status',
+          capacity: 'Capacity',
+          usage: 'Usage',
+          cache: 'Cache',
+          actions: 'Actions',
+        },
+      },
+      windows: {
+        diskHeader: 'Disk {number} - {name}',
+        columns: {
+          partitionSeq: 'Partition Seq',
+          partitionGuid: 'Partition GUID',
+          capacity: 'Capacity',
+          usage: 'Usage',
+          status: 'Status',
+          cache: 'Cache',
+          actions: 'Actions',
+        },
+      },
       summary: {
         recent: 'Recent Hosts',
         saved: 'Saved SSH Hosts',
@@ -730,6 +770,10 @@ export const messages = {
       },
       errors: {
         hostEmpty: 'Enter a host IP first.',
+        localHttp: 'Local disk request failed: {reason}',
+        ipsanHttp: 'IPSAN request failed: {reason}',
+        localDelete: 'Failed to delete local disk cache: {reason}',
+        ipsanDelete: 'Failed to delete IPSAN cache: {reason}',
         http: 'Request failed: {reason}',
         redis: 'Redis check failed: {reason}',
         deleteSingle: 'Failed to delete this cache entry: {reason}',
@@ -1257,7 +1301,6 @@ export const messages = {
           data: 'Data',
           preview: 'Preview',
           appFilter: 'App Filter',
-          audio: 'Audio',
           about: 'About',
         },
         general: {
@@ -1304,20 +1347,11 @@ export const messages = {
           examples: 'Quick examples',
           rulesSuffix: 'rule(s)',
         },
-        audio: {
-          enabled: 'Enable audio feedback',
-          volume: 'Volume',
-          onCopy: 'Play sound on copy',
-          onPaste: 'Play sound on paste',
-          disabledHint: 'Turn this on if you want subtle copy/paste confirmation sounds.',
-        },
         about: {
           imagePreviewOn: 'Image preview on',
           imagePreviewOff: 'Image preview off',
           textPreviewOn: 'Text preview on',
           textPreviewOff: 'Text preview off',
-          audioEnabled: 'Audio on',
-          audioDisabled: 'Audio off',
           appFilterDisabled: 'Filtering off',
           appFilterSummary: '{mode} · {count} rule(s)',
           cleanupTitle: 'Cleanup protection',
@@ -2081,7 +2115,47 @@ export const messages = {
     },
     diskCacheCleanup: {
       title: '硬盘缓存清理',
-      description: '查看一体机硬盘与 Redis 中的 Storage:* 残留缓存，支持逐条或批量删除。',
+      description: '同时查看本地磁盘与 IPSAN，核对 Redis Storage:* 缓存并按区域清理。',
+      localDisk: {
+        title: '本地磁盘',
+        tabs: {
+          windows: 'Windows',
+          linux: 'Linux',
+        },
+        actions: {
+          refresh: '刷新',
+          cleanAll: '清理全部 ({count})',
+        },
+      },
+      ipsan: {
+        title: 'IPSAN',
+        description: '查看 IPSAN 行并检查 Redis Storage:{IPSANId} 缓存，支持逐条或批量清理。',
+        actions: {
+          refresh: '刷新',
+          cleanAll: '清理全部 ({count})',
+        },
+        columns: {
+          name: '名称',
+          id: 'ID',
+          status: '状态',
+          capacity: '容量',
+          usage: '使用率',
+          cache: '缓存',
+          actions: '操作',
+        },
+      },
+      windows: {
+        diskHeader: '磁盘 {number} - {name}',
+        columns: {
+          partitionSeq: '分区序号',
+          partitionGuid: 'Partition GUID',
+          capacity: '容量',
+          usage: '使用率',
+          status: '状态',
+          cache: '缓存',
+          actions: '操作',
+        },
+      },
       summary: {
         recent: '最近主机',
         saved: '已保存 SSH',
@@ -2149,6 +2223,10 @@ export const messages = {
       },
       errors: {
         hostEmpty: '请先输入接入 IP。',
+        localHttp: '本地磁盘请求失败：{reason}',
+        ipsanHttp: 'IPSAN 请求失败：{reason}',
+        localDelete: '删除本地磁盘缓存失败：{reason}',
+        ipsanDelete: '删除 IPSAN 缓存失败：{reason}',
         http: '请求失败：{reason}',
         redis: 'Redis 检查失败：{reason}',
         deleteSingle: '删除该缓存失败：{reason}',
@@ -2671,7 +2749,6 @@ export const messages = {
           data: '数据',
           preview: '预览',
           appFilter: '应用过滤',
-          audio: '音效',
           about: '关于',
         },
         general: {
@@ -2718,20 +2795,11 @@ export const messages = {
           examples: '快速示例',
           rulesSuffix: '条规则',
         },
-        audio: {
-          enabled: '启用音效反馈',
-          volume: '音量',
-          onCopy: '复制时播放音效',
-          onPaste: '粘贴时播放音效',
-          disabledHint: '如果你希望复制或粘贴时有轻量提示音，可以打开这里。',
-        },
         about: {
           imagePreviewOn: '图片预览开启',
           imagePreviewOff: '图片预览关闭',
           textPreviewOn: '文本预览开启',
           textPreviewOff: '文本预览关闭',
-          audioEnabled: '音效开启',
-          audioDisabled: '音效关闭',
           appFilterDisabled: '过滤未启用',
           appFilterSummary: '{mode} · {count} 条规则',
           cleanupTitle: '清理保护',
