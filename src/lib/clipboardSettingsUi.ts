@@ -1,14 +1,23 @@
+import {
+  Database,
+  Eye,
+  Filter,
+  Info,
+  Keyboard,
+  LayoutPanelTop,
+  Settings2,
+} from 'lucide-vue-next';
+
 import type { ClipboardToolbarSettings } from './clipboardTypes.ts';
 
 export const CLIPBOARD_SETTINGS_TABS = [
-  { id: 'general', labelKey: 'clipboard.settings.tabs.general' },
-  { id: 'display', labelKey: 'clipboard.settings.tabs.display' },
-  { id: 'shortcuts', labelKey: 'clipboard.settings.tabs.shortcuts' },
-  { id: 'data', labelKey: 'clipboard.settings.tabs.data' },
-  { id: 'preview', labelKey: 'clipboard.settings.tabs.preview' },
-  { id: 'appFilter', labelKey: 'clipboard.settings.tabs.appFilter' },
-  { id: 'audio', labelKey: 'clipboard.settings.tabs.audio' },
-  { id: 'about', labelKey: 'clipboard.settings.tabs.about' },
+  { id: 'general', labelKey: 'clipboard.settings.tabs.general', icon: Settings2 },
+  { id: 'display', labelKey: 'clipboard.settings.tabs.display', icon: LayoutPanelTop },
+  { id: 'shortcuts', labelKey: 'clipboard.settings.tabs.shortcuts', icon: Keyboard },
+  { id: 'data', labelKey: 'clipboard.settings.tabs.data', icon: Database },
+  { id: 'preview', labelKey: 'clipboard.settings.tabs.preview', icon: Eye },
+  { id: 'appFilter', labelKey: 'clipboard.settings.tabs.appFilter', icon: Filter },
+  { id: 'about', labelKey: 'clipboard.settings.tabs.about', icon: Info },
 ] as const;
 
 export type ClipboardSettingsTabId =

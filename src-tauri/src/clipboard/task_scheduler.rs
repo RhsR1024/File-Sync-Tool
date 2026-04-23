@@ -77,15 +77,40 @@ mod windows_impl {
             .args(args)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .map_err(|e| e.to_string())
+            .map_err(|e| decode_console_bytes(e.to_string().as_bytes()))
+    }
+
+    /// Decode bytes emitted by Windows console tools (e.g. `schtasks`) using the current
+    /// OEM code page. These tools default to the OEM code page (936 / GBK on Chinese Windows),
+    /// so naive UTF-8 decoding produces mojibake like `����: ϵͳ�Ҳ���ָ�����ļ���`.
+    fn decode_console_bytes(bytes: &[u8]) -> String {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return text.to_string();
+        }
+
+        // `GetOEMCP` lives in kernel32.dll. Avoid a windows-rs feature just for one FFI entry.
+        extern "system" {
+            fn GetOEMCP() -> u32;
+        }
+        let code_page = unsafe { GetOEMCP() };
+        let encoding = match code_page {
+            936 => encoding_rs::GBK,
+            950 => encoding_rs::BIG5,
+            932 => encoding_rs::SHIFT_JIS,
+            949 => encoding_rs::EUC_KR,
+            65001 => encoding_rs::UTF_8,
+            _ => encoding_rs::WINDOWS_1252,
+        };
+        let (decoded, _, _) = encoding.decode(bytes);
+        decoded.into_owned()
     }
 
     fn stderr_string(output: &Output) -> String {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = decode_console_bytes(&output.stderr).trim().to_string();
         if !stderr.is_empty() {
             return stderr;
         }
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
+        decode_console_bytes(&output.stdout).trim().to_string()
     }
 
     fn is_missing_task_error(message: &str) -> bool {

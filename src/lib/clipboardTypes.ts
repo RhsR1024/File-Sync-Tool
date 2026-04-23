@@ -60,13 +60,6 @@ export interface ClipboardDataSettings {
   max_item_bytes: number;
 }
 
-export interface ClipboardAudioSettings {
-  enabled: boolean;
-  volume: number;
-  on_copy: boolean;
-  on_paste: boolean;
-}
-
 export interface ClipboardAppFilterSettings {
   enabled: boolean;
   mode: ClipboardAppFilterMode;
@@ -92,7 +85,6 @@ export interface ClipboardSettings {
   navigation: ClipboardNavigationSettings;
   toolbar: ClipboardToolbarSettings;
   data: ClipboardDataSettings;
-  audio: ClipboardAudioSettings;
   app_filter: ClipboardAppFilterSettings;
 }
 
@@ -162,12 +154,6 @@ const DEFAULT_CLIPBOARD_SETTINGS: ClipboardSettings = {
     retain_days: 30,
     max_item_bytes: 10 * 1024 * 1024,
   },
-  audio: {
-    enabled: false,
-    volume: 100,
-    on_copy: false,
-    on_paste: false,
-  },
   app_filter: {
     enabled: false,
     mode: 'blacklist',
@@ -192,7 +178,6 @@ export function cloneClipboardSettings(settings: ClipboardSettings): ClipboardSe
       items: [...settings.toolbar.items],
     },
     data: { ...settings.data },
-    audio: { ...settings.audio },
     app_filter: {
       ...settings.app_filter,
       patterns: [...settings.app_filter.patterns],
@@ -245,10 +230,6 @@ export function normalizeClipboardSettings(
     data: {
       ...defaults.data,
       ...(input?.data ?? {}),
-    },
-    audio: {
-      ...defaults.audio,
-      ...(input?.audio ?? {}),
     },
     app_filter: {
       ...defaults.app_filter,

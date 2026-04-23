@@ -27,13 +27,6 @@ const previewSummary = computed(() => [
   `${props.settings.preview.delay_ms}ms`,
 ].join(' / '));
 
-const audioSummary = computed(() => [
-  props.settings.audio.enabled
-    ? t('clipboard.settings.about.audioEnabled')
-    : t('clipboard.settings.about.audioDisabled'),
-  `${props.settings.audio.volume}%`,
-].join(' / '));
-
 const appFilterSummary = computed(() => {
   if (!props.settings.app_filter.enabled) {
     return t('clipboard.settings.about.appFilterDisabled');
@@ -72,10 +65,6 @@ const cleanupSummary = computed(() => {
         <div class="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3">
           <div class="text-xs text-slate-500">{{ t('clipboard.settings.display.toolbarOrder') }}</div>
           <div class="mt-1 text-sm font-medium text-slate-800">{{ toolbarSummary }}</div>
-        </div>
-        <div class="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3">
-          <div class="text-xs text-slate-500">{{ t('clipboard.settings.tabs.audio') }}</div>
-          <div class="mt-1 text-sm font-medium text-slate-800">{{ audioSummary }}</div>
         </div>
         <div class="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3">
           <div class="text-xs text-slate-500">{{ t('clipboard.settings.tabs.appFilter') }}</div>

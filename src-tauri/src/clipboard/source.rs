@@ -314,6 +314,164 @@ pub fn read_clipboard_rtf() -> Option<String> {
     None
 }
 
+/// Raw clipboard image read result (width, height, RGBA8 bytes).
+pub type RawClipboardImage = (u32, u32, Vec<u8>);
+
+/// Read clipboard image data directly via Win32 API when `arboard` fails.
+///
+/// Some screenshot tools (PixPin, Snipaste, ShareX...) write image data in ways that
+/// confuse `arboard`'s `get_image()` — e.g. only the `"PNG"` private format, a DIBv5
+/// with non-standard masks, or a top-down DIB. This fallback tries the common formats
+/// in priority order: PNG → CF_DIBV5 → CF_DIB. Returns `None` if no image is present
+/// or decoding fails.
+#[cfg(target_os = "windows")]
+pub fn read_clipboard_image_raw() -> Option<RawClipboardImage> {
+    use windows::core::w;
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+        RegisterClipboardFormatW,
+    };
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+    const CF_DIB: u32 = 8;
+    const CF_DIBV5: u32 = 17;
+
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+
+    unsafe fn read_format_bytes(format: u32) -> Option<Vec<u8>> {
+        unsafe {
+            if IsClipboardFormatAvailable(format).is_err() {
+                return None;
+            }
+            let handle = GetClipboardData(format).ok()?;
+            let memory = HGLOBAL(handle.0);
+            let size = GlobalSize(memory);
+            if size == 0 {
+                return None;
+            }
+            let ptr = GlobalLock(memory);
+            if ptr.is_null() {
+                return None;
+            }
+            let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), size).to_vec();
+            let _ = GlobalUnlock(memory);
+            Some(bytes)
+        }
+    }
+
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return None;
+        }
+        let _guard = ClipboardGuard;
+
+        let png_format = RegisterClipboardFormatW(w!("PNG"));
+        if png_format != 0 {
+            if let Some(bytes) = read_format_bytes(png_format) {
+                if let Some(image) = decode_png_to_rgba(&bytes) {
+                    return Some(image);
+                }
+            }
+        }
+
+        for format in [CF_DIBV5, CF_DIB] {
+            if let Some(dib) = read_format_bytes(format) {
+                if let Some(image) = decode_dib_to_rgba(&dib) {
+                    return Some(image);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn read_clipboard_image_raw() -> Option<RawClipboardImage> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn decode_png_to_rgba(bytes: &[u8]) -> Option<RawClipboardImage> {
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).ok()?;
+    let rgba = img.to_rgba8();
+    Some((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
+/// Decode a Windows Device-Independent Bitmap (starts with `BITMAPINFOHEADER` /
+/// `BITMAPV5HEADER`, no `BITMAPFILEHEADER`) into RGBA8 by synthesising a
+/// BMP file-header and feeding it to the `image` crate.
+#[cfg(target_os = "windows")]
+fn decode_dib_to_rgba(dib: &[u8]) -> Option<RawClipboardImage> {
+    if dib.len() < 4 {
+        return None;
+    }
+    let header_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
+    if header_size < 12 || header_size > dib.len() {
+        return None;
+    }
+
+    // Compute where the pixel data starts. BI_BITFIELDS/BI_ALPHABITFIELDS add 3/4 DWORD masks
+    // after the info header, colour tables add bits_per_pixel-dependent entries.
+    let bits_per_pixel = if header_size >= 16 {
+        u16::from_le_bytes([dib[14], dib[15]]) as u32
+    } else {
+        0
+    };
+    let compression = if header_size >= 20 {
+        u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]])
+    } else {
+        0
+    };
+
+    const BI_BITFIELDS: u32 = 3;
+    const BI_ALPHABITFIELDS: u32 = 6;
+
+    let mask_bytes = match compression {
+        BI_BITFIELDS if header_size == 40 => 12,
+        BI_ALPHABITFIELDS if header_size == 40 => 16,
+        _ => 0,
+    };
+
+    let colour_table_bytes = if bits_per_pixel <= 8 {
+        let colours_used = if header_size >= 36 {
+            u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]])
+        } else {
+            0
+        };
+        let colours = if colours_used == 0 {
+            1u32 << bits_per_pixel
+        } else {
+            colours_used
+        };
+        (colours as usize) * 4
+    } else {
+        0
+    };
+
+    let pixel_offset = 14 + header_size + mask_bytes + colour_table_bytes;
+    let file_size = 14 + dib.len();
+
+    let mut bmp = Vec::with_capacity(file_size);
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&(file_size as u32).to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&(pixel_offset as u32).to_le_bytes());
+    bmp.extend_from_slice(dib);
+
+    let img = image::load_from_memory_with_format(&bmp, image::ImageFormat::Bmp).ok()?;
+    let rgba = img.to_rgba8();
+    Some((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
 #[cfg(target_os = "windows")]
 fn get_app_display_name(exe_path: &Path) -> String {
     resolve_display_name(exe_path, get_file_description(exe_path).as_deref())

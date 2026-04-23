@@ -220,26 +220,6 @@ impl Default for ClipboardDataSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ClipboardAudioSettings {
-    pub enabled: bool,
-    pub volume: u8,
-    pub on_copy: bool,
-    pub on_paste: bool,
-}
-
-impl Default for ClipboardAudioSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            volume: 100,
-            on_copy: false,
-            on_paste: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
 pub struct ClipboardAppFilterSettings {
     pub enabled: bool,
     pub mode: ClipboardAppFilterMode,
@@ -285,8 +265,6 @@ pub struct ClipboardSettings {
     #[serde(default)]
     pub data: ClipboardDataSettings,
     #[serde(default)]
-    pub audio: ClipboardAudioSettings,
-    #[serde(default)]
     pub app_filter: ClipboardAppFilterSettings,
 }
 
@@ -311,7 +289,6 @@ impl Default for ClipboardSettings {
             navigation: ClipboardNavigationSettings::default(),
             toolbar: ClipboardToolbarSettings::default(),
             data: ClipboardDataSettings::default(),
-            audio: ClipboardAudioSettings::default(),
             app_filter: ClipboardAppFilterSettings::default(),
         }
     }

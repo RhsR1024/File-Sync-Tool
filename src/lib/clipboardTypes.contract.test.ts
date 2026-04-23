@@ -64,12 +64,6 @@ export const clipboardSettingsContract: ClipboardSettings = {
     retain_days: 30,
     max_item_bytes: 10 * 1024 * 1024,
   },
-  audio: {
-    enabled: false,
-    volume: 100,
-    on_copy: false,
-    on_paste: false,
-  },
   app_filter: {
     enabled: false,
     mode: 'blacklist',

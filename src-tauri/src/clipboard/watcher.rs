@@ -127,11 +127,24 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
                 .collect::<Vec<_>>()
         })
         .filter(|paths| !paths.is_empty());
-    let image = clipboard.get_image().ok().map(|image| CapturedImage {
-        width: image.width as u32,
-        height: image.height as u32,
-        rgba: image.bytes.to_vec(),
-    });
+    let image = clipboard
+        .get_image()
+        .ok()
+        .map(|image| CapturedImage {
+            width: image.width as u32,
+            height: image.height as u32,
+            rgba: image.bytes.to_vec(),
+        })
+        .or_else(|| {
+            // arboard's Windows reader can miss images from tools like PixPin / Snipaste that
+            // only set private `"PNG"` data or an unusual CF_DIBV5 layout. Fall back to a raw
+            // Win32 reader that also handles those formats.
+            source::read_clipboard_image_raw().map(|(width, height, rgba)| CapturedImage {
+                width,
+                height,
+                rgba,
+            })
+        });
 
     let snapshot = CaptureSnapshot {
         rtf: rtf.clone(),
