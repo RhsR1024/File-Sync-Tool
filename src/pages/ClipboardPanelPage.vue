@@ -363,9 +363,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex h-screen w-screen flex-col overflow-hidden bg-white">
+  <div class="flex h-screen w-screen flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
       <header
-        class="flex select-none items-center justify-between border-b border-slate-200 px-3 py-2.5"
+        class="flex select-none items-center justify-between px-3 py-2.5"
         :data-tauri-drag-region="CLIPBOARD_PANEL_USE_NATIVE_DRAG_REGION ? '' : undefined"
         @mousedown="onHeaderMouseDown"
       >
@@ -454,7 +454,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div class="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-100">
       <div v-if="toolbarLayout.showSearch" class="px-3 pt-2.5 pb-2">
         <ClipboardSearchBox
           ref="searchInput"
