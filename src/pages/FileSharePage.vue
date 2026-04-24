@@ -19,6 +19,7 @@ import {
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import QRCode from 'qrcode';
+import { LAN_SHARE_STATUS_REFRESH_INTERVAL_MS } from '../lib/lanShareStatus';
 import {
   fileShareGetStatus,
   fileShareLoadSettings,
@@ -255,6 +256,7 @@ const newIpRule = ref('');
 const isLoading = ref(true);
 const isSaving = ref(false);
 const isApplying = ref(false);
+const isRefreshingStatus = ref(false);
 const isActive = ref(false);
 const serverUrl = ref('');
 const copiedUrl = ref<string | null>(null);
@@ -363,6 +365,23 @@ const setStatus = (next: FileShareStatus) => {
     showConnections.value = false;
     showAllIps.value = false;
     lastUptimeUpdate = 0;
+  }
+};
+
+const refreshStatus = async (silent = false) => {
+  if (!silent) {
+    isRefreshingStatus.value = true;
+  }
+  try {
+    setStatus(await fileShareGetStatus());
+  } catch (e) {
+    if (!silent) {
+      errorMsg.value = String(e);
+    }
+  } finally {
+    if (!silent) {
+      isRefreshingStatus.value = false;
+    }
   }
 };
 
@@ -543,6 +562,18 @@ watch(serverUrl, () => {
 
 let offStatus: UnlistenFn | null = null;
 let offLog: UnlistenFn | null = null;
+let statusRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+const startStatusPolling = () => {
+  if (statusRefreshTimer) {
+    clearInterval(statusRefreshTimer);
+  }
+  statusRefreshTimer = setInterval(() => {
+    if (isActive.value) {
+      void refreshStatus(true);
+    }
+  }, LAN_SHARE_STATUS_REFRESH_INTERVAL_MS);
+};
 
 onMounted(async () => {
   offStatus = await listen<FileShareStatus>('file-share-status', (e) => setStatus(e.payload));
@@ -558,6 +589,7 @@ onMounted(async () => {
     if (draft.value.auto_start_on_page_open && !current.is_active && draft.value.roots.some((r) => r.enabled)) {
       await startShare(false, false, t('tools.fileShare.autoStartedOnPageOpen'));
     }
+    startStatusPolling();
   } catch (e) {
     errorMsg.value = String(e);
   } finally {
@@ -568,6 +600,10 @@ onMounted(async () => {
 onUnmounted(() => {
   offStatus?.();
   offLog?.();
+  if (statusRefreshTimer) {
+    clearInterval(statusRefreshTimer);
+    statusRefreshTimer = null;
+  }
 });
 </script>
 
@@ -890,7 +926,22 @@ onUnmounted(() => {
             </div>
 
             <div class="fs-card">
-              <div class="mb-3 text-sm font-semibold text-slate-900">{{ t('tools.fileShare.connectedIpList') }}</div>
+              <div class="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <div class="text-sm font-semibold text-slate-900">{{ t('tools.fileShare.connectedIpList') }}</div>
+                  <div class="mt-1 text-xs text-slate-500">{{ t('tools.fileShare.connectionCount') }}: {{ connCount }}</div>
+                </div>
+                <button
+                  type="button"
+                  class="fs-link fs-refresh-link"
+                  :disabled="isRefreshingStatus"
+                  :title="t('tools.fileShare.refreshStatus')"
+                  @click="refreshStatus()"
+                >
+                  <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isRefreshingStatus }" />
+                  {{ t('tools.fileShare.refreshStatus') }}
+                </button>
+              </div>
               <div v-if="connectedIps.length" class="space-y-2">
                 <div v-for="ip in visibleIps" :key="ip" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-700">{{ ip }}</div>
                 <button v-if="hiddenIpCount > 0" type="button" class="fs-link" @click="showAllIps = true"><ChevronDown class="h-3.5 w-3.5" />{{ t('tools.fileShare.showMoreIps', { n: hiddenIpCount }) }}</button>
@@ -942,6 +993,7 @@ onUnmounted(() => {
 .fs-perm{display:flex;align-items:center;gap:.6rem;border:1px solid rgb(226 232 240 / .8);border-radius:.85rem;background:#fff;padding:.75rem .85rem;font-size:.875rem;color:rgb(51 65 85)}
 .fs-icon{border:1px solid rgb(226 232 240);border-radius:.65rem;background:#fff;padding:.45rem;color:rgb(100 116 139);transition:all .15s ease}.fs-icon:hover{border-color:rgb(153 246 228);background:rgb(240 253 250);color:rgb(13 148 136)}
 .fs-link{display:inline-flex;align-items:center;gap:.35rem;font-size:.75rem;font-weight:600;color:rgb(100 116 139)}.fs-link:hover{color:rgb(13 148 136)}
+.fs-refresh-link{border:1px solid rgb(226 232 240);border-radius:9999px;background:rgb(248 250 252);padding:.35rem .7rem;white-space:nowrap}.fs-refresh-link:disabled{opacity:.45;cursor:not-allowed}
 .fs-stat-label{margin-bottom:.35rem;font-size:.7rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:rgb(100 116 139)}.fs-stat-value{font-family:ui-monospace,SFMono-Regular,monospace;font-size:1.5rem;font-weight:700;color:rgb(15 23 42)}
 @media (max-width: 900px){.fs-root-row-top{grid-template-columns:1fr}.fs-root-actions{justify-content:flex-start}}
 </style>

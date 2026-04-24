@@ -16,6 +16,7 @@ import {
 import {
   diskCleanupCheckCacheKeys,
   diskCleanupDeleteCacheKeys,
+  diskCleanupGetCacheKeyContents,
   diskCleanupListIpsans,
   diskCleanupListLinuxDisks,
   diskCleanupListLinuxServers,
@@ -23,6 +24,7 @@ import {
   getConfig,
   saveConfig,
   type AppConfig,
+  type CacheKeyContentEntry,
   type DiskInfoItem,
   type DiskServerItem,
   type IpsanItem,
@@ -65,6 +67,7 @@ const linuxDisks = ref<DiskInfoItem[]>([]);
 const windowsDisks = ref<WindowsDiskItem[]>([]);
 const localExpandedIds = ref<Set<string>>(new Set());
 const localPresentCacheKeys = ref<Set<string>>(new Set());
+const localCacheContentEntries = ref<Map<string, CacheKeyContentEntry>>(new Map());
 const localCleaningKeys = ref<Set<string>>(new Set());
 const localLoading = ref(false);
 const localBatchCleaning = ref(false);
@@ -75,6 +78,7 @@ const hasFetchedLocal = ref(false);
 
 const ipsans = ref<IpsanItem[]>([]);
 const ipsanPresentCacheKeys = ref<Set<string>>(new Set());
+const ipsanCacheContentEntries = ref<Map<string, CacheKeyContentEntry>>(new Map());
 const ipsanCleaningKeys = ref<Set<string>>(new Set());
 const ipsanLoading = ref(false);
 const ipsanBatchCleaning = ref(false);
@@ -268,9 +272,37 @@ async function pushRecentHost(host: string) {
   await persistRecentHosts(mergeRecentItems(recentHosts.value, normalized, MAX_RECENT_HOSTS));
 }
 
+function buildCacheContentEntryMap(entries: CacheKeyContentEntry[]) {
+  const next = new Map<string, CacheKeyContentEntry>();
+  for (const entry of entries) {
+    next.set(entry.key, entry);
+  }
+  return next;
+}
+
+function cachePreviewText(entry: CacheKeyContentEntry | null | undefined) {
+  if (!entry) {
+    return t('diskCacheCleanup.cache.emptyContent');
+  }
+  return entry.preview || t('diskCacheCleanup.cache.emptyContent');
+}
+
+function cacheValueType(entry: CacheKeyContentEntry | null | undefined) {
+  return entry?.value_type || '--';
+}
+
+function localCacheContentEntry(key: string) {
+  return localCacheContentEntries.value.get(key) ?? null;
+}
+
+function ipsanCacheContentEntry(key: string) {
+  return ipsanCacheContentEntries.value.get(key) ?? null;
+}
+
 function resetLocalCacheState() {
   localExpandedIds.value = new Set();
   localPresentCacheKeys.value = new Set();
+  localCacheContentEntries.value = new Map();
   localCleaningKeys.value = new Set();
   localRedisAvailable.value = true;
   localRedisError.value = null;
@@ -278,9 +310,38 @@ function resetLocalCacheState() {
 
 function resetIpsanCacheState() {
   ipsanPresentCacheKeys.value = new Set();
+  ipsanCacheContentEntries.value = new Map();
   ipsanCleaningKeys.value = new Set();
   ipsanRedisAvailable.value = true;
   ipsanRedisError.value = null;
+}
+
+async function loadLocalCacheContent(host: string, keys: string[], requestSeq: number) {
+  if (keys.length === 0) {
+    localCacheContentEntries.value = new Map();
+    return;
+  }
+
+  const result = await diskCleanupGetCacheKeyContents(host, keys);
+  if (requestSeq !== localRequestSeq) return;
+
+  localRedisAvailable.value = result.redis_available;
+  localRedisError.value = result.error;
+  localCacheContentEntries.value = buildCacheContentEntryMap(result.entries ?? []);
+}
+
+async function loadIpsanCacheContent(host: string, keys: string[], requestSeq: number) {
+  if (keys.length === 0) {
+    ipsanCacheContentEntries.value = new Map();
+    return;
+  }
+
+  const result = await diskCleanupGetCacheKeyContents(host, keys);
+  if (requestSeq !== ipsanRequestSeq) return;
+
+  ipsanRedisAvailable.value = result.redis_available;
+  ipsanRedisError.value = result.error;
+  ipsanCacheContentEntries.value = buildCacheContentEntryMap(result.entries ?? []);
 }
 
 async function loadLinuxDisksFor(host: string, serverIp: string, requestSeq: number) {
@@ -296,11 +357,14 @@ async function loadLinuxDisksFor(host: string, serverIp: string, requestSeq: num
 
     localRedisAvailable.value = result.redis_available;
     localRedisError.value = result.error;
-    localPresentCacheKeys.value = new Set(result.present_keys ?? []);
+    const presentKeys = result.present_keys ?? [];
+    localPresentCacheKeys.value = new Set(presentKeys);
+    await loadLocalCacheContent(host, presentKeys, requestSeq);
   } catch (error) {
     if (requestSeq !== localRequestSeq) return;
     linuxDisks.value = [];
     localPresentCacheKeys.value = new Set();
+    localCacheContentEntries.value = new Map();
     localError.value = t('diskCacheCleanup.errors.localHttp', {
       reason: formatError(error),
     });
@@ -331,6 +395,7 @@ async function fetchLinuxLocalRegion() {
     if (!nextServerIp) {
       linuxDisks.value = [];
       localPresentCacheKeys.value = new Set();
+      localCacheContentEntries.value = new Map();
       return;
     }
 
@@ -374,11 +439,14 @@ async function fetchWindowsLocalRegion() {
 
     localRedisAvailable.value = result.redis_available;
     localRedisError.value = result.error;
-    localPresentCacheKeys.value = new Set(result.present_keys ?? []);
+    const presentKeys = result.present_keys ?? [];
+    localPresentCacheKeys.value = new Set(presentKeys);
+    await loadLocalCacheContent(host, presentKeys, requestSeq);
   } catch (error) {
     if (requestSeq !== localRequestSeq) return;
     windowsDisks.value = [];
     localPresentCacheKeys.value = new Set();
+    localCacheContentEntries.value = new Map();
     localError.value = t('diskCacheCleanup.errors.localHttp', {
       reason: formatError(error),
     });
@@ -417,11 +485,14 @@ async function fetchIpsanRegion() {
 
     ipsanRedisAvailable.value = result.redis_available;
     ipsanRedisError.value = result.error;
-    ipsanPresentCacheKeys.value = new Set(result.present_keys ?? []);
+    const presentKeys = result.present_keys ?? [];
+    ipsanPresentCacheKeys.value = new Set(presentKeys);
+    await loadIpsanCacheContent(host, presentKeys, requestSeq);
   } catch (error) {
     if (requestSeq !== ipsanRequestSeq) return;
     ipsans.value = [];
     ipsanPresentCacheKeys.value = new Set();
+    ipsanCacheContentEntries.value = new Map();
     ipsanError.value = t('diskCacheCleanup.errors.ipsanHttp', {
       reason: formatError(error),
     });
@@ -467,6 +538,7 @@ async function handleLinuxServerChange(serverIp: string) {
   if (!serverIp) {
     linuxDisks.value = [];
     localPresentCacheKeys.value = new Set();
+    localCacheContentEntries.value = new Map();
     return;
   }
 
@@ -1084,6 +1156,27 @@ onMounted(async () => {
                               <div class="mt-1 text-sm font-semibold text-slate-800">{{ disk.storageType }}</div>
                             </div>
                           </div>
+
+                          <div
+                            v-if="localPresentCacheKeys.has(linuxDiskCacheKey(disk.storageId))"
+                            class="rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-3"
+                          >
+                            <div class="flex items-center justify-between gap-3">
+                              <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                                {{ t('diskCacheCleanup.cache.content') }}
+                              </div>
+                              <span class="inline-flex items-center rounded-full border border-indigo-200 bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-indigo-700">
+                                {{ cacheValueType(localCacheContentEntry(linuxDiskCacheKey(disk.storageId))) }}
+                              </span>
+                            </div>
+                            <pre class="mt-2 whitespace-pre-wrap break-all font-mono text-xs leading-5 text-slate-700">{{ cachePreviewText(localCacheContentEntry(linuxDiskCacheKey(disk.storageId))) }}</pre>
+                            <p
+                              v-if="localCacheContentEntry(linuxDiskCacheKey(disk.storageId))?.truncated"
+                              class="mt-2 text-[11px] text-slate-400"
+                            >
+                              {{ t('diskCacheCleanup.cache.truncated') }}
+                            </p>
+                          </div>
                         </div>
 
                         <div class="rounded-2xl border border-slate-200 bg-white px-4 py-4">
@@ -1191,12 +1284,28 @@ onMounted(async () => {
                         >
                           {{ t('diskCacheCleanup.cache.unavailable') }}
                         </span>
-                        <span
+                        <div
                           v-else-if="localPresentCacheKeys.has(windowsPartitionCacheKey(partition.partitionGUID))"
-                          class="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700"
+                          class="space-y-2"
                         >
-                          {{ t('diskCacheCleanup.cache.present') }}
-                        </span>
+                          <span
+                            class="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700"
+                          >
+                            {{ t('diskCacheCleanup.cache.present') }}
+                          </span>
+                          <div class="max-w-[280px] rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2">
+                            <div class="text-[10px] font-semibold uppercase tracking-[0.12em] text-indigo-700">
+                              {{ cacheValueType(localCacheContentEntry(windowsPartitionCacheKey(partition.partitionGUID))) }}
+                            </div>
+                            <pre class="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-slate-700">{{ cachePreviewText(localCacheContentEntry(windowsPartitionCacheKey(partition.partitionGUID))) }}</pre>
+                            <p
+                              v-if="localCacheContentEntry(windowsPartitionCacheKey(partition.partitionGUID))?.truncated"
+                              class="mt-1 text-[10px] text-slate-400"
+                            >
+                              {{ t('diskCacheCleanup.cache.truncated') }}
+                            </p>
+                          </div>
+                        </div>
                         <span v-else class="text-sm text-slate-400">
                           {{ t('diskCacheCleanup.cache.absent') }}
                         </span>
@@ -1371,12 +1480,28 @@ onMounted(async () => {
                     >
                       {{ t('diskCacheCleanup.cache.unavailable') }}
                     </span>
-                    <span
+                    <div
                       v-else-if="ipsanPresentCacheKeys.has(ipsanCacheKey(item.IPSANId))"
-                      class="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700"
+                      class="space-y-2"
                     >
-                      {{ t('diskCacheCleanup.cache.present') }}
-                    </span>
+                      <span
+                        class="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700"
+                      >
+                        {{ t('diskCacheCleanup.cache.present') }}
+                      </span>
+                      <div class="max-w-[280px] rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2">
+                        <div class="text-[10px] font-semibold uppercase tracking-[0.12em] text-indigo-700">
+                          {{ cacheValueType(ipsanCacheContentEntry(ipsanCacheKey(item.IPSANId))) }}
+                        </div>
+                        <pre class="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-slate-700">{{ cachePreviewText(ipsanCacheContentEntry(ipsanCacheKey(item.IPSANId))) }}</pre>
+                        <p
+                          v-if="ipsanCacheContentEntry(ipsanCacheKey(item.IPSANId))?.truncated"
+                          class="mt-1 text-[10px] text-slate-400"
+                        >
+                          {{ t('diskCacheCleanup.cache.truncated') }}
+                        </p>
+                      </div>
+                    </div>
                     <span v-else class="text-sm text-slate-400">
                       {{ t('diskCacheCleanup.cache.absent') }}
                     </span>

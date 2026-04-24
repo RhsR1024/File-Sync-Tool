@@ -14,10 +14,12 @@ import {
   ChevronDown,
   ChevronUp,
   ExternalLink,
+  RefreshCw,
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import QRCode from 'qrcode';
+import { LAN_SHARE_STATUS_REFRESH_INTERVAL_MS } from '../lib/lanShareStatus';
 import {
   screenShareListMonitors,
   screenShareListInterfaces,
@@ -60,6 +62,7 @@ const setQrCanvas = (url: string, el: unknown) => {
   qrCanvases.value[url] = (el as HTMLCanvasElement | null) ?? null;
 };
 const errorMsg = ref('');
+const isRefreshingStatus = ref(false);
 
 const status = ref<ScreenShareStatus>({
   is_active: false,
@@ -214,6 +217,7 @@ async function startShare() {
     isActive.value = true;
     showConnectionDetails.value = false;
     showAllConnIps.value = false;
+    await refreshStatus(true);
     await saveSettings();
   } catch (error) {
     errorMsg.value = t('tools.screenShare.errStartFailed', { error: String(error) });
@@ -300,6 +304,56 @@ watch(serverUrl, () => {
 
 let unlistenStatus: UnlistenFn | null = null;
 let unlistenLog: UnlistenFn | null = null;
+let statusRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+function applyStatus(payload: ScreenShareStatus) {
+  if (payload.is_active && payload.uptime_secs < lastUptimeUpdate && lastUptimeUpdate - payload.uptime_secs > 1) {
+    return;
+  }
+  if (payload.is_active) {
+    lastUptimeUpdate = payload.uptime_secs;
+  }
+  status.value = payload;
+  if (payload.is_active && !isActive.value) {
+    isActive.value = true;
+    serverUrl.value = payload.server_url;
+  }
+  if (!payload.is_active) {
+    isActive.value = false;
+    serverUrl.value = '';
+    showConnectionDetails.value = false;
+    showAllConnIps.value = false;
+    lastUptimeUpdate = 0;
+  }
+}
+
+async function refreshStatus(silent = false) {
+  if (!silent) {
+    isRefreshingStatus.value = true;
+  }
+  try {
+    applyStatus(await screenShareGetStatus());
+  } catch (error) {
+    if (!silent) {
+      errorMsg.value = String(error);
+    }
+  } finally {
+    if (!silent) {
+      isRefreshingStatus.value = false;
+    }
+  }
+}
+
+function startStatusPolling() {
+  if (statusRefreshTimer) {
+    clearInterval(statusRefreshTimer);
+  }
+  statusRefreshTimer = setInterval(() => {
+    if (isActive.value) {
+      void refreshStatus(true);
+    }
+  }, LAN_SHARE_STATUS_REFRESH_INTERVAL_MS);
+}
 
 onMounted(async () => {
   await loadSettings();
@@ -307,12 +361,7 @@ onMounted(async () => {
   await loadInterfaces();
 
   try {
-    const currentStatus = await screenShareGetStatus();
-    if (currentStatus.is_active) {
-      isActive.value = true;
-      serverUrl.value = currentStatus.server_url;
-      status.value = currentStatus;
-    }
+    await refreshStatus(true);
   } catch {
     /* Ignore status probe failures during page bootstrap. */
   }
@@ -322,33 +371,22 @@ onMounted(async () => {
   }
 
   unlistenStatus = await listen<ScreenShareStatus>('screen-share-status', (event) => {
-    const payload = event.payload;
-    if (payload.is_active && payload.uptime_secs < lastUptimeUpdate && lastUptimeUpdate - payload.uptime_secs > 1) {
-      return;
-    }
-    if (payload.is_active) {
-      lastUptimeUpdate = payload.uptime_secs;
-    }
-    status.value = payload;
-    if (payload.is_active && !isActive.value) {
-      isActive.value = true;
-      serverUrl.value = payload.server_url;
-    }
-    if (!payload.is_active) {
-      showConnectionDetails.value = false;
-      showAllConnIps.value = false;
-      lastUptimeUpdate = 0;
-    }
+    applyStatus(event.payload);
   });
 
   unlistenLog = await listen<{ level: string; message: string }>('screen-share-log', (event) => {
     addLog(event.payload.level, event.payload.message);
   });
+  startStatusPolling();
 });
 
 onUnmounted(() => {
   unlistenStatus?.();
   unlistenLog?.();
+  if (statusRefreshTimer) {
+    clearInterval(statusRefreshTimer);
+    statusRefreshTimer = null;
+  }
 });
 </script>
 
@@ -662,6 +700,16 @@ onUnmounted(() => {
                   <h3 class="text-sm font-semibold text-slate-900">{{ t('tools.screenShare.connectedIpList') }}</h3>
                   <p class="text-xs text-slate-500">{{ t('tools.screenShare.connectionCount') }}: {{ connectionCount }}</p>
                 </div>
+                <button
+                  type="button"
+                  class="ss-detail-button"
+                  :disabled="isRefreshingStatus"
+                  :title="t('tools.screenShare.refreshStatus')"
+                  @click="refreshStatus()"
+                >
+                  <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isRefreshingStatus }" />
+                  {{ t('tools.screenShare.refreshStatus') }}
+                </button>
               </div>
               <div v-if="connectedIps.length > 0" class="space-y-2">
                 <div
@@ -893,5 +941,10 @@ onUnmounted(() => {
   border-color: rgb(196 181 253);
   background: rgb(245 243 255);
   color: rgb(109 40 217);
+}
+
+.ss-detail-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 </style>

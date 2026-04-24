@@ -203,8 +203,18 @@ pub fn show_image_preview<R: tauri::Runtime>(
     };
 
     let desired_size = desired_image_preview_size(item);
-    show_preview_window(app, settings, PreviewKind::Image, desired_size, &payload)?;
     cache_image_preview_payload(payload);
+    if let Err(error) = show_preview_window(
+        app,
+        settings,
+        PreviewKind::Image,
+        desired_size,
+        &current_image_preview_payload()
+            .ok_or_else(|| "clipboard image preview payload missing".to_string())?,
+    ) {
+        clear_cached_preview_payloads();
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -246,8 +256,18 @@ pub fn show_text_preview<R: tauri::Runtime>(
         height: DEFAULT_TEXT_PREVIEW_HEIGHT,
     };
 
-    show_preview_window(app, settings, PreviewKind::Text, desired_size, &payload)?;
     cache_text_preview_payload(payload);
+    if let Err(error) = show_preview_window(
+        app,
+        settings,
+        PreviewKind::Text,
+        desired_size,
+        &current_text_preview_payload()
+            .ok_or_else(|| "clipboard text preview payload missing".to_string())?,
+    ) {
+        clear_cached_preview_payloads();
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -454,6 +474,11 @@ mod tests {
         }
     }
 
+    fn preview_cache_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn calculate_preview_placement_prefers_requested_right_side_when_space_exists() {
         let placement = calculate_preview_placement(
@@ -522,6 +547,9 @@ mod tests {
 
     #[test]
     fn cached_preview_payloads_can_be_retrieved_after_the_latest_update() {
+        let _guard = preview_cache_test_lock()
+            .lock()
+            .expect("preview cache test lock poisoned");
         clear_cached_preview_payloads();
 
         cache_image_preview_payload(ImagePreviewPayload {
@@ -559,6 +587,9 @@ mod tests {
 
     #[test]
     fn clearing_cached_preview_payloads_drops_both_preview_kinds() {
+        let _guard = preview_cache_test_lock()
+            .lock()
+            .expect("preview cache test lock poisoned");
         cache_image_preview_payload(ImagePreviewPayload {
             id: 21,
             image_path: "C:/preview.png".into(),

@@ -36,6 +36,7 @@ const searchInput = ref<{ focus: () => void } | null>(null);
 const previewDelayMs = ref(500);
 const clearDialogOpen = ref(false);
 const panelLocked = ref(false);
+const PANEL_WINDOW_CLASS = 'clipboard-panel-window';
 const filters: ClipboardFilter[] = ['all', 'text', 'image', 'file', 'favorite'];
 
 const selectedId = computed<number | null>(
@@ -330,6 +331,8 @@ const listKey = computed(
 );
 
 onMounted(async () => {
+  document.documentElement.classList.add(PANEL_WINDOW_CLASS);
+  document.body.classList.add(PANEL_WINDOW_CLASS);
   await refreshPreviewSettings();
   clipboardApi
     .isPanelPinned()
@@ -356,6 +359,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  document.documentElement.classList.remove(PANEL_WINDOW_CLASS);
+  document.body.classList.remove(PANEL_WINDOW_CLASS);
   preview.hideNow();
   unlistenShown?.();
   unlistenStore?.();
@@ -363,8 +368,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex h-screen w-screen overflow-hidden bg-slate-200 p-px">
-    <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[15px] bg-white">
+  <div class="clipboard-panel-shell flex h-screen w-screen flex-col overflow-hidden rounded-[16px] border border-slate-200 bg-white">
       <header
         class="flex select-none items-center justify-between px-3 py-2.5"
         :data-tauri-drag-region="CLIPBOARD_PANEL_USE_NATIVE_DRAG_REGION ? '' : undefined"
@@ -576,7 +580,6 @@ onBeforeUnmount(() => {
           />
         </div>
       </div>
-    </div>
     </div>
 
     <div

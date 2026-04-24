@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +29,9 @@ pub mod web_assets;
 // ─── Public Data Types ──────────────────────────────────────
 
 const TOOL_NAME: &str = "文件共享";
+
+const VISITOR_IP_TTL: Duration = Duration::from_secs(45);
+type VisitorIpMap = HashMap<String, Instant>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedDir {
@@ -87,7 +90,7 @@ struct FileShareRuntime {
 pub struct FileShareHandle {
     active: Arc<AtomicBool>,
     runtime: Mutex<Option<FileShareRuntime>>,
-    visitor_ips: Arc<Mutex<HashSet<String>>>,
+    visitor_ips: Arc<Mutex<VisitorIpMap>>,
 }
 
 impl FileShareHandle {
@@ -95,7 +98,7 @@ impl FileShareHandle {
         Self {
             active: Arc::new(AtomicBool::new(false)),
             runtime: Mutex::new(None),
-            visitor_ips: Arc::new(Mutex::new(HashSet::new())),
+            visitor_ips: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -125,7 +128,7 @@ struct HttpState {
     sessions: Mutex<auth::SessionStore>,
     ip_rules: Vec<auth::IpRule>,
     upload_body_limit_bytes: usize,
-    visitor_ips: Arc<Mutex<HashSet<String>>>,
+    visitor_ips: Arc<Mutex<VisitorIpMap>>,
 }
 
 #[derive(Debug, Clone)]
@@ -584,7 +587,7 @@ async fn status_reporter(
     all_urls: Vec<String>,
     shared_dirs: Vec<SharedDir>,
     start_time: Instant,
-    visitor_ips: Arc<Mutex<HashSet<String>>>,
+    visitor_ips: Arc<Mutex<VisitorIpMap>>,
 ) {
     while active.load(Ordering::Relaxed) {
         let connected_ips = snapshot_connected_ips(&visitor_ips);
@@ -1004,16 +1007,33 @@ async fn read_upload_request(
     })
 }
 
-fn remember_connected_ip(visitor_ips: &Arc<Mutex<HashSet<String>>>, ip: impl Into<String>) {
+fn remember_connected_ip(visitor_ips: &Arc<Mutex<VisitorIpMap>>, ip: impl Into<String>) {
+    remember_connected_ip_at(visitor_ips, ip, Instant::now());
+}
+
+fn remember_connected_ip_at(
+    visitor_ips: &Arc<Mutex<VisitorIpMap>>,
+    ip: impl Into<String>,
+    seen_at: Instant,
+) {
     if let Ok(mut ips) = visitor_ips.lock() {
-        ips.insert(ip.into());
+        ips.insert(ip.into(), seen_at);
     }
 }
 
-fn snapshot_connected_ips(visitor_ips: &Arc<Mutex<HashSet<String>>>) -> Vec<String> {
+fn snapshot_connected_ips(visitor_ips: &Arc<Mutex<VisitorIpMap>>) -> Vec<String> {
+    snapshot_connected_ips_at(visitor_ips, Instant::now())
+}
+
+fn snapshot_connected_ips_at(visitor_ips: &Arc<Mutex<VisitorIpMap>>, now: Instant) -> Vec<String> {
     let mut ips: Vec<String> = visitor_ips
         .lock()
-        .map(|set| set.iter().cloned().collect())
+        .map(|mut map| {
+            map.retain(|_, seen_at| {
+                now.checked_duration_since(*seen_at).unwrap_or_default() <= VISITOR_IP_TTL
+            });
+            map.keys().cloned().collect()
+        })
         .unwrap_or_default();
     ips.sort_unstable();
     ips
@@ -1119,12 +1139,12 @@ fn get_lan_ips() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        hash_password, legacy_hash_password, remember_connected_ip, snapshot_connected_ips,
-        verify_password_hash, FileShareHandle, FileShareRuntime, FileShareRuntimeSnapshot,
-        SharedDir,
+        hash_password, legacy_hash_password, remember_connected_ip, remember_connected_ip_at,
+        snapshot_connected_ips, snapshot_connected_ips_at, verify_password_hash, FileShareHandle,
+        FileShareRuntime, FileShareRuntimeSnapshot, SharedDir, VISITOR_IP_TTL,
     };
     use crate::fileshare::ops::{validate_zip_source_with_limits, ZipSourceStats};
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -1201,7 +1221,7 @@ mod tests {
 
     #[test]
     fn remember_connected_ip_tracks_unique_addresses() {
-        let visitor_ips = Arc::new(Mutex::new(HashSet::new()));
+        let visitor_ips = Arc::new(Mutex::new(HashMap::new()));
 
         remember_connected_ip(&visitor_ips, "192.168.0.8");
         remember_connected_ip(&visitor_ips, "192.168.0.8");
@@ -1210,6 +1230,24 @@ mod tests {
         assert_eq!(
             snapshot_connected_ips(&visitor_ips),
             vec!["192.168.0.12".to_string(), "192.168.0.8".to_string()]
+        );
+    }
+
+    #[test]
+    fn snapshot_connected_ips_prunes_inactive_addresses() {
+        let now = Instant::now();
+        let visitor_ips = Arc::new(Mutex::new(HashMap::new()));
+
+        remember_connected_ip_at(&visitor_ips, "192.168.0.8", now - VISITOR_IP_TTL / 2);
+        remember_connected_ip_at(&visitor_ips, "192.168.0.12", now - VISITOR_IP_TTL * 2);
+
+        assert_eq!(
+            snapshot_connected_ips_at(&visitor_ips, now),
+            vec!["192.168.0.8".to_string()]
+        );
+        assert_eq!(
+            snapshot_connected_ips_at(&visitor_ips, now + VISITOR_IP_TTL * 2),
+            Vec::<String>::new()
         );
     }
 

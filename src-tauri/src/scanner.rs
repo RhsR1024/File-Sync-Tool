@@ -16,13 +16,17 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration as StdDuration, Instant, SystemTime};
+use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 use tokio::fs;
+
+const COPY_RETRY_WINDOW: StdDuration = StdDuration::from_secs(10 * 60);
+const COPY_RETRY_INITIAL_DELAY: StdDuration = StdDuration::from_millis(500);
+const COPY_RETRY_MAX_DELAY: StdDuration = StdDuration::from_secs(5);
 
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct ScanResult {
@@ -170,6 +174,14 @@ fn task_record_ignored_in(
             && normalize_path_for_match(&record.source_path) == normalized_source_path
             && normalize_path_for_match(&record.local_path) == normalized_local_path
     })
+}
+
+fn should_recopy_size_mismatch(
+    _records: &[PersistedTaskRecord],
+    _folder: &str,
+    _local_path: &Path,
+) -> bool {
+    true
 }
 
 /// Compress `src` into a gzip file at `dst`.
@@ -480,10 +492,249 @@ fn emit_progress<R: tauri::Runtime>(
     );
 }
 
-// Helper function to copy file with chunking and interruption support
+#[derive(Debug, Clone, Copy)]
+struct CopyRetryPolicy {
+    retry_for: StdDuration,
+    initial_delay: StdDuration,
+    max_delay: StdDuration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CopySourceSnapshot {
+    source_path: String,
+    size: u64,
+    modified_millis: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PartialCopyMetadata {
+    source_path: String,
+    source_size: u64,
+    source_modified_millis: Option<u64>,
+    target_path: String,
+}
+
+impl CopyRetryPolicy {
+    fn production() -> Self {
+        Self {
+            retry_for: COPY_RETRY_WINDOW,
+            initial_delay: COPY_RETRY_INITIAL_DELAY,
+            max_delay: COPY_RETRY_MAX_DELAY,
+        }
+    }
+}
+
+fn is_controlled_copy_stop(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("skipped by user") || lower.contains("cancelled by user")
+}
+
+fn is_retryable_copy_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("os error 64")
+        || lower.contains("specified network name is no longer available")
+        || lower.contains("指定的网络名不再可用")
+        || lower.contains("network")
+        || lower.contains("broken pipe")
+        || lower.contains("timed out")
+        || lower.contains("unexpected eof")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("source file changed during copy")
+        || lower.contains("copied file size mismatch")
+}
+
+fn next_retry_delay(current: StdDuration, max_delay: StdDuration) -> StdDuration {
+    std::cmp::min(current.saturating_mul(2), max_delay)
+}
+
+fn system_time_millis(value: SystemTime) -> Option<u64> {
+    value
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+fn read_copy_source_snapshot(source: &Path) -> Result<CopySourceSnapshot, String> {
+    let metadata = std::fs::metadata(source).map_err(|error| error.to_string())?;
+    Ok(CopySourceSnapshot {
+        source_path: normalize_path_for_match(&source.to_string_lossy()),
+        size: metadata.len(),
+        modified_millis: metadata.modified().ok().and_then(system_time_millis),
+    })
+}
+
+fn copy_source_snapshots_match(left: &CopySourceSnapshot, right: &CopySourceSnapshot) -> bool {
+    left.source_path == right.source_path
+        && left.size == right.size
+        && match (left.modified_millis, right.modified_millis) {
+            (Some(left), Some(right)) => left == right,
+            _ => true,
+        }
+}
+
+fn partial_copy_path(target: &Path) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "copy".to_string());
+    target.with_file_name(format!("{}.part", file_name))
+}
+
+fn partial_copy_metadata_path(partial: &Path) -> PathBuf {
+    let file_name = partial
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "copy.part".to_string());
+    partial.with_file_name(format!("{}.meta", file_name))
+}
+
+fn replacement_backup_path(target: &Path) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "copy".to_string());
+    target.with_file_name(format!("{}.replace-backup", file_name))
+}
+
+fn partial_metadata_matches(
+    metadata: &PartialCopyMetadata,
+    source: &CopySourceSnapshot,
+    target: &Path,
+) -> bool {
+    metadata.source_path == source.source_path
+        && metadata.source_size == source.size
+        && metadata.source_modified_millis == source.modified_millis
+        && metadata.target_path == normalize_path_for_match(&target.to_string_lossy())
+}
+
+fn write_partial_copy_metadata(
+    partial: &Path,
+    target: &Path,
+    source: &CopySourceSnapshot,
+) -> Result<(), String> {
+    let metadata = PartialCopyMetadata {
+        source_path: source.source_path.clone(),
+        source_size: source.size,
+        source_modified_millis: source.modified_millis,
+        target_path: normalize_path_for_match(&target.to_string_lossy()),
+    };
+    let encoded = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
+    std::fs::write(partial_copy_metadata_path(partial), encoded).map_err(|error| error.to_string())
+}
+
+fn remove_partial_copy_state(partial: &Path) -> Result<(), String> {
+    match std::fs::remove_file(partial) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+
+    let metadata_path = partial_copy_metadata_path(partial);
+    match std::fs::remove_file(metadata_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+
+    Ok(())
+}
+
+fn prepare_partial_copy(
+    source: &CopySourceSnapshot,
+    target: &Path,
+    partial: &Path,
+) -> Result<u64, String> {
+    if partial.exists() && !partial.is_file() {
+        return Err(format!(
+            "Partial copy path is not a file and cannot be resumed: {}",
+            partial.display()
+        ));
+    }
+
+    let mut resume_offset = 0;
+    if partial.exists() {
+        let metadata_path = partial_copy_metadata_path(partial);
+        let metadata = std::fs::read(&metadata_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PartialCopyMetadata>(&bytes).ok());
+        let partial_size = std::fs::metadata(partial)
+            .map_err(|error| error.to_string())?
+            .len();
+
+        if metadata
+            .as_ref()
+            .is_some_and(|metadata| partial_metadata_matches(metadata, source, target))
+            && partial_size <= source.size
+        {
+            resume_offset = partial_size;
+        } else {
+            remove_partial_copy_state(partial)?;
+        }
+    }
+
+    write_partial_copy_metadata(partial, target, source)?;
+    Ok(resume_offset)
+}
+
+fn restore_or_remove_replacement_backup(target: &Path, backup: &Path) -> Result<(), String> {
+    if !backup.exists() {
+        return Ok(());
+    }
+
+    if !backup.is_file() {
+        return Err(format!(
+            "Replacement backup path is not a file: {}",
+            backup.display()
+        ));
+    }
+
+    if target.exists() {
+        std::fs::remove_file(backup).map_err(|error| error.to_string())
+    } else {
+        std::fs::rename(backup, target).map_err(|error| error.to_string())
+    }
+}
+
+fn replace_target_with_completed_partial(partial: &Path, target: &Path) -> Result<(), String> {
+    let backup = replacement_backup_path(target);
+    restore_or_remove_replacement_backup(target, &backup)?;
+
+    if target.exists() {
+        if !target.is_file() {
+            return Err(format!(
+                "Target path is not a file and cannot be overwritten: {}",
+                target.display()
+            ));
+        }
+
+        std::fs::rename(target, &backup).map_err(|error| error.to_string())?;
+        if let Err(error) = std::fs::rename(partial, target) {
+            let restore_result = std::fs::rename(&backup, target);
+            return Err(match restore_result {
+                Ok(()) => error.to_string(),
+                Err(restore_error) => format!(
+                    "{}; failed to restore previous target from backup: {}",
+                    error, restore_error
+                ),
+            });
+        }
+        let _ = std::fs::remove_file(backup);
+    } else {
+        std::fs::rename(partial, target).map_err(|error| error.to_string())?;
+    }
+
+    let _ = std::fs::remove_file(partial_copy_metadata_path(partial));
+    Ok(())
+}
+
+// Helper function to copy file with chunking and interruption support.
+// The destination is a managed partial file; the final target is replaced only
+// after the partial reaches the expected size and the source metadata is stable.
 fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
     from: P,
     to: Q,
+    resume_offset: u64,
     should_cancel: &Arc<AtomicBool>,
     should_skip: &Arc<AtomicBool>,
     is_paused: &Arc<AtomicBool>,
@@ -491,7 +742,21 @@ fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
     on_progress: &mut dyn FnMut(u64), // bytes copied delta
 ) -> Result<u64, String> {
     let mut file_in = std::fs::File::open(from).map_err(|e| e.to_string())?;
-    let mut file_out = std::fs::File::create(to).map_err(|e| e.to_string())?;
+    if resume_offset > 0 {
+        file_in
+            .seek(SeekFrom::Start(resume_offset))
+            .map_err(|e| e.to_string())?;
+    }
+
+    let mut file_out = if resume_offset > 0 {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(to)
+            .map_err(|e| e.to_string())?
+    } else {
+        std::fs::File::create(to).map_err(|e| e.to_string())?
+    };
 
     let mut buffer = vec![0u8; buffer_size];
     let mut total_copied = 0;
@@ -530,17 +795,8 @@ fn copy_file_chunked<P: AsRef<Path>, Q: AsRef<Path>>(
         on_progress(n as u64);
     }
 
+    file_out.flush().map_err(|e| e.to_string())?;
     Ok(total_copied)
-}
-
-fn build_temp_copy_path(target: &Path) -> PathBuf {
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("copy-target");
-
-    target.with_file_name(format!(".{}.{}.part", file_name, uuid::Uuid::new_v4()))
 }
 
 fn copy_file_with_overwrite_mode<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -553,9 +809,78 @@ fn copy_file_with_overwrite_mode<P: AsRef<Path>, Q: AsRef<Path>>(
     buffer_size: usize,
     on_progress: &mut dyn FnMut(u64),
 ) -> Result<u64, String> {
-    let target = to.as_ref();
+    copy_file_with_overwrite_mode_and_policy(
+        from,
+        to,
+        overwrite_existing,
+        should_cancel,
+        should_skip,
+        is_paused,
+        buffer_size,
+        on_progress,
+        CopyRetryPolicy::production(),
+    )
+}
 
-    if overwrite_existing && target.exists() {
+fn copy_file_with_overwrite_mode_and_policy<P: AsRef<Path>, Q: AsRef<Path>>(
+    from: P,
+    to: Q,
+    overwrite_existing: bool,
+    should_cancel: &Arc<AtomicBool>,
+    should_skip: &Arc<AtomicBool>,
+    is_paused: &Arc<AtomicBool>,
+    buffer_size: usize,
+    on_progress: &mut dyn FnMut(u64),
+    retry_policy: CopyRetryPolicy,
+) -> Result<u64, String> {
+    let started = Instant::now();
+    let mut delay = retry_policy.initial_delay;
+    let last_error = loop {
+        match copy_file_with_overwrite_mode_once(
+            from.as_ref(),
+            to.as_ref(),
+            overwrite_existing,
+            should_cancel,
+            should_skip,
+            is_paused,
+            buffer_size,
+            on_progress,
+        ) {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if is_controlled_copy_stop(&error) => return Err(error),
+            Err(error) if !is_retryable_copy_error(&error) => return Err(error),
+            Err(error) => {
+                if started.elapsed() >= retry_policy.retry_for {
+                    break error;
+                }
+                std::thread::sleep(delay);
+                delay = next_retry_delay(delay, retry_policy.max_delay);
+            }
+        }
+    };
+
+    Err(format!(
+        "{}; retry window exhausted after {}s",
+        last_error,
+        retry_policy.retry_for.as_secs()
+    ))
+}
+
+fn copy_file_with_overwrite_mode_once(
+    from: &Path,
+    to: &Path,
+    overwrite_existing: bool,
+    should_cancel: &Arc<AtomicBool>,
+    should_skip: &Arc<AtomicBool>,
+    is_paused: &Arc<AtomicBool>,
+    buffer_size: usize,
+    on_progress: &mut dyn FnMut(u64),
+) -> Result<u64, String> {
+    let target: &Path = to;
+    let source_snapshot = read_copy_source_snapshot(from)?;
+    let partial = partial_copy_path(target);
+
+    if target.exists() {
         if !target.is_file() {
             return Err(format!(
                 "Target path is not a file and cannot be overwritten: {}",
@@ -563,45 +888,55 @@ fn copy_file_with_overwrite_mode<P: AsRef<Path>, Q: AsRef<Path>>(
             ));
         }
 
-        let temp_target = build_temp_copy_path(target);
-        let copy_result = copy_file_chunked(
-            from,
-            &temp_target,
-            should_cancel,
-            should_skip,
-            is_paused,
-            buffer_size,
-            on_progress,
-        );
-
-        match copy_result {
-            Ok(bytes_copied) => {
-                if let Err(error) = std::fs::remove_file(target) {
-                    let _ = std::fs::remove_file(&temp_target);
-                    return Err(error.to_string());
-                }
-                if let Err(error) = std::fs::rename(&temp_target, target) {
-                    let _ = std::fs::remove_file(&temp_target);
-                    return Err(error.to_string());
-                }
-                Ok(bytes_copied)
-            }
-            Err(error) => {
-                let _ = std::fs::remove_file(&temp_target);
-                Err(error)
-            }
+        let target_size = std::fs::metadata(target)
+            .map_err(|error| error.to_string())?
+            .len();
+        if target_size == source_snapshot.size && !overwrite_existing {
+            remove_partial_copy_state(&partial)?;
+            return Ok(0);
         }
-    } else {
-        copy_file_chunked(
-            from,
-            target,
-            should_cancel,
-            should_skip,
-            is_paused,
-            buffer_size,
-            on_progress,
-        )
     }
+
+    let resume_offset = prepare_partial_copy(&source_snapshot, target, &partial)?;
+
+    let bytes_copied = copy_file_chunked(
+        from,
+        &partial,
+        resume_offset,
+        should_cancel,
+        should_skip,
+        is_paused,
+        buffer_size,
+        on_progress,
+    )?;
+
+    let after_copy_source = read_copy_source_snapshot(from)?;
+    if !copy_source_snapshots_match(&source_snapshot, &after_copy_source) {
+        return Err("Source file changed during copy; will retry".to_string());
+    }
+
+    let partial_size = std::fs::metadata(&partial)
+        .map_err(|error| error.to_string())?
+        .len();
+    if partial_size != source_snapshot.size {
+        return Err(format!(
+            "Copied file size mismatch: partial {} bytes, source {} bytes",
+            partial_size, source_snapshot.size
+        ));
+    }
+
+    replace_target_with_completed_partial(&partial, target)?;
+    let target_size = std::fs::metadata(target)
+        .map_err(|error| error.to_string())?
+        .len();
+    if target_size != source_snapshot.size {
+        return Err(format!(
+            "Copied file size mismatch: target {} bytes, source {} bytes",
+            target_size, source_snapshot.size
+        ));
+    }
+
+    Ok(bytes_copied)
 }
 
 // Extracted copy logic to reuse across different matching rules
@@ -761,9 +1096,8 @@ async fn perform_copy<R: tauri::Runtime>(
     let folder_name_clone = folder_name.clone();
     let source_path_clone = source_path.clone();
     let target_full_path_clone = target_full_path.clone();
-    let allow_size_mismatch_recopy =
-        !task_record_exists_in(cached_task_records, &folder_name, &target_full_path);
-
+    let recopy_size_mismatches =
+        should_recopy_size_mismatch(cached_task_records, &folder_name, &target_full_path);
     // Clone filter parameters for closure
     let extensions = filter_extensions.to_vec();
     let includes = filter_includes.to_vec();
@@ -929,7 +1263,7 @@ async fn perform_copy<R: tauri::Runtime>(
                                 match std::fs::metadata(&dst) {
                                     Ok(dst_meta) if dst_meta.is_file() => {
                                         if dst_meta.len() != file_size {
-                                            if allow_size_mismatch_recopy {
+                                            if recopy_size_mismatches {
                                                 force_overwrite_due_to_size_mismatch = true;
                                                 size_mismatch_recopy += 1;
                                                 emit_log(
@@ -1222,6 +1556,7 @@ async fn perform_copy<R: tauri::Runtime>(
         // Create target directory structure and Copy
         let mut copied_bytes_total = 0;
         let mut copied_files_list = Vec::new();
+        let mut copy_failures = Vec::new();
 
         for (src, _size, overwrite_this_file) in filtered_files {
             // Check skip before starting file
@@ -1361,14 +1696,36 @@ async fn perform_copy<R: tauri::Runtime>(
                             "Cancelled by user",
                         ));
                     } else {
-                        emit_log(
-                            &handle,
-                            format!("Failed to copy {}: {}", file_name_display, e),
-                            "error",
-                        );
+                        let failure = format!("Failed to copy {}: {}", file_name_display, e);
+                        emit_log(&handle, failure.clone(), "error");
+                        copy_failures.push(failure);
                     }
                 }
             }
+        }
+
+        if !copy_failures.is_empty() {
+            if !copied_files_list.is_empty() {
+                add_history_entry(
+                    &handle,
+                    HistoryEntry {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        timestamp: Local::now().to_rfc3339(),
+                        action_type: "COPY_FAILED".to_string(),
+                        description: format!("Copy failed for {}", folder_name_clone),
+                        folder_name: format!("{} (Failed)", folder_name_clone),
+                        source_path: source_path_clone.to_string_lossy().to_string(),
+                        target_path: target_full_path_clone.to_string_lossy().to_string(),
+                        copied_files_count: copied_files_list.len(),
+                        total_size: copied_bytes_total,
+                        files: copied_files_list.clone(),
+                    },
+                );
+            }
+            return Err(fs_extra::error::Error::new(
+                fs_extra::error::ErrorKind::Other,
+                &copy_failures.join("; "),
+            ));
         }
 
         // Done
@@ -1864,6 +2221,14 @@ async fn temporary_copy_file<R: tauri::Runtime>(
         return Err(message);
     }
 
+    // Get file metadata
+    let meta = std::fs::metadata(&source_path).map_err(|e| {
+        let message = format!("Cannot read file metadata: {}", e);
+        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
+        message
+    })?;
+    let file_size = meta.len();
+
     // Check if target file already exists
     if target_file.exists() {
         if !target_file.is_file() {
@@ -1874,7 +2239,21 @@ async fn temporary_copy_file<R: tauri::Runtime>(
             mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
             return Err(message);
         }
-        if overwrite_existing {
+        let target_size = std::fs::metadata(&target_file)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if target_size != file_size {
+            emit_log(
+                app_handle,
+                format!(
+                    "Detected incomplete local file, will resume copy: {} (local {} bytes, remote {} bytes)",
+                    target_file.display(),
+                    target_size,
+                    file_size
+                ),
+                "warn",
+            );
+        } else if overwrite_existing {
             emit_log(
                 app_handle,
                 format!(
@@ -1902,9 +2281,7 @@ async fn temporary_copy_file<R: tauri::Runtime>(
         }
     }
 
-    let target_existed_before = target_file.exists();
-
-    if target_existed_before && overwrite_existing {
+    if target_file.exists() && overwrite_existing {
         emit_log(
             app_handle,
             format!(
@@ -1914,14 +2291,6 @@ async fn temporary_copy_file<R: tauri::Runtime>(
             "warn",
         );
     }
-
-    // Get file metadata
-    let meta = std::fs::metadata(&source_path).map_err(|e| {
-        let message = format!("Cannot read file metadata: {}", e);
-        mark_copy_failed_for_handle(&task_manager, task_handle.as_ref(), &message);
-        message
-    })?;
-    let file_size = meta.len();
 
     // Stability check for recently modified files
     let recent_file_guard_secs = config.recent_file_guard_mins * 60;
@@ -2085,10 +2454,6 @@ async fn temporary_copy_file<R: tauri::Runtime>(
             Ok(())
         }
         Ok(Err(e)) => {
-            // Clean up partial file on failure when this was a brand-new target.
-            if !target_existed_before {
-                let _ = std::fs::remove_file(&target_file);
-            }
             if e.to_lowercase().contains("cancelled") || e.to_lowercase().contains("skipped") {
                 mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &e);
                 return Err(e);
@@ -2528,4 +2893,98 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::AtomicBool;
+    use tempfile::tempdir;
+
+    #[test]
+    fn copy_file_with_overwrite_mode_restarts_unknown_short_target() {
+        let dir = tempdir().expect("temp dir");
+        let source = dir.path().join("source.bin");
+        let target = dir.path().join("target.bin");
+        fs::write(&source, b"abcdefghij").expect("source file");
+        fs::write(&target, b"WXYZ").expect("unknown partial target");
+
+        let should_cancel = Arc::new(AtomicBool::new(false));
+        let should_skip = Arc::new(AtomicBool::new(false));
+        let is_paused = Arc::new(AtomicBool::new(false));
+        let mut progress = 0u64;
+
+        let copied = copy_file_with_overwrite_mode(
+            &source,
+            &target,
+            true,
+            &should_cancel,
+            &should_skip,
+            &is_paused,
+            4,
+            &mut |delta| progress += delta,
+        )
+        .expect("unknown partial target should be replaced safely");
+
+        assert_eq!(copied, 10);
+        assert_eq!(progress, 10);
+        assert_eq!(fs::read(&target).expect("target bytes"), b"abcdefghij");
+    }
+
+    #[test]
+    fn copy_file_with_overwrite_mode_resumes_managed_partial_file() {
+        let dir = tempdir().expect("temp dir");
+        let source = dir.path().join("source.bin");
+        let target = dir.path().join("target.bin");
+        let partial = partial_copy_path(&target);
+        fs::write(&source, b"abcdefghij").expect("source file");
+        fs::write(&partial, b"abcd").expect("managed partial target");
+        let snapshot = read_copy_source_snapshot(&source).expect("source snapshot");
+        write_partial_copy_metadata(&partial, &target, &snapshot).expect("partial metadata");
+
+        let should_cancel = Arc::new(AtomicBool::new(false));
+        let should_skip = Arc::new(AtomicBool::new(false));
+        let is_paused = Arc::new(AtomicBool::new(false));
+        let mut progress = 0u64;
+
+        let copied = copy_file_with_overwrite_mode(
+            &source,
+            &target,
+            true,
+            &should_cancel,
+            &should_skip,
+            &is_paused,
+            4,
+            &mut |delta| progress += delta,
+        )
+        .expect("managed partial target should resume");
+
+        assert_eq!(copied, 6);
+        assert_eq!(progress, 6);
+        assert_eq!(fs::read(&target).expect("target bytes"), b"abcdefghij");
+        assert!(!partial.exists());
+        assert!(!partial_copy_metadata_path(&partial).exists());
+    }
+
+    #[test]
+    fn existing_task_record_does_not_block_size_mismatch_recopy() {
+        let record = PersistedTaskRecord {
+            folder: "Release_01".to_string(),
+            source_path: "Z:/remote/Release_01".to_string(),
+            local_path: "D:/target/Release_01".to_string(),
+            ignored: false,
+        };
+
+        assert!(task_record_exists_in(
+            std::slice::from_ref(&record),
+            "Release_01",
+            Path::new("D:/target/Release_01")
+        ));
+        assert!(should_recopy_size_mismatch(
+            std::slice::from_ref(&record),
+            "Release_01",
+            Path::new("D:/target/Release_01")
+        ));
+    }
 }

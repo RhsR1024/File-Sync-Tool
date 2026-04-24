@@ -26,6 +26,7 @@ import {
   subscribe,
   type UrlState,
 } from './lib/url-state';
+import { FILE_SHARE_WEB_SESSION_HEARTBEAT_INTERVAL_MS } from '../lib/lanShareStatus';
 import {
   canPreviewEntry,
   shouldPromptForAccountSwitch,
@@ -83,6 +84,7 @@ const previewSrc = ref('');
 const renameTarget = ref<FileShareNode | null>(null);
 const deleteTarget = ref<FileShareNode | null>(null);
 let unsubscribeFromUrl: (() => void) | null = null;
+let sessionHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let unmounted = false;
 let latestViewIntentId = 0;
 let latestSessionRequestId = 0;
@@ -175,6 +177,24 @@ function invalidateViewLifecycle() {
   latestSessionRequestId += 1;
   latestTreeRequestId += 1;
   latestSearchRequestId += 1;
+}
+
+function startSessionHeartbeat() {
+  if (sessionHeartbeatTimer) {
+    clearInterval(sessionHeartbeatTimer);
+  }
+  sessionHeartbeatTimer = setInterval(() => {
+    if (unmounted || !session.value) {
+      return;
+    }
+    void (async () => {
+      try {
+        session.value = await fileShareApi.getSession();
+      } catch {
+        /* The next user action will surface auth or network failures. */
+      }
+    })();
+  }, FILE_SHARE_WEB_SESSION_HEARTBEAT_INTERVAL_MS);
 }
 
 function beginSessionRequest(intent: ViewIntent) {
@@ -1050,6 +1070,7 @@ async function submitDelete() {
 
 onMounted(() => {
   unmounted = false;
+  startSessionHeartbeat();
   const initialState = parseHash();
 
   void (async () => {
@@ -1081,6 +1102,10 @@ onUnmounted(() => {
   invalidateViewLifecycle();
   unsubscribeFromUrl?.();
   unsubscribeFromUrl = null;
+  if (sessionHeartbeatTimer) {
+    clearInterval(sessionHeartbeatTimer);
+    sessionHeartbeatTimer = null;
+  }
 });
 
 watchEffect(() => {

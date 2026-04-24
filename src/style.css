@@ -12,3 +12,20 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+html.clipboard-panel-window,
+body.clipboard-panel-window,
+body.clipboard-panel-window #app {
+  background: transparent;
+}

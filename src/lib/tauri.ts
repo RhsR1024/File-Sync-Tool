@@ -701,6 +701,19 @@ export interface CacheKeyCheckResult {
   error: string | null;
 }
 
+export interface CacheKeyContentEntry {
+  key: string;
+  value_type: string;
+  preview: string;
+  truncated: boolean;
+}
+
+export interface CacheKeyContentResult {
+  entries: CacheKeyContentEntry[];
+  redis_available: boolean;
+  error: string | null;
+}
+
 export interface CacheKeyDeleteResult {
   deleted_count: number;
   redis_available: boolean;
@@ -754,6 +767,16 @@ export async function diskCleanupCheckCacheKeys(
   keys: string[],
 ): Promise<CacheKeyCheckResult> {
   return await invoke<CacheKeyCheckResult>('disk_cleanup_check_cache_keys', {
+    host,
+    keys,
+  });
+}
+
+export async function diskCleanupGetCacheKeyContents(
+  host: string,
+  keys: string[],
+): Promise<CacheKeyContentResult> {
+  return await invoke<CacheKeyContentResult>('disk_cleanup_get_cache_key_contents', {
     host,
     keys,
   });

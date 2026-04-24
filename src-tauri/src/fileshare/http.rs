@@ -1717,7 +1717,7 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::extract::connect_info::ConnectInfo;
     use axum::http::{header, Request, StatusCode};
-    use std::collections::HashSet;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -1807,7 +1807,7 @@ mod tests {
             sessions: Mutex::new(auth::SessionStore::default()),
             ip_rules: Vec::new(),
             upload_body_limit_bytes,
-            visitor_ips: Arc::new(Mutex::new(HashSet::new())),
+            visitor_ips: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -1925,7 +1925,7 @@ mod tests {
             sessions: Mutex::new(auth::SessionStore::default()),
             ip_rules: parse_runtime_ip_rules(&runtime_config).expect("ip rules should parse"),
             upload_body_limit_bytes,
-            visitor_ips: Arc::new(Mutex::new(HashSet::new())),
+            visitor_ips: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -2154,7 +2154,10 @@ mod tests {
     async fn resolve_route_returns_canonical_directory_node() {
         let dir = TestDir::new("resolve-route");
         fs::create_dir_all(dir.path().join("Sub")).expect("nested directory should exist");
-        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+        let app = build_router(test_state_with_named_roots(
+            &[("UMS_TEMP", dir.path())],
+            1024,
+        ));
 
         let response = app
             .clone()
@@ -2186,7 +2189,10 @@ mod tests {
     #[tokio::test]
     async fn resolve_route_returns_not_found_for_missing_directory() {
         let dir = TestDir::new("resolve-route-missing");
-        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+        let app = build_router(test_state_with_named_roots(
+            &[("UMS_TEMP", dir.path())],
+            1024,
+        ));
 
         let response = app
             .oneshot(request_with_connect_info(
@@ -2204,7 +2210,10 @@ mod tests {
     #[tokio::test]
     async fn resolve_route_returns_home_for_missing_or_empty_path() {
         let dir = TestDir::new("resolve-route-home");
-        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+        let app = build_router(test_state_with_named_roots(
+            &[("UMS_TEMP", dir.path())],
+            1024,
+        ));
 
         for uri in ["/api/resolve", "/api/resolve?path="] {
             let response = app
@@ -2226,14 +2235,21 @@ mod tests {
             assert_eq!(status, StatusCode::OK, "{uri}");
             assert_eq!(payload["kind"].as_str(), Some("home"), "{uri}");
             assert!(payload["node_id"].is_null(), "{uri}");
-            assert_eq!(payload["canonical_segments"], serde_json::json!([]), "{uri}");
+            assert_eq!(
+                payload["canonical_segments"],
+                serde_json::json!([]),
+                "{uri}"
+            );
         }
     }
 
     #[tokio::test]
     async fn resolve_route_returns_share_root_for_root_only_path() {
         let dir = TestDir::new("resolve-route-root-only");
-        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+        let app = build_router(test_state_with_named_roots(
+            &[("UMS_TEMP", dir.path())],
+            1024,
+        ));
 
         let response = app
             .oneshot(request_with_connect_info(
@@ -2255,7 +2271,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["kind"].as_str(), Some("share_root"));
         assert!(payload["node_id"].as_str().is_some());
-        assert_eq!(payload["canonical_segments"], serde_json::json!(["UMS_TEMP"]));
+        assert_eq!(
+            payload["canonical_segments"],
+            serde_json::json!(["UMS_TEMP"])
+        );
     }
 
     #[tokio::test]
@@ -2288,7 +2307,10 @@ mod tests {
     async fn resolve_route_preserves_literal_percent_directory_name() {
         let dir = TestDir::new("resolve-route-percent");
         fs::create_dir_all(dir.path().join("%")).expect("percent directory should exist");
-        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+        let app = build_router(test_state_with_named_roots(
+            &[("UMS_TEMP", dir.path())],
+            1024,
+        ));
 
         let response = app
             .oneshot(request_with_connect_info(
@@ -2308,14 +2330,20 @@ mod tests {
             serde_json::from_slice(&body).expect("resolve response should be json");
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(payload["canonical_segments"], serde_json::json!(["UMS_TEMP", "%"]));
+        assert_eq!(
+            payload["canonical_segments"],
+            serde_json::json!(["UMS_TEMP", "%"])
+        );
     }
 
     #[tokio::test]
     async fn resolve_route_preserves_literal_plus_directory_name() {
         let dir = TestDir::new("resolve-route-plus");
         fs::create_dir_all(dir.path().join("+")).expect("plus directory should exist");
-        let app = build_router(test_state_with_named_roots(&[("UMS_TEMP", dir.path())], 1024));
+        let app = build_router(test_state_with_named_roots(
+            &[("UMS_TEMP", dir.path())],
+            1024,
+        ));
 
         let response = app
             .oneshot(request_with_connect_info(
@@ -2335,7 +2363,10 @@ mod tests {
             serde_json::from_slice(&body).expect("resolve response should be json");
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(payload["canonical_segments"], serde_json::json!(["UMS_TEMP", "+"]));
+        assert_eq!(
+            payload["canonical_segments"],
+            serde_json::json!(["UMS_TEMP", "+"])
+        );
     }
 
     #[tokio::test]

@@ -41,6 +41,7 @@ use tauri::{Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder, Window
 const TRAY_SHOW_ID: &str = "tray_show_main";
 const TRAY_CLIPBOARD_PANEL_ID: &str = "tray_toggle_clipboard_panel";
 const TRAY_QUIT_ID: &str = "tray_quit";
+const MANUAL_COPY_RECOVERY_DELAY: Duration = Duration::from_secs(60);
 
 struct AppState {
     config: Arc<Mutex<AppConfig>>,
@@ -77,6 +78,7 @@ struct ManualCopyQueueItem {
     file_extensions: Vec<String>,
     filename_includes: Vec<String>,
     task_handle: Option<task_manager::TaskRunHandle>,
+    trigger_source: task_domain::TaskTriggerSource,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -442,6 +444,18 @@ fn build_manual_copy_start_request(
     source_path: &Path,
     target_root_path: &Path,
 ) -> task_manager::StartManualCopyRequest {
+    build_manual_copy_start_request_with_trigger(
+        source_path,
+        target_root_path,
+        task_domain::TaskTriggerSource::Manual,
+    )
+}
+
+fn build_manual_copy_start_request_with_trigger(
+    source_path: &Path,
+    target_root_path: &Path,
+    trigger_source: task_domain::TaskTriggerSource,
+) -> task_manager::StartManualCopyRequest {
     let folder_name = manual_copy_folder_name(source_path);
     let local_target_path = resolve_manual_copy_target_path(source_path, target_root_path)
         .unwrap_or_else(|_| target_root_path.join(&folder_name));
@@ -451,7 +465,7 @@ fn build_manual_copy_start_request(
         folder_name,
         source_path: source_path.to_string_lossy().to_string(),
         local_target_path: local_target_path.to_string_lossy().to_string(),
-        trigger_source: task_domain::TaskTriggerSource::Manual,
+        trigger_source,
     }
 }
 
@@ -542,10 +556,13 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                 let run_handle = if let Some(handle) = task.task_handle.clone() {
                     handle
                 } else {
-                    match task_manager.begin_manual_copy_run(build_manual_copy_start_request(
-                        &source_path,
-                        &target_root_path,
-                    )) {
+                    match task_manager.begin_manual_copy_run(
+                        build_manual_copy_start_request_with_trigger(
+                            &source_path,
+                            &target_root_path,
+                            task.trigger_source.clone(),
+                        ),
+                    ) {
                         Ok(handle) => handle,
                         Err(error) => {
                             manual_copy_keys.lock().unwrap().remove(&task.key);
@@ -620,8 +637,6 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     &is_paused,
                 );
 
-                manual_copy_keys.lock().unwrap().remove(&task.key);
-
                 if let Err(error) = result {
                     let error_lower = error.to_lowercase();
                     let state =
@@ -640,6 +655,27 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                         format!("Manual copy task failed: {}", error),
                         level,
                     );
+                    if state == "cancelled" {
+                        manual_copy_keys.lock().unwrap().remove(&task.key);
+                    } else {
+                        emit_runtime_log(
+                            &app_handle,
+                            format!(
+                                "Manual copy recovery will retry in {}s: {} -> {}",
+                                MANUAL_COPY_RECOVERY_DELAY.as_secs(),
+                                task.source_path,
+                                task.target_root_path
+                            ),
+                            "warn",
+                        );
+                        tokio::time::sleep(MANUAL_COPY_RECOVERY_DELAY).await;
+                        let mut recovery_task = task;
+                        recovery_task.task_handle = None;
+                        recovery_task.trigger_source = task_domain::TaskTriggerSource::Recovery;
+                        manual_copy_queue.lock().unwrap().push_back(recovery_task);
+                    }
+                } else {
+                    manual_copy_keys.lock().unwrap().remove(&task.key);
                 }
             }
 
@@ -1417,6 +1453,7 @@ async fn start_manual_copy_task(
             file_extensions: request.file_extensions,
             filename_includes: request.filename_includes,
             task_handle: Some(run_handle.clone()),
+            trigger_source: task_domain::TaskTriggerSource::Manual,
         });
 
     emit_runtime_log(
@@ -1500,6 +1537,7 @@ async fn queue_temporary_copy(
             file_extensions,
             filename_includes,
             task_handle: Some(run_handle),
+            trigger_source: task_domain::TaskTriggerSource::Manual,
         });
 
     emit_runtime_log(
@@ -2706,6 +2744,8 @@ fn main() {
             .title("Clipboard")
             .inner_size(420.0, 720.0)
             .decorations(false)
+            .transparent(true)
+            .shadow(false)
             .resizable(false)
             .skip_taskbar(true)
             .always_on_top(true)
@@ -2815,6 +2855,7 @@ fn main() {
             disk_cleanup::disk_cleanup_list_windows_disks,
             disk_cleanup::disk_cleanup_list_ipsans,
             disk_cleanup::disk_cleanup_check_cache_keys,
+            disk_cleanup::disk_cleanup_get_cache_key_contents,
             disk_cleanup::disk_cleanup_delete_cache_keys,
             code_count::code_count_analyze,
             code_count::code_count_cancel,

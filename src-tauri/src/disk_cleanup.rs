@@ -13,6 +13,8 @@ const REDIS_PASSWORD: &str = "ums@redis_service";
 const REDIS_OP_TIMEOUT: Duration = Duration::from_secs(3);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const STORAGE_KEY_PREFIX: &str = "Storage:";
+const CACHE_PREVIEW_MAX_CHARS: usize = 240;
+const CACHE_PREVIEW_MAX_ITEMS: isize = 12;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DiskServerItem {
@@ -117,6 +119,21 @@ pub struct CacheKeyCheckResult {
 #[derive(Debug, Serialize, Clone)]
 pub struct CacheKeyDeleteResult {
     pub deleted_count: i64,
+    pub redis_available: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CacheKeyContentEntry {
+    pub key: String,
+    pub value_type: String,
+    pub preview: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CacheKeyContentResult {
+    pub entries: Vec<CacheKeyContentEntry>,
     pub redis_available: bool,
     pub error: Option<String>,
 }
@@ -238,6 +255,49 @@ fn build_storage_key(storage_id: &str) -> String {
     format!("{}{}", STORAGE_KEY_PREFIX, storage_id)
 }
 
+fn summarize_cache_value_preview(value: &str, max_chars: usize) -> String {
+    let normalized = value.replace('\0', "\\0");
+    let mut chars = normalized.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+
+    if chars.next().is_some() {
+        format!("{}...", preview)
+    } else {
+        normalized
+    }
+}
+
+fn serialize_hash_preview(entries: Vec<(String, String)>) -> String {
+    entries
+        .into_iter()
+        .take(CACHE_PREVIEW_MAX_ITEMS as usize)
+        .map(|(field, value)| format!("{field}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn serialize_list_preview(entries: Vec<String>) -> String {
+    entries
+        .into_iter()
+        .take(CACHE_PREVIEW_MAX_ITEMS as usize)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn serialize_set_preview(mut entries: Vec<String>) -> String {
+    entries.sort();
+    serialize_list_preview(entries)
+}
+
+fn serialize_zset_preview(entries: Vec<(String, f64)>) -> String {
+    entries
+        .into_iter()
+        .take(CACHE_PREVIEW_MAX_ITEMS as usize)
+        .map(|(member, score)| format!("{member} ({score})"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn build_http_client(timeout_secs: u32) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
@@ -308,6 +368,29 @@ fn classify_redis_connection_error(message: &str) -> String {
     } else {
         format!("Redis 连接失败: {}", message)
     }
+
+}
+
+#[cfg(test)]
+mod cache_preview_tests {
+    use super::summarize_cache_value_preview;
+
+    #[test]
+    fn summarize_cache_value_preview_truncates_long_content_and_marks_it() {
+        let preview = summarize_cache_value_preview(&"x".repeat(260), 32);
+
+        assert!(preview.starts_with("xxxxxxxx"));
+        assert!(preview.ends_with("..."));
+        assert!(preview.len() <= 35);
+    }
+
+    #[test]
+    fn summarize_cache_value_preview_keeps_short_content_intact() {
+        assert_eq!(
+            summarize_cache_value_preview("{\"slot\":7}", 32),
+            "{\"slot\":7}"
+        );
+    }
 }
 
 async fn connect_redis(host: &str) -> Result<MultiplexedConnection, String> {
@@ -317,6 +400,94 @@ async fn connect_redis(host: &str) -> Result<MultiplexedConnection, String> {
         .await
         .map_err(|_| "Redis 连接超时".to_string())?
         .map_err(|e| classify_redis_connection_error(&e.to_string()))
+}
+
+async fn execute_redis_command<T: redis::FromRedisValue>(
+    conn: &mut MultiplexedConnection,
+    op_name: &str,
+    command: &mut redis::Cmd,
+) -> Result<T, String> {
+    tokio::time::timeout(REDIS_OP_TIMEOUT, command.query_async::<_, T>(conn))
+        .await
+        .map_err(|_| format!("Redis {} timed out", op_name))?
+        .map_err(|error| format!("Redis {} failed: {}", op_name, error))
+}
+
+async fn load_cache_key_content(
+    conn: &mut MultiplexedConnection,
+    key: &str,
+) -> Result<CacheKeyContentEntry, String> {
+    let mut type_cmd = redis::cmd("TYPE");
+    type_cmd.arg(key);
+    let value_type =
+        execute_redis_command::<String>(conn, &format!("TYPE {}", key), &mut type_cmd).await?;
+
+    let raw_preview = match value_type.as_str() {
+        "string" => {
+            let mut get_cmd = redis::cmd("GET");
+            get_cmd.arg(key);
+            execute_redis_command::<Option<String>>(conn, &format!("GET {}", key), &mut get_cmd)
+                .await?
+                .unwrap_or_default()
+        }
+        "hash" => {
+            let mut hgetall_cmd = redis::cmd("HGETALL");
+            hgetall_cmd.arg(key);
+            let pairs = execute_redis_command::<Vec<(String, String)>>(
+                conn,
+                &format!("HGETALL {}", key),
+                &mut hgetall_cmd,
+            )
+            .await?;
+            serialize_hash_preview(pairs)
+        }
+        "list" => {
+            let mut lrange_cmd = redis::cmd("LRANGE");
+            lrange_cmd.arg(key).arg(0).arg(CACHE_PREVIEW_MAX_ITEMS - 1);
+            let values = execute_redis_command::<Vec<String>>(
+                conn,
+                &format!("LRANGE {}", key),
+                &mut lrange_cmd,
+            )
+            .await?;
+            serialize_list_preview(values)
+        }
+        "set" => {
+            let mut smembers_cmd = redis::cmd("SMEMBERS");
+            smembers_cmd.arg(key);
+            let values = execute_redis_command::<Vec<String>>(
+                conn,
+                &format!("SMEMBERS {}", key),
+                &mut smembers_cmd,
+            )
+            .await?;
+            serialize_set_preview(values)
+        }
+        "zset" => {
+            let mut zrange_cmd = redis::cmd("ZRANGE");
+            zrange_cmd
+                .arg(key)
+                .arg(0)
+                .arg(CACHE_PREVIEW_MAX_ITEMS - 1)
+                .arg("WITHSCORES");
+            let values = execute_redis_command::<Vec<(String, f64)>>(
+                conn,
+                &format!("ZRANGE {}", key),
+                &mut zrange_cmd,
+            )
+            .await?;
+            serialize_zset_preview(values)
+        }
+        "none" => String::new(),
+        other => format!("<{} preview unavailable>", other),
+    };
+
+    Ok(CacheKeyContentEntry {
+        key: key.to_string(),
+        value_type,
+        truncated: raw_preview.chars().count() > CACHE_PREVIEW_MAX_CHARS,
+        preview: summarize_cache_value_preview(&raw_preview, CACHE_PREVIEW_MAX_CHARS),
+    })
 }
 
 #[tauri::command]
@@ -475,6 +646,73 @@ pub async fn disk_cleanup_check_cache_keys(
                 error: None,
             }
         }
+    }
+}
+
+#[tauri::command]
+pub async fn disk_cleanup_get_cache_key_contents(
+    host: String,
+    keys: Vec<String>,
+) -> CacheKeyContentResult {
+    let host = match normalize_host(&host) {
+        Ok(host) => host,
+        Err(error) => {
+            return CacheKeyContentResult {
+                entries: vec![],
+                redis_available: false,
+                error: Some(error),
+            };
+        }
+    };
+
+    let keys = match normalize_cache_keys(keys) {
+        Ok(keys) => keys,
+        Err(error) => {
+            return CacheKeyContentResult {
+                entries: vec![],
+                redis_available: false,
+                error: Some(error),
+            };
+        }
+    };
+
+    if keys.is_empty() {
+        return CacheKeyContentResult {
+            entries: vec![],
+            redis_available: true,
+            error: None,
+        };
+    }
+
+    let mut conn = match connect_redis(&host).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            return CacheKeyContentResult {
+                entries: vec![],
+                redis_available: false,
+                error: Some(error),
+            };
+        }
+    };
+
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in keys {
+        match load_cache_key_content(&mut conn, &key).await {
+            Ok(entry) => entries.push(entry),
+            Err(error) => {
+                return CacheKeyContentResult {
+                    entries: vec![],
+                    redis_available: false,
+                    error: Some(error),
+                };
+            }
+        }
+    }
+
+    CacheKeyContentResult {
+        entries,
+        redis_available: true,
+        error: None,
     }
 }
 

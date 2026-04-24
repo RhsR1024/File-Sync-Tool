@@ -1,0 +1,10 @@
+{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
+{"file": "docs/superpowers/specs/2026-04-23-clipboard-manager-redesign-design.md", "reason": "Approved redesign spec and acceptance targets"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer checklist for Rust, DB, Tauri, and Vue data flow changes"}
+{"file": "src-tauri/src/clipboard/watcher.rs", "reason": "Existing capture pipeline and hash/source handling pattern"}
+{"file": "src-tauri/src/clipboard/db.rs", "reason": "Existing schema migration, row mapping, and dedup persistence pattern"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Check for existing helpers before adding source presentation or hash helpers"}
+{"file": "src/lib/clipboardListPresentation.ts", "reason": "Existing source-app display helper to extend instead of duplicating UI logic"}
+{"file": "src/components/clipboard-settings/GeneralTab.vue", "reason": "Current settings-row structure to extend with the new toggle"}

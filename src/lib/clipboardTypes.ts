@@ -242,10 +242,10 @@ export function normalizeClipboardSettings(
     },
   };
 
-  next.preview.delay_ms = input?.preview_delay_ms ?? input?.preview?.delay_ms ?? next.preview.delay_ms;
+  next.preview.delay_ms = input?.preview?.delay_ms ?? input?.preview_delay_ms ?? next.preview.delay_ms;
   next.preview_delay_ms = next.preview.delay_ms;
   next.preview.text_enabled =
-    input?.enable_text_preview ?? input?.preview?.text_enabled ?? next.preview.text_enabled;
+    input?.preview?.text_enabled ?? input?.enable_text_preview ?? next.preview.text_enabled;
   next.enable_text_preview = next.preview.text_enabled;
   next.data.max_items = input?.max_items ?? input?.data?.max_items ?? next.data.max_items;
   next.max_items = next.data.max_items;

@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Query, State as AxumState};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header::USER_AGENT, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{body::Body, Form, Json, Router};
@@ -22,6 +22,10 @@ use tokio::sync::{broadcast, oneshot};
 // ─── Public Data Types ──────────────────────────────────────
 
 const TOOL_NAME: &str = "屏幕共享";
+
+const VIEWER_IP_TTL: Duration = Duration::from_secs(12);
+const CAPTURE_CREATE_RETRY_DELAYS_MS: [u64; 5] = [0, 150, 300, 600, 1000];
+type ViewerIpMap = HashMap<String, Instant>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenShareConfig {
@@ -78,7 +82,7 @@ pub struct ScreenShareHandle {
     server_url: Mutex<String>,
     all_urls: Mutex<Vec<String>>,
     start_time: Mutex<Option<Instant>>,
-    viewer_ips: Arc<Mutex<HashSet<String>>>,
+    viewer_ips: Arc<Mutex<ViewerIpMap>>,
 }
 
 impl ScreenShareHandle {
@@ -93,48 +97,150 @@ impl ScreenShareHandle {
             server_url: Mutex::new(String::new()),
             all_urls: Mutex::new(Vec::new()),
             start_time: Mutex::new(None),
-            viewer_ips: Arc::new(Mutex::new(HashSet::new())),
+            viewer_ips: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+fn inactive_status() -> ScreenShareStatus {
+    ScreenShareStatus {
+        is_active: false,
+        viewer_count: 0,
+        connection_count: 0,
+        fps_actual: 0.0,
+        bitrate_kbps: 0,
+        uptime_secs: 0,
+        server_url: String::new(),
+        all_urls: Vec::new(),
+        connected_ips: Vec::new(),
+    }
+}
+
+fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
+    handle.active.store(false, Ordering::SeqCst);
+    handle.cancel.store(cancel, Ordering::SeqCst);
+    handle.viewer_count.store(0, Ordering::Relaxed);
+    handle.fps_counter.store(0, Ordering::Relaxed);
+    handle.bytes_sent.store(0, Ordering::Relaxed);
+    *handle.shutdown_tx.lock().unwrap() = None;
+    *handle.server_url.lock().unwrap() = String::new();
+    *handle.all_urls.lock().unwrap() = Vec::new();
+    *handle.start_time.lock().unwrap() = None;
+    if let Ok(mut ips) = handle.viewer_ips.lock() {
+        ips.clear();
+    }
+}
+
+fn prepare_runtime_state_for_start(handle: &ScreenShareHandle) {
+    clear_runtime_state(handle, false);
+}
+
+fn reset_runtime_state(handle: &ScreenShareHandle) {
+    clear_runtime_state(handle, true);
+}
+
+fn record_viewer_ip(viewer_ips: &Arc<Mutex<ViewerIpMap>>, ip: impl Into<String>) {
+    record_viewer_ip_at(viewer_ips, ip, Instant::now());
+}
+
+fn record_viewer_ip_at(
+    viewer_ips: &Arc<Mutex<ViewerIpMap>>,
+    ip: impl Into<String>,
+    seen_at: Instant,
+) {
+    if let Ok(mut ips) = viewer_ips.lock() {
+        ips.insert(ip.into(), seen_at);
+    }
+}
+
+fn snapshot_viewer_ips(viewer_ips: &Arc<Mutex<ViewerIpMap>>) -> Vec<String> {
+    snapshot_viewer_ips_at(viewer_ips, Instant::now())
+}
+
+fn snapshot_viewer_ips_at(viewer_ips: &Arc<Mutex<ViewerIpMap>>, now: Instant) -> Vec<String> {
+    let mut ips: Vec<String> = viewer_ips
+        .lock()
+        .map(|mut map| {
+            map.retain(|_, seen_at| {
+                now.checked_duration_since(*seen_at).unwrap_or_default() <= VIEWER_IP_TTL
+            });
+            map.keys().cloned().collect()
+        })
+        .unwrap_or_default();
+    ips.sort_unstable();
+    ips
+}
+
+fn emit_inactive_status(app_handle: &AppHandle) {
+    let _ = app_handle.emit("screen-share-status", inactive_status());
+}
+
+fn shutdown_after_capture_failure(
+    app_handle: &AppHandle,
+    handle: &ScreenShareHandle,
+    detail: &str,
+) {
+    handle.cancel.store(true, Ordering::SeqCst);
+    if let Some(tx) = handle.shutdown_tx.lock().unwrap().take() {
+        let _ = tx.send(());
+    }
+    reset_runtime_state(handle);
+    crate::scanner::emit_tool_log(app_handle, TOOL_NAME, detail, "error");
+    let _ = app_handle.emit(
+        "screen-share-log",
+        serde_json::json!({ "level": "error", "message": detail }),
+    );
+    emit_inactive_status(app_handle);
 }
 
 // ─── Internal: HTTP server state ────────────────────────────
 
 struct HttpServerState {
+    app_handle: AppHandle,
     broadcast_tx: broadcast::Sender<Arc<Bytes>>,
     viewer_count: Arc<AtomicU32>,
     cancel: Arc<AtomicBool>,
     auth_hash: Option<String>,
     auth_username: Option<String>,
     bytes_sent: Arc<AtomicU64>,
-    viewer_ips: Arc<Mutex<HashSet<String>>>,
+    viewer_ips: Arc<Mutex<ViewerIpMap>>,
 }
 
 /// RAII guard that decrements viewer count and removes IP on drop.
 struct ViewerGuard {
+    app_handle: AppHandle,
     count: Arc<AtomicU32>,
-    ips: Arc<Mutex<HashSet<String>>>,
+    ips: Arc<Mutex<ViewerIpMap>>,
     ip: String,
 }
 
 impl Drop for ViewerGuard {
     fn drop(&mut self) {
-        loop {
+        let updated_count = loop {
             let current = self.count.load(Ordering::Relaxed);
             if current == 0 {
-                break;
+                break 0;
             }
             if self
                 .count
                 .compare_exchange_weak(current, current - 1, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
-                break;
+                break current - 1;
             }
-        }
+        };
         if let Ok(mut set) = self.ips.lock() {
             set.remove(&self.ip);
         }
+        crate::scanner::emit_tool_log(
+            &self.app_handle,
+            TOOL_NAME,
+            &format!(
+                "Viewer disconnected: ip={}, remaining_viewers={}",
+                self.ip, updated_count
+            ),
+            "info",
+        );
     }
 }
 
@@ -228,6 +334,15 @@ pub async fn screen_share_start(
                 displays.len()
             ));
         }
+        crate::scanner::emit_tool_log(
+            &app_handle,
+            TOOL_NAME,
+            &format!(
+                "启动前显示器清单: {}",
+                describe_display_inventory(&displays)
+            ),
+            "info",
+        );
     }
 
     // Get local IPs (all non-loopback IPv4)
@@ -242,22 +357,6 @@ pub async fn screen_share_start(
         .map(|ip| format!("http://{}:{}", ip, config.port))
         .collect();
 
-    // Broadcast channel for JPEG frames
-    let (broadcast_tx, _) = broadcast::channel::<Arc<Bytes>>(8);
-
-    // Reset counters
-    handle.cancel.store(false, Ordering::SeqCst);
-    handle.viewer_count.store(0, Ordering::Relaxed);
-    handle.fps_counter.store(0, Ordering::Relaxed);
-    handle.bytes_sent.store(0, Ordering::Relaxed);
-
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-
-    *handle.shutdown_tx.lock().unwrap() = Some(shutdown_tx);
-    *handle.server_url.lock().unwrap() = server_url.clone();
-    *handle.all_urls.lock().unwrap() = all_urls.clone();
-    *handle.start_time.lock().unwrap() = Some(Instant::now());
-
     // Bind listener BEFORE spawning so that bind errors propagate to the caller
     let bind_ip = config.bind_address.as_deref().unwrap_or("0.0.0.0");
     let addr = format!("{}:{}", bind_ip, config.port);
@@ -268,38 +367,29 @@ pub async fn screen_share_start(
     })?;
     log::info!("Screen share HTTP server listening on {}", addr);
 
-    // Build axum shared state
+    prepare_runtime_state_for_start(handle);
+
+    // Broadcast channel for JPEG frames
+    let (broadcast_tx, _) = broadcast::channel::<Arc<Bytes>>(8);
+
     let auth_hash = config
         .password
         .as_ref()
         .map(|p| hash_credential(config.username.as_deref(), p));
     let auth_username = config.username.clone();
-    if let Ok(mut ips) = handle.viewer_ips.lock() {
-        ips.clear();
-    }
-    let server_state = Arc::new(HttpServerState {
-        broadcast_tx: broadcast_tx.clone(),
-        viewer_count: handle.viewer_count.clone(),
-        cancel: handle.cancel.clone(),
-        auth_hash,
-        auth_username,
-        bytes_sent: handle.bytes_sent.clone(),
-        viewer_ips: handle.viewer_ips.clone(),
-    });
-
-    // Mark active BEFORE spawning tasks so that status reporter and other
-    // components see the active flag immediately and don't exit early.
-    handle.active.store(true, Ordering::SeqCst);
 
     // --- Spawn capture thread ---
     let capture_cancel = handle.cancel.clone();
     let capture_fps = handle.fps_counter.clone();
+    let capture_viewers = handle.viewer_count.clone();
+    let capture_handle = handle.clone();
     let monitor_index = config.monitor_index;
     let quality = config.quality;
     let fps = config.fps;
     let show_cursor = config.show_cursor;
-    let capture_tx = broadcast_tx;
+    let capture_tx = broadcast_tx.clone();
     let capture_app = app_handle.clone();
+    let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
 
     if let Err(e) = std::thread::Builder::new()
         .name("screen-capture".into())
@@ -312,20 +402,65 @@ pub async fn screen_share_start(
                 capture_tx,
                 capture_cancel,
                 capture_fps,
+                capture_viewers,
+                capture_handle,
+                Some(startup_tx),
                 capture_app,
             );
         })
     {
-        // Roll back active state on failure
-        handle.active.store(false, Ordering::SeqCst);
         let msg = format!("Failed to spawn capture thread: {}", e);
+        reset_runtime_state(handle);
         crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, &msg, "error");
+        let _ = app_handle.emit(
+            "screen-share-log",
+            serde_json::json!({ "level": "error", "message": msg }),
+        );
+        emit_inactive_status(&app_handle);
         return Err(msg);
     }
+
+    let startup_detail = match tokio::time::timeout(Duration::from_secs(4), startup_rx).await {
+        Ok(Ok(Ok(()))) => None,
+        Ok(Ok(Err(detail))) => Some(detail),
+        Ok(Err(_)) => Some("Screen capture thread exited before reporting startup status".into()),
+        Err(_) => Some("Screen capture startup timed out".into()),
+    };
+
+    if let Some(detail) = startup_detail {
+        reset_runtime_state(handle);
+        crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, &detail, "error");
+        let _ = app_handle.emit(
+            "screen-share-log",
+            serde_json::json!({ "level": "error", "message": detail }),
+        );
+        emit_inactive_status(&app_handle);
+        return Err(detail);
+    }
+
+    *handle.server_url.lock().unwrap() = server_url.clone();
+    *handle.all_urls.lock().unwrap() = all_urls.clone();
+    *handle.start_time.lock().unwrap() = Some(Instant::now());
+    handle.active.store(true, Ordering::SeqCst);
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    *handle.shutdown_tx.lock().unwrap() = Some(shutdown_tx);
+
+    let server_state = Arc::new(HttpServerState {
+        app_handle: app_handle.clone(),
+        broadcast_tx: broadcast_tx.clone(),
+        viewer_count: handle.viewer_count.clone(),
+        cancel: handle.cancel.clone(),
+        auth_hash,
+        auth_username,
+        bytes_sent: handle.bytes_sent.clone(),
+        viewer_ips: handle.viewer_ips.clone(),
+    });
 
     // --- Spawn HTTP server ---
     let ss_server_active = handle.active.clone();
     let ss_server_app = app_handle.clone();
+    let ss_runtime_handle = handle.clone();
     let server_join = tokio::spawn(async move {
         run_http_server(listener, server_state, shutdown_rx).await;
     });
@@ -348,25 +483,13 @@ pub async fn screen_share_start(
         }
 
         if ss_server_active.swap(false, Ordering::SeqCst) {
+            reset_runtime_state(&ss_runtime_handle);
             crate::scanner::emit_tool_log(&ss_server_app, TOOL_NAME, "已停止", "info");
             let _ = ss_server_app.emit(
                 "screen-share-log",
                 serde_json::json!({ "level": "info", "message": "Screen share stopped" }),
             );
-            let _ = ss_server_app.emit(
-                "screen-share-status",
-                ScreenShareStatus {
-                    is_active: false,
-                    viewer_count: 0,
-                    connection_count: 0,
-                    fps_actual: 0.0,
-                    bitrate_kbps: 0,
-                    uptime_secs: 0,
-                    server_url: String::new(),
-                    all_urls: Vec::new(),
-                    connected_ips: Vec::new(),
-                },
-            );
+            emit_inactive_status(&ss_server_app);
         }
     });
 
@@ -429,18 +552,13 @@ pub async fn screen_share_stop(
 
     // Signal stop
     handle.cancel.store(true, Ordering::SeqCst);
-    handle.active.store(false, Ordering::SeqCst);
 
     // Shutdown HTTP server
     if let Some(tx) = handle.shutdown_tx.lock().unwrap().take() {
         let _ = tx.send(());
     }
 
-    // Reset state
-    handle.viewer_count.store(0, Ordering::Relaxed);
-    *handle.server_url.lock().unwrap() = String::new();
-    *handle.all_urls.lock().unwrap() = Vec::new();
-    *handle.start_time.lock().unwrap() = None;
+    reset_runtime_state(handle);
 
     crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, "已停止", "info");
 
@@ -448,24 +566,7 @@ pub async fn screen_share_stop(
         "screen-share-log",
         serde_json::json!({ "level": "info", "message": "Screen share stopped" }),
     );
-    if let Ok(mut ips) = handle.viewer_ips.lock() {
-        ips.clear();
-    }
-
-    let _ = app_handle.emit(
-        "screen-share-status",
-        ScreenShareStatus {
-            is_active: false,
-            viewer_count: 0,
-            connection_count: 0,
-            fps_actual: 0.0,
-            bitrate_kbps: 0,
-            uptime_secs: 0,
-            server_url: String::new(),
-            all_urls: Vec::new(),
-            connected_ips: Vec::new(),
-        },
-    );
+    emit_inactive_status(&app_handle);
 
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
@@ -478,17 +579,7 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
     let is_active = handle.active.load(Ordering::Relaxed);
 
     if !is_active {
-        return ScreenShareStatus {
-            is_active: false,
-            viewer_count: 0,
-            connection_count: 0,
-            fps_actual: 0.0,
-            bitrate_kbps: 0,
-            uptime_secs: 0,
-            server_url: String::new(),
-            all_urls: Vec::new(),
-            connected_ips: Vec::new(),
-        };
+        return inactive_status();
     }
 
     let uptime = handle
@@ -498,11 +589,7 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
 
-    let connected_ips = handle
-        .viewer_ips
-        .lock()
-        .map(|s| s.iter().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
+    let connected_ips = snapshot_viewer_ips(&handle.viewer_ips);
 
     ScreenShareStatus {
         is_active: true,
@@ -827,19 +914,33 @@ fn capture_loop(
     tx: broadcast::Sender<Arc<Bytes>>,
     cancel: Arc<AtomicBool>,
     fps_counter: Arc<AtomicU32>,
+    viewer_count: Arc<AtomicU32>,
+    runtime_handle: Arc<ScreenShareHandle>,
+    startup_tx: Option<oneshot::Sender<Result<(), String>>>,
     app_handle: AppHandle,
 ) {
+    let mut startup_tx = startup_tx;
     let mut capturer = match create_capturer(monitor_index) {
-        Some(c) => c,
-        None => {
-            crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, "屏幕捕获初始化失败", "error");
-            let _ = app_handle.emit(
-                "screen-share-log",
-                serde_json::json!({ "level": "error", "message": "Failed to initialize screen capturer" }),
+        Ok(c) => c,
+        Err(err) => {
+            let detail = format!(
+                "屏幕捕获初始化失败: monitor_index={}, viewers={}, cause={}",
+                monitor_index,
+                viewer_count.load(Ordering::Relaxed),
+                err
             );
+            if let Some(tx) = startup_tx.take() {
+                let _ = tx.send(Err(detail));
+            } else {
+                shutdown_after_capture_failure(&app_handle, &runtime_handle, &detail);
+            }
             return;
         }
     };
+
+    if let Some(tx) = startup_tx.take() {
+        let _ = tx.send(Ok(()));
+    }
 
     let width = capturer.width();
     let height = capturer.height();
@@ -864,6 +965,7 @@ fn capture_loop(
         quality,
         if show_cursor { "on" } else { "off" },
     );
+    let mut recreate_attempts = 0u32;
 
     // Send a placeholder frame so that viewers connecting immediately get something
     {
@@ -948,19 +1050,64 @@ fn capture_loop(
                 continue;
             }
             Err(e) => {
-                log::warn!("Capture error: {}, retrying in 500ms", e);
+                recreate_attempts += 1;
+                let capture_error_detail = format!(
+                    "捕获循环异常，准备重建: attempt={}, monitor_index={}, viewers={}, first_real_frame={}, error_kind={:?}, error={}",
+                    recreate_attempts,
+                    monitor_index,
+                    viewer_count.load(Ordering::Relaxed),
+                    first_real_frame,
+                    e.kind(),
+                    e
+                );
+                log::warn!("{}", capture_error_detail);
+                crate::scanner::emit_tool_log(
+                    &app_handle,
+                    TOOL_NAME,
+                    &capture_error_detail,
+                    "error",
+                );
+                let _ = app_handle.emit(
+                    "screen-share-log",
+                    serde_json::json!({ "level": "error", "message": capture_error_detail }),
+                );
                 std::thread::sleep(Duration::from_millis(500));
                 // Try to recreate capturer
                 drop(capturer);
                 match create_capturer(monitor_index) {
-                    Some(c) => capturer = c,
-                    None => {
-                        log::error!("Failed to recreate capturer, stopping");
+                    Ok(c) => {
+                        let recreated_msg = format!(
+                            "屏幕捕获器重建成功: attempt={}, monitor_index={}, viewers={}",
+                            recreate_attempts,
+                            monitor_index,
+                            viewer_count.load(Ordering::Relaxed)
+                        );
+                        log::info!("{}", recreated_msg);
                         crate::scanner::emit_tool_log(
                             &app_handle,
                             TOOL_NAME,
-                            "屏幕捕获器重建失败，已停止",
-                            "error",
+                            &recreated_msg,
+                            "info",
+                        );
+                        let _ = app_handle.emit(
+                            "screen-share-log",
+                            serde_json::json!({ "level": "info", "message": recreated_msg }),
+                        );
+                        capturer = c;
+                    }
+                    Err(err) => {
+                        let recreate_failed_msg = format!(
+                            "屏幕捕获器重建失败，已停止: attempt={}, monitor_index={}, viewers={}, cause={}",
+                            recreate_attempts,
+                            monitor_index,
+                            viewer_count.load(Ordering::Relaxed),
+                            err
+                        );
+                        log::error!("{}", recreate_failed_msg);
+                        shutdown_after_capture_failure(
+                            &app_handle,
+                            &runtime_handle,
+                            &recreate_failed_msg,
                         );
                         break;
                     }
@@ -978,12 +1125,141 @@ fn capture_loop(
     log::info!("Capture loop ended");
 }
 
-fn create_capturer(monitor_index: usize) -> Option<Capturer> {
-    let displays = Display::all().ok()?;
-    let display = displays.into_iter().nth(monitor_index)?;
-    Capturer::new(display)
-        .map_err(|e| log::error!("Capturer::new failed: {}", e))
-        .ok()
+#[derive(Debug)]
+struct CaptureCreateError {
+    detail: String,
+    kind: Option<std::io::ErrorKind>,
+}
+
+impl CaptureCreateError {
+    fn retryable(&self) -> bool {
+        self.kind
+            .map(should_retry_capture_creation)
+            .unwrap_or(false)
+    }
+}
+
+fn should_retry_capture_creation(error_kind: std::io::ErrorKind) -> bool {
+    matches!(
+        error_kind,
+        std::io::ErrorKind::Other
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    )
+}
+
+fn capture_creation_hint(error_kind: std::io::ErrorKind) -> Option<&'static str> {
+    if should_retry_capture_creation(error_kind) {
+        Some(
+            "possible cause: another screen-capture session is still holding the monitor; close ScreenTask or other capture tools and retry",
+        )
+    } else {
+        None
+    }
+}
+
+fn create_capturer(monitor_index: usize) -> Result<Capturer, String> {
+    let mut last_error = None;
+
+    for (attempt_index, delay_ms) in CAPTURE_CREATE_RETRY_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(*delay_ms));
+        }
+
+        match create_capturer_once(monitor_index) {
+            Ok(capturer) => return Ok(capturer),
+            Err(error) => {
+                let is_last_attempt = attempt_index + 1 == CAPTURE_CREATE_RETRY_DELAYS_MS.len();
+                if !error.retryable() || is_last_attempt {
+                    let attempts = attempt_index + 1;
+                    return Err(match last_error.take() {
+                        Some(previous) if attempts > 1 => format!(
+                            "{}; last_retry_failure={}; attempts={}",
+                            previous, error.detail, attempts
+                        ),
+                        _ if attempts > 1 => format!("{}; attempts={}", error.detail, attempts),
+                        _ => error.detail,
+                    });
+                }
+                last_error = Some(error.detail);
+            }
+        }
+    }
+
+    Err("screen capture init exhausted retries".to_string())
+}
+
+fn create_capturer_once(monitor_index: usize) -> Result<Capturer, CaptureCreateError> {
+    let displays = Display::all().map_err(|error| CaptureCreateError {
+        detail: format!("Display::all failed: kind={:?}, error={}", error.kind(), error),
+        kind: Some(error.kind()),
+    })?;
+    let display_count = displays.len();
+    let inventory = describe_display_inventory(&displays);
+    let display = displays
+        .into_iter()
+        .nth(monitor_index)
+        .ok_or_else(|| CaptureCreateError {
+            detail: format!(
+                "monitor index {} is unavailable; detected {} display(s): {}",
+                monitor_index, display_count, inventory
+            ),
+            kind: None,
+        })?;
+    Capturer::new(display).map_err(|error| {
+        let hint = capture_creation_hint(error.kind())
+            .map(|message| format!(", hint={message}"))
+            .unwrap_or_default();
+        CaptureCreateError {
+            detail: format!(
+                "Capturer::new failed for monitor index {} with {} display(s) [{}]: kind={:?}, error={}{}",
+                monitor_index,
+                display_count,
+                inventory,
+                error.kind(),
+                error,
+                hint
+            ),
+            kind: Some(error.kind()),
+        }
+    })
+}
+
+fn describe_display_inventory(displays: &[Display]) -> String {
+    if displays.is_empty() {
+        return "none".to_string();
+    }
+
+    let mut parts = Vec::with_capacity(displays.len());
+    for (index, display) in displays.iter().enumerate() {
+        let role = if index == 0 { ", primary" } else { "" };
+        parts.push(format!(
+            "#{} {}x{}{}",
+            index,
+            display.width(),
+            display.height(),
+            role
+        ));
+    }
+
+    parts.join("; ")
+}
+
+fn summarize_user_agent(headers: &HeaderMap) -> String {
+    let raw = headers
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("-");
+
+    let mut summary: String = raw.chars().take(120).collect();
+    if raw.chars().count() > 120 {
+        summary.push_str("...");
+    }
+    summary
 }
 
 // ─── JPEG Encoding ──────────────────────────────────────────
@@ -1121,11 +1397,21 @@ async fn handler_stream(
     }
 
     let client_ip = addr.ip().to_string();
-    state.viewer_count.fetch_add(1, Ordering::Relaxed);
-    if let Ok(mut ips) = state.viewer_ips.lock() {
-        ips.insert(client_ip.clone());
-    }
+    let viewer_total = state.viewer_count.fetch_add(1, Ordering::Relaxed) + 1;
+    record_viewer_ip(&state.viewer_ips, client_ip.clone());
+    crate::scanner::emit_tool_log(
+        &state.app_handle,
+        TOOL_NAME,
+        &format!(
+            "Viewer connected: ip={}, viewers={}, user_agent={}",
+            client_ip,
+            viewer_total,
+            summarize_user_agent(&headers)
+        ),
+        "info",
+    );
     let viewer_guard = ViewerGuard {
+        app_handle: state.app_handle.clone(),
         count: state.viewer_count.clone(),
         ips: state.viewer_ips.clone(),
         ip: client_ip,
@@ -1206,7 +1492,11 @@ async fn handler_auth(
         .unwrap()
 }
 
-async fn handler_status(AxumState(state): AxumState<Arc<HttpServerState>>) -> impl IntoResponse {
+async fn handler_status(
+    AxumState(state): AxumState<Arc<HttpServerState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    record_viewer_ip(&state.viewer_ips, addr.ip().to_string());
     Json(serde_json::json!({
         "active": !state.cancel.load(Ordering::Relaxed),
         "viewers": state.viewer_count.load(Ordering::Relaxed),
@@ -1224,7 +1514,7 @@ async fn status_reporter(
     server_url: String,
     all_urls: Vec<String>,
     start_time: Instant,
-    viewer_ips: Arc<Mutex<HashSet<String>>>,
+    viewer_ips: Arc<Mutex<ViewerIpMap>>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut last_bytes: u64 = 0;
@@ -1241,10 +1531,7 @@ async fn status_reporter(
         let bytes_delta = current_bytes.saturating_sub(last_bytes);
         last_bytes = current_bytes;
 
-        let connected_ips = viewer_ips
-            .lock()
-            .map(|s| s.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+        let connected_ips = snapshot_viewer_ips(&viewer_ips);
 
         let status = ScreenShareStatus {
             is_active: true,
@@ -1431,10 +1718,36 @@ const img=document.getElementById('screen'),dot=document.getElementById('dot'),s
 const btnPause=document.getElementById('btnPause'),overlay=document.getElementById('paused-overlay'),fpsSelect=document.getElementById('fpsLimit');
 let alive=true,paused=false,fpsLimitMs=0,refreshTimer=null;
 let lastFrameTime=Date.now(),reconnectAttempts=0;
+let reconnectPending=false,lastReconnectAt=0;
+const MIN_HEARTBEAT_RECONNECT_MS=60000;
 st.textContent=T.connected;
+
+// Ask the OS/browser to keep this tab treated as active — defeats Edge's
+// Efficiency Mode deprioritization that otherwise stalls fetch('/status').
+if('wakeLock' in navigator){navigator.wakeLock.request('screen').catch(()=>{});}
+
+// Hold the last rendered frame during a reconnect so the viewer never sees
+// a black frame while the new MJPEG stream is opening its first chunk.
+let heldFrame=null;
+function holdCurrentFrame(){
+  if(!img.naturalWidth)return;
+  releaseHeldFrame();
+  try{
+    const c=document.createElement('canvas');
+    c.width=img.naturalWidth;c.height=img.naturalHeight;
+    c.getContext('2d').drawImage(img,0,0);
+    const h=document.createElement('div');
+    h.style.cssText='position:absolute;inset:0;background-image:url('+c.toDataURL('image/jpeg',0.6)+');background-size:contain;background-position:center;background-repeat:no-repeat;pointer-events:none;z-index:2';
+    img.parentElement.appendChild(h);
+    heldFrame=h;
+  }catch(e){/* tainted canvas or decode error — fall back to black */}
+}
+function releaseHeldFrame(){if(heldFrame){heldFrame.remove();heldFrame=null;}}
 
 // ── Stream connection ──
 function connectStream(){
+  // Freeze last frame as a placeholder so reassigning img.src does not flash black.
+  if(img.naturalWidth>0)holdCurrentFrame();
   img.src='/stream?t='+Date.now();
   lastFrameTime=Date.now();
 }
@@ -1455,11 +1768,14 @@ function setReconnecting(){
 }
 function tryReconnect(){
   if(paused)return;
+  if(reconnectPending)return;  // debounce — avoid stacking concurrent reconnects
+  reconnectPending=true;
   reconnectAttempts++;
   setReconnecting();
   // Exponential backoff: 2s, 3s, 4s, 5s max
   let delay=Math.min(2000+reconnectAttempts*500,5000);
   setTimeout(()=>{
+    reconnectPending=false;
     if(paused)return;
     if(fpsLimitMs>0){startPolling()}else{connectStream()}
   },delay);
@@ -1470,6 +1786,7 @@ function tryReconnect(){
 // We use a combination of onerror + heartbeat to detect stream loss.
 img.onerror=function(){
   if(paused)return;
+  holdCurrentFrame();
   setDisconnected();
   tryReconnect();
 };
@@ -1477,6 +1794,8 @@ img.onload=function(){
   clearTimeout(initialTimer);
   lastFrameTime=Date.now();
   setConnected();
+  releaseHeldFrame();
+  heartbeatFails=0;
 };
 
 // 5s timeout: if stream never delivers a frame, force reconnect
@@ -1511,12 +1830,20 @@ setInterval(async()=>{
   }catch{
     heartbeatFails++;
   }
-  // If heartbeat fails 4+ times in a row and we think we're alive, reconnect.
-  // Raised from 2 → 4 to avoid false positives under Edge throttling; real
-  // TCP drops still fire img.onerror and recover independently.
-  if(heartbeatFails>=4&&alive){
+  // If heartbeat fails 10+ times in a row AND it's been >=60s since the last
+  // heartbeat-triggered reconnect, only then reconnect. This double gate stops
+  // the "flicker loop" we saw on Edge where fetch('/status') keeps timing out
+  // under Efficiency Mode even though the MJPEG stream is still delivering.
+  // Real TCP drops are caught by img.onerror and go through a separate path.
+  if(heartbeatFails>=10&&alive){
+    const now=Date.now();
+    if(now-lastReconnectAt<MIN_HEARTBEAT_RECONNECT_MS)return;
+    lastReconnectAt=now;
+    heartbeatFails=0;           // reset so the next fail does not instantly retrigger
+    holdCurrentFrame();         // freeze last frame as placeholder
     setDisconnected();
-    disconnectStream();
+    // Skip disconnectStream() here — connectStream() will reassign img.src,
+    // which itself aborts the old MJPEG connection. Doing it twice caused the flash.
     tryReconnect();
   }
 },3000);
@@ -1642,4 +1969,98 @@ button:active{{transform:scale(.99)}}
 </body>
 </html>"#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_runtime_state_for_start_clears_stale_runtime_state() {
+        let handle = ScreenShareHandle::new();
+        handle.active.store(true, Ordering::SeqCst);
+        handle.cancel.store(true, Ordering::SeqCst);
+        handle.viewer_count.store(3, Ordering::Relaxed);
+        handle.fps_counter.store(7, Ordering::Relaxed);
+        handle.bytes_sent.store(4096, Ordering::Relaxed);
+        *handle.shutdown_tx.lock().unwrap() = Some(oneshot::channel::<()>().0);
+        *handle.server_url.lock().unwrap() = "http://stale".into();
+        *handle.all_urls.lock().unwrap() = vec!["http://stale".into()];
+        *handle.start_time.lock().unwrap() = Some(Instant::now());
+        record_viewer_ip(&handle.viewer_ips, "10.0.0.1");
+
+        prepare_runtime_state_for_start(&handle);
+
+        assert!(!handle.active.load(Ordering::SeqCst));
+        assert!(!handle.cancel.load(Ordering::SeqCst));
+        assert_eq!(handle.viewer_count.load(Ordering::Relaxed), 0);
+        assert_eq!(handle.fps_counter.load(Ordering::Relaxed), 0);
+        assert_eq!(handle.bytes_sent.load(Ordering::Relaxed), 0);
+        assert!(handle.shutdown_tx.lock().unwrap().is_none());
+        assert!(handle.server_url.lock().unwrap().is_empty());
+        assert!(handle.all_urls.lock().unwrap().is_empty());
+        assert!(handle.start_time.lock().unwrap().is_none());
+        assert!(handle.viewer_ips.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_runtime_state_marks_handle_inactive_and_clears_runtime_fields() {
+        let handle = ScreenShareHandle::new();
+        handle.active.store(true, Ordering::SeqCst);
+        handle.cancel.store(false, Ordering::SeqCst);
+        handle.viewer_count.store(2, Ordering::Relaxed);
+        handle.fps_counter.store(5, Ordering::Relaxed);
+        handle.bytes_sent.store(2048, Ordering::Relaxed);
+        *handle.shutdown_tx.lock().unwrap() = Some(oneshot::channel::<()>().0);
+        *handle.server_url.lock().unwrap() = "http://active".into();
+        *handle.all_urls.lock().unwrap() = vec!["http://active".into()];
+        *handle.start_time.lock().unwrap() = Some(Instant::now());
+        record_viewer_ip(&handle.viewer_ips, "10.0.0.2");
+
+        reset_runtime_state(&handle);
+
+        assert!(!handle.active.load(Ordering::SeqCst));
+        assert!(handle.cancel.load(Ordering::SeqCst));
+        assert_eq!(handle.viewer_count.load(Ordering::Relaxed), 0);
+        assert_eq!(handle.fps_counter.load(Ordering::Relaxed), 0);
+        assert_eq!(handle.bytes_sent.load(Ordering::Relaxed), 0);
+        assert!(handle.shutdown_tx.lock().unwrap().is_none());
+        assert!(handle.server_url.lock().unwrap().is_empty());
+        assert!(handle.all_urls.lock().unwrap().is_empty());
+        assert!(handle.start_time.lock().unwrap().is_none());
+        assert!(handle.viewer_ips.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn snapshot_viewer_ips_prunes_stale_heartbeats() {
+        let now = Instant::now();
+        let ips = Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+        record_viewer_ip_at(&ips, "10.0.0.1", now - VIEWER_IP_TTL / 2);
+        record_viewer_ip_at(&ips, "10.0.0.2", now - VIEWER_IP_TTL * 2);
+
+        assert_eq!(
+            snapshot_viewer_ips_at(&ips, now),
+            vec!["10.0.0.1".to_string()]
+        );
+        assert_eq!(
+            snapshot_viewer_ips_at(&ips, now + VIEWER_IP_TTL * 2),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn should_retry_capture_creation_retries_transient_desktop_duplication_errors() {
+        assert!(should_retry_capture_creation(std::io::ErrorKind::Other));
+        assert!(should_retry_capture_creation(std::io::ErrorKind::Interrupted));
+        assert!(should_retry_capture_creation(
+            std::io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn should_retry_capture_creation_skips_non_transient_input_errors() {
+        assert!(!should_retry_capture_creation(std::io::ErrorKind::InvalidInput));
+        assert!(!should_retry_capture_creation(std::io::ErrorKind::InvalidData));
+    }
 }
