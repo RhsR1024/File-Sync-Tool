@@ -1676,14 +1676,57 @@ fn open_path_parent(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn open_url_via_shell_execute(url: &str) -> Result<(), String> {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide_url: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide_url.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    if result.0 as usize <= 32 {
+        return Err(format!(
+            "ShellExecuteW failed with code {}",
+            result.0 as usize
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_url_windows(url: &str) -> Result<(), String> {
+    open_url_via_shell_execute(url)
+}
+
+#[cfg(all(target_os = "windows", test))]
+fn open_url_windows_with<CmdStart, ShellExecute>(
+    url: &str,
+    _cmd_start: CmdStart,
+    shell_execute: ShellExecute,
+) -> Result<(), String>
+where
+    CmdStart: FnOnce(&str) -> Result<(), String>,
+    ShellExecute: FnOnce(&str) -> Result<(), String>,
+{
+    shell_execute(url)
+}
+
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "", &url])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        open_url_windows(&url)?;
     }
 
     #[cfg(target_os = "macos")]
@@ -1703,6 +1746,43 @@ fn open_url(url: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "windows")]
+    use super::open_url_windows_with;
+    #[cfg(target_os = "windows")]
+    use std::cell::Cell;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_open_url_prefers_shell_execute_without_cmd() {
+        let cmd_called = Cell::new(false);
+        let shell_called = Cell::new(false);
+
+        let result = open_url_windows_with(
+            "https://example.com",
+            |_| {
+                cmd_called.set(true);
+                Ok(())
+            },
+            |_| {
+                shell_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(
+            !cmd_called.get(),
+            "Windows URL open should not go through cmd /C start"
+        );
+        assert!(
+            shell_called.get(),
+            "Windows URL open should go through ShellExecute"
+        );
+    }
 }
 
 #[tauri::command]
@@ -2782,9 +2862,6 @@ fn main() {
                     });
                 }
             });
-
-            clipboard::preview::ensure_preview_windows(app)?;
-
             // Register the clipboard global shortcut (default Alt+C) when the feature is on.
             if clipboard_enabled_at_start {
                 match clipboard::hotkey::register(app.handle().clone(), &clipboard_hotkey_at_start)
@@ -2875,6 +2952,8 @@ fn main() {
             network::send_wol,
             screenshare::screen_share_list_monitors,
             screenshare::screen_share_list_interfaces,
+            screenshare::screen_share_scan_conflicts,
+            screenshare::screen_share_force_close_conflicts,
             screenshare::screen_share_start,
             screenshare::screen_share_stop,
             screenshare::screen_share_get_status,

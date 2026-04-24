@@ -70,7 +70,6 @@ export function useHoverPreview(opts: HoverPreviewOptions = {}) {
       return;
     }
 
-    void hidePreview();
     showTimer = window.setTimeout(() => {
       void showPreview(target);
       showTimer = null;

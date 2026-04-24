@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clipboard Text Preview</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: transparent;
+      color: #0f172a;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+    }
+    body {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(241, 245, 249, 0.96));
+    }
+    .shell {
+      display: flex;
+      height: 100%;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid rgba(226, 232, 240, 0.88);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.84);
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(226, 232, 240, 0.92);
+    }
+    .label {
+      margin: 0;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.24em;
+      text-transform: uppercase;
+      color: #64748b;
+    }
+    .source {
+      margin: 6px 0 0;
+      font-size: 14px;
+      color: #475569;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .source:empty {
+      display: none;
+    }
+    .kind {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #0f172a;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    .content {
+      flex: 1;
+      overflow: auto;
+      padding: 16px;
+    }
+    .empty {
+      display: flex;
+      height: 100%;
+      align-items: center;
+      justify-content: center;
+      color: #94a3b8;
+      font-size: 14px;
+      text-align: center;
+    }
+    .empty[hidden] {
+      display: none;
+    }
+    .text {
+      display: none;
+      min-height: 100%;
+      margin: 0;
+      padding: 16px;
+      border: 1px solid rgba(226, 232, 240, 0.92);
+      border-radius: 20px;
+      background: #fff;
+      color: #475569;
+      font-family: "Cascadia Code", "Consolas", "SFMono-Regular", monospace;
+      font-size: 14px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+      box-shadow: 0 24px 60px -48px rgba(15, 23, 42, 0.85);
+    }
+    .text.visible {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="header">
+      <div>
+        <p class="label">Text Preview</p>
+        <p id="source" class="source"></p>
+      </div>
+      <span id="kind" class="kind">TEXT</span>
+    </header>
+    <main class="content">
+      <div id="empty" class="empty">Hover a text item to preview it.</div>
+      <pre id="text" class="text"></pre>
+    </main>
+  </div>
+
+  <script>
+    const sourceEl = document.getElementById('source');
+    const kindEl = document.getElementById('kind');
+    const emptyEl = document.getElementById('empty');
+    const textEl = document.getElementById('text');
+    const internals = window.__TAURI_INTERNALS__ || null;
+
+    function applyPayload(payload) {
+      sourceEl.textContent = payload?.source_app || '';
+      kindEl.textContent = (payload?.kind || 'text').toUpperCase();
+      textEl.textContent = payload?.content || '';
+      emptyEl.hidden = true;
+      textEl.classList.add('visible');
+    }
+
+    function clearPayload() {
+      sourceEl.textContent = '';
+      kindEl.textContent = 'TEXT';
+      textEl.textContent = '';
+      textEl.classList.remove('visible');
+      emptyEl.hidden = false;
+    }
+
+    async function refreshPayload() {
+      if (!internals?.invoke) {
+        return;
+      }
+      try {
+        const payload = await internals.invoke('cb_get_text_preview_payload');
+        if (payload) {
+          applyPayload(payload);
+        } else {
+          clearPayload();
+        }
+      } catch (_) {
+        clearPayload();
+      }
+    }
+
+    async function listen(event, handler) {
+      if (!internals?.invoke || !internals?.transformCallback) {
+        return;
+      }
+      await internals.invoke('plugin:event|listen', {
+        event,
+        target: { kind: 'Any' },
+        handler: internals.transformCallback(handler),
+      });
+    }
+
+    if (internals) {
+      void listen('clipboard-text-preview-update', (event) => {
+        applyPayload(event.payload);
+      });
+      void listen('clipboard-text-preview-clear', () => {
+        clearPayload();
+      });
+      window.addEventListener('focus', () => {
+        void refreshPayload();
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          void refreshPayload();
+        }
+      });
+      void refreshPayload();
+    } else {
+      clearPayload();
+    }
+  </script>
+</body>
+</html>

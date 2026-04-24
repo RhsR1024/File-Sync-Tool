@@ -16,6 +16,21 @@ let unlisten: UnlistenFn | null = null;
 
 const kindLabel = computed(() => payload.value?.kind.toUpperCase() ?? 'TEXT');
 
+async function refreshPayload() {
+  const cachedPayload = await clipboardApi.getTextPreviewPayload();
+  payload.value = cachedPayload;
+}
+
+function onWindowFocus() {
+  void refreshPayload();
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    void refreshPayload();
+  }
+}
+
 onMounted(async () => {
   unlisten = await listen<ClipboardTextPreviewPayload>(
     TEXT_PREVIEW_UPDATE_EVENT,
@@ -24,14 +39,15 @@ onMounted(async () => {
     },
   );
 
-  const cachedPayload = await clipboardApi.getTextPreviewPayload();
-  if (cachedPayload) {
-    payload.value = cachedPayload;
-  }
+  window.addEventListener('focus', onWindowFocus);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  await refreshPayload();
 });
 
 onBeforeUnmount(() => {
   unlisten?.();
+  window.removeEventListener('focus', onWindowFocus);
+  document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
 

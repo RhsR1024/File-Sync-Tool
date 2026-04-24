@@ -48,6 +48,25 @@ function onWheel(event: WheelEvent) {
   changeZoom(event.deltaY < 0 ? 1 : -1);
 }
 
+async function refreshPayload() {
+  const cachedPayload = await clipboardApi.getImagePreviewPayload();
+  if (cachedPayload) {
+    applyPayload(cachedPayload);
+    return;
+  }
+  payload.value = null;
+}
+
+function onWindowFocus() {
+  void refreshPayload();
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    void refreshPayload();
+  }
+}
+
 onMounted(async () => {
   unlisten = await listen<ClipboardImagePreviewPayload>(
     IMAGE_PREVIEW_UPDATE_EVENT,
@@ -56,14 +75,15 @@ onMounted(async () => {
     },
   );
 
-  const cachedPayload = await clipboardApi.getImagePreviewPayload();
-  if (cachedPayload) {
-    applyPayload(cachedPayload);
-  }
+  window.addEventListener('focus', onWindowFocus);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  await refreshPayload();
 });
 
 onBeforeUnmount(() => {
   unlisten?.();
+  window.removeEventListener('focus', onWindowFocus);
+  document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
 

@@ -1,11 +1,13 @@
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(target_os = "windows")]
+use std::{mem, process::Command};
 
 use axum::extract::{ConnectInfo, Query, State as AxumState};
 use axum::http::{header::USER_AGENT, HeaderMap, StatusCode};
@@ -18,13 +20,24 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{broadcast, oneshot};
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM};
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+    TH32CS_SNAPPROCESS,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+};
 
 // ─── Public Data Types ──────────────────────────────────────
 
 const TOOL_NAME: &str = "屏幕共享";
 
 const VIEWER_IP_TTL: Duration = Duration::from_secs(12);
-const CAPTURE_CREATE_RETRY_DELAYS_MS: [u64; 5] = [0, 150, 300, 600, 1000];
+const CAPTURE_CREATE_RETRY_DELAYS_MS: [u64; 8] = [0, 200, 400, 800, 1500, 2500, 4000, 6000];
 type ViewerIpMap = HashMap<String, Instant>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +81,31 @@ pub struct ScreenShareStatus {
     pub server_url: String,
     pub all_urls: Vec<String>,
     pub connected_ips: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScreenShareConflictProcess {
+    pub pid: u32,
+    pub process_name: String,
+    pub window_title: String,
+    pub reason: String,
+    pub risk_level: String,
+    pub can_force_close: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ScreenShareConflictCloseResult {
+    pub closed_pids: Vec<u32>,
+    pub failed_pids: Vec<u32>,
+    pub skipped_pids: Vec<u32>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenCaptureConflictPolicy {
+    reason: &'static str,
+    risk_level: &'static str,
+    can_force_close: bool,
 }
 
 // ─── Handle (stored in AppState) ────────────────────────────
@@ -605,6 +643,257 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
 }
 
 // ─── Cursor Overlay (Windows) ──────────────────────────────
+
+fn normalize_process_name(process_name: &str) -> String {
+    let normalized = process_name.trim().to_ascii_lowercase();
+    normalized
+        .strip_suffix(".exe")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn screen_capture_conflict_policy(process_name: &str) -> Option<ScreenCaptureConflictPolicy> {
+    let normalized = normalize_process_name(process_name);
+
+    match normalized.as_str() {
+        "screentask"
+        | "dingtalk"
+        | "zoom"
+        | "wechat"
+        | "weixin"
+        | "qq"
+        | "qqpcrtp"
+        | "qqpctray"
+        | "lark"
+        | "feishu"
+        | "obs"
+        | "obs64"
+        | "rustdesk"
+        | "anydesk"
+        | "todesk"
+        | "sunlogin"
+        | "sunloginclient"
+        | "teamviewer"
+        | "scrcpy"
+        | "bandicam"
+        | "camtasia"
+        | "snagitcapture"
+        | "snagit32"
+        | "xsplit"
+        | "teams"
+        | "ms-teams"
+        | "msteams" => Some(ScreenCaptureConflictPolicy {
+            reason: "Known meeting, remote-control, or capture client may keep the desktop duplication session busy",
+            risk_level: "high",
+            can_force_close: true,
+        }),
+        "chrome" | "msedge" | "msedgewebview2" | "firefox" => {
+            Some(ScreenCaptureConflictPolicy {
+                reason: "Browser-based tab or window sharing can leave a capture session active",
+                risk_level: "medium",
+                can_force_close: false,
+            })
+        }
+        "mstsc" => Some(ScreenCaptureConflictPolicy {
+            reason: "Remote Desktop sessions can block local desktop duplication capture",
+            risk_level: "medium",
+            can_force_close: false,
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn utf16_cstr_to_string(raw: &[u16]) -> String {
+    let len = raw.iter().position(|value| *value == 0).unwrap_or(raw.len());
+    String::from_utf16_lossy(&raw[..len])
+}
+
+#[cfg(target_os = "windows")]
+fn collect_window_titles_by_pid() -> HashMap<u32, String> {
+    unsafe extern "system" fn callback(hwnd: HWND, data: LPARAM) -> BOOL {
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return BOOL(1);
+        }
+
+        let title_len = unsafe { GetWindowTextLengthW(hwnd) };
+        if title_len <= 0 {
+            return BOOL(1);
+        }
+
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        }
+        if pid == 0 {
+            return BOOL(1);
+        }
+
+        let mut buffer = vec![0u16; title_len as usize + 1];
+        let copied = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+        if copied <= 0 {
+            return BOOL(1);
+        }
+
+        let title = String::from_utf16_lossy(&buffer[..copied as usize])
+            .trim()
+            .to_string();
+        if title.is_empty() {
+            return BOOL(1);
+        }
+
+        let titles = unsafe { &mut *(data.0 as *mut HashMap<u32, String>) };
+        titles.entry(pid).or_insert(title);
+
+        BOOL(1)
+    }
+
+    let mut titles = HashMap::new();
+    unsafe {
+        let _ = EnumWindows(
+            Some(callback),
+            LPARAM(&mut titles as *mut HashMap<u32, String> as isize),
+        );
+    }
+    titles
+}
+
+#[cfg(target_os = "windows")]
+fn scan_screen_share_conflicts() -> Result<Vec<ScreenShareConflictProcess>, String> {
+    let window_titles = collect_window_titles_by_pid();
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+        .map_err(|error| format!("failed to snapshot running processes: {}", error))?;
+
+    let mut entry = PROCESSENTRY32W::default();
+    entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut conflicts = Vec::new();
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+
+    while has_entry {
+        let process_name = utf16_cstr_to_string(&entry.szExeFile);
+        if let Some(policy) = screen_capture_conflict_policy(&process_name) {
+            let window_title = window_titles
+                .get(&entry.th32ProcessID)
+                .cloned()
+                .unwrap_or_default();
+            if policy.can_force_close || !window_title.is_empty() {
+                conflicts.push(ScreenShareConflictProcess {
+                    pid: entry.th32ProcessID,
+                    process_name,
+                    window_title,
+                    reason: policy.reason.to_string(),
+                    risk_level: policy.risk_level.to_string(),
+                    can_force_close: policy.can_force_close,
+                });
+            }
+        }
+
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+
+    let _ = unsafe { CloseHandle(snapshot) };
+
+    conflicts.sort_by(|left, right| {
+        right
+            .can_force_close
+            .cmp(&left.can_force_close)
+            .then(left.process_name.cmp(&right.process_name))
+            .then(left.pid.cmp(&right.pid))
+    });
+
+    Ok(conflicts)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn scan_screen_share_conflicts() -> Result<Vec<ScreenShareConflictProcess>, String> {
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+pub fn screen_share_scan_conflicts() -> Result<Vec<ScreenShareConflictProcess>, String> {
+    scan_screen_share_conflicts()
+}
+
+#[cfg(target_os = "windows")]
+fn force_close_screen_share_conflicts_inner(
+    pids: Vec<u32>,
+) -> Result<ScreenShareConflictCloseResult, String> {
+    let mut result = ScreenShareConflictCloseResult::default();
+    let allowed_conflicts = scan_screen_share_conflicts()?;
+    let allowed_pids: HashSet<u32> = allowed_conflicts
+        .into_iter()
+        .filter(|item| item.can_force_close)
+        .map(|item| item.pid)
+        .collect();
+    let mut seen = HashSet::new();
+    let mut failures = Vec::new();
+
+    for pid in pids {
+        if pid == 0 || !seen.insert(pid) {
+            continue;
+        }
+
+        if !allowed_pids.contains(&pid) {
+            result.skipped_pids.push(pid);
+            continue;
+        }
+
+        match Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .status()
+        {
+            Ok(status) if status.success() => result.closed_pids.push(pid),
+            Ok(status) => {
+                result.failed_pids.push(pid);
+                failures.push(format!("PID {} exited with status {}", pid, status));
+            }
+            Err(error) => {
+                result.failed_pids.push(pid);
+                failures.push(format!("PID {} taskkill failed: {}", pid, error));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        result.error = Some(failures.join("; "));
+    }
+
+    Ok(result)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn force_close_screen_share_conflicts_inner(
+    _pids: Vec<u32>,
+) -> Result<ScreenShareConflictCloseResult, String> {
+    Ok(ScreenShareConflictCloseResult::default())
+}
+
+#[tauri::command]
+pub fn screen_share_force_close_conflicts(
+    app_handle: AppHandle,
+    pids: Vec<u32>,
+) -> Result<ScreenShareConflictCloseResult, String> {
+    let result = force_close_screen_share_conflicts_inner(pids)?;
+
+    if !result.closed_pids.is_empty() {
+        crate::scanner::emit_tool_log(
+            &app_handle,
+            TOOL_NAME,
+            &format!(
+                "已尝试结束屏幕采集冲突进程: {}",
+                result
+                    .closed_pids
+                    .iter()
+                    .map(|pid| pid.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "warn",
+        );
+    }
+
+    Ok(result)
+}
 
 #[cfg(target_os = "windows")]
 mod cursor_overlay {
@@ -2062,5 +2351,28 @@ mod tests {
     fn should_retry_capture_creation_skips_non_transient_input_errors() {
         assert!(!should_retry_capture_creation(std::io::ErrorKind::InvalidInput));
         assert!(!should_retry_capture_creation(std::io::ErrorKind::InvalidData));
+    }
+
+    #[test]
+    fn screen_capture_conflict_policy_marks_dingtalk_as_force_closeable() {
+        let policy =
+            screen_capture_conflict_policy("DingTalk.exe").expect("DingTalk should be detected");
+
+        assert_eq!(policy.risk_level, "high");
+        assert!(policy.can_force_close);
+    }
+
+    #[test]
+    fn screen_capture_conflict_policy_marks_browsers_as_detect_only() {
+        let policy =
+            screen_capture_conflict_policy("chrome.exe").expect("Chrome should be detected");
+
+        assert_eq!(policy.risk_level, "medium");
+        assert!(!policy.can_force_close);
+    }
+
+    #[test]
+    fn screen_capture_conflict_policy_ignores_unrelated_processes() {
+        assert!(screen_capture_conflict_policy("notepad.exe").is_none());
     }
 }

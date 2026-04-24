@@ -13,10 +13,12 @@ pub const IMAGE_PREVIEW_WINDOW_LABEL: &str = "clipboard-image-preview";
 pub const TEXT_PREVIEW_WINDOW_LABEL: &str = "clipboard-text-preview";
 pub const IMAGE_PREVIEW_UPDATE_EVENT: &str = "clipboard-image-preview-update";
 pub const TEXT_PREVIEW_UPDATE_EVENT: &str = "clipboard-text-preview-update";
+pub const IMAGE_PREVIEW_CLEAR_EVENT: &str = "clipboard-image-preview-clear";
+pub const TEXT_PREVIEW_CLEAR_EVENT: &str = "clipboard-text-preview-clear";
 pub const PREVIEW_GAP_PX: i32 = 12;
 
-const IMAGE_PREVIEW_ROUTE: &str = "index.html#/clipboard-preview/image";
-const TEXT_PREVIEW_ROUTE: &str = "index.html#/clipboard-preview/text";
+const IMAGE_PREVIEW_ROUTE: &str = "/clipboard-image-preview.html";
+const TEXT_PREVIEW_ROUTE: &str = "/clipboard-text-preview.html";
 const IMAGE_PREVIEW_TITLE: &str = "Clipboard Image Preview";
 const TEXT_PREVIEW_TITLE: &str = "Clipboard Text Preview";
 const DEFAULT_IMAGE_PREVIEW_WIDTH: u32 = 420;
@@ -136,34 +138,13 @@ pub fn clear_cached_preview_payloads() {
     cache.text = None;
 }
 
-pub fn ensure_preview_windows<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<()> {
-    ensure_preview_window(
-        manager,
-        IMAGE_PREVIEW_WINDOW_LABEL,
-        IMAGE_PREVIEW_ROUTE,
-        IMAGE_PREVIEW_TITLE,
-        PreviewWindowSize {
-            width: DEFAULT_IMAGE_PREVIEW_WIDTH,
-            height: DEFAULT_IMAGE_PREVIEW_HEIGHT,
-        },
-    )?;
-    ensure_preview_window(
-        manager,
-        TEXT_PREVIEW_WINDOW_LABEL,
-        TEXT_PREVIEW_ROUTE,
-        TEXT_PREVIEW_TITLE,
-        PreviewWindowSize {
-            width: DEFAULT_TEXT_PREVIEW_WIDTH,
-            height: DEFAULT_TEXT_PREVIEW_HEIGHT,
-        },
-    )?;
-    Ok(())
-}
-
 pub fn hide_preview_windows<R: tauri::Runtime>(app: &AppHandle<R>) {
-    clear_cached_preview_payloads();
-    for label in [IMAGE_PREVIEW_WINDOW_LABEL, TEXT_PREVIEW_WINDOW_LABEL] {
+    for (label, clear_event) in [
+        (IMAGE_PREVIEW_WINDOW_LABEL, IMAGE_PREVIEW_CLEAR_EVENT),
+        (TEXT_PREVIEW_WINDOW_LABEL, TEXT_PREVIEW_CLEAR_EVENT),
+    ] {
         if let Some(window) = app.get_webview_window(label) {
+            let _ = window.emit(clear_event, ());
             let _ = window.hide();
         }
     }
@@ -186,6 +167,7 @@ pub fn show_image_preview<R: tauri::Runtime>(
     }
 
     if !settings.preview.image_enabled {
+        clear_cached_preview_payloads();
         hide_preview_windows(app);
         return Ok(());
     }
@@ -231,6 +213,7 @@ pub fn show_text_preview<R: tauri::Runtime>(
     }
 
     if !text_preview_enabled(settings) {
+        clear_cached_preview_payloads();
         hide_preview_windows(app);
         return Ok(());
     }
@@ -336,23 +319,23 @@ fn ensure_preview_window<R: tauri::Runtime, M: Manager<R>>(
     route: &str,
     title: &str,
     size: PreviewWindowSize,
-) -> tauri::Result<()> {
-    if manager.get_webview_window(label).is_some() {
-        return Ok(());
+) -> tauri::Result<WebviewWindow<R>> {
+    if let Some(window) = manager.get_webview_window(label) {
+        return Ok(window);
     }
 
     WebviewWindowBuilder::new(manager, label, WebviewUrl::App(route.into()))
         .title(title)
         .inner_size(size.width as f64, size.height as f64)
         .decorations(false)
+        .transparent(true)
+        .shadow(false)
         .resizable(false)
         .skip_taskbar(true)
         .always_on_top(true)
         .focused(false)
         .visible(false)
-        .build()?;
-
-    Ok(())
+        .build()
 }
 
 fn desired_image_preview_size(item: &ClipboardItem) -> PreviewWindowSize {
@@ -381,8 +364,6 @@ fn show_preview_window<R: tauri::Runtime, T: Serialize>(
     desired_size: PreviewWindowSize,
     payload: &T,
 ) -> Result<(), String> {
-    ensure_preview_windows(app).map_err(|error| error.to_string())?;
-
     let panel = app
         .get_webview_window("clipboard-panel")
         .ok_or_else(|| "clipboard-panel window not found".to_string())?;
@@ -395,27 +376,36 @@ fn show_preview_window<R: tauri::Runtime, T: Serialize>(
         settings.preview.position.clone(),
     );
 
-    let (target_label, update_event, opposite_label) = match kind {
+    let (target_label, target_route, target_title, update_event, opposite_label, opposite_clear_event) = match kind {
         PreviewKind::Image => (
             IMAGE_PREVIEW_WINDOW_LABEL,
+            IMAGE_PREVIEW_ROUTE,
+            IMAGE_PREVIEW_TITLE,
             IMAGE_PREVIEW_UPDATE_EVENT,
             TEXT_PREVIEW_WINDOW_LABEL,
+            TEXT_PREVIEW_CLEAR_EVENT,
         ),
         PreviewKind::Text => (
             TEXT_PREVIEW_WINDOW_LABEL,
+            TEXT_PREVIEW_ROUTE,
+            TEXT_PREVIEW_TITLE,
             TEXT_PREVIEW_UPDATE_EVENT,
             IMAGE_PREVIEW_WINDOW_LABEL,
+            IMAGE_PREVIEW_CLEAR_EVENT,
         ),
     };
 
     if let Some(window) = app.get_webview_window(opposite_label) {
+        let _ = window.emit(opposite_clear_event, ());
         let _ = window.hide();
     }
 
-    let window = app
-        .get_webview_window(target_label)
-        .ok_or_else(|| format!("{target_label} window not found"))?;
+    let window = ensure_preview_window(app, target_label, target_route, target_title, desired_size)
+        .map_err(|error| error.to_string())?;
 
+    window
+        .set_ignore_cursor_events(true)
+        .map_err(|error| error.to_string())?;
     window
         .set_size(Size::Physical(PhysicalSize::new(
             placement.width,

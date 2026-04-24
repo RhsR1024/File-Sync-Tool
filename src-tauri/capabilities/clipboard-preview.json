@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "clipboard-preview",
+  "description": "Permissions for standalone clipboard preview windows.",
+  "windows": [
+    "clipboard-image-preview",
+    "clipboard-text-preview"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:window:allow-hide",
+    "core:window:allow-show"
+  ]
+}

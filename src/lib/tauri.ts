@@ -916,12 +916,40 @@ export interface ScreenShareStatus {
   connected_ips: string[];
 }
 
+export interface ScreenShareConflictProcess {
+  pid: number;
+  process_name: string;
+  window_title: string;
+  reason: string;
+  risk_level: string;
+  can_force_close: boolean;
+}
+
+export interface ScreenShareConflictCloseResult {
+  closed_pids: number[];
+  failed_pids: number[];
+  skipped_pids: number[];
+  error: string | null;
+}
+
 export async function screenShareListMonitors(): Promise<MonitorInfo[]> {
   return await invoke<MonitorInfo[]>('screen_share_list_monitors');
 }
 
 export async function screenShareListInterfaces(): Promise<NetworkInterfaceInfo[]> {
   return await invoke<NetworkInterfaceInfo[]>('screen_share_list_interfaces');
+}
+
+export async function screenShareScanConflicts(): Promise<ScreenShareConflictProcess[]> {
+  return await invoke<ScreenShareConflictProcess[]>('screen_share_scan_conflicts');
+}
+
+export async function screenShareForceCloseConflicts(
+  pids: number[],
+): Promise<ScreenShareConflictCloseResult> {
+  return await invoke<ScreenShareConflictCloseResult>('screen_share_force_close_conflicts', {
+    pids,
+  });
 }
 
 export async function screenShareStart(config: ScreenShareConfig): Promise<string> {

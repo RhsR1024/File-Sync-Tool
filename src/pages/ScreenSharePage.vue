@@ -55,7 +55,6 @@ const isStarting = ref(false);
 const serverUrl = ref('');
 const qrForUrl = ref<string | null>(null);
 const copiedUrl = ref<string | null>(null);
-const showConnectionDetails = ref(true);
 const showAllConnIps = ref(false);
 const qrCanvases = ref<Record<string, HTMLCanvasElement | null>>({});
 const setQrCanvas = (url: string, el: unknown) => {
@@ -198,27 +197,34 @@ async function loadSettings() {
   }
 }
 
+function buildScreenShareConfig(): ScreenShareConfig {
+  return {
+    port: port.value,
+    username: usernameEnabled.value && username.value ? username.value : null,
+    password: passwordEnabled.value && password.value ? password.value : null,
+    monitor_index: selectedMonitor.value,
+    quality: quality.value,
+    fps: fps.value,
+    show_cursor: showCursor.value,
+    bind_address: selectedBindAddress.value || '0.0.0.0',
+  };
+}
+
+async function applyStartedShare(url: string) {
+  serverUrl.value = url;
+  isActive.value = true;
+  showAllConnIps.value = false;
+  await refreshStatus(true);
+  await saveSettings();
+}
+
 async function startShare() {
   errorMsg.value = '';
   isStarting.value = true;
   try {
-    const config: ScreenShareConfig = {
-      port: port.value,
-      username: usernameEnabled.value && username.value ? username.value : null,
-      password: passwordEnabled.value && password.value ? password.value : null,
-      monitor_index: selectedMonitor.value,
-      quality: quality.value,
-      fps: fps.value,
-      show_cursor: showCursor.value,
-      bind_address: selectedBindAddress.value || '0.0.0.0',
-    };
+    const config = buildScreenShareConfig();
     const url = await screenShareStart(config);
-    serverUrl.value = url;
-    isActive.value = true;
-    showConnectionDetails.value = false;
-    showAllConnIps.value = false;
-    await refreshStatus(true);
-    await saveSettings();
+    await applyStartedShare(url);
   } catch (error) {
     errorMsg.value = t('tools.screenShare.errStartFailed', { error: String(error) });
   } finally {
@@ -235,7 +241,6 @@ async function stopShare() {
   isActive.value = false;
   serverUrl.value = '';
   qrForUrl.value = null;
-  showConnectionDetails.value = false;
   showAllConnIps.value = false;
   status.value = {
     is_active: false,
@@ -321,7 +326,6 @@ function applyStatus(payload: ScreenShareStatus) {
   if (!payload.is_active) {
     isActive.value = false;
     serverUrl.value = '';
-    showConnectionDetails.value = false;
     showAllConnIps.value = false;
     lastUptimeUpdate = 0;
   }
@@ -586,7 +590,7 @@ onUnmounted(() => {
           <button
             v-if="!isActive"
             type="button"
-            @click="startShare"
+            @click="startShare()"
             :disabled="isStarting || monitors.length === 0"
             class="w-full rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-6 py-3.5 text-sm font-semibold text-white shadow-sm transition hover:from-violet-700 hover:to-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -653,20 +657,22 @@ onUnmounted(() => {
             </div>
 
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div class="ss-stat-card sm:col-span-2">
-                <div class="mb-3 flex items-start justify-between gap-3">
-                  <div class="flex items-center gap-2 text-slate-500">
-                    <Users class="h-4 w-4 text-violet-500" />
-                    <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">
-                      {{ t('tools.screenShare.connectionCount') }}
-                    </span>
-                  </div>
-                  <button type="button" class="ss-detail-button" @click="showConnectionDetails = !showConnectionDetails">
-                    {{ t('tools.screenShare.connectionDetails') }}
-                    <component :is="showConnectionDetails ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />
-                  </button>
+              <div class="ss-stat-card">
+                <div class="mb-3 flex items-center gap-2 text-slate-500">
+                  <Users class="h-4 w-4 text-violet-500" />
+                  <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">
+                    {{ t('tools.screenShare.connectionCount') }}
+                  </span>
                 </div>
-                <div class="font-mono text-3xl font-bold text-slate-900">{{ connectionCount }}</div>
+                <div class="font-mono text-2xl font-bold text-slate-900">{{ connectionCount }}</div>
+              </div>
+
+              <div class="ss-stat-card">
+                <div class="mb-2 flex items-center gap-2 text-slate-500">
+                  <Clock class="h-4 w-4 text-violet-500" />
+                  <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">{{ t('tools.screenShare.uptime') }}</span>
+                </div>
+                <div class="font-mono text-2xl font-bold text-slate-900">{{ formattedUptime }}</div>
               </div>
 
               <div class="ss-stat-card">
@@ -684,17 +690,9 @@ onUnmounted(() => {
                 </div>
                 <div class="font-mono text-2xl font-bold text-slate-900">{{ formattedBitrate }}</div>
               </div>
-
-              <div class="ss-stat-card sm:col-span-2">
-                <div class="mb-2 flex items-center gap-2 text-slate-500">
-                  <Clock class="h-4 w-4 text-violet-500" />
-                  <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">{{ t('tools.screenShare.uptime') }}</span>
-                </div>
-                <div class="font-mono text-2xl font-bold text-slate-900">{{ formattedUptime }}</div>
-              </div>
             </div>
 
-            <div v-if="showConnectionDetails" class="ss-card">
+            <div class="ss-card">
               <div class="mb-3 flex items-center justify-between gap-3">
                 <div>
                   <h3 class="text-sm font-semibold text-slate-900">{{ t('tools.screenShare.connectedIpList') }}</h3>
