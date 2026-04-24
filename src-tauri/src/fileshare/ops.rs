@@ -392,7 +392,9 @@ fn is_valid_path_segment(segment: &str) -> bool {
         return false;
     }
 
-    !segment.chars().any(|character| matches!(character, '/' | '\\' | ':' | '\0'))
+    !segment
+        .chars()
+        .any(|character| matches!(character, '/' | '\\' | ':' | '\0'))
 }
 
 pub fn stream_preview(root: &ResolvedRoot, path: &str) -> Result<FilePreview, String> {
@@ -887,7 +889,11 @@ mod tests {
             &roots,
             &principal_perms,
             &root_perms,
-            &["UMS_TEMP".to_string(), "Sub".to_string(), "Leaf".to_string()],
+            &[
+                "UMS_TEMP".to_string(),
+                "Sub".to_string(),
+                "Leaf".to_string(),
+            ],
         )
         .expect("nested directories should resolve");
 
@@ -896,7 +902,11 @@ mod tests {
         assert_eq!(result.relative_path, "Sub/Leaf");
         assert_eq!(
             result.canonical_segments,
-            vec!["UMS_TEMP".to_string(), "Sub".to_string(), "Leaf".to_string()]
+            vec![
+                "UMS_TEMP".to_string(),
+                "Sub".to_string(),
+                "Leaf".to_string()
+            ]
         );
     }
 
@@ -926,17 +936,17 @@ mod tests {
         .expect("case-insensitive match should resolve");
 
         assert_eq!(result.kind, ResolveNodeKind::Directory);
-        assert_eq!(result.canonical_segments, vec!["UMS_TEMP".to_string(), "Sub".to_string()]);
+        assert_eq!(
+            result.canonical_segments,
+            vec!["UMS_TEMP".to_string(), "Sub".to_string()]
+        );
         assert_eq!(result.relative_path, "Sub");
     }
 
     #[test]
     fn resolve_directory_name_match_rejects_ambiguous_case_insensitive_matches() {
-        let error = resolve_directory_name_match(
-            "SUB",
-            vec!["Sub".to_string(), "sUb".to_string()],
-        )
-        .expect_err("ambiguous matches should be rejected");
+        let error = resolve_directory_name_match("SUB", vec!["Sub".to_string(), "sUb".to_string()])
+            .expect_err("ambiguous matches should be rejected");
 
         assert_eq!(error, ResolveError::NotFound);
     }
@@ -1034,7 +1044,11 @@ mod tests {
             )
             .expect_err("invalid segment should not resolve");
 
-            assert_eq!(error, ResolveError::NotFound, "segment {bad:?} should be rejected");
+            assert_eq!(
+                error,
+                ResolveError::NotFound,
+                "segment {bad:?} should be rejected"
+            );
         }
     }
 

@@ -413,7 +413,12 @@ fn refresh_duplicate_item_by_hash(
             "UPDATE clipboard_items
              SET source_app = ?1, source_app_icon = ?2, from_self = ?3
              WHERE hash = ?4",
-            params![item.source_app, item.source_app_icon, item.from_self, item.hash],
+            params![
+                item.source_app,
+                item.source_app_icon,
+                item.from_self,
+                item.hash
+            ],
         )?
     };
     Ok(affected > 0)

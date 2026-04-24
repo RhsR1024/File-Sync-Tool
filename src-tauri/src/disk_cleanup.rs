@@ -243,7 +243,10 @@ fn legacy_storage_ids_to_cache_keys(storage_ids: Vec<String>) -> Vec<String> {
 fn legacy_present_keys_to_storage_ids(present_keys: Vec<String>) -> Vec<String> {
     present_keys
         .into_iter()
-        .filter_map(|key| key.strip_prefix(STORAGE_KEY_PREFIX).map(|id| id.to_string()))
+        .filter_map(|key| {
+            key.strip_prefix(STORAGE_KEY_PREFIX)
+                .map(|id| id.to_string())
+        })
         .collect()
 }
 
@@ -328,11 +331,9 @@ fn parse_api_payload<T: DeserializeOwned>(
         .map_err(|e| format!("接口响应解析失败: {}", e))?;
 
     if parsed.code != 0 {
-        return Err(
-            parsed
-                .message
-                .unwrap_or_else(|| format!("接口返回错误码 {}", parsed.code)),
-        );
+        return Err(parsed
+            .message
+            .unwrap_or_else(|| format!("接口返回错误码 {}", parsed.code)));
     }
 
     parsed.data.ok_or_else(|| "接口返回缺少 data".to_string())
@@ -368,7 +369,6 @@ fn classify_redis_connection_error(message: &str) -> String {
     } else {
         format!("Redis 连接失败: {}", message)
     }
-
 }
 
 #[cfg(test)]
@@ -516,12 +516,8 @@ pub async fn disk_cleanup_list_linux_disks(
 
     let client = build_http_client(timeout_secs)?;
     let url = build_disk_cleanup_url(&host, DISK_LIST_PATH);
-    let data: DiskListData = post_json(
-        &client,
-        &url,
-        serde_json::json!({ "serverIp": server_ip }),
-    )
-    .await?;
+    let data: DiskListData =
+        post_json(&client, &url, serde_json::json!({ "serverIp": server_ip })).await?;
     Ok(data.storage_info_list)
 }
 
@@ -567,10 +563,7 @@ pub async fn disk_cleanup_list_ipsans(
 }
 
 #[tauri::command]
-pub async fn disk_cleanup_check_cache_keys(
-    host: String,
-    keys: Vec<String>,
-) -> CacheKeyCheckResult {
+pub async fn disk_cleanup_check_cache_keys(host: String, keys: Vec<String>) -> CacheKeyCheckResult {
     let host = match normalize_host(&host) {
         Ok(host) => host,
         Err(error) => {
@@ -617,11 +610,8 @@ pub async fn disk_cleanup_check_cache_keys(
         pipe.cmd("EXISTS").arg(key);
     }
 
-    let exec = tokio::time::timeout(
-        REDIS_OP_TIMEOUT,
-        pipe.query_async::<_, Vec<i64>>(&mut conn),
-    )
-    .await;
+    let exec =
+        tokio::time::timeout(REDIS_OP_TIMEOUT, pipe.query_async::<_, Vec<i64>>(&mut conn)).await;
 
     match exec {
         Err(_) => CacheKeyCheckResult {
@@ -764,7 +754,9 @@ pub async fn disk_cleanup_delete_cache_keys(
 
     let exec = tokio::time::timeout(
         REDIS_OP_TIMEOUT,
-        redis::cmd("DEL").arg(&keys).query_async::<_, i64>(&mut conn),
+        redis::cmd("DEL")
+            .arg(&keys)
+            .query_async::<_, i64>(&mut conn),
     )
     .await;
 
@@ -881,10 +873,7 @@ mod tests {
                 " disk-b ".to_string(),
                 "disk-a".to_string(),
             ]),
-            vec![
-                "Storage:disk-a".to_string(),
-                "Storage:disk-b".to_string()
-            ]
+            vec!["Storage:disk-a".to_string(), "Storage:disk-b".to_string()]
         );
     }
 

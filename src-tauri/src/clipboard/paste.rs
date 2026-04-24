@@ -17,8 +17,8 @@ use enigo::{
 };
 use tauri::{AppHandle, Manager};
 
-use crate::clipboard::ClipboardState;
 use crate::clipboard::models::{ClipboardItem, ContentKind};
+use crate::clipboard::ClipboardState;
 
 /// Paste an item. If `plain_text` is true, rich items are written as plain text.
 pub fn paste_item(

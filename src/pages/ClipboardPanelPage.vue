@@ -368,10 +368,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="clipboard-panel-shell flex h-screen w-screen flex-col overflow-hidden rounded-[16px] border border-slate-200 bg-white">
+  <div
+    class="clipboard-panel-shell flex h-screen w-screen flex-col overflow-hidden rounded-[16px] border border-slate-200 bg-white"
+    @pointerdown.capture="preview.hideNow()"
+  >
       <header
         class="flex select-none items-center justify-between px-3 py-2.5"
         :data-tauri-drag-region="CLIPBOARD_PANEL_USE_NATIVE_DRAG_REGION ? '' : undefined"
+        @mouseenter="preview.hideNow()"
         @mousedown="onHeaderMouseDown"
       >
       <span class="pointer-events-none truncate text-sm font-semibold text-slate-700">
@@ -500,6 +504,7 @@ onBeforeUnmount(() => {
             @pin="onToggleItemPin"
             @remove="onRemoveItem"
             @menu="onListMenu"
+            @hover-leave="preview.onLeave"
           />
         </div>
 
@@ -519,6 +524,7 @@ onBeforeUnmount(() => {
             @pin="onToggleItemPin"
             @remove="onRemoveItem"
             @menu="onListMenu"
+            @hover-leave="preview.onLeave"
           />
 
           <div class="min-h-0 flex-1 overflow-hidden">
@@ -542,6 +548,7 @@ onBeforeUnmount(() => {
               @remove="onRemoveItem"
               @menu="onListMenu"
               @reorder="onReorder"
+              @hover-leave="preview.onLeave"
             />
           </div>
         </div>

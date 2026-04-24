@@ -34,6 +34,7 @@ const emit = defineEmits<{
   remove: [id: number];
   toggle: [payload: { id: number; shiftKey: boolean }];
   menu: [payload: { item: ClipboardItem; x: number; y: number }];
+  hoverLeave: [];
 }>();
 
 const { t } = useI18n();
@@ -80,6 +81,7 @@ const listHeight = computed(() => {
         @remove="emit('remove', $event)"
         @toggle="emit('toggle', $event)"
         @menu="emit('menu', $event)"
+        @hover-leave="emit('hoverLeave')"
       />
     </div>
   </section>

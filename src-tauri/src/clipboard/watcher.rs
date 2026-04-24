@@ -163,18 +163,18 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
     };
 
     let hash_hex = match kind {
-        CaptureKind::Rtf => crate::clipboard::capture_hash(b"rtf", rtf.as_deref().unwrap().as_bytes()),
+        CaptureKind::Rtf => {
+            crate::clipboard::capture_hash(b"rtf", rtf.as_deref().unwrap().as_bytes())
+        }
         CaptureKind::Html => {
             crate::clipboard::capture_hash(b"html", html.as_deref().unwrap().as_bytes())
         }
-        CaptureKind::File => crate::clipboard::capture_hash(
-            b"files",
-            files.as_ref().unwrap().join("\0").as_bytes(),
-        ),
-        CaptureKind::Image => crate::clipboard::capture_hash(
-            b"image",
-            image.as_ref().unwrap().rgba.as_slice(),
-        ),
+        CaptureKind::File => {
+            crate::clipboard::capture_hash(b"files", files.as_ref().unwrap().join("\0").as_bytes())
+        }
+        CaptureKind::Image => {
+            crate::clipboard::capture_hash(b"image", image.as_ref().unwrap().rgba.as_slice())
+        }
         CaptureKind::Text => {
             crate::clipboard::capture_hash(b"text", text.as_deref().unwrap().as_bytes())
         }
@@ -600,12 +600,8 @@ mod tests {
     fn resolve_self_write_match_marks_capture_as_self_when_setting_is_enabled() {
         let now = std::time::Instant::now();
 
-        let decision = resolve_self_write_match(
-            Some(("same-hash".to_string(), now)),
-            "same-hash",
-            true,
-            now,
-        );
+        let decision =
+            resolve_self_write_match(Some(("same-hash".to_string(), now)), "same-hash", true, now);
 
         assert_eq!(decision, SelfWriteDecision::CaptureAsSelf);
     }

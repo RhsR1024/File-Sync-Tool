@@ -647,13 +647,22 @@ pub fn cb_show_image_preview(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
+    token: Option<u64>,
 ) -> Result<(), String> {
+    eprintln!("[clipboard-preview][command:show-image] id={id} token={token:?}");
     let item = {
         let conn = state.clipboard.read_db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
     let settings = state.clipboard.settings.read().clone();
-    crate::clipboard::preview::show_image_preview(&app, &settings, &item)
+    let result = crate::clipboard::preview::show_image_preview(&app, &settings, &item, token);
+    match &result {
+        Ok(()) => eprintln!("[clipboard-preview][command:show-image:ok] id={id} token={token:?}"),
+        Err(error) => eprintln!(
+            "[clipboard-preview][command:show-image:error] id={id} token={token:?} error={error}"
+        ),
+    }
+    result
 }
 
 #[tauri::command]
@@ -661,13 +670,22 @@ pub fn cb_show_text_preview(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
+    token: Option<u64>,
 ) -> Result<(), String> {
+    eprintln!("[clipboard-preview][command:show-text] id={id} token={token:?}");
     let item = {
         let conn = state.clipboard.read_db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
     let settings = state.clipboard.settings.read().clone();
-    crate::clipboard::preview::show_text_preview(&app, &settings, &item)
+    let result = crate::clipboard::preview::show_text_preview(&app, &settings, &item, token);
+    match &result {
+        Ok(()) => eprintln!("[clipboard-preview][command:show-text:ok] id={id} token={token:?}"),
+        Err(error) => eprintln!(
+            "[clipboard-preview][command:show-text:error] id={id} token={token:?} error={error}"
+        ),
+    }
+    result
 }
 
 #[tauri::command]
@@ -681,8 +699,9 @@ pub fn cb_get_text_preview_payload() -> Option<crate::clipboard::preview::TextPr
 }
 
 #[tauri::command]
-pub fn cb_hide_preview(app: AppHandle) {
-    crate::clipboard::preview::hide_preview_windows(&app);
+pub fn cb_hide_preview(app: AppHandle, token: Option<u64>) {
+    eprintln!("[clipboard-preview][command:hide] token={token:?}");
+    crate::clipboard::preview::hide_preview_windows_for_token(&app, token);
 }
 
 #[tauri::command]

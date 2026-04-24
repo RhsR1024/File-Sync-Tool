@@ -45,6 +45,7 @@ const emit = defineEmits<{
   reorder: [ids: number[]];
   toggle: [payload: { id: number; shiftKey: boolean }];
   menu: [payload: { item: ClipboardItem; x: number; y: number }];
+  hoverLeave: [];
 }>();
 
 const { t } = useI18n();
@@ -269,6 +270,7 @@ function onReorderEnd() {
       ]"
       :style="{ minHeight: `${heightOf(item)}px` }"
       @mouseenter="emit('select', item.id)"
+      @mouseleave="emit('hoverLeave')"
       @click="onRowClick($event, item.id)"
       @keydown="onRowKeydown($event, item.id)"
       @contextmenu="onRowContextMenu($event, item)"
@@ -461,6 +463,7 @@ function onReorderEnd() {
           ]"
           :style="{ minHeight: `${item._height - 6}px` }"
           @mouseenter="emit('select', item.id)"
+          @mouseleave="emit('hoverLeave')"
           @click="onRowClick($event, item.id)"
           @keydown="onRowKeydown($event, item.id)"
           @contextmenu="onRowContextMenu($event, item)"

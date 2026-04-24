@@ -21,11 +21,10 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{broadcast, oneshot};
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM};
+use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-    TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -705,7 +704,10 @@ fn screen_capture_conflict_policy(process_name: &str) -> Option<ScreenCaptureCon
 
 #[cfg(target_os = "windows")]
 fn utf16_cstr_to_string(raw: &[u16]) -> String {
-    let len = raw.iter().position(|value| *value == 0).unwrap_or(raw.len());
+    let len = raw
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(raw.len());
     String::from_utf16_lossy(&raw[..len])
 }
 
@@ -1482,7 +1484,11 @@ fn create_capturer(monitor_index: usize) -> Result<Capturer, String> {
 
 fn create_capturer_once(monitor_index: usize) -> Result<Capturer, CaptureCreateError> {
     let displays = Display::all().map_err(|error| CaptureCreateError {
-        detail: format!("Display::all failed: kind={:?}, error={}", error.kind(), error),
+        detail: format!(
+            "Display::all failed: kind={:?}, error={}",
+            error.kind(),
+            error
+        ),
         kind: Some(error.kind()),
     })?;
     let display_count = displays.len();
@@ -2341,7 +2347,9 @@ mod tests {
     #[test]
     fn should_retry_capture_creation_retries_transient_desktop_duplication_errors() {
         assert!(should_retry_capture_creation(std::io::ErrorKind::Other));
-        assert!(should_retry_capture_creation(std::io::ErrorKind::Interrupted));
+        assert!(should_retry_capture_creation(
+            std::io::ErrorKind::Interrupted
+        ));
         assert!(should_retry_capture_creation(
             std::io::ErrorKind::PermissionDenied
         ));
@@ -2349,8 +2357,12 @@ mod tests {
 
     #[test]
     fn should_retry_capture_creation_skips_non_transient_input_errors() {
-        assert!(!should_retry_capture_creation(std::io::ErrorKind::InvalidInput));
-        assert!(!should_retry_capture_creation(std::io::ErrorKind::InvalidData));
+        assert!(!should_retry_capture_creation(
+            std::io::ErrorKind::InvalidInput
+        ));
+        assert!(!should_retry_capture_creation(
+            std::io::ErrorKind::InvalidData
+        ));
     }
 
     #[test]

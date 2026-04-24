@@ -2853,9 +2853,17 @@ fn main() {
                     let preview_app_handle = preview_app_handle.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(150));
-                        if !panel.is_focused().unwrap_or(false)
-                            && !clipboard::preview::preview_window_is_focused(&preview_app_handle)
-                        {
+                        let panel_focused = panel.is_focused().unwrap_or(false);
+                        let preview_focused =
+                            clipboard::preview::preview_window_is_focused(&preview_app_handle);
+                        clipboard::preview::log_preview_window_diagnostics(
+                            &preview_app_handle,
+                            "focused-false-tick",
+                        );
+                        eprintln!(
+                            "[clipboard-preview][focused-false-tick] panel_focused={panel_focused} preview_focused={preview_focused}"
+                        );
+                        if !panel_focused && !preview_focused {
                             clipboard::preview::hide_preview_windows(&preview_app_handle);
                             let _ = panel.hide();
                         }

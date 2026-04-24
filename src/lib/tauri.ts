@@ -1147,13 +1147,16 @@ export const clipboardApi = {
   openInExplorer: (path: string) => invoke<void>('cb_open_in_explorer', { path }),
   mergePaste: (ids: number[], separator?: string | null) =>
     invoke<void>('cb_merge_paste', { ids, separator: separator ?? null }),
-  showImagePreview: (id: number) => invoke<void>('cb_show_image_preview', { id }),
-  showTextPreview: (id: number) => invoke<void>('cb_show_text_preview', { id }),
+  showImagePreview: (id: number, token: number) =>
+    invoke<void>('cb_show_image_preview', { id, token }),
+  showTextPreview: (id: number, token: number) =>
+    invoke<void>('cb_show_text_preview', { id, token }),
   getImagePreviewPayload: () =>
     invoke<ClipboardImagePreviewPayload | null>('cb_get_image_preview_payload'),
   getTextPreviewPayload: () =>
     invoke<ClipboardTextPreviewPayload | null>('cb_get_text_preview_payload'),
-  hidePreview: () => invoke<void>('cb_hide_preview'),
+  hidePreview: (token?: number | null) =>
+    invoke<void>('cb_hide_preview', { token: token ?? null }),
   togglePanel: () => invoke<void>('cb_toggle_panel'),
   stats: () => invoke<ClipboardStats>('cb_stats'),
   getSettings: () => invoke<ClipboardSettings>('cb_get_settings'),
