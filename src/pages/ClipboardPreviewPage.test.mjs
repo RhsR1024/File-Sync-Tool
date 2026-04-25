@@ -87,10 +87,26 @@ test('clipboard preview pages stay interactive so hover and scroll handlers can 
   assert.doesNotMatch(imagePreviewPageSource, /cursor:\s*pointer/);
 });
 
+test('clipboard preview pages keep the window surface transparent and clip visuals inside the rounded shell', () => {
+  for (const source of [imagePreviewPageSource, textPreviewPageSource]) {
+    assert.match(source, /html,\s*body\s*\{[\s\S]*background:\s*transparent/);
+    assert.match(source, /body\s*\{[^}]*background:\s*transparent/);
+    assert.match(source, /\.shell\s*\{[\s\S]*border-radius:\s*22px/);
+    assert.match(source, /\.shell\s*\{[\s\S]*overflow:\s*hidden/);
+    assert.doesNotMatch(source, /body\s*\{[^}]*linear-gradient/);
+    assert.doesNotMatch(source, /body\s*\{[^}]*radial-gradient/);
+  }
+});
+
 test('clipboard text preview page listens for update and clear events through Tauri internals', () => {
   assert.match(textPreviewPageSource, /text-preview-update/);
   assert.match(textPreviewPageSource, /text-preview-clear/);
   assert.match(textPreviewPageSource, /__TAURI_INTERNALS__/);
+});
+
+test('clipboard text preview content can be partially selected and copied', () => {
+  assert.match(textPreviewPageSource, /\.text\s*\{[\s\S]*user-select:\s*text/);
+  assert.match(textPreviewPageSource, /\.text\s*\{[\s\S]*cursor:\s*text/);
 });
 
 test('clipboard preview backend keeps standalone preview windows interactive instead of click-through', () => {
@@ -184,6 +200,11 @@ test('clipboard image preview page renders the picture fit-to-window by default 
   assert.match(imagePreviewPageSource, /max-height: 100%/);
   assert.match(imagePreviewPageSource, /id="fullscreen"/);
   assert.match(imagePreviewPageSource, /cb_toggle_preview_fullscreen/);
+});
+
+test('clipboard image preview keeps fit-to-window as the minimum zoom level', () => {
+  assert.match(imagePreviewPageSource, /const MIN_SCALE = FIT_SCALE/);
+  assert.match(imagePreviewPageSource, /zoomOutBtn\.disabled = scale <= FIT_SCALE/);
 });
 
 test('clipboard preview commands log request entry so native diagnostics can distinguish missing hovers from failed window creation', () => {

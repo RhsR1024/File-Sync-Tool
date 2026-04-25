@@ -32,11 +32,15 @@
 - Preview windows must call `set_ignore_cursor_events(false)` before showing so the preview itself can receive hover, wheel, and button input.
 - Preview windows must be inserted behind the `clipboard-panel` HWND in z-order when shown. They may be topmost as a group, but the panel must remain above them so overlap cannot block titlebar, settings, lock, close, or list clicks.
 - Preview HTML pages are interactive surfaces (`pointer-events: auto`, no `cursor: pointer`) so users can scroll long text, zoom images, and hit the fullscreen control without the panel stealing those events.
+- Preview page `html` / `body` must stay transparent, and the visual chrome must be painted by the rounded `.shell` container with `overflow: hidden`; do not leave a rectangular page background behind the rounded window.
+- Text preview content must remain partially selectable for copy: the outer shell can keep `user-select: none`, but the actual text content region must override to `user-select: text` with a text cursor.
 - Clipboard rows that can trigger hover previews must emit a leave event from the row itself, not only from the scroll container.
 - The Alt+C panel shell must hide previews during pointerdown capture, and header/control hover must also hide previews before settings, lock, close, or drag handlers run.
 - Hover preview show/hide requests must be token guarded across frontend and Rust command boundaries. A delayed or in-flight show request must not display a preview after the matching hover token has been hidden or replaced.
 - Preview pages must emit `clipboard-preview-mouse-enter` / `clipboard-preview-mouse-leave` so the panel-side hide debounce can stay alive while the cursor is inside a preview window.
 - Preview windows must support fullscreen toggle/restore while preserving the last non-fullscreen rect for each label.
+- Image preview zoom floor is the fit-to-window scale (`1.0`). The minus button and wheel zoom-out path must not shrink the image below that fit state.
+- Oversized image previews must open in a comfortable shell instead of mirroring raw image pixels. Before side-placement shrink, the image preview shell should cap to `720x640` and scale the image to fit inside that box.
 - Losing focus from either preview window must route through the shared orphan-dismiss debounce, and the panel should hide only when neither the panel nor any preview window still owns focus.
 - Placement must use real side space next to the panel:
   - Left side max width: `panel.x - monitor.x - PREVIEW_GAP_PX`
@@ -57,8 +61,11 @@
 | Hover leaves while a show command is still in-flight | The stale show token is rejected or immediately hidden; it must not resurrect the preview. |
 | A newer row hover starts before an older hide completes | The older hide token must not hide the newer preview. |
 | Cursor moves from a row into the preview window | The preview stays alive because the preview page emits hover-enter and the panel-side hide timer is cleared. |
+| User drags across text preview content | Only the text region is selectable; the drag should create a text selection instead of doing nothing. |
 | Preview visually overlaps the panel | The panel remains above the preview in z-order, so overlap still cannot intercept panel controls. |
 | User clicks the preview fullscreen button | The preview expands to the current monitor and a second toggle restores the saved rect. |
+| User clicks image zoom-out while already at fit scale | The preview stays at `100%`; it must not shrink smaller than the fit-to-window baseline. |
+| Source image is very large | The initial preview shell opens within the `720x640` comfort cap before placement-side shrink is applied. |
 | The panel loses Tauri focus but a preview is actually foreground on Windows | Native foreground-HWND detection still treats the preview as focused, so orphan-dismiss does not fire early. |
 
 ### 5. Good/Base/Bad Cases
@@ -67,6 +74,8 @@
 - Base: A 360px preview with enough requested-side space keeps the requested side and width.
 - Bad: A preview larger than the side space is clamped to `monitor.right - width`; this can overlap the panel and make settings, lock, close, and dragging appear frozen.
 - Bad: A preview window is click-through or `pointer-events: none`; users can no longer scroll text, zoom images, or keep the preview alive by moving into it.
+- Bad: The page `body` paints the preview background while the shell is merely a rounded inner card; the window corners still look square because the outer page remains opaque.
+- Bad: Fit-to-window is treated like an ordinary zoom level and the UI allows `90%`, `80%`, etc. even though the rendered image does not get meaningfully smaller than the fit baseline.
 
 ### 6. Tests Required
 
@@ -83,6 +92,10 @@
   - Assert preview windows are shown behind the Alt+C panel in z-order.
   - Assert preview windows are non-focusable and shown through the non-activating helper.
   - Assert preview HTML stays interactive and emits preview hover events.
+  - Assert preview page chrome is clipped by the rounded shell instead of an opaque `body`.
+  - Assert text preview content remains selectable for partial copy.
+  - Assert image preview zoom floor stays at fit scale.
+  - Assert oversized image previews use the comfort cap before placement shrink.
   - Assert fullscreen toggle/orphan-dismiss wiring is exposed across frontend and backend.
   - Assert frontend API, Tauri commands, and backend preview logic pass and validate hover tokens.
 - Node: `node --test src/pages/ClipboardPanelPage.test.mjs`

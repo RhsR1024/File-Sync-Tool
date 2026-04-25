@@ -31,6 +31,10 @@ const DEFAULT_IMAGE_PREVIEW_WIDTH: u32 = 420;
 const DEFAULT_IMAGE_PREVIEW_HEIGHT: u32 = 320;
 const DEFAULT_TEXT_PREVIEW_WIDTH: u32 = 420;
 const DEFAULT_TEXT_PREVIEW_HEIGHT: u32 = 420;
+const MAX_IMAGE_PREVIEW_WIDTH: u32 = 720;
+const MAX_IMAGE_PREVIEW_HEIGHT: u32 = 640;
+const IMAGE_PREVIEW_HORIZONTAL_CHROME_PX: u32 = 32;
+const IMAGE_PREVIEW_VERTICAL_CHROME_PX: u32 = 96;
 const MIN_PREVIEW_WIDTH: u32 = 280;
 const MIN_PREVIEW_HEIGHT: u32 = 220;
 static PREVIEW_REQUEST_TOKEN: AtomicU64 = AtomicU64::new(0);
@@ -875,16 +879,31 @@ fn show_preview_without_focus<R: tauri::Runtime>(
 }
 
 fn desired_image_preview_size(item: &ClipboardItem) -> PreviewWindowSize {
-    let width = item
+    let content_width = item
         .image_width
-        .unwrap_or(DEFAULT_IMAGE_PREVIEW_WIDTH.saturating_sub(32))
-        .saturating_add(32)
-        .clamp(MIN_PREVIEW_WIDTH, 960);
-    let height = item
+        .unwrap_or(DEFAULT_IMAGE_PREVIEW_WIDTH.saturating_sub(IMAGE_PREVIEW_HORIZONTAL_CHROME_PX))
+        .max(1);
+    let content_height = item
         .image_height
-        .unwrap_or(DEFAULT_IMAGE_PREVIEW_HEIGHT.saturating_sub(32))
-        .saturating_add(32)
-        .clamp(MIN_PREVIEW_HEIGHT, 720);
+        .unwrap_or(DEFAULT_IMAGE_PREVIEW_HEIGHT.saturating_sub(IMAGE_PREVIEW_VERTICAL_CHROME_PX))
+        .max(1);
+    let max_content_width = MAX_IMAGE_PREVIEW_WIDTH
+        .saturating_sub(IMAGE_PREVIEW_HORIZONTAL_CHROME_PX)
+        .max(1);
+    let max_content_height = MAX_IMAGE_PREVIEW_HEIGHT
+        .saturating_sub(IMAGE_PREVIEW_VERTICAL_CHROME_PX)
+        .max(1);
+    let width_scale = max_content_width as f64 / content_width as f64;
+    let height_scale = max_content_height as f64 / content_height as f64;
+    let scale = width_scale.min(height_scale).min(1.0);
+    let width = ((content_width as f64 * scale).round() as u32)
+        .max(1)
+        .saturating_add(IMAGE_PREVIEW_HORIZONTAL_CHROME_PX)
+        .clamp(MIN_PREVIEW_WIDTH, MAX_IMAGE_PREVIEW_WIDTH);
+    let height = ((content_height as f64 * scale).round() as u32)
+        .max(1)
+        .saturating_add(IMAGE_PREVIEW_VERTICAL_CHROME_PX)
+        .clamp(MIN_PREVIEW_HEIGHT, MAX_IMAGE_PREVIEW_HEIGHT);
 
     PreviewWindowSize { width, height }
 }
@@ -1157,6 +1176,33 @@ mod tests {
         PREVIEW_REQUEST_TOKEN.store(0, Ordering::SeqCst);
     }
 
+    fn image_item(width: u32, height: u32) -> ClipboardItem {
+        ClipboardItem {
+            id: 1,
+            kind: ContentKind::Image,
+            content_preview: String::new(),
+            content_full: None,
+            rtf_content: None,
+            html: None,
+            image_path: Some("C:/preview.png".into()),
+            image_width: Some(width),
+            image_height: Some(height),
+            file_paths: None,
+            byte_size: 0,
+            char_count: 0,
+            hash: "hash".into(),
+            source_app: None,
+            source_app_icon: None,
+            from_self: false,
+            group_id: None,
+            is_favorite: false,
+            is_pinned: false,
+            favorite_sort_index: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
     #[test]
     fn calculate_preview_placement_prefers_requested_right_side_when_space_exists() {
         let placement = calculate_preview_placement(
@@ -1240,6 +1286,17 @@ mod tests {
         assert_eq!(placement.x, panel.right() + PREVIEW_GAP_PX);
         assert!(placement.x >= panel.right() + PREVIEW_GAP_PX);
         assert!(placement.x + placement.width as i32 <= 1920);
+    }
+
+    #[test]
+    fn desired_image_preview_size_is_not_overly_wide_for_large_images() {
+        let size = desired_image_preview_size(&image_item(2600, 1600));
+
+        assert!(
+            size.width <= 720,
+            "expected image preview width to stay within a comfortable side-preview cap, got {}",
+            size.width
+        );
     }
 
     #[test]
