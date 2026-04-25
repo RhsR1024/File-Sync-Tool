@@ -42,6 +42,10 @@ const config = ref<AppConfig>({
   appliance_ssh_api_timeout_secs: 5,
   framework_password_api_timeout_secs: 5,
   disk_cleanup_http_timeout_secs: 5,
+  update_server_url: 'http://192.115.1.3:8080',
+  notify_on_new_version: false,
+  last_update_check_at: null,
+  pending_update: null,
   clipboard: createDefaultClipboardSettings(),
 });
 
@@ -821,6 +825,39 @@ onUnmounted(clearStatusMsg);
           <span class="text-xs text-slate-500">{{ t('settings.lines') }}</span>
         </div>
       </div>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-sky-100 text-sky-600 flex items-center justify-center shrink-0">
+          <RefreshCw class="w-4 h-4" />
+        </div>
+        <h3 class="text-base font-semibold text-slate-700">{{ t('settings.update.section') }}</h3>
+      </div>
+      <div class="p-6 space-y-4">
+        <label class="flex items-center justify-between gap-3">
+          <div>
+            <div class="text-sm font-medium text-slate-700">{{ t('settings.update.notifyToggle') }}</div>
+            <p class="text-xs text-slate-400 mt-1">{{ t('settings.update.notifyHelp') }}</p>
+          </div>
+          <div class="shrink-0 relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" v-model="config.notify_on_new_version" @change="save" class="sr-only peer">
+            <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-sky-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-sky-600"></div>
+          </div>
+        </label>
+
+        <div class="space-y-2">
+          <label class="block text-sm font-medium text-slate-700">{{ t('settings.update.serverLabel') }}</label>
+          <input
+            v-model.trim="config.update_server_url"
+            type="text"
+            :placeholder="t('settings.update.serverPlaceholder')"
+            class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-200"
+            @change="save"
+          />
+          <p class="text-xs text-slate-400">{{ t('settings.update.serverHint') }}</p>
+        </div>
       </div>
     </div>
 

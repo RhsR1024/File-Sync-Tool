@@ -18,13 +18,18 @@ import {
 } from 'lucide-vue-next';
 import { computed, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 
+import UpdateRedDot from '@/components/UpdateRedDot.vue';
+import { useUpdater } from '@/composables/useUpdater';
 import { SIDEBAR_NAV_SECTIONS, isSidebarItemActive, type SidebarIconKey } from '@/lib/sidebarNavigation';
 import { appStore } from '@/lib/store';
+import { formatReleaseDate } from '@/pages/about/version';
 
 const route = useRoute();
+const router = useRouter();
 const { t } = useI18n();
+const { state: updaterState } = useUpdater();
 
 const iconMap: Record<SidebarIconKey, Component> = {
   tasks: ListChecks,
@@ -56,6 +61,20 @@ const sections = computed(() =>
     })),
   })),
 );
+
+const fallbackVersionLabel = computed(() => t('sidebar.version'));
+
+const versionChipLabel = computed(() => {
+  const fallbackParts = fallbackVersionLabel.value.split('·').map((part) => part.trim());
+  const fallbackVersion = fallbackParts[0] ?? '1.0.7';
+  const fallbackDate = fallbackParts[1] ?? '';
+  const current = updaterState.value?.current ?? fallbackVersion;
+  const currentEntry = updaterState.value?.manifest?.versions.find((entry) => entry.version === current);
+  const releaseDate = currentEntry?.released_at
+    ? formatReleaseDate(currentEntry.released_at)
+    : fallbackDate;
+  return releaseDate ? `${current} · ${releaseDate}` : current;
+});
 </script>
 
 <template>
@@ -122,10 +141,16 @@ const sections = computed(() =>
     </nav>
 
     <div class="border-t border-slate-800/90 bg-slate-950/25 px-5 py-4">
-      <div class="flex items-center gap-3 text-xs font-mono text-slate-500">
+      <button
+        type="button"
+        class="flex w-full items-center gap-3 rounded-2xl border border-transparent px-2 py-2 text-left text-xs font-mono text-slate-400 transition hover:border-slate-800 hover:bg-slate-900/70 hover:text-slate-200"
+        :title="t('sidebar.versionChipTooltip')"
+        @click="router.push('/about')"
+      >
         <ShieldCheck class="h-4 w-4" />
-        <span>{{ t('sidebar.version') }}</span>
-      </div>
+        <span class="min-w-0 flex-1 truncate">{{ versionChipLabel }}</span>
+        <UpdateRedDot v-if="updaterState?.has_update" />
+      </button>
     </div>
   </div>
 </template>

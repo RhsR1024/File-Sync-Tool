@@ -168,6 +168,18 @@ pub struct AppConfig {
     #[serde(default = "default_disk_cleanup_http_timeout_secs")]
     pub disk_cleanup_http_timeout_secs: u64,
 
+    #[serde(default = "default_update_server_url")]
+    pub update_server_url: String,
+
+    #[serde(default)]
+    pub notify_on_new_version: bool,
+
+    #[serde(default)]
+    pub last_update_check_at: Option<String>,
+
+    #[serde(default)]
+    pub pending_update: Option<crate::updater::PendingUpdate>,
+
     /// Clipboard manager settings (spec §2026-04-19-clipboard-manager §7.1).
     #[serde(default)]
     pub clipboard: ClipboardSettings,
@@ -196,6 +208,36 @@ fn default_framework_password_api_timeout_secs() -> u64 {
 }
 fn default_disk_cleanup_http_timeout_secs() -> u64 {
     5
+}
+fn default_update_server_url() -> String {
+    "http://192.115.1.3:8080".to_string()
+}
+
+fn normalize_update_server_url(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        trimmed.trim_end_matches('/').to_string()
+    }
+}
+
+fn validate_update_server_url(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|_| "Update server URL must be a valid http(s) URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Update server URL must start with http:// or https://".to_string());
+    }
+    if url.host_str().is_none() {
+        return Err("Update server URL must include a host".to_string());
+    }
+
+    Ok(())
 }
 
 fn default_clipboard_settings() -> ClipboardSettings {
@@ -226,6 +268,10 @@ impl Default for AppConfig {
             appliance_ssh_api_timeout_secs: 5,
             framework_password_api_timeout_secs: 5,
             disk_cleanup_http_timeout_secs: 5,
+            update_server_url: default_update_server_url(),
+            notify_on_new_version: false,
+            last_update_check_at: None,
+            pending_update: None,
             clipboard: default_clipboard_settings(),
         }
     }
@@ -241,6 +287,7 @@ pub fn normalize_config(mut config: AppConfig) -> AppConfig {
     if config.recent_file_guard_mins < MIN_RECENT_FILE_GUARD_MINS {
         config.recent_file_guard_mins = MIN_RECENT_FILE_GUARD_MINS;
     }
+    config.update_server_url = normalize_update_server_url(&config.update_server_url);
     config
 }
 
@@ -263,6 +310,7 @@ pub fn validate_config(config: &AppConfig) -> Result<(), String> {
             MIN_RECENT_FILE_GUARD_MINS
         ));
     }
+    validate_update_server_url(&config.update_server_url)?;
     Ok(())
 }
 
@@ -492,5 +540,62 @@ mod tests {
         );
         assert!(serialized.get("panel").is_none());
         assert!(serialized.get("toolbar").is_none());
+    }
+
+    #[test]
+    fn legacy_config_without_update_fields_migrates_to_defaults() {
+        let legacy_json = r#"{
+            "tasks": [],
+            "local_path": "C:\\local",
+            "interval_minutes": 5,
+            "time_ranges": [],
+            "file_extensions": [],
+            "filename_includes": [],
+            "deploy_enabled": false,
+            "servers": [],
+            "command_groups": [],
+            "local_command_groups": [],
+            "stability_check_secs": 60,
+            "recent_file_guard_mins": 3,
+            "launch_and_auto_scan": false,
+            "close_to_tray": false,
+            "max_log_lines": 200
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(legacy_json).expect("parse");
+        assert_eq!(cfg.update_server_url, "http://192.115.1.3:8080");
+        assert!(!cfg.notify_on_new_version);
+        assert!(cfg.last_update_check_at.is_none());
+        assert!(cfg.pending_update.is_none());
+    }
+
+    #[test]
+    fn config_round_trip_preserves_pending_update() {
+        let mut cfg = AppConfig::default();
+        cfg.pending_update = Some(crate::updater::PendingUpdate {
+            target_version: "1.0.8".into(),
+            temp_path: r"C:\Users\u\AppData\Local\Temp\fst-update.exe".into(),
+            sha256: "ab".repeat(32),
+            downloaded_at: "2026-04-25T10:00:00+08:00".into(),
+        });
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.pending_update, cfg.pending_update);
+    }
+
+    #[test]
+    fn normalize_config_trims_update_server_url() {
+        let mut cfg = AppConfig::default();
+        cfg.update_server_url = "  http://example.com/releases/  ".into();
+        let normalized = normalize_config(cfg);
+        assert_eq!(normalized.update_server_url, "http://example.com/releases");
+    }
+
+    #[test]
+    fn validate_config_rejects_invalid_update_server_url() {
+        let mut cfg = AppConfig::default();
+        cfg.update_server_url = "ftp://example.com".into();
+        let error = validate_config(&cfg).unwrap_err();
+        assert!(error.contains("http:// or https://"));
     }
 }

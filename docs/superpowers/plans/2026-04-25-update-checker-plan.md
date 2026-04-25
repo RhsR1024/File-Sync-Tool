@@ -10,6 +10,8 @@
 
 **Companion design spec:** `docs/superpowers/specs/2026-04-25-update-checker-design.md` — re-read it before starting.
 
+**Execution note:** Per the latest user instruction in this session, implement and commit this feature directly on `main`. Do **not** create a worktree or separate feature branch for this task.
+
 ---
 
 ## File Structure
@@ -28,6 +30,8 @@
 | `src/updater/updater.bat` | Embedded helper script (raw `.bat`) |
 | `src/config.rs` | Add 4 fields with `#[serde(default)]` (no logic change beyond field additions) |
 | `src/main.rs` | `mod updater;`, `AppState.updater`, `invoke_handler` registration, startup background task |
+| `.trellis/spec/backend/update-checker.md` | Executable contract for updater commands, events, config fields, and manifest/error rules |
+| `.trellis/spec/backend/index.md` | Register the new updater code-spec |
 
 **Frontend (`src/`):**
 
@@ -3605,7 +3609,123 @@ git commit -m "docs(updater): bundled release-server serve.py and README"
 
 ---
 
-## Task 23: Final verification
+## Task 23: Update backend code-spec for the updater contract
+
+**Files:**
+- Create: `.trellis/spec/backend/update-checker.md`
+- Modify: `.trellis/spec/backend/index.md`
+
+- [ ] **Step 1: Register the new spec in the backend index**
+
+Open `.trellis/spec/backend/index.md` and append a new row to the guide table:
+
+```md
+| [Update Checker](./update-checker.md) | Contracts for manifest fetch, update download/apply flow, and Tauri updater commands | Active |
+```
+
+- [ ] **Step 2: Write the executable updater contract**
+
+Create `.trellis/spec/backend/update-checker.md` with concrete sections matching the implemented code:
+
+```md
+# Update Checker
+
+> Contracts for syncing updater manifest state into the app, downloading verified installers, and applying a pending update on Windows.
+
+## Scenario: Manifest / Download / Apply contract
+
+### 1. Scope / Trigger
+- Trigger: Code under `src-tauri/src/updater/`, `src-tauri/src/config.rs`, or frontend wrappers using updater commands/events.
+- Goal: Keep the manifest schema, event payloads, config fields, pending-update rules, and command signatures stable across Rust and Vue.
+
+### 2. Signatures
+- Rust modules:
+  - `src-tauri/src/updater/mod.rs`
+  - `src-tauri/src/updater/manifest.rs`
+  - `src-tauri/src/updater/download.rs`
+  - `src-tauri/src/updater/installer.rs`
+  - `src-tauri/src/updater/pending.rs`
+  - `src-tauri/src/updater/commands.rs`
+- Tauri commands:
+  - `check_update(...) -> Result<UpdateCheckResult, String>`
+  - `start_update_download(...) -> Result<(), String>`
+  - `cancel_update_download(...) -> Result<(), String>`
+  - `apply_update_now(...) -> Result<(), String>`
+  - `test_update_server(...) -> Result<TestServerResult, String>`
+  - `get_update_state(...) -> UpdateState`
+- Events:
+  - `update-state-changed`
+  - `update-download-progress`
+  - `update-download-complete`
+  - `open-update-dialog`
+
+### 3. Contracts
+- `AppConfig` fields:
+  - `update_server_url: String`
+  - `notify_on_new_version: bool`
+  - `last_update_check_at: Option<String>`
+  - `pending_update: Option<PendingUpdate>`
+- Manifest rules:
+  - endpoint is `${server_url}/manifest.json`
+  - relative file URLs are resolved against `server_url`
+  - malformed entries are dropped; valid entries still work
+- Query rules:
+  - debug builds return no-op updater behavior
+  - empty `update_server_url` disables checks
+  - verified downloads write `pending_update`
+  - `apply_update_now` consumes `pending_update`, spawns `helper.bat`, then exits the current process
+
+### 4. Validation & Error Matrix
+| Case | Required behavior |
+| --- | --- |
+| server URL empty | return `server_not_configured` for manual commands |
+| manifest HTTP/network failure | keep existing state, log warning, surface error only for manual actions |
+| SHA-256 mismatch | delete temp file, return verify-failed behavior |
+| pending file missing or mismatched on restart | clear `pending_update` silently |
+| duplicate download start | return `already_in_progress` |
+
+### 5. Good / Base / Bad Cases
+- Good: startup auto-check finds a newer version and emits state; if notify toggle is on, frontend opens the dialog.
+- Base: manual check with no update stores manifest/history but leaves `has_update = false`.
+- Bad: frontend/backend disagree on `UpdateState` or event payload fields.
+- Bad: download completion skips SHA-256 verification before persisting `pending_update`.
+
+### 6. Tests Required
+- Rust: `cargo test --manifest-path src-tauri/Cargo.toml -p app updater`
+  - assert URL resolution, manifest parsing, download verification, helper-bat generation, pending-update validation
+- Node: `node --test src/pages/about/version.test.mjs`
+  - assert pure helper behavior for version/history rendering
+- Frontend type-check: `pnpm check`
+  - assert typed wrappers, dialog/page/composable wiring stay compatible
+
+### 7. Wrong vs Correct
+#### Wrong
+```rust
+pub fn start_update_download(...) -> Result<(), String> {
+    // trust downloaded bytes and persist immediately
+}
+```
+
+#### Correct
+```rust
+pub fn start_update_download(...) -> Result<(), String> {
+    // stream bytes, hash while writing, compare SHA-256, then persist pending_update
+}
+```
+```
+
+Keep this doc concrete. Use the actual type names, command names, event names, and config field names from the implementation — not placeholders or pseudonyms.
+
+- [ ] **Step 3: Commit the code-spec**
+
+```bash
+git add .trellis/spec/backend/index.md .trellis/spec/backend/update-checker.md
+git commit -m "docs(updater): capture backend command and manifest contracts"
+```
+
+---
+
+## Task 24: Final verification
 
 **Files:**
 - None (verification only)

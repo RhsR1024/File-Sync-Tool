@@ -31,6 +31,11 @@ const routes: RouteRecordRaw[] = [
     component: SettingsPage,
   },
   {
+    path: '/about',
+    name: 'about',
+    component: () => import('../pages/AboutPage.vue'),
+  },
+  {
     path: '/tools',
     component: () => import('../pages/ToolsHubPage.vue'),
   },

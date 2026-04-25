@@ -129,8 +129,76 @@ export interface AppConfig {
   /** HTTP request timeout in seconds for disk cache cleanup API. Default: 5. */
   disk_cleanup_http_timeout_secs: number;
 
+  /** Update server URL used by the in-app updater. */
+  update_server_url: string;
+
+  /** Whether startup auto-checks should show the update dialog. */
+  notify_on_new_version: boolean;
+
+  /** RFC3339 timestamp of the last successful update check. */
+  last_update_check_at: string | null;
+
+  /** Downloaded update waiting to be applied on restart. */
+  pending_update: PendingUpdate | null;
+
   /** Clipboard manager settings mirrored from Rust AppConfig. */
   clipboard: ClipboardSettings;
+}
+
+export interface ManifestVersion {
+  version: string;
+  url: string;
+  sha256: string;
+  released_at: string;
+  changelog: string[];
+}
+
+export interface Manifest {
+  latest: string;
+  versions: ManifestVersion[];
+}
+
+export interface PendingUpdate {
+  target_version: string;
+  temp_path: string;
+  sha256: string;
+  downloaded_at: string;
+}
+
+export interface UpdateState {
+  current: string;
+  server_url: string;
+  manifest: Manifest | null;
+  has_update: boolean;
+  last_checked_at: string | null;
+  pending_update: PendingUpdate | null;
+  debug_build: boolean;
+}
+
+export interface DownloadProgress {
+  downloaded: number;
+  total: number | null;
+  speed_bps: number;
+}
+
+export interface DownloadCompletePayload {
+  version: string;
+  temp_path: string;
+  sha256_ok: boolean;
+  error: string | null;
+}
+
+export interface UpdateCheckResult {
+  has_update: boolean;
+  current: string;
+  latest: string | null;
+  manifest: Manifest | null;
+}
+
+export interface TestServerResult {
+  ok: boolean;
+  status: number | null;
+  error: string | null;
 }
 
 export type TaskSourceType = 'scheduled' | 'manual';
@@ -1103,6 +1171,17 @@ export interface AdminTaskStatus {
   path_valid: boolean;
   last_error: string | null;
 }
+
+// ===== Updater =====
+
+export const updaterApi = {
+  getState: () => invoke<UpdateState>('get_update_state'),
+  check: () => invoke<UpdateCheckResult>('check_update'),
+  startDownload: () => invoke<void>('start_update_download'),
+  cancelDownload: () => invoke<void>('cancel_update_download'),
+  applyNow: () => invoke<void>('apply_update_now'),
+  testServer: () => invoke<TestServerResult>('test_update_server'),
+};
 
 // ===== Error Code Lookup =====
 

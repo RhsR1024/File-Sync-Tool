@@ -21,6 +21,7 @@ mod task_events;
 mod task_manager;
 mod task_persist;
 mod task_runtime;
+mod updater;
 
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
@@ -46,6 +47,7 @@ const MANUAL_COPY_RECOVERY_DELAY: Duration = Duration::from_secs(60);
 
 struct AppState {
     config: Arc<Mutex<AppConfig>>,
+    updater: updater::SharedUpdaterState,
     task_manager: task_manager::TaskManager,
     task_runtime: task_runtime::TaskRuntimeRegistry,
     executor_active: Arc<AtomicBool>,
@@ -819,10 +821,17 @@ fn save_config_cmd(
     config: AppConfig,
 ) -> Result<(), String> {
     config::validate_config(&config)?;
-    let config = config::normalize_config(config);
+    let previous = state.config.lock().unwrap().clone();
+    let mut config = config::normalize_config(config);
+    let server_url_changed = previous.update_server_url != config.update_server_url;
+    if server_url_changed {
+        config.last_update_check_at = None;
+    }
     sync_launch_on_startup(config.launch_and_auto_scan || config.launch_and_auto_start_file_share)?;
     *state.config.lock().unwrap() = config.clone();
-    config::save_config(&app_handle, &config)
+    config::save_config(&app_handle, &config)?;
+    updater::commands::handle_config_changed(&app_handle, state.inner(), server_url_changed);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2785,6 +2794,7 @@ fn main() {
             app.manage(network::NetworkState::default());
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
+                updater: Arc::new(updater::UpdaterState::new()),
                 task_manager,
                 task_runtime: task_runtime::TaskRuntimeRegistry::new(),
                 executor_active: Arc::new(AtomicBool::new(false)),
@@ -2806,6 +2816,10 @@ fn main() {
                 clipboard: clipboard_state,
                 error_code: std::sync::Mutex::new(error_code::ErrorCodeStore::default()),
             });
+
+            if let Some(state) = app.try_state::<AppState>() {
+                updater::commands::initialize_on_startup(app.handle().clone(), state.inner());
+            }
 
             // Start the clipboard watcher if the persisted config has it enabled.
             // init() seeds is_enabled from config, but watcher thread only runs after enable().
@@ -2930,6 +2944,12 @@ fn main() {
             save_text_file,
             change_framework_password,
             enable_appliance_ssh,
+            updater::commands::check_update,
+            updater::commands::start_update_download,
+            updater::commands::cancel_update_download,
+            updater::commands::apply_update_now,
+            updater::commands::test_update_server,
+            updater::commands::get_update_state,
             disk_cleanup::disk_cleanup_list_servers,
             disk_cleanup::disk_cleanup_list_disks,
             disk_cleanup::disk_cleanup_check_redis,

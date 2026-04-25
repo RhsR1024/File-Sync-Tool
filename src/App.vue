@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import Sidebar from '@/components/Sidebar.vue';
+import UpdateDialog from '@/components/UpdateDialog.vue';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { onMounted, onUnmounted, watch } from 'vue';
 import { RouterView, useRouter } from 'vue-router';
 
+import { ensureUpdaterInitialized } from '@/composables/useUpdater';
 import { startScheduler } from '@/lib/scheduler';
 import { appStore, addLog, setToolRuntime, startLiveTicker, stopLiveTicker } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
@@ -68,6 +70,12 @@ onMounted(async () => {
   // listeners, scheduler auto-start, or before-quit handling.
   const label = getCurrentWindow().label;
   if (label !== 'main') return;
+
+  try {
+    await ensureUpdaterInitialized();
+  } catch (error) {
+    addLog(`Updater init failed: ${error}`, 'error');
+  }
 
   startLiveTicker();
   let cfg = null;
@@ -219,5 +227,6 @@ onUnmounted(() => {
         </keep-alive>
       </router-view>
     </main>
+    <UpdateDialog />
   </div>
 </template>
