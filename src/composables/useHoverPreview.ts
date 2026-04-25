@@ -1,4 +1,5 @@
 import { onBeforeUnmount } from 'vue';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import type { ClipboardItem } from '@/lib/clipboardTypes';
 import {
@@ -11,15 +12,19 @@ export interface HoverPreviewOptions {
   delayMs?: number | (() => number);
   hideDelayMs?: number;
   onError?: (error: unknown) => void;
+  onDebug?: (message: string) => void;
 }
 
 export function useHoverPreview(opts: HoverPreviewOptions = {}) {
-  const hideDelayMs = opts.hideDelayMs ?? 150;
+  const hideDelayMs = opts.hideDelayMs ?? 200;
 
   let showTimer: number | null = null;
   let hideTimer: number | null = null;
   let nextPreviewToken = 0;
   let activePreviewToken: number | null = null;
+  let previewHovered = false;
+  let unlistenEnter: UnlistenFn | null = null;
+  let unlistenLeave: UnlistenFn | null = null;
 
   function resolveDelayMs(): number {
     const delayMs =
@@ -34,6 +39,13 @@ export function useHoverPreview(opts: HoverPreviewOptions = {}) {
       clearTimeout(showTimer);
       showTimer = null;
     }
+    if (hideTimer !== null) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+  }
+
+  function clearHideTimer() {
     if (hideTimer !== null) {
       clearTimeout(hideTimer);
       hideTimer = null;
@@ -56,10 +68,28 @@ export function useHoverPreview(opts: HoverPreviewOptions = {}) {
     return activePreviewToken === token;
   }
 
+  function scheduleHide(reason: string) {
+    const token = activePreviewToken;
+    clearHideTimer();
+    opts.onDebug?.(reason);
+    hideTimer = window.setTimeout(() => {
+      hideTimer = null;
+      if (previewHovered) return;
+      if (token !== activePreviewToken) return;
+      void hidePreview(token);
+    }, hideDelayMs);
+  }
+
   async function hidePreview(token: number | null = null): Promise<void> {
     try {
+      opts.onDebug?.('hide-preview:start');
       await clipboardApi.hidePreview(token);
+      if (token === null || activePreviewToken === token) {
+        activePreviewToken = null;
+      }
+      opts.onDebug?.('hide-preview:done');
     } catch (error) {
+      opts.onDebug?.(`hide-preview:error ${String(error)}`);
       opts.onError?.(error);
     }
   }
@@ -68,6 +98,7 @@ export function useHoverPreview(opts: HoverPreviewOptions = {}) {
     if (!isActivePreviewToken(token)) return;
 
     try {
+      opts.onDebug?.(`show-preview:start kind=${target.kind} id=${target.id}`);
       if (target.kind === 'image') {
         await clipboardApi.showImagePreview(target.id, token);
       } else {
@@ -76,7 +107,9 @@ export function useHoverPreview(opts: HoverPreviewOptions = {}) {
       if (!isActivePreviewToken(token)) {
         await hidePreview(token);
       }
+      opts.onDebug?.(`show-preview:done kind=${target.kind} id=${target.id}`);
     } catch (error) {
+      opts.onDebug?.(`show-preview:error kind=${target.kind} id=${target.id} error=${String(error)}`);
       opts.onError?.(error);
     }
   }
@@ -86,15 +119,13 @@ export function useHoverPreview(opts: HoverPreviewOptions = {}) {
 
     const target = resolveHoverPreviewTarget(item);
     if (!target) {
-      const token = consumeActivePreviewToken();
-      hideTimer = window.setTimeout(() => {
-        void hidePreview(token);
-        hideTimer = null;
-      }, hideDelayMs);
+      scheduleHide(`schedule-hide item=${item?.id ?? 'none'}`);
       return;
     }
 
+    previewHovered = false;
     const token = startPreviewToken();
+    opts.onDebug?.(`schedule-show kind=${target.kind} id=${target.id} delay=${resolveDelayMs()}`);
     showTimer = window.setTimeout(() => {
       void showPreview(target, token);
       showTimer = null;
@@ -102,24 +133,45 @@ export function useHoverPreview(opts: HoverPreviewOptions = {}) {
   }
 
   function onLeave() {
-    clearTimers();
-    const token = consumeActivePreviewToken();
-    hideTimer = window.setTimeout(() => {
-      void hidePreview(token);
-      hideTimer = null;
-    }, hideDelayMs);
+    if (showTimer !== null) {
+      clearTimeout(showTimer);
+      showTimer = null;
+    }
+    scheduleHide('schedule-hide leave');
   }
 
   function hideNow() {
     clearTimers();
+    previewHovered = false;
     const token = consumeActivePreviewToken();
     void hidePreview(token);
   }
 
+  void (async () => {
+    try {
+      unlistenEnter = await listen('clipboard-preview-mouse-enter', () => {
+        previewHovered = true;
+        opts.onDebug?.('preview:mouse-enter');
+        clearHideTimer();
+      });
+      unlistenLeave = await listen('clipboard-preview-mouse-leave', () => {
+        previewHovered = false;
+        scheduleHide('preview:mouse-leave');
+      });
+    } catch (error) {
+      opts.onDebug?.(`preview-hover-listen:error ${String(error)}`);
+    }
+  })();
+
   onBeforeUnmount(() => {
     clearTimers();
+    previewHovered = false;
     const token = consumeActivePreviewToken();
     void hidePreview(token);
+    unlistenEnter?.();
+    unlistenLeave?.();
+    unlistenEnter = null;
+    unlistenLeave = null;
   });
 
   return {

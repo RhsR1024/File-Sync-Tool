@@ -47,8 +47,12 @@ test('clipboard preview backend uses standalone HTML preview windows instead of 
   assert.doesNotMatch(previewBackendSource, /#\/clipboard-preview\/text/);
 });
 
-test('clipboard preview windows are created lazily instead of being prewarmed on startup', () => {
-  assert.doesNotMatch(mainSource, /clipboard::preview::ensure_preview_windows\(app\)\?/);
+test('clipboard preview windows are prewarmed on startup so first hover does not create them', () => {
+  assert.match(
+    previewBackendSource,
+    /pub fn ensure_preview_windows[\s\S]*ensure_preview_window\(/,
+  );
+  assert.match(mainSource, /clipboard::preview::ensure_preview_windows\(app\)\?/);
 });
 
 test('clipboard panel capability remains scoped to the Alt+C panel window only', () => {
@@ -77,9 +81,9 @@ test('clipboard image preview page listens for update and clear events and resol
   assert.match(imagePreviewPageSource, /convertFileSrc/);
 });
 
-test('clipboard preview pages remain passive so the Alt+C panel keeps pointer ownership', () => {
-  assert.match(imagePreviewPageSource, /pointer-events:\s*none/);
-  assert.match(textPreviewPageSource, /pointer-events:\s*none/);
+test('clipboard preview pages stay interactive so hover and scroll handlers can keep previews alive', () => {
+  assert.match(imagePreviewPageSource, /pointer-events:\s*auto/);
+  assert.match(textPreviewPageSource, /pointer-events:\s*auto/);
   assert.doesNotMatch(imagePreviewPageSource, /cursor:\s*pointer/);
 });
 
@@ -89,29 +93,21 @@ test('clipboard text preview page listens for update and clear events through Ta
   assert.match(textPreviewPageSource, /__TAURI_INTERNALS__/);
 });
 
-test('clipboard preview backend makes standalone preview windows ignore cursor events so the panel stays interactive', () => {
+test('clipboard preview backend keeps standalone preview windows interactive instead of click-through', () => {
   assert.match(
+    previewBackendSource,
+    /show_preview_window[\s\S]*set_ignore_cursor_events\(false\)/,
+  );
+  assert.doesNotMatch(
     previewBackendSource,
     /show_preview_window[\s\S]*set_ignore_cursor_events\(true\)/,
   );
 });
 
-test('clipboard preview backend enforces native Windows click-through styles after showing', () => {
-  assert.match(previewBackendSource, /fn enforce_preview_click_through/);
-  assert.match(previewBackendSource, /WS_EX_TRANSPARENT/);
-  assert.match(previewBackendSource, /WS_EX_NOACTIVATE/);
-  assert.match(previewBackendSource, /SetWindowLongW/);
-  assert.match(previewBackendSource, /SWP_FRAMECHANGED/);
+test('clipboard preview windows are shown without activating the Alt+C panel away', () => {
   assert.match(
     previewBackendSource,
-    /show_preview_without_focus\(&window,\s*&panel\)\?;[\s\S]*enforce_preview_click_through\(&window\)/,
-  );
-});
-
-test('clipboard preview windows are non-focusable and shown without activating the Alt+C panel away', () => {
-  assert.match(
-    previewBackendSource,
-    /WebviewWindowBuilder::new[\s\S]*\.focusable\(false\)[\s\S]*\.focused\(false\)/,
+    /WebviewWindowBuilder::new[\s\S]*\.focused\(false\)/,
   );
   assert.match(
     previewBackendSource,
@@ -140,16 +136,9 @@ test('clipboard preview focus detection uses the native foreground HWND instead 
   );
 });
 
-test('clipboard preview backend re-applies native click-through after a short delay for late WebView2 children', () => {
-  assert.match(previewBackendSource, /tauri::async_runtime::spawn/);
-  assert.match(
-    previewBackendSource,
-    /tokio::time::sleep\(std::time::Duration::from_millis\(300\)\)/,
-  );
-  assert.match(
-    previewBackendSource,
-    /tauri::async_runtime::spawn[\s\S]*enforce_preview_click_through\(&window\)/,
-  );
+test('clipboard preview backend keeps delayed debug snapshots for post-show diagnostics', () => {
+  assert.match(previewBackendSource, /fn schedule_debug_snapshots/);
+  assert.match(previewBackendSource, /for delay_ms in \[50_u64,\s*300,\s*1000\]/);
 });
 
 test('clipboard hover preview show and hide requests are token guarded against stale async shows', () => {
@@ -173,6 +162,30 @@ test('clipboard hover preview show and hide requests are token guarded against s
   assert.match(previewBackendSource, /cancel_preview_token/);
 });
 
+test('clipboard preview backend exposes a fullscreen toggle and an orphan-dismiss debounce shared with the panel', () => {
+  assert.match(previewBackendSource, /pub fn toggle_preview_fullscreen/);
+  assert.match(previewBackendSource, /pub fn schedule_dismiss_if_orphaned/);
+  assert.match(previewBackendSource, /pub fn attach_preview_dismiss_handlers/);
+  assert.match(mainSource, /attach_preview_dismiss_handlers\(/);
+  assert.match(mainSource, /schedule_dismiss_if_orphaned\(/);
+});
+
+test('clipboard preview pages emit hover events so the panel can keep the preview alive while interacted with', () => {
+  for (const source of [imagePreviewPageSource, textPreviewPageSource]) {
+    assert.match(source, /clipboard-preview-mouse-enter/);
+    assert.match(source, /clipboard-preview-mouse-leave/);
+    assert.match(source, /plugin:event\|emit/);
+  }
+});
+
+test('clipboard image preview page renders the picture fit-to-window by default and offers a fullscreen control', () => {
+  assert.match(imagePreviewPageSource, /object-fit: contain/);
+  assert.match(imagePreviewPageSource, /max-width: 100%/);
+  assert.match(imagePreviewPageSource, /max-height: 100%/);
+  assert.match(imagePreviewPageSource, /id="fullscreen"/);
+  assert.match(imagePreviewPageSource, /cb_toggle_preview_fullscreen/);
+});
+
 test('clipboard preview commands log request entry so native diagnostics can distinguish missing hovers from failed window creation', () => {
   assert.match(previewCommandsSource, /command:show-image/);
   assert.match(previewCommandsSource, /command:show-text/);
@@ -186,5 +199,5 @@ test('clipboard preview backend logs early-exit reasons and prepared window plac
   assert.match(previewBackendSource, /request:text/);
   assert.match(previewBackendSource, /prepare:/);
   assert.match(previewBackendSource, /error stage=/);
-  assert.match(previewBackendSource, /ok stage=after-show/);
+  assert.match(previewBackendSource, /preview_stage_ok\(target_label,\s*token,\s*"after-show"\)/);
 });

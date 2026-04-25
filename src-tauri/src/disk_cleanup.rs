@@ -14,8 +14,6 @@ const REDIS_OP_TIMEOUT: Duration = Duration::from_secs(3);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const STORAGE_KEY_PREFIX: &str = "Storage:";
 const CACHE_PREVIEW_MAX_CHARS: usize = 240;
-const CACHE_PREVIEW_MAX_ITEMS: isize = 12;
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DiskServerItem {
     #[serde(rename = "serverName")]
@@ -128,6 +126,7 @@ pub struct CacheKeyContentEntry {
     pub key: String,
     pub value_type: String,
     pub preview: String,
+    pub full_value: String,
     pub truncated: bool,
 }
 
@@ -258,8 +257,12 @@ fn build_storage_key(storage_id: &str) -> String {
     format!("{}{}", STORAGE_KEY_PREFIX, storage_id)
 }
 
+fn normalize_cache_value_text(value: &str) -> String {
+    value.replace('\0', "\\0")
+}
+
 fn summarize_cache_value_preview(value: &str, max_chars: usize) -> String {
-    let normalized = value.replace('\0', "\\0");
+    let normalized = normalize_cache_value_text(value);
     let mut chars = normalized.chars();
     let preview: String = chars.by_ref().take(max_chars).collect();
 
@@ -270,32 +273,26 @@ fn summarize_cache_value_preview(value: &str, max_chars: usize) -> String {
     }
 }
 
-fn serialize_hash_preview(entries: Vec<(String, String)>) -> String {
+fn serialize_hash_entries(entries: Vec<(String, String)>) -> String {
     entries
         .into_iter()
-        .take(CACHE_PREVIEW_MAX_ITEMS as usize)
         .map(|(field, value)| format!("{field}={value}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn serialize_list_preview(entries: Vec<String>) -> String {
-    entries
-        .into_iter()
-        .take(CACHE_PREVIEW_MAX_ITEMS as usize)
-        .collect::<Vec<_>>()
-        .join("\n")
+fn serialize_list_entries(entries: Vec<String>) -> String {
+    entries.into_iter().collect::<Vec<_>>().join("\n")
 }
 
-fn serialize_set_preview(mut entries: Vec<String>) -> String {
+fn serialize_set_entries(mut entries: Vec<String>) -> String {
     entries.sort();
-    serialize_list_preview(entries)
+    serialize_list_entries(entries)
 }
 
-fn serialize_zset_preview(entries: Vec<(String, f64)>) -> String {
+fn serialize_zset_entries(entries: Vec<(String, f64)>) -> String {
     entries
         .into_iter()
-        .take(CACHE_PREVIEW_MAX_ITEMS as usize)
         .map(|(member, score)| format!("{member} ({score})"))
         .collect::<Vec<_>>()
         .join("\n")
@@ -373,7 +370,7 @@ fn classify_redis_connection_error(message: &str) -> String {
 
 #[cfg(test)]
 mod cache_preview_tests {
-    use super::summarize_cache_value_preview;
+    use super::{normalize_cache_value_text, summarize_cache_value_preview};
 
     #[test]
     fn summarize_cache_value_preview_truncates_long_content_and_marks_it() {
@@ -390,6 +387,11 @@ mod cache_preview_tests {
             summarize_cache_value_preview("{\"slot\":7}", 32),
             "{\"slot\":7}"
         );
+    }
+
+    #[test]
+    fn normalize_cache_value_text_escapes_null_bytes() {
+        assert_eq!(normalize_cache_value_text("ab\0cd"), "ab\\0cd");
     }
 }
 
@@ -422,7 +424,7 @@ async fn load_cache_key_content(
     let value_type =
         execute_redis_command::<String>(conn, &format!("TYPE {}", key), &mut type_cmd).await?;
 
-    let raw_preview = match value_type.as_str() {
+    let raw_value = match value_type.as_str() {
         "string" => {
             let mut get_cmd = redis::cmd("GET");
             get_cmd.arg(key);
@@ -439,18 +441,18 @@ async fn load_cache_key_content(
                 &mut hgetall_cmd,
             )
             .await?;
-            serialize_hash_preview(pairs)
+            serialize_hash_entries(pairs)
         }
         "list" => {
             let mut lrange_cmd = redis::cmd("LRANGE");
-            lrange_cmd.arg(key).arg(0).arg(CACHE_PREVIEW_MAX_ITEMS - 1);
+            lrange_cmd.arg(key).arg(0).arg(-1);
             let values = execute_redis_command::<Vec<String>>(
                 conn,
                 &format!("LRANGE {}", key),
                 &mut lrange_cmd,
             )
             .await?;
-            serialize_list_preview(values)
+            serialize_list_entries(values)
         }
         "set" => {
             let mut smembers_cmd = redis::cmd("SMEMBERS");
@@ -461,32 +463,33 @@ async fn load_cache_key_content(
                 &mut smembers_cmd,
             )
             .await?;
-            serialize_set_preview(values)
+            serialize_set_entries(values)
         }
         "zset" => {
             let mut zrange_cmd = redis::cmd("ZRANGE");
-            zrange_cmd
-                .arg(key)
-                .arg(0)
-                .arg(CACHE_PREVIEW_MAX_ITEMS - 1)
-                .arg("WITHSCORES");
+            zrange_cmd.arg(key).arg(0).arg(-1).arg("WITHSCORES");
             let values = execute_redis_command::<Vec<(String, f64)>>(
                 conn,
                 &format!("ZRANGE {}", key),
                 &mut zrange_cmd,
             )
             .await?;
-            serialize_zset_preview(values)
+            serialize_zset_entries(values)
         }
         "none" => String::new(),
         other => format!("<{} preview unavailable>", other),
     };
 
+    let full_value = normalize_cache_value_text(&raw_value);
+
+    let truncated = full_value.chars().count() > CACHE_PREVIEW_MAX_CHARS;
+
     Ok(CacheKeyContentEntry {
         key: key.to_string(),
         value_type,
-        truncated: raw_preview.chars().count() > CACHE_PREVIEW_MAX_CHARS,
-        preview: summarize_cache_value_preview(&raw_preview, CACHE_PREVIEW_MAX_CHARS),
+        preview: summarize_cache_value_preview(&raw_value, CACHE_PREVIEW_MAX_CHARS),
+        full_value,
+        truncated,
     })
 }
 

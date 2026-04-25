@@ -98,12 +98,6 @@ export function useClipboardHotkey(opts: ClipboardHotkeyOptions): void {
           e.preventDefault();
         }
         break;
-      case '/':
-        if (!inEditable) {
-          opts.onFocusSearch();
-          e.preventDefault();
-        }
-        break;
       case 'Escape':
         if (opts.searchValue.value) {
           if (opts.onSearchChange) opts.onSearchChange('');

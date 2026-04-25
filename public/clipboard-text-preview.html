@@ -15,7 +15,7 @@
       color: #0f172a;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
       cursor: default;
-      pointer-events: none;
+      pointer-events: auto;
       user-select: none;
     }
     body {
@@ -127,6 +127,8 @@
     const textEl = document.getElementById('text');
     const internals = window.__TAURI_INTERNALS__ || null;
 
+    const PREVIEW_LABEL = 'clipboard-text-preview';
+
     function applyPayload(payload) {
       sourceEl.textContent = payload?.source_app || '';
       kindEl.textContent = (payload?.kind || 'text').toUpperCase();
@@ -142,6 +144,24 @@
       textEl.classList.remove('visible');
       emptyEl.hidden = false;
     }
+
+    async function emitTauri(event, payload) {
+      if (!internals?.invoke) return;
+      try {
+        await internals.invoke('plugin:event|emit', { event, payload: payload ?? null });
+      } catch (_) {
+        // Best-effort.
+      }
+    }
+
+    // Tell the panel's hide-debounce that this preview is being hovered, so the
+    // user can move into the window and scroll long content without it being hidden.
+    document.body.addEventListener('mouseenter', () => {
+      void emitTauri('clipboard-preview-mouse-enter', { label: PREVIEW_LABEL });
+    });
+    document.body.addEventListener('mouseleave', () => {
+      void emitTauri('clipboard-preview-mouse-leave', { label: PREVIEW_LABEL });
+    });
 
     async function refreshPayload() {
       if (!internals?.invoke) {

@@ -3,7 +3,6 @@ import { emit } from '@tauri-apps/api/event';
 import { computed, reactive, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
-import AboutTab from '@/components/clipboard-settings/AboutTab.vue';
 import AppFilterTab from '@/components/clipboard-settings/AppFilterTab.vue';
 import DataTab from '@/components/clipboard-settings/DataTab.vue';
 import DisplayTab from '@/components/clipboard-settings/DisplayTab.vue';
@@ -40,7 +39,6 @@ const tabComponents = {
   data: DataTab,
   preview: PreviewTab,
   appFilter: AppFilterTab,
-  about: AboutTab,
 } as const;
 
 const currentTabComponent = computed(
@@ -49,8 +47,18 @@ const currentTabComponent = computed(
 
 function buildNextSettings(patch: DeepPartial<ClipboardSettings>): ClipboardSettings {
   return normalizeClipboardSettings({
-    ...model,
-    ...patch,
+    enabled: patch.enabled ?? model.enabled,
+    hotkey: patch.hotkey ?? model.hotkey,
+    max_items: patch.max_items ?? model.max_items,
+    retain_days: patch.retain_days ?? model.retain_days,
+    max_item_bytes: patch.max_item_bytes ?? model.max_item_bytes,
+    preview_delay_ms: patch.preview_delay_ms ?? model.preview_delay_ms,
+    enable_text_preview: patch.enable_text_preview ?? model.enable_text_preview,
+    use_win_v_replacement: patch.use_win_v_replacement ?? model.use_win_v_replacement,
+    run_as_admin: patch.run_as_admin ?? model.run_as_admin,
+    show_startup_notification: patch.show_startup_notification ?? model.show_startup_notification,
+    dedup_strategy: patch.dedup_strategy ?? model.dedup_strategy,
+    reinsert_on_self_copy: patch.reinsert_on_self_copy ?? model.reinsert_on_self_copy,
     display: {
       ...model.display,
       ...(patch.display ?? {}),
@@ -59,16 +67,9 @@ function buildNextSettings(patch: DeepPartial<ClipboardSettings>): ClipboardSett
       ...model.preview,
       ...(patch.preview ?? {}),
     },
-    panel: {
-      ...model.panel,
-      ...(patch.panel ?? {}),
-    },
     shortcuts: {
       ...model.shortcuts,
       ...(patch.shortcuts ?? {}),
-      quick_paste: patch.shortcuts?.quick_paste
-        ? [...patch.shortcuts.quick_paste]
-        : [...model.shortcuts.quick_paste],
       focus_search: patch.shortcuts?.focus_search
         ? [...patch.shortcuts.focus_search]
         : [...model.shortcuts.focus_search],
@@ -76,13 +77,6 @@ function buildNextSettings(patch: DeepPartial<ClipboardSettings>): ClipboardSett
     navigation: {
       ...model.navigation,
       ...(patch.navigation ?? {}),
-    },
-    toolbar: {
-      ...model.toolbar,
-      ...(patch.toolbar ?? {}),
-      items: patch.toolbar?.items
-        ? [...patch.toolbar.items]
-        : [...model.toolbar.items],
     },
     data: {
       ...model.data,

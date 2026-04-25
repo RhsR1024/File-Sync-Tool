@@ -15,7 +15,7 @@
       color: #0f172a;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
       cursor: default;
-      pointer-events: none;
+      pointer-events: auto;
       user-select: none;
     }
     body {
@@ -82,14 +82,20 @@
       border-radius: 999px;
       background: rgba(255, 255, 255, 0.74);
       color: #475569;
-      font-size: 18px;
+      font-size: 16px;
       line-height: 1;
     }
     .icon-btn:hover {
       background: rgba(255, 255, 255, 0.96);
       color: #0f172a;
     }
+    .icon-btn.active {
+      background: #0f172a;
+      color: #fff;
+      border-color: #0f172a;
+    }
     .content {
+      position: relative;
       display: flex;
       flex: 1;
       align-items: center;
@@ -107,15 +113,28 @@
     }
     .image {
       display: none;
-      max-width: none;
+      max-width: 100%;
+      max-height: 100%;
+      width: auto;
+      height: auto;
+      object-fit: contain;
       border-radius: 20px;
       border: 1px solid rgba(255, 255, 255, 0.7);
       background: rgba(255, 255, 255, 0.72);
       box-shadow: 0 28px 80px -36px rgba(15, 23, 42, 0.72);
       transform-origin: center center;
+      transition: transform 80ms ease-out;
+      user-select: none;
+      -webkit-user-drag: none;
     }
     .image.visible {
       display: block;
+    }
+    /* When zoomed past fit, drop max-* so the image renders at its scaled size and
+       the surrounding .content scrolls. */
+    .image.zoomed {
+      max-width: none;
+      max-height: none;
     }
   </style>
 </head>
@@ -128,14 +147,15 @@
       </div>
       <div class="controls">
         <span id="zoom-label" class="badge">100%</span>
-        <button id="zoom-out" class="icon-btn" type="button" aria-label="Zoom out">-</button>
-        <button id="zoom-reset" class="icon-btn" type="button" aria-label="Reset zoom">o</button>
-        <button id="zoom-in" class="icon-btn" type="button" aria-label="Zoom in">+</button>
+        <button id="zoom-out" class="icon-btn" type="button" aria-label="Zoom out" title="Zoom out (Ctrl+wheel)">−</button>
+        <button id="zoom-reset" class="icon-btn" type="button" aria-label="Fit to window" title="Fit to window (double-click image)">⤢</button>
+        <button id="zoom-in" class="icon-btn" type="button" aria-label="Zoom in" title="Zoom in (Ctrl+wheel)">+</button>
+        <button id="fullscreen" class="icon-btn" type="button" aria-label="Toggle fullscreen" title="Fullscreen (Esc to exit)">⛶</button>
       </div>
     </header>
     <main id="content" class="content">
       <p id="empty" class="empty">Hover an image item to preview it.</p>
-      <img id="image" class="image" alt="" />
+      <img id="image" class="image" alt="" draggable="false" />
     </main>
   </div>
 
@@ -145,18 +165,21 @@
     const emptyEl = document.getElementById('empty');
     const imageEl = document.getElementById('image');
     const contentEl = document.getElementById('content');
+    const fullscreenBtn = document.getElementById('fullscreen');
     const internals = window.__TAURI_INTERNALS__ || null;
 
-    const DEFAULT_SCALE = 1;
+    const PREVIEW_LABEL = 'clipboard-image-preview';
+    const FIT_SCALE = 1;
     const MIN_SCALE = 0.25;
     const MAX_SCALE = 6;
 
     let payload = null;
-    let scale = DEFAULT_SCALE;
+    let scale = FIT_SCALE;
+    let isFullscreen = false;
 
     function clampScale(value) {
       if (!Number.isFinite(value)) {
-        return DEFAULT_SCALE;
+        return FIT_SCALE;
       }
       return Math.max(MIN_SCALE, Math.min(MAX_SCALE, value));
     }
@@ -168,20 +191,32 @@
         sourceEl.textContent = '';
         emptyEl.hidden = false;
         imageEl.classList.remove('visible');
+        imageEl.classList.remove('zoomed');
         imageEl.removeAttribute('src');
-        imageEl.style.transform = `scale(${DEFAULT_SCALE})`;
+        imageEl.style.transform = '';
         return;
       }
 
       sourceEl.textContent = payload.source_app || '';
       emptyEl.hidden = true;
       imageEl.classList.add('visible');
-      imageEl.style.transform = `scale(${scale})`;
+
+      // At fit-scale (1.0) we let the browser size the image to the content area
+      // via max-width/height so the whole picture is visible at once. Above 1.0
+      // we drop those caps and apply a CSS transform; .content's overflow:auto
+      // then provides the scrollbars.
+      if (scale > FIT_SCALE) {
+        imageEl.classList.add('zoomed');
+        imageEl.style.transform = `scale(${scale})`;
+      } else {
+        imageEl.classList.remove('zoomed');
+        imageEl.style.transform = '';
+      }
     }
 
     function applyPayload(nextPayload) {
       payload = nextPayload;
-      scale = DEFAULT_SCALE;
+      scale = FIT_SCALE;
       imageEl.src = internals?.convertFileSrc
         ? internals.convertFileSrc(payload.image_path)
         : payload.image_path;
@@ -190,7 +225,7 @@
 
     function clearPayload() {
       payload = null;
-      scale = DEFAULT_SCALE;
+      scale = FIT_SCALE;
       render();
     }
 
@@ -200,6 +235,11 @@
       }
       const step = Math.max(1, Number(payload.zoom_step) || 10) / 100;
       scale = clampScale(scale + direction * step);
+      render();
+    }
+
+    function resetZoom() {
+      scale = FIT_SCALE;
       render();
     }
 
@@ -219,20 +259,63 @@
       }
     }
 
+    async function emitTauri(event, payload) {
+      if (!internals?.invoke) return;
+      try {
+        await internals.invoke('plugin:event|emit', { event, payload: payload ?? null });
+      } catch (_) {
+        // Best-effort; swallow.
+      }
+    }
+
+    async function toggleFullscreen() {
+      if (!internals?.invoke) return;
+      try {
+        const next = await internals.invoke('cb_toggle_preview_fullscreen', {
+          label: PREVIEW_LABEL,
+        });
+        isFullscreen = Boolean(next);
+        fullscreenBtn.classList.toggle('active', isFullscreen);
+      } catch (_) {
+        // Best-effort.
+      }
+    }
+
     document.getElementById('zoom-out').addEventListener('click', () => changeZoom(-1));
-    document.getElementById('zoom-reset').addEventListener('click', () => {
-      scale = DEFAULT_SCALE;
-      render();
-    });
+    document.getElementById('zoom-reset').addEventListener('click', resetZoom);
     document.getElementById('zoom-in').addEventListener('click', () => changeZoom(1));
+    fullscreenBtn.addEventListener('click', () => { void toggleFullscreen(); });
+
+    imageEl.addEventListener('dblclick', resetZoom);
 
     contentEl.addEventListener('wheel', (event) => {
       if (!payload) {
         return;
       }
+      // Plain wheel scrolls when zoomed; Ctrl+wheel always zooms.
+      if (!event.ctrlKey && scale > FIT_SCALE) {
+        return;
+      }
       event.preventDefault();
       changeZoom(event.deltaY < 0 ? 1 : -1);
     }, { passive: false });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && isFullscreen) {
+        event.preventDefault();
+        void toggleFullscreen();
+      }
+    });
+
+    // Tell the panel's hide-debounce that the preview is being hovered. Without
+    // these notifications the panel's items-mouseleave timer would hide us as
+    // soon as the user moves the cursor over here.
+    document.body.addEventListener('mouseenter', () => {
+      void emitTauri('clipboard-preview-mouse-enter', { label: PREVIEW_LABEL });
+    });
+    document.body.addEventListener('mouseleave', () => {
+      void emitTauri('clipboard-preview-mouse-leave', { label: PREVIEW_LABEL });
+    });
 
     async function listen(event, handler) {
       if (!internals?.invoke || !internals?.transformCallback) {
@@ -247,6 +330,10 @@
 
     if (internals) {
       void listen('clipboard-image-preview-update', (event) => {
+        // A new payload always returns to fit-scale and exits fullscreen state in JS.
+        // The Rust side already drops its saved-rect when the window is repositioned.
+        isFullscreen = false;
+        fullscreenBtn.classList.remove('active');
         applyPayload(event.payload);
       });
       void listen('clipboard-image-preview-clear', () => {

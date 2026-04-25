@@ -2838,38 +2838,34 @@ fn main() {
             // during the WM_NCLBUTTONDOWN drag modal loop. Without this guard
             // the panel would hide the instant the user pressed the header.
             // Skip auto-hide entirely when the user pinned the panel.
+            //
+            // The same orphan-dismissal logic also runs from each preview window's
+            // `Focused(false)` handler so the panel still hides when the user clicks
+            // outside while the preview held focus (e.g. after clicking a zoom button).
             let panel_clone = panel.clone();
             let preview_app_handle = panel.app_handle().clone();
             let pinned_flag = clipboard_state_for_startup.clone();
             panel.on_window_event(move |ev| {
                 if let tauri::WindowEvent::Focused(false) = ev {
-                    if pinned_flag
-                        .panel_pinned
-                        .load(std::sync::atomic::Ordering::Acquire)
-                    {
-                        return;
-                    }
-                    let panel = panel_clone.clone();
-                    let preview_app_handle = preview_app_handle.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(150));
-                        let panel_focused = panel.is_focused().unwrap_or(false);
-                        let preview_focused =
-                            clipboard::preview::preview_window_is_focused(&preview_app_handle);
-                        clipboard::preview::log_preview_window_diagnostics(
-                            &preview_app_handle,
-                            "focused-false-tick",
-                        );
-                        eprintln!(
-                            "[clipboard-preview][focused-false-tick] panel_focused={panel_focused} preview_focused={preview_focused}"
-                        );
-                        if !panel_focused && !preview_focused {
-                            clipboard::preview::hide_preview_windows(&preview_app_handle);
-                            let _ = panel.hide();
-                        }
-                    });
+                    clipboard::preview::debug_window_snapshot(
+                        &preview_app_handle,
+                        "panel-focused-false:received",
+                    );
+                    clipboard::preview::schedule_dismiss_if_orphaned(
+                        preview_app_handle.clone(),
+                        panel_clone.clone(),
+                        pinned_flag.clone(),
+                    );
                 }
             });
+
+            clipboard::preview::ensure_preview_windows(app)?;
+            clipboard::preview::attach_preview_dismiss_handlers(
+                app.handle(),
+                panel.clone(),
+                clipboard_state_for_startup.clone(),
+            )?;
+
             // Register the clipboard global shortcut (default Alt+C) when the feature is on.
             if clipboard_enabled_at_start {
                 match clipboard::hotkey::register(app.handle().clone(), &clipboard_hotkey_at_start)
@@ -3004,6 +3000,8 @@ fn main() {
             clipboard::commands::cb_get_image_preview_payload,
             clipboard::commands::cb_get_text_preview_payload,
             clipboard::commands::cb_hide_preview,
+            clipboard::commands::cb_debug_window_snapshot,
+            clipboard::commands::cb_toggle_preview_fullscreen,
             clipboard::commands::cb_reorder_favorites,
             clipboard::commands::cb_stats,
             clipboard::commands::cb_get_settings,

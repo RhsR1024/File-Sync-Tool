@@ -22,7 +22,7 @@ import {
   CLIPBOARD_PANEL_USE_NATIVE_DRAG_REGION,
   shouldStartClipboardPanelDrag,
 } from '@/lib/clipboardPanelDrag';
-import { buildClipboardToolbarLayout } from '@/lib/clipboardSettingsUi';
+import { CLIPBOARD_TOOLBAR_ACTION_IDS } from '@/lib/clipboardSettingsUi';
 import { clipboardApi } from '@/lib/tauri';
 import type { ClipboardFilter, ClipboardGroup, ClipboardItem } from '@/lib/clipboardTypes';
 
@@ -38,14 +38,54 @@ const clearDialogOpen = ref(false);
 const panelLocked = ref(false);
 const PANEL_WINDOW_CLASS = 'clipboard-panel-window';
 const filters: ClipboardFilter[] = ['all', 'text', 'image', 'file', 'favorite'];
+const toolbarActionItems = [...CLIPBOARD_TOOLBAR_ACTION_IDS];
 
 const selectedId = computed<number | null>(
   () => store.visibleItems.value[selectedIndex.value]?.id ?? null,
 );
 const hasVisibleItems = computed(() => store.visibleItems.value.length > 0);
-const toolbarLayout = computed(() =>
-  buildClipboardToolbarLayout(store.settings.value.toolbar, ['batch', 'settings', 'lock']),
-);
+
+function describeDebugTarget(target: EventTarget | null): string {
+  if (!(target instanceof Element)) return '<none>';
+  const tag = target.tagName.toLowerCase();
+  const role = target.getAttribute('role');
+  const title = target.getAttribute('title');
+  const dataNoDrag = target.hasAttribute('data-no-drag') ? 'data-no-drag' : '';
+  const className =
+    typeof target.className === 'string'
+      ? target.className.split(/\s+/).filter(Boolean).slice(0, 4).join('.')
+      : '';
+  const text = target.textContent?.trim().replace(/\s+/g, ' ').slice(0, 40) ?? '';
+  return [
+    tag,
+    role ? `role=${role}` : '',
+    title ? `title=${title}` : '',
+    dataNoDrag,
+    className ? `class=${className}` : '',
+    text ? `text=${text}` : '',
+  ].filter(Boolean).join(' ');
+}
+
+function debugClipboardSnapshot(context: string) {
+  const state = [
+    `selected=${selectedId.value ?? 'none'}`,
+    `batch=${store.batchMode.value}`,
+    `clearDialog=${clearDialogOpen.value}`,
+    `locked=${panelLocked.value}`,
+    `items=${store.visibleItems.value.length}`,
+  ].join(' ');
+  void clipboardApi.debugWindowSnapshot(`panel:${context} ${state}`);
+}
+
+function onDebugPointerEvent(event: PointerEvent | MouseEvent) {
+  debugClipboardSnapshot(
+    `event:${event.type} button=${event.button} buttons=${event.buttons} x=${event.clientX} y=${event.clientY} target=${describeDebugTarget(event.target)} active=${describeDebugTarget(document.activeElement)}`,
+  );
+}
+
+function onDebugWindowFocus(event: FocusEvent) {
+  debugClipboardSnapshot(`window:${event.type} active=${describeDebugTarget(document.activeElement)}`);
+}
 
 function resetBatchSelection() {
   store.setBatchMode(false);
@@ -61,16 +101,20 @@ function setClipboardActionError(error: unknown, action: ClipboardContextActionI
 }
 
 async function togglePanelLocked() {
+  debugClipboardSnapshot(`action:toggle-lock:start current=${panelLocked.value}`);
   const next = !panelLocked.value;
   try {
     await clipboardApi.setPanelPinned(next);
     panelLocked.value = next;
+    debugClipboardSnapshot(`action:toggle-lock:done next=${next}`);
   } catch (error) {
+    debugClipboardSnapshot(`action:toggle-lock:error ${String(error)}`);
     console.error('[clipboard] setPanelPinned failed:', error);
   }
 }
 
 function toggleBatchMode() {
+  debugClipboardSnapshot(`action:toggle-batch current=${store.batchMode.value}`);
   preview.hideNow();
   store.toggleBatchMode();
   closeMenu();
@@ -89,12 +133,15 @@ function onToggleSelect(payload: { id: number; shiftKey: boolean }) {
 async function onBatchDelete() {
   const ids = store.orderedSelectedIds.value;
   if (ids.length === 0) return;
+  debugClipboardSnapshot(`action:batch-delete:start ids=${ids.join(',')}`);
   preview.hideNow();
   try {
     await clipboardApi.deleteBatch(ids);
     resetBatchSelection();
     await store.reload();
+    debugClipboardSnapshot('action:batch-delete:done');
   } catch (error) {
+    debugClipboardSnapshot(`action:batch-delete:error ${String(error)}`);
     console.error('[clipboard] batch delete failed:', error);
     store.error.value = `${t('clipboard.errors.loadFailed')} - ${error}`;
   }
@@ -103,6 +150,7 @@ async function onBatchDelete() {
 async function onBatchFavorite(nextFavorite: boolean) {
   const ids = store.orderedSelectedIds.value;
   if (ids.length === 0) return;
+  debugClipboardSnapshot(`action:batch-favorite:start next=${nextFavorite} ids=${ids.join(',')}`);
 
   for (const id of ids) {
     try {
@@ -118,16 +166,20 @@ async function onBatchFavorite(nextFavorite: boolean) {
 
   resetBatchSelection();
   await store.reload();
+  debugClipboardSnapshot(`action:batch-favorite:done next=${nextFavorite}`);
 }
 
 async function onConfirmClear() {
+  debugClipboardSnapshot('action:clear-confirm:start');
   preview.hideNow();
   try {
     await clipboardApi.clear(true);
     clearDialogOpen.value = false;
     selectedIndex.value = 0;
     await store.reload();
+    debugClipboardSnapshot('action:clear-confirm:done');
   } catch (error) {
+    debugClipboardSnapshot(`action:clear-confirm:error ${String(error)}`);
     console.error('[clipboard] clear failed:', error);
     store.error.value = `${t('clipboard.errors.loadFailed')} - ${error}`;
     clearDialogOpen.value = false;
@@ -135,35 +187,45 @@ async function onConfirmClear() {
 }
 
 async function openSettings() {
+  debugClipboardSnapshot('action:open-settings:start');
   try {
     preview.hideNow();
     await clipboardApi.openSettings();
+    debugClipboardSnapshot('action:open-settings:done');
   } catch (error) {
+    debugClipboardSnapshot(`action:open-settings:error ${String(error)}`);
     console.error('[clipboard] openSettings failed:', error);
   }
 }
 
 async function paste(id: number, plain: boolean) {
+  debugClipboardSnapshot(`action:paste:start id=${id} plain=${plain}`);
   try {
     if (plain) await clipboardApi.pastePlain(id);
     else await clipboardApi.paste(id);
+    debugClipboardSnapshot(`action:paste:done id=${id} plain=${plain}`);
   } catch (error) {
+    debugClipboardSnapshot(`action:paste:error id=${id} plain=${plain} error=${String(error)}`);
     console.error('[clipboard] paste failed:', error);
     store.error.value = `${t('clipboard.errors.pasteFailed')} - ${error}`;
   }
 }
 
 async function onReorder(ids: number[]) {
+  debugClipboardSnapshot(`action:reorder:start ids=${ids.join(',')}`);
   try {
     await clipboardApi.reorderFavorites(ids);
     await store.reload();
+    debugClipboardSnapshot('action:reorder:done');
   } catch (error) {
+    debugClipboardSnapshot(`action:reorder:error ${String(error)}`);
     console.error('[clipboard] reorder failed:', error);
     store.error.value = `${t('clipboard.errors.saveFailed')} - ${error}`;
   }
 }
 
 function close() {
+  debugClipboardSnapshot('action:close-panel');
   preview.hideNow();
   void getCurrentWindow().hide();
 }
@@ -210,7 +272,12 @@ async function renameGroup(payload: { id: number; name: string }) {
 }
 
 async function deleteGroup(group: ClipboardGroup) {
-  if (!window.confirm(t('clipboard.groups.deleteConfirm', { name: group.name }))) return;
+  debugClipboardSnapshot(`action:delete-group:before-confirm id=${group.id}`);
+  if (!window.confirm(t('clipboard.groups.deleteConfirm', { name: group.name }))) {
+    debugClipboardSnapshot(`action:delete-group:cancel id=${group.id}`);
+    return;
+  }
+  debugClipboardSnapshot(`action:delete-group:confirmed id=${group.id}`);
   preview.hideNow();
   await store.deleteGroup(group.id);
   selectedIndex.value = 0;
@@ -227,24 +294,36 @@ async function refreshPreviewSettings() {
 
 const preview = useHoverPreview({
   delayMs: () => previewDelayMs.value,
+  onDebug: debugClipboardSnapshot,
   onError: (error) => {
     console.error('[clipboard] preview command failed:', error);
   },
 });
 
 function onListSelect(id: number) {
+  debugClipboardSnapshot(`action:list-select id=${id}`);
   selectById(id);
   preview.onItemChange(store.visibleItems.value.find((item) => item.id === id) ?? null);
 }
 
 async function onRemoveItem(id: number) {
+  debugClipboardSnapshot(`action:remove-item:start id=${id}`);
   preview.hideNow();
   await store.remove(id);
+  debugClipboardSnapshot(`action:remove-item:done id=${id}`);
 }
 
 async function onToggleItemPin(id: number) {
+  debugClipboardSnapshot(`action:toggle-pin:start id=${id}`);
   preview.hideNow();
   await store.togglePin(id);
+  debugClipboardSnapshot(`action:toggle-pin:done id=${id}`);
+}
+
+async function onToggleItemFavorite(id: number) {
+  debugClipboardSnapshot(`action:toggle-favorite:start id=${id}`);
+  await store.toggleFavorite(id);
+  debugClipboardSnapshot(`action:toggle-favorite:done id=${id}`);
 }
 
 const {
@@ -270,13 +349,19 @@ const {
   selectedIds: store.selectedIds,
   selectedIdOrder: store.orderedSelectedIds,
   onPaste: paste,
-  onCopy: (id: number) => clipboardApi.copy(id),
+  onCopy: async (id: number) => {
+    debugClipboardSnapshot(`action:copy:start id=${id}`);
+    await clipboardApi.copy(id);
+    debugClipboardSnapshot(`action:copy:done id=${id}`);
+  },
   onDelete: (id: number) => onRemoveItem(id),
-  onToggleFavorite: (id: number) => store.toggleFavorite(id),
+  onToggleFavorite: onToggleItemFavorite,
   onTogglePin: (id: number) => onToggleItemPin(id),
   onMoveToGroup: async (id: number, groupId: number | null) => {
+    debugClipboardSnapshot(`action:move-to-group:start id=${id} group=${groupId ?? 'none'}`);
     preview.hideNow();
     await store.moveToGroup(id, groupId);
+    debugClipboardSnapshot(`action:move-to-group:done id=${id} group=${groupId ?? 'none'}`);
   },
   onError: setClipboardActionError,
   onMergeSuccess: async () => {
@@ -287,6 +372,7 @@ const {
 });
 
 function onListMenu(payload: { item: ClipboardItem; x: number; y: number }) {
+  debugClipboardSnapshot(`action:list-menu id=${payload.item.id} x=${payload.x} y=${payload.y}`);
   selectById(payload.item.id);
   openMenu(payload.item, { x: payload.x, y: payload.y });
 }
@@ -307,7 +393,7 @@ useClipboardHotkey({
   enabled: computed(() => store.settings.value.navigation.enabled),
   onPaste: paste,
   onDelete: onRemoveItem,
-  onFavorite: (id) => store.toggleFavorite(id),
+  onFavorite: onToggleItemFavorite,
   onClose: close,
   onFocusSearch: () => searchInput.value?.focus(),
   onFilterChange: changeFilter,
@@ -333,6 +419,11 @@ const listKey = computed(
 onMounted(async () => {
   document.documentElement.classList.add(PANEL_WINDOW_CLASS);
   document.body.classList.add(PANEL_WINDOW_CLASS);
+  document.addEventListener('pointerdown', onDebugPointerEvent, true);
+  document.addEventListener('click', onDebugPointerEvent, true);
+  window.addEventListener('focus', onDebugWindowFocus, true);
+  window.addEventListener('blur', onDebugWindowFocus, true);
+  debugClipboardSnapshot('mounted');
   await refreshPreviewSettings();
   clipboardApi
     .isPanelPinned()
@@ -353,7 +444,6 @@ onMounted(async () => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
     showCounter.value += 1;
-    searchInput.value?.focus();
   });
   unlistenStore = await store.startListening();
 });
@@ -361,6 +451,10 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   document.documentElement.classList.remove(PANEL_WINDOW_CLASS);
   document.body.classList.remove(PANEL_WINDOW_CLASS);
+  document.removeEventListener('pointerdown', onDebugPointerEvent, true);
+  document.removeEventListener('click', onDebugPointerEvent, true);
+  window.removeEventListener('focus', onDebugWindowFocus, true);
+  window.removeEventListener('blur', onDebugWindowFocus, true);
   preview.hideNow();
   unlistenShown?.();
   unlistenStore?.();
@@ -392,7 +486,7 @@ onBeforeUnmount(() => {
           <Trash2 class="h-4 w-4" />
         </button>
         <ClipboardToolbar
-          :items="toolbarLayout.actionItems"
+          :items="toolbarActionItems"
           :batch-mode="store.batchMode.value"
           :locked="panelLocked"
           compact
@@ -464,7 +558,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-100">
-      <div v-if="toolbarLayout.showSearch" class="px-3 pt-2.5 pb-2">
+      <div class="px-3 pt-2.5 pb-2">
         <ClipboardSearchBox
           ref="searchInput"
           :model-value="store.search.value"
@@ -500,7 +594,7 @@ onBeforeUnmount(() => {
             @select="onListSelect"
             @activate="(id: number) => paste(id, false)"
             @toggle="onToggleSelect"
-            @favorite="(id: number) => store.toggleFavorite(id)"
+            @favorite="onToggleItemFavorite"
             @pin="onToggleItemPin"
             @remove="onRemoveItem"
             @menu="onListMenu"
@@ -520,7 +614,7 @@ onBeforeUnmount(() => {
             :show-pin-button="true"
             @select="onListSelect"
             @activate="(id: number) => paste(id, false)"
-            @favorite="(id: number) => store.toggleFavorite(id)"
+            @favorite="onToggleItemFavorite"
             @pin="onToggleItemPin"
             @remove="onRemoveItem"
             @menu="onListMenu"
@@ -543,7 +637,7 @@ onBeforeUnmount(() => {
               :index-offset="store.pinnedItems.value.length"
               @select="onListSelect"
               @activate="(id: number) => paste(id, false)"
-              @favorite="(id: number) => store.toggleFavorite(id)"
+              @favorite="onToggleItemFavorite"
               @pin="onToggleItemPin"
               @remove="onRemoveItem"
               @menu="onListMenu"
@@ -556,10 +650,7 @@ onBeforeUnmount(() => {
 
       <div class="shrink-0 px-3 pb-2 pt-1 select-none">
         <div class="flex items-center gap-1 rounded-xl bg-slate-100 p-1" data-no-drag>
-          <div
-            v-if="toolbarLayout.showFilter"
-            class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
-          >
+          <div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
             <button
               v-for="filter in filters"
               :key="filter"
@@ -573,7 +664,6 @@ onBeforeUnmount(() => {
               {{ t(`clipboard.filter.${filter}`) }}
             </button>
           </div>
-          <div v-else class="flex-1" />
 
           <span class="mx-0.5 h-4 w-px shrink-0 bg-slate-200" aria-hidden />
 

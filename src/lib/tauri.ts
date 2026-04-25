@@ -705,6 +705,7 @@ export interface CacheKeyContentEntry {
   key: string;
   value_type: string;
   preview: string;
+  full_value: string;
   truncated: boolean;
 }
 
@@ -1157,6 +1158,10 @@ export const clipboardApi = {
     invoke<ClipboardTextPreviewPayload | null>('cb_get_text_preview_payload'),
   hidePreview: (token?: number | null) =>
     invoke<void>('cb_hide_preview', { token: token ?? null }),
+  togglePreviewFullscreen: (label: string) =>
+    invoke<boolean>('cb_toggle_preview_fullscreen', { label }),
+  debugWindowSnapshot: (context: string) =>
+    invoke<void>('cb_debug_window_snapshot', { context }),
   togglePanel: () => invoke<void>('cb_toggle_panel'),
   stats: () => invoke<ClipboardStats>('cb_stats'),
   getSettings: () => invoke<ClipboardSettings>('cb_get_settings'),

@@ -25,31 +25,14 @@ fn cleanup_assets_after_mutation<T>(
 }
 
 #[cfg(target_os = "windows")]
-fn show_panel_without_focus(panel: &WebviewWindow) -> Result<(), String> {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    };
-
+fn show_panel(panel: &WebviewWindow) -> Result<(), String> {
     panel.show().map_err(|e| e.to_string())?;
-    if let Ok(hwnd) = panel.hwnd() {
-        unsafe {
-            let _ = SetWindowPos(
-                HWND(hwnd.0 as *mut _),
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-            );
-        }
-    }
+    panel.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn show_panel_without_focus(panel: &WebviewWindow) -> Result<(), String> {
+fn show_panel(panel: &WebviewWindow) -> Result<(), String> {
     panel.show().map_err(|e| e.to_string())?;
     panel.set_focus().map_err(|e| e.to_string())?;
     Ok(())
@@ -382,7 +365,7 @@ pub fn cb_toggle_panel_internal(app: AppHandle) -> Result<(), String> {
         let _ = panel.set_position(PhysicalPosition::new(cx, cy));
     }
 
-    show_panel_without_focus(&panel)?;
+    show_panel(&panel)?;
     let _ = app.emit("clipboard-panel-shown", ());
     Ok(())
 }
@@ -702,6 +685,16 @@ pub fn cb_get_text_preview_payload() -> Option<crate::clipboard::preview::TextPr
 pub fn cb_hide_preview(app: AppHandle, token: Option<u64>) {
     eprintln!("[clipboard-preview][command:hide] token={token:?}");
     crate::clipboard::preview::hide_preview_windows_for_token(&app, token);
+}
+
+#[tauri::command]
+pub fn cb_debug_window_snapshot(app: AppHandle, context: String) {
+    crate::clipboard::preview::debug_window_snapshot(&app, &context);
+}
+
+#[tauri::command]
+pub fn cb_toggle_preview_fullscreen(app: AppHandle, label: String) -> Result<bool, String> {
+    crate::clipboard::preview::toggle_preview_fullscreen(&app, &label)
 }
 
 #[tauri::command]

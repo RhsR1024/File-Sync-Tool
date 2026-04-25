@@ -1,14 +1,5 @@
 <script setup lang="ts">
-import { ChevronLeft, ChevronRight } from 'lucide-vue-next';
-import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
-
-import {
-  CLIPBOARD_TOOLBAR_ITEM_IDS,
-  moveClipboardToolbarItem,
-  normalizeClipboardToolbarItems,
-  type ClipboardToolbarItemId,
-} from '@/lib/clipboardSettingsUi';
 import type { DeepPartial, ClipboardSettings } from '@/lib/clipboardTypes';
 
 const props = defineProps<{
@@ -25,20 +16,12 @@ const densityOptions = ['compact', 'standard', 'spacious'] as const;
 const timeFormatOptions = ['relative', 'absolute'] as const;
 const sourceAppOptions = ['none', 'name', 'icon', 'both'] as const;
 
-const toolbarItems = computed(() =>
-  normalizeClipboardToolbarItems(props.settings.toolbar.items),
-);
-
 function patch(next: DeepPartial<ClipboardSettings>) {
   emit('patch', next);
 }
 
 function patchDisplay(next: DeepPartial<ClipboardSettings['display']>) {
   patch({ display: next });
-}
-
-function patchToolbar(next: DeepPartial<ClipboardSettings['toolbar']>) {
-  patch({ toolbar: next });
 }
 
 function updatePreviewLines(event: Event) {
@@ -50,26 +33,6 @@ function updatePreviewLines(event: Event) {
 function updateImageMaxHeight(event: Event) {
   patchDisplay({
     image_max_height: Number((event.target as HTMLInputElement).value),
-  });
-}
-
-function toggleToolbarItem(item: ClipboardToolbarItemId) {
-  const active = toolbarItems.value.includes(item);
-  if (active) {
-    patchToolbar({
-      items: toolbarItems.value.filter((entry) => entry !== item),
-    });
-    return;
-  }
-
-  patchToolbar({
-    items: normalizeClipboardToolbarItems([...toolbarItems.value, item]),
-  });
-}
-
-function moveItem(item: ClipboardToolbarItemId, direction: -1 | 1) {
-  patchToolbar({
-    items: moveClipboardToolbarItem(toolbarItems.value, item, direction),
   });
 }
 </script>
@@ -201,58 +164,6 @@ function moveItem(item: ClipboardToolbarItemId, direction: -1 | 1) {
               @change="updateImageMaxHeight"
             >
           </label>
-        </div>
-      </div>
-    </div>
-
-    <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div class="flex items-center justify-between gap-4">
-        <div>
-          <h4 class="text-sm font-semibold text-slate-900">{{ t('clipboard.settings.display.toolbarOrder') }}</h4>
-          <p class="mt-1 text-xs text-slate-500">{{ t('clipboard.settings.display.toolbarVisible') }}</p>
-        </div>
-        <input
-          type="checkbox"
-          :checked="props.settings.toolbar.visible"
-          @change="patchToolbar({ visible: ($event.target as HTMLInputElement).checked })"
-        >
-      </div>
-
-      <div class="mt-4 space-y-2">
-        <div
-          v-for="item in CLIPBOARD_TOOLBAR_ITEM_IDS"
-          :key="item"
-          class="flex items-center gap-3 rounded-xl border border-slate-100 px-3 py-2"
-          :class="toolbarItems.includes(item) ? 'bg-slate-50' : 'bg-white'"
-        >
-          <button
-            type="button"
-            class="inline-flex h-6 w-6 items-center justify-center rounded border border-slate-200 text-[11px] text-slate-600"
-            :disabled="!toolbarItems.includes(item)"
-            @click="moveItem(item, -1)"
-          >
-            <ChevronLeft class="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            class="inline-flex h-6 w-6 items-center justify-center rounded border border-slate-200 text-[11px] text-slate-600"
-            :disabled="!toolbarItems.includes(item)"
-            @click="moveItem(item, 1)"
-          >
-            <ChevronRight class="h-3.5 w-3.5" />
-          </button>
-
-          <div class="min-w-0 flex-1">
-            <div class="text-sm font-medium text-slate-700">
-              {{ t(`clipboard.settings.toolbarItems.${item}`) }}
-            </div>
-          </div>
-
-          <input
-            type="checkbox"
-            :checked="toolbarItems.includes(item)"
-            @change="toggleToolbarItem(item)"
-          >
         </div>
       </div>
     </div>

@@ -59,3 +59,16 @@ test('clipboard pinned section forwards hover-leave from its nested list', () =>
   assert.match(pinnedSource, /hoverLeave: \[\]/);
   assert.match(pinnedSource, /@hover-leave="emit\('hoverLeave'\)"/);
 });
+
+test('clipboard panel does not auto-focus the search box when shown', () => {
+  const shownHandler = pageSource.match(
+    /unlistenShown = await listen\('clipboard-panel-shown', async \(\) => \{[\s\S]*?\n  \}\);/,
+  );
+
+  assert.ok(shownHandler);
+  assert.doesNotMatch(shownHandler[0], /searchInput\.value\?\.focus\(\)/);
+});
+
+test('clipboard panel still exposes an explicit focus-search action for keyboard shortcuts', () => {
+  assert.match(pageSource, /onFocusSearch: \(\) => searchInput\.value\?\.focus\(\)/);
+});

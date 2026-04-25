@@ -43,9 +43,9 @@ pub enum ClipboardTimeFormat {
 #[serde(rename_all = "snake_case")]
 pub enum ClipboardSourceAppDisplay {
     None,
-    #[default]
     Name,
     Icon,
+    #[default]
     Both,
 }
 
@@ -86,9 +86,9 @@ impl Default for ClipboardDisplaySettings {
             density: ClipboardCardDensity::Standard,
             preview_lines: 3,
             time_format: ClipboardTimeFormat::Relative,
-            show_char_count: false,
+            show_char_count: true,
             show_byte_size: true,
-            show_source_app: ClipboardSourceAppDisplay::Name,
+            show_source_app: ClipboardSourceAppDisplay::Both,
             image_max_height: 120,
             image_auto_height: true,
             drag_indicator: true,
@@ -120,28 +120,7 @@ impl Default for ClipboardPreviewSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ClipboardPanelSettings {
-    pub follow_cursor: bool,
-    pub remember_position: bool,
-    pub animate: bool,
-    pub use_mica: bool,
-}
-
-impl Default for ClipboardPanelSettings {
-    fn default() -> Self {
-        Self {
-            follow_cursor: true,
-            remember_position: false,
-            animate: true,
-            use_mica: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
 pub struct ClipboardShortcutsSettings {
-    pub quick_paste: Vec<String>,
     pub paste: String,
     pub plain_paste: String,
     pub delete: String,
@@ -154,13 +133,12 @@ pub struct ClipboardShortcutsSettings {
 impl Default for ClipboardShortcutsSettings {
     fn default() -> Self {
         Self {
-            quick_paste: vec![],
             paste: "Enter".to_string(),
             plain_paste: "Shift+Enter".to_string(),
             delete: "Delete".to_string(),
             favorite: "Ctrl+D".to_string(),
             edit: "Ctrl+E".to_string(),
-            focus_search: vec!["Ctrl+F".to_string(), "/".to_string()],
+            focus_search: vec!["Ctrl+F".to_string()],
             close: "Escape".to_string(),
         }
     }
@@ -175,28 +153,6 @@ pub struct ClipboardNavigationSettings {
 impl Default for ClipboardNavigationSettings {
     fn default() -> Self {
         Self { enabled: true }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ClipboardToolbarSettings {
-    pub visible: bool,
-    pub items: Vec<String>,
-}
-
-impl Default for ClipboardToolbarSettings {
-    fn default() -> Self {
-        Self {
-            visible: true,
-            items: vec![
-                "search".to_string(),
-                "filter".to_string(),
-                "batch".to_string(),
-                "settings".to_string(),
-                "lock".to_string(),
-            ],
-        }
     }
 }
 
@@ -257,13 +213,9 @@ pub struct ClipboardSettings {
     #[serde(default)]
     pub preview: ClipboardPreviewSettings,
     #[serde(default)]
-    pub panel: ClipboardPanelSettings,
-    #[serde(default)]
     pub shortcuts: ClipboardShortcutsSettings,
     #[serde(default)]
     pub navigation: ClipboardNavigationSettings,
-    #[serde(default)]
-    pub toolbar: ClipboardToolbarSettings,
     #[serde(default)]
     pub data: ClipboardDataSettings,
     #[serde(default)]
@@ -287,10 +239,8 @@ impl Default for ClipboardSettings {
             reinsert_on_self_copy: false,
             display: ClipboardDisplaySettings::default(),
             preview: ClipboardPreviewSettings::default(),
-            panel: ClipboardPanelSettings::default(),
             shortcuts: ClipboardShortcutsSettings::default(),
             navigation: ClipboardNavigationSettings::default(),
-            toolbar: ClipboardToolbarSettings::default(),
             data: ClipboardDataSettings::default(),
             app_filter: ClipboardAppFilterSettings::default(),
         }
@@ -449,18 +399,22 @@ impl ContentKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn clipboard_settings_default_exposes_panel_navigation_and_toolbar_visibility() {
+    fn clipboard_settings_default_exposes_new_display_and_shortcut_defaults() {
         let settings = ClipboardSettings::default();
+        let serialized = serde_json::to_value(&settings).unwrap();
 
-        assert!(settings.panel.follow_cursor);
-        assert!(!settings.panel.remember_position);
-        assert!(settings.panel.animate);
-        assert!(settings.panel.use_mica);
         assert!(settings.navigation.enabled);
-        assert!(settings.toolbar.visible);
+        assert!(settings.display.show_char_count);
+        assert_eq!(settings.display.show_source_app, ClipboardSourceAppDisplay::Both);
+        assert_eq!(settings.shortcuts.focus_search, vec!["Ctrl+F".to_string()]);
+        assert!(serialized.get("panel").is_none());
+        assert!(serialized.get("toolbar").is_none());
+        assert!(serialized
+            .get("shortcuts")
+            .and_then(|value| value.get("quick_paste"))
+            .is_none());
     }
 
     #[test]
@@ -471,17 +425,27 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_settings_roundtrip_keeps_new_nested_settings_and_backfills_legacy_json() {
+    fn clipboard_settings_roundtrip_keeps_simplified_nested_settings() {
         let configured = ClipboardSettings {
-            toolbar: ClipboardToolbarSettings {
-                visible: false,
-                items: vec!["search".to_string(), "filter".to_string()],
+            display: ClipboardDisplaySettings {
+                density: ClipboardCardDensity::Compact,
+                preview_lines: 2,
+                time_format: ClipboardTimeFormat::Absolute,
+                show_char_count: false,
+                show_byte_size: false,
+                show_source_app: ClipboardSourceAppDisplay::Icon,
+                image_max_height: 96,
+                image_auto_height: false,
+                drag_indicator: false,
             },
-            panel: ClipboardPanelSettings {
-                follow_cursor: false,
-                remember_position: true,
-                animate: false,
-                use_mica: false,
+            shortcuts: ClipboardShortcutsSettings {
+                paste: "Enter".to_string(),
+                plain_paste: "Shift+Enter".to_string(),
+                delete: "Delete".to_string(),
+                favorite: "Ctrl+D".to_string(),
+                edit: "Ctrl+E".to_string(),
+                focus_search: vec!["Ctrl+F".to_string()],
+                close: "Escape".to_string(),
             },
             navigation: ClipboardNavigationSettings { enabled: false },
             ..ClipboardSettings::default()
@@ -489,36 +453,14 @@ mod tests {
 
         let roundtrip: ClipboardSettings =
             serde_json::from_value(serde_json::to_value(&configured).unwrap()).unwrap();
-        assert!(!roundtrip.toolbar.visible);
-        assert_eq!(
-            roundtrip.toolbar.items,
-            vec!["search".to_string(), "filter".to_string()]
-        );
-        assert!(!roundtrip.panel.follow_cursor);
-        assert!(roundtrip.panel.remember_position);
-        assert!(!roundtrip.panel.animate);
-        assert!(!roundtrip.panel.use_mica);
+        let serialized = serde_json::to_value(&roundtrip).unwrap();
+
+        assert_eq!(roundtrip.display.density, ClipboardCardDensity::Compact);
+        assert_eq!(roundtrip.display.time_format, ClipboardTimeFormat::Absolute);
+        assert_eq!(roundtrip.display.show_source_app, ClipboardSourceAppDisplay::Icon);
+        assert_eq!(roundtrip.shortcuts.focus_search, vec!["Ctrl+F".to_string()]);
         assert!(!roundtrip.navigation.enabled);
-
-        let legacy: ClipboardSettings = serde_json::from_value(json!({
-            "enabled": false,
-            "hotkey": "Ctrl+Shift+V",
-            "toolbar": {
-                "items": ["search", "filter"]
-            },
-            "display": {
-                "density": "compact"
-            }
-        }))
-        .unwrap();
-
-        assert_eq!(legacy.hotkey, "Ctrl+Shift+V");
-        assert_eq!(legacy.display.density, ClipboardCardDensity::Compact);
-        assert!(legacy.toolbar.visible);
-        assert!(legacy.panel.follow_cursor);
-        assert!(!legacy.panel.remember_position);
-        assert!(legacy.panel.animate);
-        assert!(legacy.panel.use_mica);
-        assert!(legacy.navigation.enabled);
+        assert!(serialized.get("panel").is_none());
+        assert!(serialized.get("toolbar").is_none());
     }
 }

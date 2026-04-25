@@ -461,7 +461,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn app_config_deserializes_legacy_clipboard_settings_with_new_nested_defaults() {
+    fn app_config_uses_simplified_clipboard_defaults() {
         let config: AppConfig = serde_json::from_value(json!({
             "tasks": [],
             "local_path": "E:/UMS_TEMP",
@@ -474,23 +474,23 @@ mod tests {
             "command_groups": [],
             "local_command_groups": [],
             "clipboard": {
-                "enabled": true,
-                "toolbar": {
-                    "items": ["search", "filter"]
-                }
+                "enabled": true
             }
         }))
         .unwrap();
+        let serialized = serde_json::to_value(&config.clipboard).unwrap();
 
-        assert!(config.clipboard.toolbar.visible);
-        assert_eq!(
-            config.clipboard.toolbar.items,
-            vec!["search".to_string(), "filter".to_string()]
-        );
-        assert!(config.clipboard.panel.follow_cursor);
-        assert!(!config.clipboard.panel.remember_position);
-        assert!(config.clipboard.panel.animate);
-        assert!(config.clipboard.panel.use_mica);
         assert!(config.clipboard.navigation.enabled);
+        assert!(config.clipboard.display.show_char_count);
+        assert_eq!(
+            config.clipboard.display.show_source_app,
+            crate::clipboard::models::ClipboardSourceAppDisplay::Both
+        );
+        assert_eq!(
+            config.clipboard.shortcuts.focus_search,
+            vec!["Ctrl+F".to_string()]
+        );
+        assert!(serialized.get("panel").is_none());
+        assert!(serialized.get("toolbar").is_none());
     }
 }

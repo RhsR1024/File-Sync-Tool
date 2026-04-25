@@ -153,42 +153,6 @@ watch(
       <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <h4 class="text-sm font-semibold text-slate-900">{{ t('clipboard.settings.tabs.general') }}</h4>
         <div class="mt-4 space-y-3">
-          <label class="flex items-center justify-between gap-4">
-            <span class="text-sm text-slate-700">{{ t('clipboard.settings.general.followCursor') }}</span>
-            <input
-              type="checkbox"
-              :checked="props.settings.panel.follow_cursor"
-              @change="patch({ panel: { follow_cursor: ($event.target as HTMLInputElement).checked } })"
-            >
-          </label>
-
-          <label class="flex items-center justify-between gap-4">
-            <span class="text-sm text-slate-700">{{ t('clipboard.settings.general.rememberPosition') }}</span>
-            <input
-              type="checkbox"
-              :checked="props.settings.panel.remember_position"
-              @change="patch({ panel: { remember_position: ($event.target as HTMLInputElement).checked } })"
-            >
-          </label>
-
-          <label class="flex items-center justify-between gap-4">
-            <span class="text-sm text-slate-700">{{ t('clipboard.settings.general.animate') }}</span>
-            <input
-              type="checkbox"
-              :checked="props.settings.panel.animate"
-              @change="patch({ panel: { animate: ($event.target as HTMLInputElement).checked } })"
-            >
-          </label>
-
-          <label class="flex items-center justify-between gap-4">
-            <span class="text-sm text-slate-700">{{ t('clipboard.settings.general.useMica') }}</span>
-            <input
-              type="checkbox"
-              :checked="props.settings.panel.use_mica"
-              @change="patch({ panel: { use_mica: ($event.target as HTMLInputElement).checked } })"
-            >
-          </label>
-
           <label class="flex items-start justify-between gap-4">
             <div>
               <div class="text-sm text-slate-700">

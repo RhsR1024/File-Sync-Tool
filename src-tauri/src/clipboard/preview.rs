@@ -1,8 +1,10 @@
 use serde::Serialize;
 use std::sync::{
+    Arc,
     atomic::{AtomicU64, Ordering},
     Mutex, OnceLock,
 };
+use std::time::Duration;
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Size, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
@@ -11,6 +13,7 @@ use tauri::{
 use crate::clipboard::models::{
     ClipboardItem, ClipboardPreviewPosition, ClipboardSettings, ContentKind,
 };
+use crate::clipboard::ClipboardState;
 
 pub const IMAGE_PREVIEW_WINDOW_LABEL: &str = "clipboard-image-preview";
 pub const TEXT_PREVIEW_WINDOW_LABEL: &str = "clipboard-text-preview";
@@ -186,16 +189,181 @@ pub fn clear_cached_preview_payloads() {
     cache.text = None;
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct SavedRect {
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, Default)]
+struct PreviewFullscreenState {
+    image_saved: Option<SavedRect>,
+    text_saved: Option<SavedRect>,
+}
+
+fn preview_fullscreen_state() -> &'static Mutex<PreviewFullscreenState> {
+    static STATE: OnceLock<Mutex<PreviewFullscreenState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(PreviewFullscreenState::default()))
+}
+
+fn fullscreen_slot_for_label<'a>(
+    state: &'a mut PreviewFullscreenState,
+    label: &str,
+) -> Option<&'a mut Option<SavedRect>> {
+    match label {
+        IMAGE_PREVIEW_WINDOW_LABEL => Some(&mut state.image_saved),
+        TEXT_PREVIEW_WINDOW_LABEL => Some(&mut state.text_saved),
+        _ => None,
+    }
+}
+
+fn clear_preview_fullscreen_saved(label: &str) {
+    let mut state = preview_fullscreen_state()
+        .lock()
+        .expect("preview fullscreen state poisoned");
+    if let Some(slot) = fullscreen_slot_for_label(&mut state, label) {
+        *slot = None;
+    }
+}
+
+pub fn toggle_preview_fullscreen<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    label: &str,
+) -> Result<bool, String> {
+    let window = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("preview window not found: {label}"))?;
+
+    let mut state = preview_fullscreen_state()
+        .lock()
+        .map_err(|_| "preview fullscreen state poisoned".to_string())?;
+    let slot = fullscreen_slot_for_label(&mut state, label)
+        .ok_or_else(|| format!("invalid preview label: {label}"))?;
+
+    if let Some(saved) = slot.take() {
+        window
+            .set_size(Size::Physical(PhysicalSize::new(saved.width, saved.height)))
+            .map_err(|error| error.to_string())?;
+        window
+            .set_position(PhysicalPosition::new(saved.x, saved.y))
+            .map_err(|error| error.to_string())?;
+        Ok(false)
+    } else {
+        let pos = window.outer_position().map_err(|error| error.to_string())?;
+        let size = window.outer_size().map_err(|error| error.to_string())?;
+        *slot = Some(SavedRect {
+            width: size.width,
+            height: size.height,
+            x: pos.x,
+            y: pos.y,
+        });
+
+        let monitor = window
+            .current_monitor()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "current monitor unavailable".to_string())?;
+        let monitor_size = monitor.size();
+        let monitor_pos = monitor.position();
+        window
+            .set_size(Size::Physical(PhysicalSize::new(
+                monitor_size.width,
+                monitor_size.height,
+            )))
+            .map_err(|error| error.to_string())?;
+        window
+            .set_position(PhysicalPosition::new(monitor_pos.x, monitor_pos.y))
+            .map_err(|error| error.to_string())?;
+        Ok(true)
+    }
+}
+
+pub fn schedule_dismiss_if_orphaned<R>(
+    app: AppHandle<R>,
+    panel: WebviewWindow<R>,
+    state: Arc<ClipboardState>,
+) where
+    R: tauri::Runtime,
+{
+    if state
+        .panel_pinned
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        let panel_focused = panel.is_focused().unwrap_or(false);
+        let preview_focused = preview_window_is_focused(&app);
+        if !panel_focused && !preview_focused {
+            hide_preview_windows(&app);
+            let _ = panel.hide();
+        }
+    });
+}
+
+pub fn attach_preview_dismiss_handlers<R>(
+    app: &AppHandle<R>,
+    panel: WebviewWindow<R>,
+    state: Arc<ClipboardState>,
+) -> tauri::Result<()>
+where
+    R: tauri::Runtime,
+{
+    for label in [IMAGE_PREVIEW_WINDOW_LABEL, TEXT_PREVIEW_WINDOW_LABEL] {
+        if let Some(window) = app.get_webview_window(label) {
+            let app_handle = app.clone();
+            let panel = panel.clone();
+            let state = state.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    schedule_dismiss_if_orphaned(app_handle.clone(), panel.clone(), state.clone());
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
+pub fn ensure_preview_windows<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<()> {
+    let _ = ensure_preview_window(
+        manager,
+        IMAGE_PREVIEW_WINDOW_LABEL,
+        IMAGE_PREVIEW_ROUTE,
+        IMAGE_PREVIEW_TITLE,
+        PreviewWindowSize {
+            width: DEFAULT_IMAGE_PREVIEW_WIDTH,
+            height: DEFAULT_IMAGE_PREVIEW_HEIGHT,
+        },
+    )?;
+    let _ = ensure_preview_window(
+        manager,
+        TEXT_PREVIEW_WINDOW_LABEL,
+        TEXT_PREVIEW_ROUTE,
+        TEXT_PREVIEW_TITLE,
+        PreviewWindowSize {
+            width: DEFAULT_TEXT_PREVIEW_WIDTH,
+            height: DEFAULT_TEXT_PREVIEW_HEIGHT,
+        },
+    )?;
+    Ok(())
+}
+
 fn hide_preview_window_handles<R: tauri::Runtime>(app: &AppHandle<R>) {
+    debug_window_snapshot(app, "hide-preview-windows:start");
     for (label, clear_event) in [
         (IMAGE_PREVIEW_WINDOW_LABEL, IMAGE_PREVIEW_CLEAR_EVENT),
         (TEXT_PREVIEW_WINDOW_LABEL, TEXT_PREVIEW_CLEAR_EVENT),
     ] {
         if let Some(window) = app.get_webview_window(label) {
+            clear_preview_fullscreen_saved(label);
             let _ = window.emit(clear_event, ());
             let _ = window.hide();
         }
     }
+    debug_window_snapshot(app, "hide-preview-windows:done");
 }
 
 pub fn hide_preview_windows<R: tauri::Runtime>(app: &AppHandle<R>) {
@@ -386,7 +554,7 @@ pub fn preview_window_is_focused<R: tauri::Runtime>(app: &AppHandle<R>) -> bool 
         .any(|window| tauri_window_reports_focus(&window))
 }
 
-pub fn show_image_preview<R: tauri::Runtime>(
+pub fn show_image_preview<R: tauri::Runtime + 'static>(
     app: &AppHandle<R>,
     settings: &ClipboardSettings,
     item: &ClipboardItem,
@@ -463,7 +631,7 @@ pub fn show_image_preview<R: tauri::Runtime>(
     Ok(())
 }
 
-pub fn show_text_preview<R: tauri::Runtime>(
+pub fn show_text_preview<R: tauri::Runtime + 'static>(
     app: &AppHandle<R>,
     settings: &ClipboardSettings,
     item: &ClipboardItem,
@@ -654,7 +822,6 @@ fn ensure_preview_window<R: tauri::Runtime, M: Manager<R>>(
         .resizable(false)
         .skip_taskbar(true)
         .always_on_top(true)
-        .focusable(false)
         .focused(false)
         .visible(false)
         .build()
@@ -699,101 +866,12 @@ fn show_preview_without_focus<R: tauri::Runtime>(
     restack_preview_behind_panel(window, panel)
 }
 
-#[cfg(target_os = "windows")]
-fn enforce_preview_click_through<R: tauri::Runtime>(
-    window: &WebviewWindow<R>,
-) -> Result<(), String> {
-    use std::ffi::c_void;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-    };
-
-    unsafe fn apply_click_through_style(hwnd: HWND) {
-        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        let desired_style =
-            ex_style | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
-        if desired_style != ex_style {
-            SetWindowLongW(hwnd, GWL_EXSTYLE, desired_style as i32);
-        }
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-    }
-
-    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-    let hwnd = HWND(hwnd.0 as *mut _);
-    unsafe {
-        apply_click_through_style(hwnd);
-
-        let mut callback = |child_hwnd| {
-            apply_click_through_style(child_hwnd);
-            true
-        };
-        let mut trait_obj: &mut dyn FnMut(HWND) -> bool = &mut callback;
-        let closure_pointer_pointer: *mut c_void = std::mem::transmute(&mut trait_obj);
-        let lparam = LPARAM(closure_pointer_pointer as isize);
-        unsafe extern "system" fn enumerate_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
-            let closure = &mut *(lparam.0 as *mut c_void as *mut &mut dyn FnMut(HWND) -> bool);
-            closure(hwnd).into()
-        }
-        let _ = EnumChildWindows(hwnd, Some(enumerate_callback), lparam);
-    }
-    Ok(())
-}
-
 #[cfg(not(target_os = "windows"))]
 fn show_preview_without_focus<R: tauri::Runtime>(
     window: &WebviewWindow<R>,
     _panel: &WebviewWindow<R>,
 ) -> Result<(), String> {
     window.show().map_err(|error| error.to_string())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn enforce_preview_click_through<R: tauri::Runtime>(
-    _window: &WebviewWindow<R>,
-) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn schedule_delayed_preview_native_sync<R: tauri::Runtime>(app: &AppHandle<R>, target_label: &str) {
-    let app = app.clone();
-    let target_label = target_label.to_string();
-
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let Some(window) = app.get_webview_window(target_label.as_str()) else {
-            return;
-        };
-        if !window.is_visible().unwrap_or(false) {
-            return;
-        }
-        let Some(panel) = app.get_webview_window("clipboard-panel") else {
-            return;
-        };
-
-        let _ = enforce_preview_click_through(&window);
-        let _ = restack_preview_behind_panel(&window, &panel);
-        log_preview_window_diagnostics(&app, &format!("delayed-sync:{target_label}"));
-    });
-}
-
-#[cfg(not(target_os = "windows"))]
-fn schedule_delayed_preview_native_sync<R: tauri::Runtime>(
-    _app: &AppHandle<R>,
-    _target_label: &str,
-) {
 }
 
 fn desired_image_preview_size(item: &ClipboardItem) -> PreviewWindowSize {
@@ -825,7 +903,7 @@ fn preview_stage_ok(target_label: &str, token: u64, stage: &str) {
     eprintln!("[clipboard-preview][prepare:{target_label}] ok stage={stage} token={token}");
 }
 
-fn show_preview_window<R: tauri::Runtime, T: Serialize>(
+fn show_preview_window<R: tauri::Runtime + 'static, T: Serialize>(
     app: &AppHandle<R>,
     settings: &ClipboardSettings,
     kind: PreviewKind,
@@ -921,20 +999,19 @@ fn show_preview_window<R: tauri::Runtime, T: Serialize>(
         return Ok(());
     }
 
-    let _ = window.set_focusable(false);
+    debug_window_snapshot(
+        app,
+        &format!("show-preview-window:{target_label}:before-resize"),
+    );
     window
-        .set_ignore_cursor_events(true)
+        .set_ignore_cursor_events(false)
         .map_err(|error| {
             let error = error.to_string();
             preview_stage_error(target_label, token, "set-ignore-cursor-events", &error);
             error
         })?;
     preview_stage_ok(target_label, token, "set-ignore-cursor-events");
-    enforce_preview_click_through(&window).map_err(|error| {
-        preview_stage_error(target_label, token, "enforce-before-show", &error);
-        error
-    })?;
-    preview_stage_ok(target_label, token, "enforce-before-show");
+    clear_preview_fullscreen_saved(target_label);
     window
         .set_size(Size::Physical(PhysicalSize::new(
             placement.width,
@@ -976,13 +1053,15 @@ fn show_preview_window<R: tauri::Runtime, T: Serialize>(
         error
     })?;
     preview_stage_ok(target_label, token, "show-preview-without-focus");
-    enforce_preview_click_through(&window).map_err(|error| {
-        preview_stage_error(target_label, token, "enforce-after-show", &error);
-        error
-    })?;
-    preview_stage_ok(target_label, token, "enforce-after-show");
+    debug_window_snapshot(
+        app,
+        &format!("show-preview-window:{target_label}:after-show"),
+    );
     log_preview_window_diagnostics(app, &format!("show:{target_label}"));
-    schedule_delayed_preview_native_sync(app, target_label);
+    schedule_debug_snapshots(
+        app,
+        format!("show-preview-window:{target_label}:delayed-after-show"),
+    );
 
     if !is_preview_token_current(token) {
         eprintln!(
@@ -994,6 +1073,38 @@ fn show_preview_window<R: tauri::Runtime, T: Serialize>(
 
     preview_stage_ok(target_label, token, "after-show");
     Ok(())
+}
+
+fn schedule_debug_snapshots<R: tauri::Runtime + 'static>(app: &AppHandle<R>, context: String) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for delay_ms in [50_u64, 300, 1000] {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            debug_window_snapshot(&app, &format!("{context}:{delay_ms}ms"));
+        }
+    });
+}
+
+pub fn debug_window_snapshot<R: tauri::Runtime>(app: &AppHandle<R>, context: &str) {
+    let mut summaries = Vec::new();
+    for label in [
+        "clipboard-panel",
+        IMAGE_PREVIEW_WINDOW_LABEL,
+        TEXT_PREVIEW_WINDOW_LABEL,
+    ] {
+        match app.get_webview_window(label) {
+            Some(window) => {
+                let visible = window.is_visible().unwrap_or(false);
+                let focused = tauri_window_reports_focus(&window);
+                let rect = window_rect(&window).ok();
+                summaries.push(format!(
+                    "{label} visible={visible} focused={focused} rect={rect:?}"
+                ));
+            }
+            None => summaries.push(format!("{label} missing")),
+        }
+    }
+    eprintln!("[clipboard-debug] {context} {}", summaries.join(" | "));
 }
 
 fn window_rect<R: tauri::Runtime>(window: &WebviewWindow<R>) -> Result<WindowRect, String> {

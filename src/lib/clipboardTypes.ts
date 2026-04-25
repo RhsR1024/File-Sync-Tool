@@ -27,15 +27,7 @@ export interface ClipboardPreviewSettings {
   position: ClipboardPreviewPosition;
 }
 
-export interface ClipboardPanelSettings {
-  follow_cursor: boolean;
-  remember_position: boolean;
-  animate: boolean;
-  use_mica: boolean;
-}
-
 export interface ClipboardShortcutsSettings {
-  quick_paste: string[];
   paste: string;
   plain_paste: string;
   delete: string;
@@ -43,11 +35,6 @@ export interface ClipboardShortcutsSettings {
   edit: string;
   focus_search: string[];
   close: string;
-}
-
-export interface ClipboardToolbarSettings {
-  visible: boolean;
-  items: string[];
 }
 
 export interface ClipboardNavigationSettings {
@@ -81,10 +68,8 @@ export interface ClipboardSettings {
   reinsert_on_self_copy: boolean;
   display: ClipboardDisplaySettings;
   preview: ClipboardPreviewSettings;
-  panel: ClipboardPanelSettings;
   shortcuts: ClipboardShortcutsSettings;
   navigation: ClipboardNavigationSettings;
-  toolbar: ClipboardToolbarSettings;
   data: ClipboardDataSettings;
   app_filter: ClipboardAppFilterSettings;
 }
@@ -114,9 +99,9 @@ const DEFAULT_CLIPBOARD_SETTINGS: ClipboardSettings = {
     density: 'standard',
     preview_lines: 3,
     time_format: 'relative',
-    show_char_count: false,
+    show_char_count: true,
     show_byte_size: true,
-    show_source_app: 'name',
+    show_source_app: 'both',
     image_max_height: 120,
     image_auto_height: true,
     drag_indicator: true,
@@ -128,28 +113,17 @@ const DEFAULT_CLIPBOARD_SETTINGS: ClipboardSettings = {
     zoom_step: 10,
     position: 'auto',
   },
-  panel: {
-    follow_cursor: true,
-    remember_position: false,
-    animate: true,
-    use_mica: true,
-  },
   shortcuts: {
-    quick_paste: [],
     paste: 'Enter',
     plain_paste: 'Shift+Enter',
     delete: 'Delete',
     favorite: 'Ctrl+D',
     edit: 'Ctrl+E',
-    focus_search: ['Ctrl+F', '/'],
+    focus_search: ['Ctrl+F'],
     close: 'Escape',
   },
   navigation: {
     enabled: true,
-  },
-  toolbar: {
-    visible: true,
-    items: ['search', 'filter', 'batch', 'settings', 'lock'],
   },
   data: {
     max_items: 1000,
@@ -168,17 +142,11 @@ export function cloneClipboardSettings(settings: ClipboardSettings): ClipboardSe
     ...settings,
     display: { ...settings.display },
     preview: { ...settings.preview },
-    panel: { ...settings.panel },
     shortcuts: {
       ...settings.shortcuts,
-      quick_paste: [...settings.shortcuts.quick_paste],
       focus_search: [...settings.shortcuts.focus_search],
     },
     navigation: { ...settings.navigation },
-    toolbar: {
-      ...settings.toolbar,
-      items: [...settings.toolbar.items],
-    },
     data: { ...settings.data },
     app_filter: {
       ...settings.app_filter,
@@ -196,8 +164,19 @@ export function normalizeClipboardSettings(
 ): ClipboardSettings {
   const defaults = createDefaultClipboardSettings();
   const next: ClipboardSettings = {
-    ...defaults,
-    ...input,
+    enabled: input?.enabled ?? defaults.enabled,
+    hotkey: input?.hotkey ?? defaults.hotkey,
+    max_items: input?.max_items ?? defaults.max_items,
+    retain_days: input?.retain_days ?? defaults.retain_days,
+    max_item_bytes: input?.max_item_bytes ?? defaults.max_item_bytes,
+    preview_delay_ms: input?.preview_delay_ms ?? defaults.preview_delay_ms,
+    enable_text_preview: input?.enable_text_preview ?? defaults.enable_text_preview,
+    use_win_v_replacement: input?.use_win_v_replacement ?? defaults.use_win_v_replacement,
+    run_as_admin: input?.run_as_admin ?? defaults.run_as_admin,
+    show_startup_notification:
+      input?.show_startup_notification ?? defaults.show_startup_notification,
+    dedup_strategy: input?.dedup_strategy ?? defaults.dedup_strategy,
+    reinsert_on_self_copy: input?.reinsert_on_self_copy ?? defaults.reinsert_on_self_copy,
     display: {
       ...defaults.display,
       ...(input?.display ?? {}),
@@ -206,16 +185,9 @@ export function normalizeClipboardSettings(
       ...defaults.preview,
       ...(input?.preview ?? {}),
     },
-    panel: {
-      ...defaults.panel,
-      ...(input?.panel ?? {}),
-    },
     shortcuts: {
       ...defaults.shortcuts,
       ...(input?.shortcuts ?? {}),
-      quick_paste: input?.shortcuts?.quick_paste
-        ? [...input.shortcuts.quick_paste]
-        : [...defaults.shortcuts.quick_paste],
       focus_search: input?.shortcuts?.focus_search
         ? [...input.shortcuts.focus_search]
         : [...defaults.shortcuts.focus_search],
@@ -223,11 +195,6 @@ export function normalizeClipboardSettings(
     navigation: {
       ...defaults.navigation,
       ...(input?.navigation ?? {}),
-    },
-    toolbar: {
-      ...defaults.toolbar,
-      ...(input?.toolbar ?? {}),
-      items: input?.toolbar?.items ? [...input.toolbar.items] : [...defaults.toolbar.items],
     },
     data: {
       ...defaults.data,

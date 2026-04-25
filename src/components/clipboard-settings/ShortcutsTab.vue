@@ -52,9 +52,7 @@ const shortcutRows = computed(() => [
   },
   {
     label: t('clipboard.settings.shortcuts.quickPaste'),
-    value: props.settings.shortcuts.quick_paste.length > 0
-      ? props.settings.shortcuts.quick_paste.join(' / ')
-      : 'Alt+1 - Alt+9',
+    value: 'Alt+1 - Alt+9',
   },
 ]);
 
