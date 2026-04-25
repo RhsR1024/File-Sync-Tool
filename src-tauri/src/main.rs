@@ -7,6 +7,7 @@ mod code_count;
 mod config;
 mod deploy;
 mod disk_cleanup;
+mod error_code;
 mod fileshare;
 mod history;
 mod local_exec;
