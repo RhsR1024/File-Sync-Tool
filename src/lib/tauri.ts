@@ -1104,6 +1104,53 @@ export interface AdminTaskStatus {
   last_error: string | null;
 }
 
+// ===== Error Code Lookup =====
+
+export type ErrorCodeMode = 'single' | 'range' | 'keyword';
+
+export interface ErrorCodeEntry {
+  code: number;
+  message_cn: string;
+  message_en: string;
+  solution: string;
+  module: string;
+  remark: string;
+  source_file: string;
+}
+
+export interface ErrorCodeQueryRequest {
+  mode: ErrorCodeMode;
+  value: string;
+  page: number;
+}
+
+export interface ErrorCodeQueryResult {
+  entries: ErrorCodeEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ErrorCodeSyncReport {
+  file_count: number;
+  row_count: number;
+  last_synced_at: string;
+}
+
+export interface ErrorCodeMetaInfo {
+  has_cache: boolean;
+  last_synced_at: string | null;
+  file_count: number;
+  row_count: number;
+}
+
+export const errorCodeApi = {
+  sync: () => invoke<ErrorCodeSyncReport>('error_code_sync'),
+  query: (request: ErrorCodeQueryRequest) =>
+    invoke<ErrorCodeQueryResult>('error_code_query', { request }),
+  getMeta: () => invoke<ErrorCodeMetaInfo>('error_code_get_meta'),
+};
+
 export type ClipboardImportMode = 'replace' | 'merge';
 
 export interface ClipboardImportReport {

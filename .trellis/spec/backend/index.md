@@ -10,6 +10,7 @@
 |-------|-------------|--------|
 | [Disk Cache Cleanup](./disk-cache-cleanup.md) | Contracts for Linux local disk, Windows raw disk, IPSAN, and Redis cache-key operations | Active |
 | [Clipboard Preview Windows](./clipboard-preview-windows.md) | Contracts for non-activating Alt+C hover preview windows and no-overlap placement | Active |
+| [Error Code Lookup](./error-code-lookup.md) | Contracts for GitLab archive sync, on-disk cache, and Tauri query commands backing the error-code tool | Active |
 
 ---
 

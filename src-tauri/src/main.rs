@@ -65,6 +65,7 @@ struct AppState {
     screen_share: Arc<screenshare::ScreenShareHandle>,
     file_share: Arc<fileshare::FileShareHandle>,
     clipboard: Arc<clipboard::ClipboardState>,
+    error_code: error_code::ErrorCodeState,
 }
 
 #[allow(dead_code)]
@@ -2803,6 +2804,7 @@ fn main() {
                 screen_share: Arc::new(screenshare::ScreenShareHandle::new()),
                 file_share: Arc::new(fileshare::FileShareHandle::new()),
                 clipboard: clipboard_state,
+                error_code: std::sync::Mutex::new(error_code::ErrorCodeStore::default()),
             });
 
             // Start the clipboard watcher if the persisted config has it enabled.
@@ -2969,6 +2971,9 @@ fn main() {
             fileshare::file_share_start,
             fileshare::file_share_stop,
             fileshare::file_share_get_status,
+            error_code::commands::error_code_sync,
+            error_code::commands::error_code_query,
+            error_code::commands::error_code_get_meta,
             confirm_quit,
             clipboard::commands::cb_is_enabled,
             clipboard::commands::cb_enable,

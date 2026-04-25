@@ -407,7 +407,10 @@ mod tests {
 
         assert!(settings.navigation.enabled);
         assert!(settings.display.show_char_count);
-        assert_eq!(settings.display.show_source_app, ClipboardSourceAppDisplay::Both);
+        assert_eq!(
+            settings.display.show_source_app,
+            ClipboardSourceAppDisplay::Both
+        );
         assert_eq!(settings.shortcuts.focus_search, vec!["Ctrl+F".to_string()]);
         assert!(serialized.get("panel").is_none());
         assert!(serialized.get("toolbar").is_none());
@@ -457,7 +460,10 @@ mod tests {
 
         assert_eq!(roundtrip.display.density, ClipboardCardDensity::Compact);
         assert_eq!(roundtrip.display.time_format, ClipboardTimeFormat::Absolute);
-        assert_eq!(roundtrip.display.show_source_app, ClipboardSourceAppDisplay::Icon);
+        assert_eq!(
+            roundtrip.display.show_source_app,
+            ClipboardSourceAppDisplay::Icon
+        );
         assert_eq!(roundtrip.shortcuts.focus_search, vec!["Ctrl+F".to_string()]);
         assert!(!roundtrip.navigation.enabled);
         assert!(serialized.get("panel").is_none());

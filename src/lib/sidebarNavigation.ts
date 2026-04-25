@@ -11,7 +11,8 @@ export type SidebarIconKey =
   | 'screenShare'
   | 'fileShare'
   | 'diskCacheCleanup'
-  | 'clipboardManager';
+  | 'clipboardManager'
+  | 'errorCodeLookup';
 
 export type SidebarMatchMode = 'exact' | 'prefix';
 export type SidebarRuntimeKey = 'screenShare' | 'fileShare';
@@ -126,6 +127,13 @@ export const SIDEBAR_NAV_SECTIONS = [
         labelKey: 'sidebar.clipboardManager',
         path: '/tools/clipboard',
         iconKey: 'clipboardManager',
+        matchMode: 'prefix',
+      },
+      {
+        key: 'error-code-lookup',
+        labelKey: 'sidebar.errorCodeLookup',
+        path: '/tools/error-code-lookup',
+        iconKey: 'errorCodeLookup',
         matchMode: 'prefix',
       },
     ],

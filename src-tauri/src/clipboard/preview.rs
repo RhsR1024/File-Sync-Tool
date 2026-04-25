@@ -1,8 +1,7 @@
 use serde::Serialize;
 use std::sync::{
-    Arc,
     atomic::{AtomicU64, Ordering},
-    Mutex, OnceLock,
+    Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
 use tauri::{
@@ -1022,13 +1021,11 @@ fn show_preview_window<R: tauri::Runtime + 'static, T: Serialize>(
         app,
         &format!("show-preview-window:{target_label}:before-resize"),
     );
-    window
-        .set_ignore_cursor_events(false)
-        .map_err(|error| {
-            let error = error.to_string();
-            preview_stage_error(target_label, token, "set-ignore-cursor-events", &error);
-            error
-        })?;
+    window.set_ignore_cursor_events(false).map_err(|error| {
+        let error = error.to_string();
+        preview_stage_error(target_label, token, "set-ignore-cursor-events", &error);
+        error
+    })?;
     preview_stage_ok(target_label, token, "set-ignore-cursor-events");
     clear_preview_fullscreen_saved(target_label);
     window
@@ -1050,13 +1047,11 @@ fn show_preview_window<R: tauri::Runtime + 'static, T: Serialize>(
             error
         })?;
     preview_stage_ok(target_label, token, "set-position");
-    window
-        .emit(update_event, payload)
-        .map_err(|error| {
-            let error = error.to_string();
-            preview_stage_error(target_label, token, "emit-update", &error);
-            error
-        })?;
+    window.emit(update_event, payload).map_err(|error| {
+        let error = error.to_string();
+        preview_stage_error(target_label, token, "emit-update", &error);
+        error
+    })?;
     preview_stage_ok(target_label, token, "emit-update");
 
     if !is_preview_token_current(token) {

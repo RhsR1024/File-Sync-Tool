@@ -67,6 +67,10 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../pages/ClipboardManagerPage.vue'),
   },
   {
+    path: '/tools/error-code-lookup',
+    component: () => import('../pages/ErrorCodeLookupPage.vue'),
+  },
+  {
     path: '/clipboard-panel',
     component: () => import('../pages/ClipboardPanelPage.vue'),
     meta: { noLayout: true },

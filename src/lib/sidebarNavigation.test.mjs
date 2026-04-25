@@ -19,6 +19,7 @@ assert.deepEqual(toolPaths, [
   '/tools/file-share',
   '/tools/disk-cache-cleanup',
   '/tools/clipboard',
+  '/tools/error-code-lookup',
 ]);
 
 assert.equal(

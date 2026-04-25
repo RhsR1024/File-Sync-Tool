@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { ArrowRight, BarChart3, Clipboard, Globe, HardDrive, KeyRound, MonitorUp, Share2, Shield, type LucideIcon } from 'lucide-vue-next';
+import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorUp, Share2, Shield, type LucideIcon } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
 import { appStore } from '@/lib/store';
 
@@ -106,6 +106,15 @@ const toolCards = computed<ToolCard[]>(() => [
     icon: markRaw(Clipboard as LucideIcon),
     iconClasses: 'from-rose-500 to-pink-600 shadow-rose-500/20',
     chipKey: 'toolsHub.cards.clipboardManager.chip',
+  },
+  {
+    key: 'error-code-lookup',
+    titleKey: 'sidebar.errorCodeLookup',
+    descriptionKey: 'toolsHub.cards.errorCodeLookup.description',
+    path: '/tools/error-code-lookup',
+    icon: markRaw(FileSearch as LucideIcon),
+    iconClasses: 'from-indigo-500 to-blue-600 shadow-indigo-500/20',
+    chipKey: 'toolsHub.cards.errorCodeLookup.chip',
   },
 ]);
 </script>

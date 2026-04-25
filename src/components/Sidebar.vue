@@ -3,6 +3,7 @@ import {
   Activity,
   BarChart3,
   Clipboard,
+  FileSearch,
   Globe,
   HardDrive,
   History,
@@ -39,6 +40,7 @@ const iconMap: Record<SidebarIconKey, Component> = {
   fileShare: Share2,
   diskCacheCleanup: HardDrive,
   clipboardManager: Clipboard,
+  errorCodeLookup: FileSearch,
 };
 
 const sections = computed(() =>
