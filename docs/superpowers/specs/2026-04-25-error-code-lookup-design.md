@@ -315,9 +315,11 @@ present.
 | File | Purpose |
 |---|---|
 | `src/pages/ErrorCodeLookupPage.vue` | Main page component |
-| `src/pages/ErrorCodeLookupPage.test.mjs` | Vitest unit tests for page logic |
+| `src/pages/errorCodeLookup/validation.ts` | Pure functions parsing/validating single, range, keyword inputs |
+| `src/pages/errorCodeLookup/validation.test.mjs` | `node --test` unit tests for validation |
 | `src/lib/tauri.ts` | Add typed wrappers for the 3 commands + types |
 | `src/lib/sidebarNavigation.ts` | Add `errorCodeLookup` icon key + nav item |
+| `src/lib/sidebarNavigation.test.mjs` | Extend existing snapshot to include new path |
 | `src/components/Sidebar.vue` | Map new icon key to `FileSearch` |
 | `src/pages/ToolsHubPage.vue` | Add new card entry |
 | `src/router/index.ts` | Register `/tools/error-code-lookup` route |
@@ -543,18 +545,22 @@ Test fixtures live under `src-tauri/tests/fixtures/error_code/`:
 - `sample_quoted.csv`
 - `sample_malformed.csv`
 
-### Frontend (`pnpm test`)
+### Frontend (`node --test`)
 
-`ErrorCodeLookupPage.test.mjs` covers:
-- Renders empty state when `getMeta` returns `has_cache: false`.
-- Renders preview when `has_cache: true`.
-- Mode switch resets input and results.
-- Single-mode validation (non-numeric → red border, no invoke).
-- Range-mode validation (bad format / reversed / too large).
-- Keyword-mode validation (empty / >50 chars).
-- Pagination triggers new `query` invocation with correct `page`.
-- Sync button shows loading state and re-fetches preview on success.
-- Toast appears for each backend error variant.
+The page itself is a thin shell over Tauri commands; testable logic is
+extracted into `src/pages/errorCodeLookup/validation.ts` (pure functions).
+`validation.test.mjs` covers:
+
+- `parseSingle('110')` → `{ ok: true, code: 110 }`; `parseSingle('abc')` → `{ ok: false, error: 'invalid_single' }`.
+- `parseRange('300000-301000')` → `{ ok: true, start: 300000, end: 301000 }`; reversed / bad format / span > 1000 each map to the right error tag.
+- `parseKeyword('  hello  ')` → `{ ok: true, keyword: 'hello' }`; empty / 51-char string → error tag.
+
+Sidebar/nav wiring is covered by extending `src/lib/sidebarNavigation.test.mjs`
+to assert the new path appears in the tools section.
+
+Page-level UI (mode switch, pagination clicks, table rendering) is verified by
+manual QA per §8 "Manual QA checklist" — consistent with how other tool pages
+in this repo are tested.
 
 ### Manual QA checklist
 
