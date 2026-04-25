@@ -37,6 +37,7 @@ rfd = "0.14"
 reqwest = { version = "0.11", features = ["json"] }
 encoding_rs = "0.8"
 chardetng = "0.1"
+csv = "1.3"
 base64 = "0.22"
 redis = { version = "0.25", features = ["tokio-comp"] }
 rand = "0.8"
