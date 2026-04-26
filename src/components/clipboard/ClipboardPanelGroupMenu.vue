@@ -42,6 +42,11 @@ const triggerLabel = computed(() =>
   resolveClipboardPanelGroupLabel(props.groups, props.selectedGroupId, labels.value.defaultGroup),
 );
 
+function focusFirstInteractive() {
+  const first = rootRef.value?.querySelector<HTMLElement>('[role="menuitem"], input, button');
+  first?.focus();
+}
+
 function resetEditors() {
   creating.value = false;
   newGroupName.value = '';
@@ -58,6 +63,10 @@ function toggleMenu() {
   menuOpen.value = !menuOpen.value;
   if (!menuOpen.value) {
     resetEditors();
+  } else {
+    void nextTick().then(() => {
+      focusFirstInteractive();
+    });
   }
 }
 
@@ -158,6 +167,7 @@ onBeforeUnmount(() => {
     <button
       type="button"
       class="inline-flex h-8 max-w-[132px] items-center gap-1 rounded-lg bg-white px-2.5 text-xs font-medium text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50 hover:text-slate-900"
+      aria-haspopup="menu"
       :aria-expanded="menuOpen"
       :title="triggerLabel"
       @click="toggleMenu"
@@ -180,6 +190,8 @@ onBeforeUnmount(() => {
       <div
         v-if="menuOpen"
         class="absolute bottom-full right-0 z-50 mb-1.5 w-[188px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-[0_18px_40px_rgba(15,23,42,0.18)]"
+        role="menu"
+        :aria-label="t('clipboard.groups.title')"
       >
         <template v-for="row in rows" :key="row.kind === 'group' ? `group-${row.id ?? 'default'}` : 'create'">
           <div v-if="row.showSeparatorAbove" class="mx-1 my-1 h-px bg-slate-200" />
@@ -218,6 +230,7 @@ onBeforeUnmount(() => {
             <button
               v-else
               type="button"
+              role="menuitem"
               class="group flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition"
               :class="row.selected
                 ? 'bg-slate-100 text-slate-900'
@@ -282,6 +295,7 @@ onBeforeUnmount(() => {
           <button
             v-else
             type="button"
+            role="menuitem"
             class="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"
             @click="startCreate"
           >

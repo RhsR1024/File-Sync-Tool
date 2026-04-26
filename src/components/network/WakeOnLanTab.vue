@@ -2,6 +2,8 @@
 import { ref, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { sendWol, type WolResult, type WolDevice } from '../../lib/tauri';
+import Empty from '../Empty.vue';
+import { pushToast } from '../../composables/useToast';
 
 defineOptions({ name: 'WakeOnLanTab' });
 
@@ -64,6 +66,11 @@ function validateMac() {
 
 function showResult(result: WolResult) {
   lastResult.value = result;
+  pushToast(
+    result.message,
+    result.success ? 'success' : 'error',
+    { ttlMs: result.success ? 2200 : 4200 },
+  );
   if (resultTimer !== null) clearTimeout(resultTimer);
   resultTimer = setTimeout(() => {
     lastResult.value = null;
@@ -135,11 +142,13 @@ function saveDevice() {
   saveDevicesToLocalStorage(devices.value);
   showSaveForm.value = false;
   newDeviceName.value = '';
+  pushToast(t('networkTools.wol.deviceSaved'), 'success', { ttlMs: 1800 });
 }
 
 function deleteDevice(index: number) {
   devices.value = devices.value.filter((_, i) => i !== index);
   saveDevicesToLocalStorage(devices.value);
+  pushToast(t('networkTools.wol.deviceDeleted'), 'info', { ttlMs: 1800 });
 }
 
 // ── Load device into form ────────────────────────────────────────────────────
@@ -274,9 +283,15 @@ onMounted(() => {
       <!-- Empty state -->
       <div
         v-if="devices.length === 0"
-        class="py-8 text-center text-sm text-slate-400 border border-dashed border-slate-200 rounded-lg"
+        class="py-2"
       >
-        {{ t('networkTools.wol.noDevices') }}
+        <Empty
+          :title="t('networkTools.wol.noDevices')"
+          :description="t('networkTools.wol.noDevicesHint')"
+          :action-label="t('networkTools.wol.saveCurrent')"
+          dashed
+          @action="toggleSaveForm"
+        />
       </div>
 
       <!-- Devices table -->
@@ -284,16 +299,16 @@ onMounted(() => {
         <table class="w-full text-sm">
           <thead>
             <tr class="bg-slate-50 border-b border-slate-200">
-              <th class="px-4 py-2.5 text-left font-medium text-slate-600">
+              <th scope="col" class="px-4 py-2.5 text-left font-medium text-slate-600">
                 {{ t('networkTools.wol.deviceName') }}
               </th>
-              <th class="px-4 py-2.5 text-left font-medium text-slate-600">
+              <th scope="col" class="px-4 py-2.5 text-left font-medium text-slate-600">
                 {{ t('networkTools.wol.macAddress') }}
               </th>
-              <th class="px-4 py-2.5 text-left font-medium text-slate-600">
+              <th scope="col" class="px-4 py-2.5 text-left font-medium text-slate-600">
                 {{ t('networkTools.wol.broadcast') }}
               </th>
-              <th class="px-4 py-2.5 text-right font-medium text-slate-600 w-32"></th>
+              <th scope="col" class="px-4 py-2.5 text-right font-medium text-slate-600 w-32"></th>
             </tr>
           </thead>
           <tbody>

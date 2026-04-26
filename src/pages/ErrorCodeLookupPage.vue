@@ -3,6 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { ChevronLeft, ChevronRight, FileSearch, RefreshCw, Search } from 'lucide-vue-next';
 
+import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
+import { pushToast } from '@/composables/useToast';
 import {
   errorCodeApi,
   type ErrorCodeEntry,
@@ -101,6 +103,15 @@ function rowKey(entry: ErrorCodeEntry, index: number): string {
 function toggleExpand(entry: ErrorCodeEntry, index: number) {
   const key = rowKey(entry, index);
   expandedKey.value = expandedKey.value === key ? null : key;
+}
+
+function onRowKeydown(event: KeyboardEvent, entry: ErrorCodeEntry, index: number) {
+  // Mirror button semantics for the role="button" row wrapper. Space scrolls
+  // by default — prevent that and toggle the detail panel instead.
+  if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+    event.preventDefault();
+    toggleExpand(entry, index);
+  }
 }
 
 function camel(snake: string): string {
@@ -244,6 +255,9 @@ async function onJump() {
 
 async function onSync() {
   syncing.value = true;
+  // The inline status banner is reserved for page-level state (e.g., a future
+  // persistent service-down notice). Transient sync feedback uses toasts so it
+  // does not duplicate with any page-level message that may appear here.
   statusBanner.value = null;
 
   try {
@@ -253,7 +267,7 @@ async function onSync() {
       rows: report.row_count,
     });
     addLog(`[error_code] ${successMessage}`, 'success');
-    statusBanner.value = { type: 'success', message: successMessage };
+    pushToast(successMessage, 'success');
     await loadMeta();
     await runDefaultPreview();
   } catch (error) {
@@ -265,7 +279,7 @@ async function onSync() {
     const statusMatch = detail.match(/http_(\d+)/);
     const message = t(toastKey, { status: statusMatch?.[1] ?? '' });
     addLog(`[error_code] 同步失败：${message} (${detail})`, 'error');
-    statusBanner.value = { type: 'error', message };
+    pushToast(message, 'error');
   } finally {
     syncing.value = false;
   }
@@ -310,11 +324,11 @@ onMounted(async () => {
             </span>
             <button
               type="button"
-              class="inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-indigo-600 disabled:cursor-not-allowed disabled:opacity-60"
+              class="inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-60"
               :disabled="syncing"
               @click="onSync"
             >
-              <RefreshCw class="h-4 w-4" :class="syncing ? 'animate-spin' : ''" />
+              <RefreshCw class="h-4 w-4 motion-reduce:animate-none" :class="syncing ? 'animate-spin' : ''" aria-hidden="true" />
               <span>
                 {{ syncing ? t('errorCodeLookup.syncing') : t('errorCodeLookup.syncButton') }}
               </span>
@@ -355,7 +369,11 @@ onMounted(async () => {
         <section
           class="rounded-[24px] border border-slate-200 bg-white/90 p-5 shadow-[0_14px_40px_rgba(15,23,42,0.06)]"
         >
-          <div class="flex items-center gap-3 text-sm text-slate-500">
+          <div
+            class="flex items-center gap-3 text-sm text-slate-500"
+            role="radiogroup"
+            :aria-label="t('errorCodeLookup.aria.modeGroup')"
+          >
             <span class="font-semibold text-slate-700">
               {{ t('errorCodeLookup.modeLabel') }}
             </span>
@@ -385,11 +403,11 @@ onMounted(async () => {
             />
             <button
               type="button"
-              class="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:opacity-60"
+              class="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:opacity-60"
               :disabled="submitting"
               @click="onSearch"
             >
-              <Search class="h-4 w-4" />
+              <Search class="h-4 w-4" aria-hidden="true" />
               <span>{{ t('errorCodeLookup.searchButton') }}</span>
             </button>
           </div>
@@ -397,11 +415,20 @@ onMounted(async () => {
           <p v-if="inputError" class="mt-2 text-xs text-red-500">{{ inputError }}</p>
         </section>
 
+        <Transition name="fst-result-fade" mode="out-in">
         <section
+          :key="mode"
           class="rounded-[24px] border border-slate-200 bg-white/95 shadow-[0_14px_40px_rgba(15,23,42,0.06)]"
         >
           <div
-            v-if="entries.length === 0 && noResultMessage"
+            v-if="submitting && entries.length === 0"
+            class="px-5 py-8"
+          >
+            <LoadingSkeleton variant="list-row" :count="5" />
+          </div>
+
+          <div
+            v-else-if="entries.length === 0 && noResultMessage"
             class="px-5 py-12 text-center text-sm text-slate-500"
           >
             {{ noResultMessage }}
@@ -422,8 +449,13 @@ onMounted(async () => {
             <tbody>
               <template v-for="(entry, index) in entries" :key="rowKey(entry, index)">
                 <tr
-                  class="cursor-pointer border-t border-slate-100 hover:bg-slate-50"
+                  role="button"
+                  tabindex="0"
+                  :aria-expanded="expandedKey === rowKey(entry, index)"
+                  :aria-label="t('errorCodeLookup.aria.expandRow')"
+                  class="cursor-pointer border-t border-slate-100 hover:bg-slate-50 focus-visible:outline-none focus-visible:bg-slate-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500/40"
                   @click="toggleExpand(entry, index)"
+                  @keydown="onRowKeydown($event, entry, index)"
                 >
                   <td class="px-4 py-3 font-mono">
                     <span class="rounded bg-slate-100 px-2 py-1 text-xs text-slate-700">
@@ -431,22 +463,22 @@ onMounted(async () => {
                     </span>
                   </td>
                   <td class="truncate px-4 py-3" :title="entry.message_cn">
-                    {{ entry.message_cn || '-' }}
+                    {{ entry.message_cn || '—' }}
                   </td>
                   <td class="truncate px-4 py-3" :title="entry.message_en">
-                    {{ entry.message_en || '-' }}
+                    {{ entry.message_en || '—' }}
                   </td>
                   <td class="px-4 py-3">
                     <span v-if="entry.module" class="rounded-full bg-slate-100 px-2 py-0.5 text-xs">
                       {{ entry.module }}
                     </span>
-                    <span v-else class="text-slate-400">-</span>
+                    <span v-else class="text-slate-400">—</span>
                   </td>
                   <td class="truncate px-4 py-3 text-slate-600" :title="entry.solution">
-                    {{ entry.solution || '-' }}
+                    {{ entry.solution || '—' }}
                   </td>
                   <td class="truncate px-4 py-3 text-slate-500" :title="entry.remark">
-                    {{ entry.remark || '-' }}
+                    {{ entry.remark || '—' }}
                   </td>
                 </tr>
 
@@ -463,14 +495,14 @@ onMounted(async () => {
                         <dt class="text-xs uppercase tracking-wide text-slate-400">
                           {{ t('errorCodeLookup.columns.module') }}
                         </dt>
-                        <dd>{{ entry.module || '-' }}</dd>
+                        <dd>{{ entry.module || '—' }}</dd>
                       </div>
                       <div class="col-span-2">
                         <dt class="text-xs uppercase tracking-wide text-slate-400">
                           {{ t('errorCodeLookup.columns.messageCn') }}
                         </dt>
                         <dd class="break-words whitespace-pre-wrap">
-                          {{ entry.message_cn || '-' }}
+                          {{ entry.message_cn || '—' }}
                         </dd>
                       </div>
                       <div class="col-span-2">
@@ -478,7 +510,7 @@ onMounted(async () => {
                           {{ t('errorCodeLookup.columns.messageEn') }}
                         </dt>
                         <dd class="break-words whitespace-pre-wrap">
-                          {{ entry.message_en || '-' }}
+                          {{ entry.message_en || '—' }}
                         </dd>
                       </div>
                       <div class="col-span-2">
@@ -486,7 +518,7 @@ onMounted(async () => {
                           {{ t('errorCodeLookup.columns.solution') }}
                         </dt>
                         <dd class="break-words whitespace-pre-wrap">
-                          {{ entry.solution || '-' }}
+                          {{ entry.solution || '—' }}
                         </dd>
                       </div>
                       <div class="col-span-2">
@@ -494,7 +526,7 @@ onMounted(async () => {
                           {{ t('errorCodeLookup.columns.remark') }}
                         </dt>
                         <dd class="break-words whitespace-pre-wrap">
-                          {{ entry.remark || '-' }}
+                          {{ entry.remark || '—' }}
                         </dd>
                       </div>
                     </dl>
@@ -510,11 +542,11 @@ onMounted(async () => {
           >
             <button
               type="button"
-              class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 disabled:opacity-50"
+              class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 disabled:opacity-50"
               :disabled="currentPage <= 1 || submitting"
               @click="changePage(-1)"
             >
-              <ChevronLeft class="h-4 w-4" />
+              <ChevronLeft class="h-4 w-4" aria-hidden="true" />
               {{ t('errorCodeLookup.pagination.prev') }}
             </button>
 
@@ -526,24 +558,56 @@ onMounted(async () => {
               <span>{{ t('errorCodeLookup.pagination.jumpTo') }}</span>
               <input
                 v-model="jumpInput"
-                class="w-16 rounded-lg border border-slate-200 px-2 py-1 text-center"
+                class="w-16 rounded-lg border border-slate-200 px-2 py-1 text-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40"
                 type="text"
                 inputmode="numeric"
+                :aria-label="t('errorCodeLookup.aria.jumpInput')"
                 @keyup.enter="onJump"
               />
               <button
                 type="button"
-                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 disabled:opacity-50"
+                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 disabled:opacity-50"
                 :disabled="currentPage >= totalPages || submitting"
                 @click="changePage(1)"
               >
                 {{ t('errorCodeLookup.pagination.next') }}
-                <ChevronRight class="h-4 w-4" />
+                <ChevronRight class="h-4 w-4" aria-hidden="true" />
               </button>
             </div>
           </div>
         </section>
+        </Transition>
       </template>
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 120ms fade on mode change so the results section doesn't snap when the user
+   switches between single / range / keyword. Reduced motion drops the
+   transform. */
+.fst-result-fade-enter-from {
+  opacity: 0;
+}
+.fst-result-fade-enter-active {
+  transition: opacity 120ms ease-out;
+}
+.fst-result-fade-enter-to {
+  opacity: 1;
+}
+.fst-result-fade-leave-from {
+  opacity: 1;
+}
+.fst-result-fade-leave-active {
+  transition: opacity 120ms ease-in;
+}
+.fst-result-fade-leave-to {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fst-result-fade-enter-active,
+  .fst-result-fade-leave-active {
+    transition: none;
+  }
+}
+</style>

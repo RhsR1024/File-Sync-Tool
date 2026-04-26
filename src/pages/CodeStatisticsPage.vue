@@ -14,6 +14,7 @@ import {
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import CodeStatisticsScopeTreeNode from '@/components/CodeStatisticsScopeTreeNode.vue';
+import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
 import { generateCodeStatisticsHtmlReport } from '../lib/codeStatisticsExport';
 import {
   codeCountAnalyze,
@@ -29,7 +30,19 @@ import {
 
 defineOptions({ name: 'CodeStatisticsPage' });
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
+
+// Locale-aware integer formatter (1,234 in en-US; 1,234 in zh-CN). The
+// formatter is rebuilt only when the active locale changes so we avoid
+// per-cell re-instantiation cost while still respecting the i18n state.
+const numberFormatter = computed(() => {
+  const tag = locale.value.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US';
+  return new Intl.NumberFormat(tag);
+});
+const fmtNum = (value: number | null | undefined): string => {
+  if (value === null || value === undefined || Number.isNaN(value)) return '';
+  return numberFormatter.value.format(value);
+};
 
 type AnalysisMode = 'incremental' | 'newProject';
 type ExportFormat = 'csv' | 'html';
@@ -396,6 +409,40 @@ const phaseLabel = computed(() => {
     default:
       return progress.value.phase;
   }
+});
+
+// Screen-reader summaries for the otherwise-decorative charts. Each label
+// folds the underlying numbers into one sentence so assistive tech doesn't
+// have to walk the bar/wedge geometry.
+const codeCommentChartAriaLabel = computed(() => {
+  if (!result.value) return '';
+  return t('codeStatistics.aria.chart.codeComment', {
+    codeAdded: fmtNum(result.value.summary.codeAdded),
+    codeDeleted: fmtNum(result.value.summary.codeDeleted),
+    codeModified: fmtNum(result.value.summary.codeModified),
+    commentAdded: fmtNum(result.value.summary.commentAdded),
+    commentDeleted: fmtNum(result.value.summary.commentDeleted),
+    commentModified: fmtNum(result.value.summary.commentModified),
+  });
+});
+
+const changeTypeChartAriaLabel = computed(() => {
+  if (!result.value) return '';
+  return t('codeStatistics.aria.chart.changeType', {
+    addedTotal: fmtNum(result.value.operationSummary.addedTotal),
+    deletedTotal: fmtNum(result.value.operationSummary.deletedTotal),
+    modifiedTotal: fmtNum(result.value.operationSummary.modifiedTotal),
+  });
+});
+
+const fileTypeChartAriaLabel = computed(() => {
+  if (fileTypeSummaryEntries.value.length === 0) return '';
+  const top = fileTypeSummaryEntries.value[0];
+  return t('codeStatistics.aria.chart.fileType', {
+    count: fileTypeSummaryEntries.value.length,
+    topType: top.ext,
+    topTotal: fmtNum(top.total),
+  });
 });
 
 const exportMessageClasses = computed(() => {
@@ -1459,10 +1506,11 @@ onUnmounted(() => {
 
             <div
               v-if="panel.state.isLoading"
-              class="flex items-center gap-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-sm text-slate-600"
+              class="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4"
+              role="status"
+              :aria-label="t('codeStatistics.loadingScopes')"
             >
-              <Loader class="w-4 h-4 animate-spin" />
-              {{ t('codeStatistics.loadingScopes') }}
+              <LoadingSkeleton variant="list-row" :count="4" />
             </div>
 
             <div
@@ -1481,7 +1529,7 @@ onUnmounted(() => {
 
             <div v-else>
               <div class="flex flex-wrap items-center justify-between gap-2 mb-3 text-xs text-slate-500">
-                <span>
+                <span class="tabular-nums">
                   {{
                     t('codeStatistics.scopeSelectionSummary', {
                       selected: getScopeSelectedFileCount(panel.state),
@@ -1492,7 +1540,9 @@ onUnmounted(() => {
                 <span>{{ t('codeStatistics.scopeHint') }}</span>
               </div>
               <div
-                class="rounded-2xl border border-slate-200 bg-slate-50/50 p-3 max-h-[420px] overflow-y-auto transition-opacity"
+                role="tree"
+                :aria-label="t('codeStatistics.aria.scopeTree')"
+                class="scrollbar-light rounded-2xl border border-slate-200 bg-slate-50/50 p-3 max-h-[420px] overflow-y-auto transition-opacity motion-reduce:transition-none"
                 :class="isAnalyzing ? 'pointer-events-none opacity-50' : ''"
               >
                 <CodeStatisticsScopeTreeNode
@@ -1534,11 +1584,17 @@ onUnmounted(() => {
     <div v-if="isAnalyzing && progress" class="bg-white border border-slate-200 rounded-lg p-6 shadow-sm mb-6">
       <div class="flex items-center justify-between mb-2">
         <span class="text-sm font-medium text-slate-700">{{ phaseLabel }}</span>
-        <span class="text-sm text-slate-500">{{ progress.percent }}%</span>
+        <span class="text-sm text-slate-500 tabular-nums">{{ progress.percent }}%</span>
       </div>
-      <div class="w-full bg-slate-200 rounded-full h-2.5 mb-2">
+      <div
+        class="w-full bg-slate-200 rounded-full h-2.5 mb-2"
+        role="progressbar"
+        :aria-valuenow="progress.percent"
+        aria-valuemin="0"
+        aria-valuemax="100"
+      >
         <div
-          class="bg-gradient-to-r from-blue-500 to-blue-600 h-2.5 rounded-full transition-all duration-300"
+          class="bg-gradient-to-r from-blue-500 to-blue-600 h-2.5 rounded-full transition-all duration-300 motion-reduce:transition-none"
           :style="{ width: `${progress.percent}%` }"
         ></div>
       </div>
@@ -1628,21 +1684,49 @@ onUnmounted(() => {
 
       <template v-else>
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
-          <div class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-green-500 to-emerald-400 shadow-sm">
+          <div
+            class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-green-500 to-emerald-400 shadow-sm"
+            role="group"
+            :aria-label="t('codeStatistics.aria.metricCard', {
+              label: t('codeStatistics.totalAdded'),
+              value: result.operationSummary.addedTotal,
+            })"
+          >
             <div class="text-sm font-medium mb-1 opacity-90">{{ t('codeStatistics.totalAdded') }}</div>
-            <div class="text-4xl font-bold">{{ result.operationSummary.addedTotal }}</div>
+            <div class="text-4xl font-bold tabular-nums">{{ fmtNum(result.operationSummary.addedTotal) }}</div>
           </div>
-          <div class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-red-500 to-rose-400 shadow-sm">
+          <div
+            class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-red-500 to-rose-400 shadow-sm"
+            role="group"
+            :aria-label="t('codeStatistics.aria.metricCard', {
+              label: t('codeStatistics.totalDeleted'),
+              value: result.operationSummary.deletedTotal,
+            })"
+          >
             <div class="text-sm font-medium mb-1 opacity-90">{{ t('codeStatistics.totalDeleted') }}</div>
-            <div class="text-4xl font-bold">{{ result.operationSummary.deletedTotal }}</div>
+            <div class="text-4xl font-bold tabular-nums">{{ fmtNum(result.operationSummary.deletedTotal) }}</div>
           </div>
-          <div class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-amber-500 to-yellow-400 shadow-sm">
+          <div
+            class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-amber-500 to-yellow-400 shadow-sm"
+            role="group"
+            :aria-label="t('codeStatistics.aria.metricCard', {
+              label: t('codeStatistics.totalModified'),
+              value: result.operationSummary.modifiedTotal,
+            })"
+          >
             <div class="text-sm font-medium mb-1 opacity-90">{{ t('codeStatistics.totalModified') }}</div>
-            <div class="text-4xl font-bold">{{ result.operationSummary.modifiedTotal }}</div>
+            <div class="text-4xl font-bold tabular-nums">{{ fmtNum(result.operationSummary.modifiedTotal) }}</div>
           </div>
-          <div class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-sky-500 to-cyan-400 shadow-sm">
+          <div
+            class="rounded-lg p-5 text-white text-center bg-gradient-to-br from-sky-500 to-cyan-400 shadow-sm"
+            role="group"
+            :aria-label="t('codeStatistics.aria.metricCard', {
+              label: t('codeStatistics.totalChanged'),
+              value: totalChanged,
+            })"
+          >
             <div class="text-sm font-medium mb-1 opacity-90">{{ t('codeStatistics.totalChanged') }}</div>
-            <div class="text-4xl font-bold">{{ totalChanged }}</div>
+            <div class="text-4xl font-bold tabular-nums">{{ fmtNum(totalChanged) }}</div>
           </div>
         </div>
 
@@ -1652,20 +1736,20 @@ onUnmounted(() => {
             <div class="space-y-1.5">
               <div class="flex justify-between py-1 border-b border-slate-100">
                 <span class="text-slate-600 text-sm">{{ t('codeStatistics.added') }}</span>
-                <strong class="text-green-600">+{{ result.summary.codeAdded }}</strong>
+                <strong class="text-green-600 tabular-nums">+{{ fmtNum(result.summary.codeAdded) }}</strong>
               </div>
               <div class="flex justify-between py-1 border-b border-slate-100">
                 <span class="text-slate-600 text-sm">{{ t('codeStatistics.deleted') }}</span>
-                <strong class="text-red-600">-{{ result.summary.codeDeleted }}</strong>
+                <strong class="text-red-600 tabular-nums">-{{ fmtNum(result.summary.codeDeleted) }}</strong>
               </div>
               <div class="flex justify-between py-1 border-b border-slate-100">
                 <span class="text-slate-600 text-sm">{{ t('codeStatistics.modified') }}</span>
-                <strong class="text-amber-600">~{{ result.summary.codeModified }}</strong>
+                <strong class="text-amber-600 tabular-nums">~{{ fmtNum(result.summary.codeModified) }}</strong>
               </div>
               <div class="flex justify-between py-1">
                 <span class="text-slate-600 text-sm">{{ t('codeStatistics.netChange') }}</span>
-                <strong :class="netCode >= 0 ? 'text-green-600' : 'text-red-600'">
-                  {{ netCode >= 0 ? '+' : '' }}{{ netCode }}
+                <strong class="tabular-nums" :class="netCode >= 0 ? 'text-green-600' : 'text-red-600'">
+                  {{ netCode >= 0 ? '+' : '' }}{{ fmtNum(netCode) }}
                 </strong>
               </div>
             </div>
@@ -1675,20 +1759,20 @@ onUnmounted(() => {
             <div class="space-y-1.5">
               <div class="flex justify-between py-1 border-b border-slate-100">
                 <span class="text-slate-600 text-sm">{{ t('codeStatistics.added') }}</span>
-                <strong class="text-green-600">+{{ result.summary.commentAdded }}</strong>
+                <strong class="text-green-600 tabular-nums">+{{ fmtNum(result.summary.commentAdded) }}</strong>
               </div>
               <div class="flex justify-between py-1 border-b border-slate-100">
                 <span class="text-slate-600 text-sm">{{ t('codeStatistics.deleted') }}</span>
-                <strong class="text-red-600">-{{ result.summary.commentDeleted }}</strong>
+                <strong class="text-red-600 tabular-nums">-{{ fmtNum(result.summary.commentDeleted) }}</strong>
               </div>
               <div class="flex justify-between py-1 border-b border-slate-100">
                 <span class="text-slate-600 text-sm">{{ t('codeStatistics.modified') }}</span>
-                <strong class="text-amber-600">~{{ result.summary.commentModified }}</strong>
+                <strong class="text-amber-600 tabular-nums">~{{ fmtNum(result.summary.commentModified) }}</strong>
               </div>
               <div class="flex justify-between py-1">
                 <span class="text-slate-600 text-sm">{{ t('codeStatistics.netChange') }}</span>
-                <strong :class="netComment >= 0 ? 'text-green-600' : 'text-red-600'">
-                  {{ netComment >= 0 ? '+' : '' }}{{ netComment }}
+                <strong class="tabular-nums" :class="netComment >= 0 ? 'text-green-600' : 'text-red-600'">
+                  {{ netComment >= 0 ? '+' : '' }}{{ fmtNum(netComment) }}
                 </strong>
               </div>
             </div>
@@ -1696,24 +1780,28 @@ onUnmounted(() => {
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-          <div class="bg-white border border-slate-200 rounded-lg p-5 shadow-sm">
+          <div
+            class="bg-white border border-slate-200 rounded-lg p-5 shadow-sm"
+            role="img"
+            :aria-label="codeCommentChartAriaLabel"
+          >
             <h4 class="font-semibold text-slate-800 mb-4 text-center">
               {{ t('codeStatistics.codeCommentChart') }}
             </h4>
-            <div class="flex items-end justify-around border-b border-slate-200 pb-3 mb-3" style="height: 190px;">
+            <div class="flex items-end justify-around border-b border-slate-200 pb-3 mb-3" style="height: 190px;" aria-hidden="true">
               <div class="flex flex-col items-center">
                 <div class="flex items-end gap-1.5 h-40">
                   <div class="flex flex-col items-center justify-end w-7 h-full">
-                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none">{{ result.summary.codeAdded }}</span>
-                    <div class="w-full bg-green-400 rounded-t transition-all" :style="{ height: barHeight(result.summary.codeAdded) }"></div>
+                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none tabular-nums">{{ fmtNum(result.summary.codeAdded) }}</span>
+                    <div class="w-full bg-green-400 rounded-t transition-all motion-reduce:transition-none" :style="{ height: barHeight(result.summary.codeAdded) }"></div>
                   </div>
                   <div class="flex flex-col items-center justify-end w-7 h-full">
-                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none">{{ result.summary.codeDeleted }}</span>
-                    <div class="w-full bg-red-400 rounded-t transition-all" :style="{ height: barHeight(result.summary.codeDeleted) }"></div>
+                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none tabular-nums">{{ fmtNum(result.summary.codeDeleted) }}</span>
+                    <div class="w-full bg-red-400 rounded-t transition-all motion-reduce:transition-none" :style="{ height: barHeight(result.summary.codeDeleted) }"></div>
                   </div>
                   <div class="flex flex-col items-center justify-end w-7 h-full">
-                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none">{{ result.summary.codeModified }}</span>
-                    <div class="w-full bg-amber-400 rounded-t transition-all" :style="{ height: barHeight(result.summary.codeModified) }"></div>
+                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none tabular-nums">{{ fmtNum(result.summary.codeModified) }}</span>
+                    <div class="w-full bg-amber-400 rounded-t transition-all motion-reduce:transition-none" :style="{ height: barHeight(result.summary.codeModified) }"></div>
                   </div>
                 </div>
                 <span class="text-xs text-slate-500 mt-1.5 font-medium">{{ t('codeStatistics.code') }}</span>
@@ -1721,16 +1809,16 @@ onUnmounted(() => {
               <div class="flex flex-col items-center">
                 <div class="flex items-end gap-1.5 h-40">
                   <div class="flex flex-col items-center justify-end w-7 h-full">
-                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none">{{ result.summary.commentAdded }}</span>
-                    <div class="w-full bg-green-400 rounded-t transition-all" :style="{ height: barHeight(result.summary.commentAdded) }"></div>
+                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none tabular-nums">{{ fmtNum(result.summary.commentAdded) }}</span>
+                    <div class="w-full bg-green-400 rounded-t transition-all motion-reduce:transition-none" :style="{ height: barHeight(result.summary.commentAdded) }"></div>
                   </div>
                   <div class="flex flex-col items-center justify-end w-7 h-full">
-                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none">{{ result.summary.commentDeleted }}</span>
-                    <div class="w-full bg-red-400 rounded-t transition-all" :style="{ height: barHeight(result.summary.commentDeleted) }"></div>
+                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none tabular-nums">{{ fmtNum(result.summary.commentDeleted) }}</span>
+                    <div class="w-full bg-red-400 rounded-t transition-all motion-reduce:transition-none" :style="{ height: barHeight(result.summary.commentDeleted) }"></div>
                   </div>
                   <div class="flex flex-col items-center justify-end w-7 h-full">
-                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none">{{ result.summary.commentModified }}</span>
-                    <div class="w-full bg-amber-400 rounded-t transition-all" :style="{ height: barHeight(result.summary.commentModified) }"></div>
+                    <span class="text-[10px] font-bold text-slate-600 mb-0.5 leading-none tabular-nums">{{ fmtNum(result.summary.commentModified) }}</span>
+                    <div class="w-full bg-amber-400 rounded-t transition-all motion-reduce:transition-none" :style="{ height: barHeight(result.summary.commentModified) }"></div>
                   </div>
                 </div>
                 <span class="text-xs text-slate-500 mt-1.5 font-medium">{{ t('codeStatistics.comment') }}</span>
@@ -1752,23 +1840,27 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="bg-white border border-slate-200 rounded-lg p-5 shadow-sm flex flex-col items-center justify-center">
+          <div
+            class="bg-white border border-slate-200 rounded-lg p-5 shadow-sm flex flex-col items-center justify-center"
+            role="img"
+            :aria-label="changeTypeChartAriaLabel"
+          >
             <h4 class="font-semibold text-slate-800 mb-4 text-center">
               {{ t('codeStatistics.changeTypeChart') }}
             </h4>
-            <div class="w-40 h-40 rounded-full shadow-inner" :style="pieStyle"></div>
+            <div class="w-40 h-40 rounded-full shadow-inner" :style="pieStyle" aria-hidden="true"></div>
             <div class="flex flex-wrap justify-center gap-4 mt-5 text-sm text-slate-700">
               <div class="flex items-center gap-1.5">
                 <div class="w-3 h-3 bg-green-400 rounded-sm shrink-0"></div>
-                {{ t('codeStatistics.added') }} ({{ result.operationSummary.addedTotal }})
+                {{ t('codeStatistics.added') }} (<span class="tabular-nums">{{ fmtNum(result.operationSummary.addedTotal) }}</span>)
               </div>
               <div class="flex items-center gap-1.5">
                 <div class="w-3 h-3 bg-red-400 rounded-sm shrink-0"></div>
-                {{ t('codeStatistics.deleted') }} ({{ result.operationSummary.deletedTotal }})
+                {{ t('codeStatistics.deleted') }} (<span class="tabular-nums">{{ fmtNum(result.operationSummary.deletedTotal) }}</span>)
               </div>
               <div class="flex items-center gap-1.5">
                 <div class="w-3 h-3 bg-amber-400 rounded-sm shrink-0"></div>
-                {{ t('codeStatistics.modified') }} ({{ result.operationSummary.modifiedTotal }})
+                {{ t('codeStatistics.modified') }} (<span class="tabular-nums">{{ fmtNum(result.operationSummary.modifiedTotal) }}</span>)
               </div>
             </div>
           </div>
@@ -1777,16 +1869,20 @@ onUnmounted(() => {
         <div v-if="fileTypeSummaryEntries.length > 0" class="bg-white border border-slate-200 rounded-lg p-6 shadow-sm mb-6">
           <h3 class="text-lg font-semibold text-slate-900 mb-5">{{ t('codeStatistics.fileTypeTitle') }}</h3>
 
-          <div class="space-y-2 mb-6">
+          <div
+            class="space-y-2 mb-6"
+            role="img"
+            :aria-label="fileTypeChartAriaLabel"
+          >
             <div v-for="entry in fileTypeSummaryEntries" :key="entry.ext" class="flex items-center gap-3">
               <span class="w-24 text-sm font-mono font-semibold text-slate-700 shrink-0 truncate" :title="entry.ext">{{ entry.ext }}</span>
               <div class="flex-1 bg-slate-100 rounded-full h-5 overflow-hidden">
                 <div
-                  class="h-full bg-gradient-to-r from-blue-500 to-cyan-500 rounded-full transition-all"
+                  class="h-full bg-gradient-to-r from-blue-500 to-cyan-500 rounded-full transition-all motion-reduce:transition-none"
                   :style="{ width: `${Math.round((entry.total / maxFileTypeTotal) * 100)}%` }"
                 ></div>
               </div>
-              <span class="w-24 text-sm font-bold text-slate-700 shrink-0 text-right tabular-nums">{{ entry.total.toLocaleString() }}</span>
+              <span class="w-24 text-sm font-bold text-slate-700 shrink-0 text-right tabular-nums" :title="t('codeStatistics.tooltip.exact')">{{ fmtNum(entry.total) }}</span>
             </div>
           </div>
 
@@ -1797,11 +1893,11 @@ onUnmounted(() => {
               class="bg-slate-50 border border-slate-200 rounded-lg p-3 text-center"
             >
               <div class="font-mono font-bold text-blue-600 mb-1 text-sm">{{ entry.ext }}</div>
-              <div class="text-2xl font-bold text-slate-800">{{ entry.total }}</div>
-              <div class="text-xs text-slate-500 mt-1">
-                {{ t('codeStatistics.code') }}: {{ entry.codeAdded + entry.codeDeleted + entry.codeModified }}
+              <div class="text-2xl font-bold text-slate-800 tabular-nums">{{ fmtNum(entry.total) }}</div>
+              <div class="text-xs text-slate-500 mt-1 tabular-nums">
+                {{ t('codeStatistics.code') }}: {{ fmtNum(entry.codeAdded + entry.codeDeleted + entry.codeModified) }}
                 &nbsp;|&nbsp;
-                {{ t('codeStatistics.comment') }}: {{ entry.commentAdded + entry.commentDeleted + entry.commentModified }}
+                {{ t('codeStatistics.comment') }}: {{ fmtNum(entry.commentAdded + entry.commentDeleted + entry.commentModified) }}
               </div>
             </div>
           </div>
@@ -1824,23 +1920,23 @@ onUnmounted(() => {
               <tbody>
                 <tr v-for="entry in fileTypeSummaryEntries" :key="`${entry.ext}-row`" class="border-b border-slate-100 hover:bg-slate-50">
                   <td class="px-3 py-2"><span class="font-mono text-xs bg-slate-100 text-blue-600 px-2 py-0.5 rounded font-bold">{{ entry.ext }}</span></td>
-                  <td class="px-3 py-2 text-right text-sm font-mono text-green-600">{{ entry.codeAdded }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono text-red-600">{{ entry.codeDeleted }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono text-amber-600">{{ entry.codeModified }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono text-green-600">{{ entry.commentAdded }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono text-red-600">{{ entry.commentDeleted }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono text-amber-600">{{ entry.commentModified }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-slate-800">{{ entry.total }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono text-green-600 tabular-nums">{{ fmtNum(entry.codeAdded) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono text-red-600 tabular-nums">{{ fmtNum(entry.codeDeleted) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono text-amber-600 tabular-nums">{{ fmtNum(entry.codeModified) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono text-green-600 tabular-nums">{{ fmtNum(entry.commentAdded) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono text-red-600 tabular-nums">{{ fmtNum(entry.commentDeleted) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono text-amber-600 tabular-nums">{{ fmtNum(entry.commentModified) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-slate-800 tabular-nums">{{ fmtNum(entry.total) }}</td>
                 </tr>
                 <tr v-if="fileTypeTotal" class="bg-slate-50 border-t-2 border-slate-200">
                   <td class="px-3 py-2 text-sm font-bold text-slate-800">{{ t('codeStatistics.totalRow') }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-green-600">{{ fileTypeTotal.codeAdded }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-red-600">{{ fileTypeTotal.codeDeleted }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-amber-600">{{ fileTypeTotal.codeModified }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-green-600">{{ fileTypeTotal.commentAdded }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-red-600">{{ fileTypeTotal.commentDeleted }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-amber-600">{{ fileTypeTotal.commentModified }}</td>
-                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-slate-800">{{ fileTypeTotal.total }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-green-600 tabular-nums">{{ fmtNum(fileTypeTotal.codeAdded) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-red-600 tabular-nums">{{ fmtNum(fileTypeTotal.codeDeleted) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-amber-600 tabular-nums">{{ fmtNum(fileTypeTotal.codeModified) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-green-600 tabular-nums">{{ fmtNum(fileTypeTotal.commentAdded) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-red-600 tabular-nums">{{ fmtNum(fileTypeTotal.commentDeleted) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-amber-600 tabular-nums">{{ fmtNum(fileTypeTotal.commentModified) }}</td>
+                  <td class="px-3 py-2 text-right text-sm font-mono font-bold text-slate-800 tabular-nums">{{ fmtNum(fileTypeTotal.total) }}</td>
                 </tr>
               </tbody>
             </table>
@@ -1849,11 +1945,11 @@ onUnmounted(() => {
 
         <div class="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
           <div class="px-6 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-            <h3 class="text-lg font-semibold text-slate-900">
-              {{ t('codeStatistics.fileListTitle') }} ({{ result.files.length }})
+            <h3 class="text-lg font-semibold text-slate-900 tabular-nums">
+              {{ t('codeStatistics.fileListTitle') }} ({{ fmtNum(result.files.length) }})
             </h3>
           </div>
-          <div class="overflow-x-auto max-h-[400px] overflow-y-auto">
+          <div class="scrollbar-light overflow-x-auto max-h-[400px] overflow-y-auto">
             <table class="w-full">
               <thead class="sticky top-0 z-10">
                 <tr class="border-b border-slate-200 bg-slate-50">
@@ -1869,12 +1965,12 @@ onUnmounted(() => {
               <tbody>
                 <tr v-for="file in result.files" :key="file.filePath" class="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                   <td class="px-4 py-2 text-sm text-slate-800 font-mono truncate max-w-xs" :title="file.filePath">{{ file.filePath }}</td>
-                  <td class="px-3 py-2 text-sm text-right font-mono" :class="file.codeAdded > 0 ? 'text-green-600' : 'text-slate-300'">{{ file.codeAdded > 0 ? `+${file.codeAdded}` : '-' }}</td>
-                  <td class="px-3 py-2 text-sm text-right font-mono" :class="file.codeDeleted > 0 ? 'text-red-600' : 'text-slate-300'">{{ file.codeDeleted > 0 ? `-${file.codeDeleted}` : '-' }}</td>
-                  <td class="px-3 py-2 text-sm text-right font-mono" :class="file.codeModified > 0 ? 'text-amber-600' : 'text-slate-300'">{{ file.codeModified > 0 ? `~${file.codeModified}` : '-' }}</td>
-                  <td class="px-3 py-2 text-sm text-right font-mono" :class="file.commentAdded > 0 ? 'text-green-600' : 'text-slate-300'">{{ file.commentAdded > 0 ? `+${file.commentAdded}` : '-' }}</td>
-                  <td class="px-3 py-2 text-sm text-right font-mono" :class="file.commentDeleted > 0 ? 'text-red-600' : 'text-slate-300'">{{ file.commentDeleted > 0 ? `-${file.commentDeleted}` : '-' }}</td>
-                  <td class="px-3 py-2 text-sm text-right font-mono" :class="file.commentModified > 0 ? 'text-amber-600' : 'text-slate-300'">{{ file.commentModified > 0 ? `~${file.commentModified}` : '-' }}</td>
+                  <td class="px-3 py-2 text-sm text-right font-mono tabular-nums" :class="file.codeAdded > 0 ? 'text-green-600' : 'text-slate-300'">{{ file.codeAdded > 0 ? `+${fmtNum(file.codeAdded)}` : '—' }}</td>
+                  <td class="px-3 py-2 text-sm text-right font-mono tabular-nums" :class="file.codeDeleted > 0 ? 'text-red-600' : 'text-slate-300'">{{ file.codeDeleted > 0 ? `-${fmtNum(file.codeDeleted)}` : '—' }}</td>
+                  <td class="px-3 py-2 text-sm text-right font-mono tabular-nums" :class="file.codeModified > 0 ? 'text-amber-600' : 'text-slate-300'">{{ file.codeModified > 0 ? `~${fmtNum(file.codeModified)}` : '—' }}</td>
+                  <td class="px-3 py-2 text-sm text-right font-mono tabular-nums" :class="file.commentAdded > 0 ? 'text-green-600' : 'text-slate-300'">{{ file.commentAdded > 0 ? `+${fmtNum(file.commentAdded)}` : '—' }}</td>
+                  <td class="px-3 py-2 text-sm text-right font-mono tabular-nums" :class="file.commentDeleted > 0 ? 'text-red-600' : 'text-slate-300'">{{ file.commentDeleted > 0 ? `-${fmtNum(file.commentDeleted)}` : '—' }}</td>
+                  <td class="px-3 py-2 text-sm text-right font-mono tabular-nums" :class="file.commentModified > 0 ? 'text-amber-600' : 'text-slate-300'">{{ file.commentModified > 0 ? `~${fmtNum(file.commentModified)}` : '—' }}</td>
                 </tr>
               </tbody>
             </table>

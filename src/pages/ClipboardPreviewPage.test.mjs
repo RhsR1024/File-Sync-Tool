@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { JSDOM } from 'jsdom';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const imagePreviewPageSource = readFileSync(
@@ -39,6 +40,64 @@ const clipboardPanelCapability = JSON.parse(
 const clipboardPreviewCapability = JSON.parse(
   readFileSync(join(__dirname, '../../src-tauri/capabilities/clipboard-preview.json'), 'utf8'),
 );
+
+async function createImagePreviewDom({
+  zoomStep = 10,
+  clientWidth = 460,
+  clientHeight = 360,
+  naturalWidth = 800,
+  naturalHeight = 600,
+} = {}) {
+  const dom = new JSDOM(imagePreviewPageSource, {
+    runScripts: 'dangerously',
+    resources: 'usable',
+    pretendToBeVisual: true,
+    beforeParse(window) {
+      window.__TAURI_INTERNALS__ = {
+        convertFileSrc: (path) => path,
+        invoke: async (command) => {
+          if (command === 'cb_get_image_preview_payload') {
+            return {
+              id: 1,
+              image_path: 'C:/preview.png',
+              zoom_step: zoomStep,
+              source_app: 'Test',
+            };
+          }
+          if (command === 'cb_toggle_preview_fullscreen') {
+            return false;
+          }
+          return null;
+        },
+        transformCallback: (callback) => callback,
+      };
+    },
+  });
+
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+
+  const contentEl = dom.window.document.getElementById('content');
+  const imageEl = dom.window.document.getElementById('image');
+  assert.ok(contentEl);
+  assert.ok(imageEl);
+
+  Object.defineProperty(contentEl, 'clientWidth', { configurable: true, get: () => clientWidth });
+  Object.defineProperty(contentEl, 'clientHeight', { configurable: true, get: () => clientHeight });
+  Object.defineProperty(imageEl, 'naturalWidth', { configurable: true, get: () => naturalWidth });
+  Object.defineProperty(imageEl, 'naturalHeight', { configurable: true, get: () => naturalHeight });
+  contentEl.setPointerCapture = () => {};
+  contentEl.releasePointerCapture = () => {};
+  contentEl.scrollLeft = 0;
+  contentEl.scrollTop = 0;
+  imageEl.dispatchEvent(new dom.window.Event('load'));
+
+  return {
+    dom,
+    contentEl,
+    imageEl,
+    zoomLabelEl: dom.window.document.getElementById('zoom-label'),
+  };
+}
 
 test('clipboard preview backend uses standalone HTML preview windows instead of hash-route pages', () => {
   assert.match(previewBackendSource, /clipboard-image-preview\.html/);
@@ -205,6 +264,172 @@ test('clipboard image preview page renders the picture fit-to-window by default 
 test('clipboard image preview keeps fit-to-window as the minimum zoom level', () => {
   assert.match(imagePreviewPageSource, /const MIN_SCALE = FIT_SCALE/);
   assert.match(imagePreviewPageSource, /zoomOutBtn\.disabled = scale <= FIT_SCALE/);
+});
+
+test('clipboard image preview supports drag-to-pan when zoomed in', () => {
+  assert.match(imagePreviewPageSource, /cursor:\s*grab/);
+  assert.match(imagePreviewPageSource, /cursor:\s*grabbing/);
+  assert.match(imagePreviewPageSource, /classList\.toggle\('can-pan'/);
+  assert.match(imagePreviewPageSource, /classList\.toggle\('is-panning'/);
+  assert.match(imagePreviewPageSource, /contentEl\.addEventListener\('pointerdown'/);
+  assert.match(imagePreviewPageSource, /contentEl\.scrollLeft\s*=/);
+  assert.match(imagePreviewPageSource, /contentEl\.scrollTop\s*=/);
+});
+
+test('clipboard image preview zooms through layout size so drag-to-pan moves the real scroll area', () => {
+  assert.match(imagePreviewPageSource, /function getScaledImageSize/);
+  assert.match(imagePreviewPageSource, /function getImageLayoutMetrics/);
+  assert.match(imagePreviewPageSource, /function getScrollTargetForScale/);
+  assert.match(imagePreviewPageSource, /imageEl\.style\.width = `\$\{imageMetrics\.imageWidth}px`/);
+  assert.match(imagePreviewPageSource, /imageEl\.style\.height = `\$\{imageMetrics\.imageHeight}px`/);
+  assert.doesNotMatch(imagePreviewPageSource, /imageEl\.style\.transform = `scale\(\$\{scale\}\)`/);
+});
+
+test('clipboard image preview hides scrollbars while keeping drag-pan available', () => {
+  assert.match(imagePreviewPageSource, /\.content\s*\{[\s\S]*scrollbar-width:\s*none/);
+  assert.match(imagePreviewPageSource, /\.content\s*\{[\s\S]*-ms-overflow-style:\s*none/);
+  assert.match(imagePreviewPageSource, /\.content::-webkit-scrollbar\s*\{[\s\S]*display:\s*none/);
+  assert.doesNotMatch(imagePreviewPageSource, /Ctrl\+wheel/);
+});
+
+test('clipboard image preview uses the Windows-like 10% multiplicative wheel zoom curve without ctrl', async () => {
+  const { dom, contentEl, imageEl, zoomLabelEl } = await createImagePreviewDom({ zoomStep: 25 });
+  assert.equal(zoomLabelEl?.textContent, '100%');
+
+  const wheelUp = new dom.window.WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    deltaY: -120,
+  });
+  contentEl.dispatchEvent(wheelUp);
+
+  assert.equal(zoomLabelEl?.textContent, '110%');
+  assert.equal(imageEl.style.width, '471px');
+  assert.equal(imageEl.style.height, '353px');
+
+  contentEl.dispatchEvent(new dom.window.WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    deltaY: -120,
+  }));
+
+  assert.equal(zoomLabelEl?.textContent, '121%');
+  assert.equal(imageEl.style.width, '518px');
+  assert.equal(imageEl.style.height, '388px');
+
+  const wheelDown = new dom.window.WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    deltaY: 120,
+  });
+  contentEl.dispatchEvent(wheelDown);
+
+  assert.equal(zoomLabelEl?.textContent, '110%');
+  assert.equal(imageEl.style.width, '471px');
+  assert.equal(imageEl.style.height, '353px');
+
+  contentEl.dispatchEvent(new dom.window.WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    deltaY: 120,
+  }));
+
+  assert.equal(zoomLabelEl?.textContent, '100%');
+  assert.equal(imageEl.style.width, '428px');
+  assert.equal(imageEl.style.height, '321px');
+});
+
+test('clipboard image preview caps plain-wheel zoom at 600%', async () => {
+  const { dom, contentEl, zoomLabelEl } = await createImagePreviewDom({ zoomStep: 25 });
+
+  for (let index = 0; index < 80; index += 1) {
+    const wheelUp = new dom.window.WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      deltaY: -120,
+    });
+    contentEl.dispatchEvent(wheelUp);
+  }
+
+  assert.equal(zoomLabelEl?.textContent, '600%');
+});
+
+test('clipboard image preview keeps the current zoom when the preview window gains focus', async () => {
+  const { dom, contentEl, zoomLabelEl } = await createImagePreviewDom({ zoomStep: 25 });
+
+  contentEl.dispatchEvent(new dom.window.WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    deltaY: -120,
+  }));
+  assert.equal(zoomLabelEl?.textContent, '110%');
+
+  dom.window.dispatchEvent(new dom.window.Event('focus'));
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+
+  assert.equal(zoomLabelEl?.textContent, '110%');
+});
+
+test('clipboard image preview anchors wheel zoom to the mouse position instead of the image center', async () => {
+  const { dom, contentEl } = await createImagePreviewDom({ zoomStep: 25 });
+  contentEl.getBoundingClientRect = () => ({
+    x: 100,
+    y: 50,
+    left: 100,
+    top: 50,
+    right: 560,
+    bottom: 410,
+    width: 460,
+    height: 360,
+    toJSON() { return this; },
+  });
+
+  contentEl.dispatchEvent(new dom.window.WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    deltaY: -120,
+    clientX: 520,
+    clientY: 180,
+  }));
+
+  assert.ok(
+    contentEl.scrollLeft > 35,
+    `expected zoom near the right edge to keep the pointer anchor, got scrollLeft=${contentEl.scrollLeft}`,
+  );
+});
+
+test('clipboard image preview keeps the image centered on non-overflow axes while zooming portrait images', async () => {
+  const { dom, contentEl, imageEl } = await createImagePreviewDom({
+    zoomStep: 25,
+    naturalWidth: 600,
+    naturalHeight: 1200,
+  });
+  contentEl.getBoundingClientRect = () => ({
+    x: 100,
+    y: 50,
+    left: 100,
+    top: 50,
+    right: 560,
+    bottom: 410,
+    width: 460,
+    height: 360,
+    toJSON() { return this; },
+  });
+
+  contentEl.dispatchEvent(new dom.window.WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    deltaY: -120,
+    clientX: 314,
+    clientY: 210,
+  }));
+
+  assert.equal(imageEl.style.marginLeft, '124px');
+  assert.equal(imageEl.style.marginRight, '124px');
+});
+
+test('clipboard image preview does not animate width or height during wheel zoom', () => {
+  assert.doesNotMatch(imagePreviewPageSource, /transition:\s*width 80ms ease-out,\s*height 80ms ease-out/);
 });
 
 test('clipboard preview commands log request entry so native diagnostics can distinguish missing hovers from failed window creation', () => {

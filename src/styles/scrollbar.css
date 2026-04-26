@@ -1,0 +1,39 @@
+/*
+ * Shared scrollbar treatments.
+ *
+ * `scrollbar-terminal` matches the dark slate console used by `MainConsole`
+ * and any inset terminal-like surfaces.  `scrollbar-light` is the soft slate
+ * thumb used inside light cards (history list, settings panels, etc.).
+ *
+ * Plain CSS so the rules are stable across Tailwind upgrades; Tailwind
+ * utilities can still override individual properties on the same element.
+ */
+
+.scrollbar-terminal::-webkit-scrollbar {
+  width: 10px;
+}
+.scrollbar-terminal::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+.scrollbar-terminal::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 5px;
+  border: 2px solid #0f172a;
+}
+.scrollbar-terminal::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+.scrollbar-light::-webkit-scrollbar {
+  width: 8px;
+}
+.scrollbar-light::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-light::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+.scrollbar-light::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}

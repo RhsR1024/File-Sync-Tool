@@ -76,6 +76,7 @@ function emitAction(item: ClipboardToolbarActionId) {
         item === 'lock' && props.locked && 'bg-amber-50 text-amber-600 border-amber-100',
       ]"
       :title="titleFor(item)"
+      :aria-label="titleFor(item)"
       @click="emitAction(item)"
     >
       <CheckSquare

@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { Copy } from 'lucide-vue-next';
+import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { testPorts, type PortTestRequest, type PortTestResult, type SinglePortResult, type PortPreset } from '../../lib/tauri';
+import Empty from '../Empty.vue';
+import { pushToast } from '../../composables/useToast';
 
 defineOptions({ name: 'PortTestTab' });
 
@@ -69,6 +72,13 @@ const presetName = ref('');
 const presetPorts = ref('');
 
 const errorMsg = ref('');
+
+const resultSummary = computed(() => {
+  if (!result.value) return '';
+  return result.value.results
+    .map((row) => `${row.port}\t${row.open ? t('networkTools.port.open') : t('networkTools.port.closed')}\t${row.name || '-'}`)
+    .join('\n');
+});
 
 // ─── Preset interactions ─────────────────────────────────────────────────────
 
@@ -148,6 +158,16 @@ async function startTest(): Promise<void> {
     errorMsg.value = String(e);
   } finally {
     isLoading.value = false;
+  }
+}
+
+async function copyResultSummary() {
+  if (!resultSummary.value) return;
+  try {
+    await navigator.clipboard.writeText(resultSummary.value);
+    pushToast(t('networkTools.copy.copied'), 'success', { ttlMs: 1800 });
+  } catch (error) {
+    pushToast(t('networkTools.copy.failed', { error: String(error) }), 'error', { ttlMs: 3600 });
   }
 }
 </script>
@@ -312,27 +332,37 @@ async function startTest(): Promise<void> {
     </div>
 
     <!-- Results table -->
-    <div v-if="result" class="space-y-2">
+      <div v-if="result" class="space-y-2">
       <!-- Host resolved info -->
-      <div class="text-sm text-slate-600">
-        <span class="font-medium">{{ result.host }}</span>
-        <span v-if="result.resolvedIp" class="text-slate-400 ml-2">({{ result.resolvedIp }})</span>
+      <div class="flex items-center justify-between gap-3 text-sm text-slate-600">
+        <div>
+          <span class="font-medium">{{ result.host }}</span>
+          <span v-if="result.resolvedIp" class="text-slate-400 ml-2">({{ result.resolvedIp }})</span>
+        </div>
+        <button
+          type="button"
+          class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/30"
+          @click="copyResultSummary"
+        >
+          <Copy class="h-3.5 w-3.5" />
+          {{ t('networkTools.port.copyResults') }}
+        </button>
       </div>
 
       <div class="border border-slate-200 rounded-lg overflow-hidden">
         <table class="w-full text-sm">
           <thead>
             <tr class="bg-slate-50 border-b border-slate-200">
-              <th class="text-left px-4 py-2.5 text-xs font-semibold text-slate-600 uppercase tracking-wide">
+              <th scope="col" class="text-left px-4 py-2.5 text-xs font-semibold text-slate-600 uppercase tracking-wide">
                 {{ t('networkTools.port.port') }}
               </th>
-              <th class="text-left px-4 py-2.5 text-xs font-semibold text-slate-600 uppercase tracking-wide">
+              <th scope="col" class="text-left px-4 py-2.5 text-xs font-semibold text-slate-600 uppercase tracking-wide">
                 {{ t('networkTools.port.service') }}
               </th>
-              <th class="text-left px-4 py-2.5 text-xs font-semibold text-slate-600 uppercase tracking-wide">
+              <th scope="col" class="text-left px-4 py-2.5 text-xs font-semibold text-slate-600 uppercase tracking-wide">
                 {{ t('networkTools.port.status') }}
               </th>
-              <th class="text-left px-4 py-2.5 text-xs font-semibold text-slate-600 uppercase tracking-wide">
+              <th scope="col" class="text-left px-4 py-2.5 text-xs font-semibold text-slate-600 uppercase tracking-wide">
                 {{ t('networkTools.port.latency') }}
               </th>
             </tr>
@@ -364,5 +394,12 @@ async function startTest(): Promise<void> {
         </table>
       </div>
     </div>
+
+    <Empty
+      v-else-if="!isLoading"
+      :title="t('networkTools.port.emptyTitle')"
+      :description="t('networkTools.port.emptyDescription')"
+      dashed
+    />
   </div>
 </template>

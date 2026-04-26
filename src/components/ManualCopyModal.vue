@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { X, Play, FolderOpen, ShieldCheck, AlertTriangle, RefreshCw, FilePlus2 } from 'lucide-vue-next';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { X, Play, FolderOpen, ShieldCheck, AlertTriangle, RefreshCw, FilePlus2, Info, Loader2 } from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
 import { updateManualCopyForm, getManualCopyForm } from '@/lib/store';
 import {
@@ -11,6 +11,8 @@ import {
   type AppConfig,
   type ManualCopyPreview,
 } from '@/lib/tauri';
+import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
+import { pushToast, type ToastTone } from '@/composables/useToast';
 
 defineOptions({ name: 'ManualCopyModal' });
 
@@ -31,12 +33,16 @@ const { t } = useI18n();
 
 const sourcePath = ref('');
 const targetRootPath = ref('');
-const statusMsg = ref('');
-const statusTone = ref<'info' | 'success' | 'error'>('info');
+// Inline error message for in-form validation feedback. Rendered below the
+// inputs so users see exactly which field/value the backend rejected without
+// hunting for a toast.
+const inlineError = ref('');
 const isSubmitting = ref(false);
+const isLoadingConfig = ref(false);
 const config = ref<AppConfig | null>(null);
 const isSelectingTarget = ref(false);
 const sourceInputRef = ref<HTMLInputElement | null>(null);
+const modalRef = ref<HTMLElement | null>(null);
 const existingTargetPreview = ref<ManualCopyPreview | null>(null);
 const pendingSubmitRequest = ref<{ source: string; target: string } | null>(null);
 
@@ -44,12 +50,21 @@ const pendingSubmitRequest = ref<{ source: string; target: string } | null>(null
 const selectedExtensions = ref<string[]>([]);
 const selectedKeywords = ref<string[]>([]);
 
+// Tracks the focused element before the modal opens so we can return focus to
+// it when the modal closes (a11y: keyboard users land back on the trigger).
+let previouslyFocused: HTMLElement | null = null;
+
+// Pushes a toast through the M01 shared queue.
+function notify(message: string, tone: ToastTone = 'info', ttlMs?: number) {
+  pushToast(message, tone, ttlMs !== undefined ? { ttlMs } : undefined);
+}
+
 const canSubmit = computed(
   () =>
     sourcePath.value.trim().length > 0
     && targetRootPath.value.trim().length > 0
     && !isSubmitting.value
-    && !existingTargetPreview.value
+    && !existingTargetPreview.value,
 );
 
 const globalExtensions = computed(() => config.value?.file_extensions.filter(Boolean) ?? []);
@@ -88,6 +103,7 @@ const stabilitySummary = computed(() => {
 });
 
 async function loadConfig() {
+  isLoadingConfig.value = true;
   try {
     const cfg = await getConfig();
     config.value = cfg;
@@ -96,8 +112,9 @@ async function loadConfig() {
       targetRootPath.value = cfg.local_path;
     }
   } catch (error) {
-    statusTone.value = 'error';
-    statusMsg.value = t('manualCopy.loadConfigFailed', { error: String(error) });
+    notify(t('manualCopy.loadConfigFailed', { error: String(error) }), 'error');
+  } finally {
+    isLoadingConfig.value = false;
   }
 }
 
@@ -182,10 +199,12 @@ async function enqueueCopy(source: string, target: string, overwriteExisting: bo
   const kws = [...selectedKeywords.value];
   const ack = await queueTemporaryCopy(source, target, overwriteExisting, exts, kws);
 
-  statusTone.value = 'success';
-  statusMsg.value = ack.queued_ahead > 0
-    ? t('manualCopy.addedToQueueWithAhead', { count: ack.queued_ahead })
-    : t('manualCopy.addedToQueue');
+  notify(
+    ack.queued_ahead > 0
+      ? t('manualCopy.addedToQueueWithAhead', { count: ack.queued_ahead })
+      : t('manualCopy.addedToQueue'),
+    'success',
+  );
 
   updateManualCopyForm({
     sourcePath: '',
@@ -193,6 +212,7 @@ async function enqueueCopy(source: string, target: string, overwriteExisting: bo
   });
 
   sourcePath.value = '';
+  inlineError.value = '';
   emit('success');
   await focusSourceInput();
 }
@@ -201,8 +221,7 @@ async function confirmExistingTarget(overwriteExisting: boolean) {
   if (!pendingSubmitRequest.value) return;
 
   isSubmitting.value = true;
-  statusMsg.value = '';
-  statusTone.value = 'info';
+  inlineError.value = '';
 
   try {
     await enqueueCopy(
@@ -211,8 +230,8 @@ async function confirmExistingTarget(overwriteExisting: boolean) {
       overwriteExisting,
     );
   } catch (error) {
-    statusTone.value = 'error';
-    statusMsg.value = formatManualCopyError(error);
+    inlineError.value = formatManualCopyError(error);
+    notify(inlineError.value, 'error');
   } finally {
     clearExistingTargetDecision();
     isSubmitting.value = false;
@@ -221,8 +240,7 @@ async function confirmExistingTarget(overwriteExisting: boolean) {
 
 function cancelExistingTargetDecision() {
   clearExistingTargetDecision();
-  statusTone.value = 'info';
-  statusMsg.value = t('manualCopy.submitCancelled');
+  notify(t('manualCopy.submitCancelled'), 'info');
 }
 
 async function selectTargetDirectory() {
@@ -232,15 +250,14 @@ async function selectTargetDirectory() {
     if (selected) {
       targetRootPath.value = selected;
       updateManualCopyForm({ targetRootPath: selected });
-      statusMsg.value = '';
+      inlineError.value = '';
     } else {
       // User cancelled directory selection
-      statusTone.value = 'info';
-      statusMsg.value = t('manualCopy.directorySelectionCancelled');
+      notify(t('manualCopy.directorySelectionCancelled'), 'info');
     }
   } catch (error) {
-    statusTone.value = 'error';
-    statusMsg.value = t('manualCopy.selectDirFailed', { error: String(error) });
+    inlineError.value = t('manualCopy.selectDirFailed', { error: String(error) });
+    notify(inlineError.value, 'error');
   } finally {
     isSelectingTarget.value = false;
   }
@@ -248,14 +265,12 @@ async function selectTargetDirectory() {
 
 async function submitCopy() {
   if (!canSubmit.value) {
-    statusTone.value = 'error';
-    statusMsg.value = t('manualCopy.fillRequired');
+    inlineError.value = t('manualCopy.fillRequired');
     return;
   }
 
   isSubmitting.value = true;
-  statusMsg.value = '';
-  statusTone.value = 'info';
+  inlineError.value = '';
 
   try {
     const source = sourcePath.value.trim();
@@ -270,16 +285,41 @@ async function submitCopy() {
 
     await enqueueCopy(source, target, false);
   } catch (error) {
-    statusTone.value = 'error';
-    statusMsg.value = formatManualCopyError(error);
+    inlineError.value = formatManualCopyError(error);
+    notify(inlineError.value, 'error');
   } finally {
     isSubmitting.value = false;
   }
 }
 
 function closeModal() {
+  if (existingTargetPreview.value) {
+    return;
+  }
   clearExistingTargetDecision();
   emit('close');
+}
+
+function onModalKeydown(event: KeyboardEvent) {
+  // Focus-trap: cycle Tab between the first and last focusable element so the
+  // user never tabs out of the modal.
+  if (event.key !== 'Tab' || !modalRef.value) return;
+  const focusables = Array.from(
+    modalRef.value.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => !el.hasAttribute('aria-hidden'));
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement as HTMLElement | null;
+  if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 // Save form data on input
@@ -295,213 +335,258 @@ onMounted(() => {
   loadConfig();
 });
 
+onBeforeUnmount(() => {
+  // Defensive cleanup — closing the modal during a paint flush sometimes
+  // leaves a focus-trap listener behind otherwise.
+  if (typeof document !== 'undefined' && previouslyFocused) {
+    previouslyFocused = null;
+  }
+});
+
 watch(() => props.isOpen, (open) => {
   if (open) {
     isSubmitting.value = false;
-    statusMsg.value = '';
-    statusTone.value = 'info';
+    inlineError.value = '';
     clearExistingTargetDecision();
+    // Stash the previously-focused element so we can restore focus when the
+    // modal closes (a11y baseline for dialog windows).
+    if (typeof document !== 'undefined') {
+      previouslyFocused = document.activeElement as HTMLElement | null;
+    }
     loadConfig();
     focusSourceInput();
+  } else {
+    // Restore focus to the trigger element after the modal closes so keyboard
+    // users land back where they came from.
+    requestAnimationFrame(() => {
+      previouslyFocused?.focus?.();
+      previouslyFocused = null;
+    });
   }
 });
 </script>
 
 <template>
   <Transition name="modal-fade">
-    <div v-if="isOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+    <div
+      v-if="isOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
+      @keydown="onModalKeydown"
+    >
       <!-- Modal Container -->
       <div
-        class="relative bg-white rounded-2xl shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto"
+        ref="modalRef"
+        class="relative bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto focus:outline-none"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="manual-copy-title"
+        aria-describedby="manual-copy-desc"
+        tabindex="-1"
       >
         <!-- Modal Header -->
         <div class="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
           <div>
-            <h3 class="text-lg font-bold text-slate-800">{{ t('manualCopy.title') }}</h3>
-            <p class="text-sm text-slate-500 mt-1">{{ t('manualCopy.subtitle') }}</p>
+            <h3 id="manual-copy-title" class="text-lg font-bold text-slate-800">{{ t('manualCopy.title') }}</h3>
+            <p id="manual-copy-desc" class="text-sm text-slate-500 mt-1">{{ t('manualCopy.subtitle') }}</p>
           </div>
           <button
             @click="closeModal"
-            class="p-2 rounded-lg hover:bg-slate-100 transition-colors text-slate-600 hover:text-slate-800"
-            :aria-label="t('settings.close')"
+            class="p-2 rounded-lg hover:bg-slate-100 transition-colors motion-reduce:transition-none text-slate-600 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-1"
+            :aria-label="t('common.close')"
+            :title="t('common.close')"
           >
-            <X class="w-5 h-5" />
+            <X class="w-5 h-5" aria-hidden="true" />
           </button>
         </div>
 
         <!-- Modal Content -->
         <div class="p-6 space-y-6">
-          <!-- Form Section -->
-          <div class="space-y-4">
-            <!-- Source Path Input -->
-            <div>
-              <label class="block text-sm font-medium text-slate-700 mb-2">
-                {{ t('manualCopy.sourcePath') }}
-              </label>
-              <input
-                ref="sourceInputRef"
-                v-model="sourcePath"
-                type="text"
-                :disabled="isSubmitting || Boolean(existingTargetPreview)"
-                class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all disabled:cursor-not-allowed disabled:bg-slate-100"
-                :placeholder="t('manualCopy.sourcePlaceholder')"
-              />
-            </div>
+          <!-- Loading skeleton during config load -->
+          <div v-if="isLoadingConfig && !config" class="space-y-3" role="status" aria-live="polite">
+            <LoadingSkeleton variant="text-line" :lines="2" />
+            <LoadingSkeleton variant="text-line" :lines="2" />
+            <LoadingSkeleton variant="card" />
+          </div>
 
-            <!-- Target Path Input -->
-            <div>
-              <label class="block text-sm font-medium text-slate-700 mb-2">
-                {{ t('manualCopy.targetRootPath') }}
-              </label>
-              <div class="flex gap-2">
+          <template v-else>
+            <!-- Form Section -->
+            <div class="space-y-4">
+              <!-- Source Path Input -->
+              <div>
+                <label for="manual-copy-source" class="block text-sm font-medium text-slate-700 mb-2">
+                  {{ t('manualCopy.sourcePath') }}
+                </label>
                 <input
-                  v-model="targetRootPath"
+                  id="manual-copy-source"
+                  ref="sourceInputRef"
+                  v-model="sourcePath"
                   type="text"
                   :disabled="isSubmitting || Boolean(existingTargetPreview)"
-                  class="flex-1 p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all disabled:cursor-not-allowed disabled:bg-slate-100"
-                  :placeholder="t('manualCopy.targetPlaceholder')"
+                  class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all motion-reduce:transition-none disabled:cursor-not-allowed disabled:bg-slate-100"
+                  :placeholder="t('manualCopy.sourcePlaceholder')"
+                  :aria-invalid="Boolean(inlineError) || undefined"
                 />
-                <button
-                  @click="selectTargetDirectory"
-                  :disabled="isSelectingTarget || isSubmitting || Boolean(existingTargetPreview)"
-                  :title="t('manualCopy.browseFolder')"
-                  class="px-4 py-3 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2 text-slate-600 font-medium"
-                >
-                  <FolderOpen class="w-4 h-4" />
-                  <span class="hidden sm:inline">{{ t('manualCopy.browse') }}</span>
-                </button>
               </div>
-              <p class="text-xs text-slate-400 mt-2">{{ t('manualCopy.targetHint') }}</p>
-            </div>
-          </div>
 
-          <!-- Status Message -->
-          <div
-            v-if="statusMsg"
-            class="rounded-xl px-4 py-3 text-sm border"
-            :class="
-              statusTone === 'error'
-                ? 'bg-red-50 text-red-600 border-red-100'
-                : statusTone === 'success'
-                  ? 'bg-emerald-50 text-emerald-600 border-emerald-100'
-                  : 'bg-slate-50 text-slate-600 border-slate-200'
-            "
-          >
-            {{ statusMsg }}
-          </div>
-
-          <!-- Filter Rules Card -->
-          <div class="bg-slate-50 rounded-xl border border-slate-200 p-5 space-y-4">
-            <div class="flex items-center gap-2 text-slate-800 font-semibold">
-              <ShieldCheck class="w-4 h-4 text-blue-600" />
-              {{ t('manualCopy.filterTitle') }}
-            </div>
-
-            <div v-if="hasAnyGlobalFilter" class="space-y-3 text-sm">
-              <p class="text-slate-500">{{ t('manualCopy.filterPickHint') }}</p>
-
-              <!-- Extension checkboxes -->
-              <div v-if="globalExtensions.length > 0">
-                <div class="font-medium text-slate-700 mb-2">{{ t('manualCopy.extFilterLabel') }}</div>
-                <div class="flex flex-wrap gap-2">
-                  <label
-                    v-for="ext in globalExtensions"
-                    :key="'ext-' + ext"
-                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border cursor-pointer transition-colors select-none text-sm"
-                    :class="selectedExtensions.includes(ext)
-                      ? 'bg-blue-50 border-blue-300 text-blue-700'
-                      : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'"
+              <!-- Target Path Input -->
+              <div>
+                <label for="manual-copy-target" class="block text-sm font-medium text-slate-700 mb-2">
+                  {{ t('manualCopy.targetRootPath') }}
+                </label>
+                <div class="flex gap-2">
+                  <input
+                    id="manual-copy-target"
+                    v-model="targetRootPath"
+                    type="text"
+                    :disabled="isSubmitting || Boolean(existingTargetPreview)"
+                    class="flex-1 p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all motion-reduce:transition-none disabled:cursor-not-allowed disabled:bg-slate-100"
+                    :placeholder="t('manualCopy.targetPlaceholder')"
+                    :aria-invalid="Boolean(inlineError) || undefined"
+                  />
+                  <button
+                    @click="selectTargetDirectory"
+                    :disabled="isSelectingTarget || isSubmitting || Boolean(existingTargetPreview)"
+                    :title="t('manualCopy.browseFolder')"
+                    :aria-label="t('manualCopy.browseFolder')"
+                    class="px-4 py-3 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 transition-colors motion-reduce:transition-none disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2 text-slate-600 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-1"
                   >
-                    <input
-                      type="checkbox"
-                      :checked="selectedExtensions.includes(ext)"
-                      class="sr-only"
-                      @change="toggleExtension(ext)"
-                    />
-                    <span
-                      class="w-4 h-4 rounded border flex items-center justify-center text-xs shrink-0"
+                    <FolderOpen class="w-4 h-4" aria-hidden="true" />
+                    <span class="hidden sm:inline">{{ t('manualCopy.browse') }}</span>
+                  </button>
+                </div>
+                <p class="text-xs text-slate-400 mt-2">{{ t('manualCopy.targetHint') }}</p>
+              </div>
+            </div>
+
+            <!-- Inline error message (form validation feedback). Toast-style
+                 success/info notifications are pushed through useToast. -->
+            <div
+              v-if="inlineError"
+              role="alert"
+              aria-live="assertive"
+              class="rounded-xl px-4 py-3 text-sm border bg-red-50 text-red-600 border-red-100 flex items-start gap-2"
+            >
+              <AlertTriangle class="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+              <span class="break-all">{{ inlineError }}</span>
+            </div>
+
+            <!-- Filter Rules Card -->
+            <div class="bg-slate-50 rounded-xl border border-slate-200 p-5 space-y-4">
+              <div class="flex items-center gap-2 text-slate-800 font-semibold">
+                <ShieldCheck class="w-4 h-4 text-blue-600" aria-hidden="true" />
+                {{ t('manualCopy.filterTitle') }}
+              </div>
+
+              <div v-if="hasAnyGlobalFilter" class="space-y-3 text-sm">
+                <p class="text-slate-500">{{ t('manualCopy.filterPickHint') }}</p>
+
+                <!-- Extension checkboxes -->
+                <div v-if="globalExtensions.length > 0">
+                  <div class="font-medium text-slate-700 mb-2">{{ t('manualCopy.extFilterLabel') }}</div>
+                  <div class="flex flex-wrap gap-2">
+                    <label
+                      v-for="ext in globalExtensions"
+                      :key="'ext-' + ext"
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border cursor-pointer transition-colors motion-reduce:transition-none select-none text-sm focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:ring-offset-1"
                       :class="selectedExtensions.includes(ext)
-                        ? 'bg-blue-600 border-blue-600 text-white'
-                        : 'border-slate-300 bg-white'"
+                        ? 'bg-blue-50 border-blue-300 text-blue-700'
+                        : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'"
                     >
-                      <svg v-if="selectedExtensions.includes(ext)" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
-                    </span>
-                    {{ ext }}
-                  </label>
+                      <input
+                        type="checkbox"
+                        :checked="selectedExtensions.includes(ext)"
+                        class="sr-only"
+                        @change="toggleExtension(ext)"
+                      />
+                      <span
+                        class="w-4 h-4 rounded border flex items-center justify-center text-xs shrink-0"
+                        :class="selectedExtensions.includes(ext)
+                          ? 'bg-blue-600 border-blue-600 text-white'
+                          : 'border-slate-300 bg-white'"
+                        aria-hidden="true"
+                      >
+                        <svg v-if="selectedExtensions.includes(ext)" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+                      </span>
+                      {{ ext }}
+                    </label>
+                  </div>
                 </div>
-              </div>
 
-              <!-- Keyword checkboxes -->
-              <div v-if="globalKeywords.length > 0">
-                <div class="font-medium text-slate-700 mb-2">{{ t('manualCopy.keywordFilterLabel') }}</div>
-                <div class="flex flex-wrap gap-2">
-                  <label
-                    v-for="kw in globalKeywords"
-                    :key="'kw-' + kw"
-                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border cursor-pointer transition-colors select-none text-sm"
-                    :class="selectedKeywords.includes(kw)
-                      ? 'bg-purple-50 border-purple-300 text-purple-700'
-                      : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'"
-                  >
-                    <input
-                      type="checkbox"
-                      :checked="selectedKeywords.includes(kw)"
-                      class="sr-only"
-                      @change="toggleKeyword(kw)"
-                    />
-                    <span
-                      class="w-4 h-4 rounded border flex items-center justify-center text-xs shrink-0"
+                <!-- Keyword checkboxes -->
+                <div v-if="globalKeywords.length > 0">
+                  <div class="font-medium text-slate-700 mb-2">{{ t('manualCopy.keywordFilterLabel') }}</div>
+                  <div class="flex flex-wrap gap-2">
+                    <label
+                      v-for="kw in globalKeywords"
+                      :key="'kw-' + kw"
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border cursor-pointer transition-colors motion-reduce:transition-none select-none text-sm focus-within:ring-2 focus-within:ring-purple-500/50 focus-within:ring-offset-1"
                       :class="selectedKeywords.includes(kw)
-                        ? 'bg-purple-600 border-purple-600 text-white'
-                        : 'border-slate-300 bg-white'"
+                        ? 'bg-purple-50 border-purple-300 text-purple-700'
+                        : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'"
                     >
-                      <svg v-if="selectedKeywords.includes(kw)" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
-                    </span>
-                    {{ kw }}
-                  </label>
+                      <input
+                        type="checkbox"
+                        :checked="selectedKeywords.includes(kw)"
+                        class="sr-only"
+                        @change="toggleKeyword(kw)"
+                      />
+                      <span
+                        class="w-4 h-4 rounded border flex items-center justify-center text-xs shrink-0"
+                        :class="selectedKeywords.includes(kw)
+                          ? 'bg-purple-600 border-purple-600 text-white'
+                          : 'border-slate-300 bg-white'"
+                        aria-hidden="true"
+                      >
+                        <svg v-if="selectedKeywords.includes(kw)" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
+                      </span>
+                      {{ kw }}
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Active filter summary -->
+                <div class="rounded-lg bg-white border border-slate-200 px-3 py-2 text-xs text-slate-500">
+                  {{ filterSummary }}
                 </div>
               </div>
 
-              <!-- Active filter summary -->
-              <div class="rounded-lg bg-white border border-slate-200 px-3 py-2 text-xs text-slate-500">
-                {{ filterSummary }}
+              <div v-else class="text-sm text-slate-500">
+                {{ t('manualCopy.noGlobalFilters') }}
               </div>
             </div>
 
-            <div v-else class="text-sm text-slate-500">
-              {{ t('manualCopy.noGlobalFilters') }}
-            </div>
-          </div>
-
-          <!-- Other Rules Card -->
-          <div class="bg-slate-50 rounded-xl border border-slate-200 p-5 space-y-3">
-            <div class="space-y-3 text-sm text-slate-600">
-              <div>
-                <div class="font-medium text-slate-700 mb-1">{{ t('manualCopy.stabilityTitle') }}</div>
-                <div>{{ stabilitySummary }}</div>
+            <!-- Other Rules Card (stability + execution mode shown as info-tone
+                 cards so the read-only contracts have a visible hint icon). -->
+            <div class="bg-blue-50/40 rounded-xl border border-blue-100 p-5 space-y-3">
+              <div class="space-y-3 text-sm text-slate-600">
+                <div class="flex items-start gap-2">
+                  <Info class="w-4 h-4 text-blue-500 shrink-0 mt-0.5" aria-hidden="true" />
+                  <div>
+                    <div class="font-medium text-slate-700 mb-1">{{ t('manualCopy.stabilityTitle') }}</div>
+                    <div>{{ stabilitySummary }}</div>
+                  </div>
+                </div>
+                <div class="flex items-start gap-2">
+                  <Info class="w-4 h-4 text-blue-500 shrink-0 mt-0.5" aria-hidden="true" />
+                  <div>
+                    <div class="font-medium text-slate-700 mb-1">{{ t('manualCopy.modeTitle') }}</div>
+                    <div>{{ t('manualCopy.modeDesc') }}</div>
+                  </div>
+                </div>
               </div>
-              <div>
-                <div class="font-medium text-slate-700 mb-1">{{ t('manualCopy.modeTitle') }}</div>
-                <div>{{ t('manualCopy.modeDesc') }}</div>
-              </div>
             </div>
-          </div>
+          </template>
         </div>
 
         <!-- Modal Footer -->
         <div class="sticky bottom-0 z-10 border-t border-slate-200 bg-white px-6 py-4 flex items-center justify-end gap-3">
           <button
-            @click="closeModal"
-            class="px-5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 transition-colors font-medium"
-          >
-            {{ t('settings.close') }}
-          </button>
-          <button
             @click="submitCopy"
             :disabled="!canSubmit"
-            class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-white font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700"
+            class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-white font-medium transition-colors motion-reduce:transition-none disabled:opacity-60 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 focus-visible:ring-offset-1"
           >
-            <Play class="w-4 h-4" />
+            <Loader2 v-if="isSubmitting" class="w-4 h-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            <Play v-else class="w-4 h-4" aria-hidden="true" />
             {{ isSubmitting ? t('manualCopy.submitting') : t('manualCopy.startCopy') }}
           </button>
         </div>
@@ -512,6 +597,9 @@ watch(() => props.isOpen, (open) => {
             <div
               v-if="existingTargetPreview"
               class="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 backdrop-blur-sm px-4"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="manual-copy-conflict-title"
               @click="!isSubmitting && cancelExistingTargetDecision()"
             >
               <div
@@ -521,10 +609,10 @@ watch(() => props.isOpen, (open) => {
                 <!-- Dialog header -->
                 <div class="flex items-start gap-4 px-6 pt-6 pb-5 border-b border-slate-100">
                   <div class="flex-shrink-0 w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center">
-                    <AlertTriangle class="w-5 h-5 text-amber-600" />
+                    <AlertTriangle class="w-5 h-5 text-amber-600" aria-hidden="true" />
                   </div>
                   <div class="min-w-0 pt-0.5">
-                    <div class="text-base font-semibold text-slate-800">
+                    <div id="manual-copy-conflict-title" class="text-base font-semibold text-slate-800">
                       {{ t('manualCopy.targetExistsDecisionTitle') }}
                     </div>
                     <p class="text-sm leading-6 text-slate-500 mt-1.5 break-all">
@@ -535,17 +623,18 @@ watch(() => props.isOpen, (open) => {
 
                 <!-- Option cards -->
                 <div class="p-4 space-y-2.5">
-                  <!-- Overwrite -->
+                  <!-- Overwrite (destructive) -->
                   <button
                     @click="confirmExistingTarget(true)"
                     :disabled="isSubmitting"
-                    class="w-full flex items-start gap-3.5 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3.5 text-left transition-all hover:border-blue-300 hover:bg-blue-100 hover:shadow-sm active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+                    class="w-full flex items-start gap-3.5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3.5 text-left transition-all motion-reduce:transition-none hover:border-amber-400 hover:bg-amber-100 hover:shadow-sm active:scale-[0.99] motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 focus-visible:ring-offset-2"
+                    :aria-label="t('manualCopy.overwriteAndQueue')"
                   >
-                    <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center mt-0.5">
-                      <RefreshCw class="w-3.5 h-3.5 text-white" />
+                    <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-amber-600 flex items-center justify-center mt-0.5">
+                      <RefreshCw class="w-3.5 h-3.5 text-white" aria-hidden="true" />
                     </div>
                     <div class="min-w-0 flex-1">
-                      <div class="text-sm font-semibold text-blue-800">
+                      <div class="text-sm font-semibold text-amber-800">
                         {{ t('manualCopy.overwriteAndQueue') }}
                       </div>
                       <div class="text-xs text-slate-600 mt-1 leading-5 break-words">
@@ -554,14 +643,15 @@ watch(() => props.isOpen, (open) => {
                     </div>
                   </button>
 
-                  <!-- Copy new files only -->
+                  <!-- Copy new files only (safe option) -->
                   <button
                     @click="confirmExistingTarget(false)"
                     :disabled="isSubmitting"
-                    class="w-full flex items-start gap-3.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3.5 text-left transition-all hover:border-emerald-300 hover:bg-emerald-100 hover:shadow-sm active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+                    class="w-full flex items-start gap-3.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3.5 text-left transition-all motion-reduce:transition-none hover:border-emerald-300 hover:bg-emerald-100 hover:shadow-sm active:scale-[0.99] motion-reduce:active:scale-100 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 focus-visible:ring-offset-2"
+                    :aria-label="t('manualCopy.skipAndQueue')"
                   >
                     <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center mt-0.5">
-                      <FilePlus2 class="w-3.5 h-3.5 text-white" />
+                      <FilePlus2 class="w-3.5 h-3.5 text-white" aria-hidden="true" />
                     </div>
                     <div class="min-w-0 flex-1">
                       <div class="text-sm font-semibold text-emerald-800">
@@ -579,7 +669,7 @@ watch(() => props.isOpen, (open) => {
                   <button
                     @click="cancelExistingTargetDecision"
                     :disabled="isSubmitting"
-                    class="px-4 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                    class="px-4 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-1"
                   >
                     {{ t('manualCopy.cancelConflictDecision') }}
                   </button>
@@ -624,5 +714,23 @@ watch(() => props.isOpen, (open) => {
 .confirm-fade-leave-from {
   opacity: 1;
   transform: scale(1);
+}
+
+/* Respect user preferences: skip the slide/scale transitions when the OS
+   reports prefers-reduced-motion. The opacity step survives so the modal
+   still announces presence/absence visually. */
+@media (prefers-reduced-motion: reduce) {
+  .confirm-fade-enter-from,
+  .confirm-fade-leave-to,
+  .confirm-fade-enter-to,
+  .confirm-fade-leave-from {
+    transform: none;
+  }
+  .modal-fade-enter-active,
+  .modal-fade-leave-active,
+  .confirm-fade-enter-active,
+  .confirm-fade-leave-active {
+    transition-duration: 120ms;
+  }
 }
 </style>

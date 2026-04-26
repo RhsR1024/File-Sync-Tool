@@ -112,7 +112,26 @@
       align-items: center;
       justify-content: center;
       overflow: auto;
+      -ms-overflow-style: none;
+      scrollbar-width: none;
       padding: 16px;
+    }
+    .content::-webkit-scrollbar {
+      display: none;
+      width: 0;
+      height: 0;
+    }
+    .content.has-image {
+      align-items: flex-start;
+      justify-content: flex-start;
+    }
+    .content.can-pan,
+    .content.can-pan .image {
+      cursor: grab;
+    }
+    .content.is-panning,
+    .content.is-panning .image {
+      cursor: grabbing;
     }
     .empty {
       color: #94a3b8;
@@ -133,8 +152,6 @@
       border: 1px solid rgba(255, 255, 255, 0.7);
       background: rgba(255, 255, 255, 0.72);
       box-shadow: 0 28px 80px -36px rgba(15, 23, 42, 0.72);
-      transform-origin: center center;
-      transition: transform 80ms ease-out;
       user-select: none;
       -webkit-user-drag: none;
     }
@@ -158,9 +175,9 @@
       </div>
       <div class="controls">
         <span id="zoom-label" class="badge">100%</span>
-        <button id="zoom-out" class="icon-btn" type="button" aria-label="Zoom out" title="Zoom out (Ctrl+wheel)">−</button>
+        <button id="zoom-out" class="icon-btn" type="button" aria-label="Zoom out" title="Zoom out">−</button>
         <button id="zoom-reset" class="icon-btn" type="button" aria-label="Fit to window" title="Fit to window (double-click image)">⤢</button>
-        <button id="zoom-in" class="icon-btn" type="button" aria-label="Zoom in" title="Zoom in (Ctrl+wheel)">+</button>
+        <button id="zoom-in" class="icon-btn" type="button" aria-label="Zoom in" title="Zoom in">+</button>
         <button id="fullscreen" class="icon-btn" type="button" aria-label="Toggle fullscreen" title="Fullscreen (Esc to exit)">⛶</button>
       </div>
     </header>
@@ -186,10 +203,12 @@
     const FIT_SCALE = 1;
     const MIN_SCALE = FIT_SCALE;
     const MAX_SCALE = 6;
+    const WHEEL_STEP_PERCENT = 10;
 
     let payload = null;
     let scale = FIT_SCALE;
     let isFullscreen = false;
+    let panSession = null;
 
     function clampScale(value) {
       if (!Number.isFinite(value)) {
@@ -198,11 +217,169 @@
       return Math.max(MIN_SCALE, Math.min(MAX_SCALE, value));
     }
 
+    function parseCssPixels(value) {
+      const parsed = Number.parseFloat(value || '0');
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function getContentViewportSize() {
+      const styles = window.getComputedStyle(contentEl);
+      const horizontalPadding = parseCssPixels(styles.paddingLeft) + parseCssPixels(styles.paddingRight);
+      const verticalPadding = parseCssPixels(styles.paddingTop) + parseCssPixels(styles.paddingBottom);
+      return {
+        width: Math.max(1, contentEl.clientWidth - horizontalPadding),
+        height: Math.max(1, contentEl.clientHeight - verticalPadding),
+      };
+    }
+
+    function getBaseImageSize() {
+      if (!payload || !imageEl.naturalWidth || !imageEl.naturalHeight) {
+        return null;
+      }
+      const viewportSize = getContentViewportSize();
+      const fitRatio = Math.min(
+        viewportSize.width / imageEl.naturalWidth,
+        viewportSize.height / imageEl.naturalHeight,
+        1,
+      );
+      return {
+        width: Math.max(1, Math.round(imageEl.naturalWidth * fitRatio)),
+        height: Math.max(1, Math.round(imageEl.naturalHeight * fitRatio)),
+      };
+    }
+
+    function getScaledImageSize(nextScale = scale) {
+      const baseSize = getBaseImageSize();
+      if (!baseSize) {
+        return null;
+      }
+      return {
+        width: Math.max(1, Math.round(baseSize.width * nextScale)),
+        height: Math.max(1, Math.round(baseSize.height * nextScale)),
+      };
+    }
+
+    function clampScrollOffset(value, maxValue) {
+      if (!Number.isFinite(value)) {
+        return 0;
+      }
+      return Math.max(0, Math.min(value, Math.max(0, maxValue)));
+    }
+
+    function clampImageRatio(value) {
+      if (!Number.isFinite(value)) {
+        return 0.5;
+      }
+      return Math.max(0, Math.min(1, value));
+    }
+
+    function getImageLayoutMetrics(nextScale = scale) {
+      const viewportSize = getContentViewportSize();
+      const scaledSize = getScaledImageSize(nextScale);
+      if (!scaledSize) {
+        return null;
+      }
+      const marginLeft = Math.max(0, (viewportSize.width - scaledSize.width) / 2);
+      const marginTop = Math.max(0, (viewportSize.height - scaledSize.height) / 2);
+      return {
+        viewportWidth: viewportSize.width,
+        viewportHeight: viewportSize.height,
+        imageWidth: scaledSize.width,
+        imageHeight: scaledSize.height,
+        marginLeft,
+        marginTop,
+        marginRight: marginLeft,
+        marginBottom: marginTop,
+        contentWidth: scaledSize.width + marginLeft * 2,
+        contentHeight: scaledSize.height + marginTop * 2,
+      };
+    }
+
+    function resolveViewportAnchor(metrics, anchor = null) {
+      return {
+        x: clampScrollOffset(anchor?.x ?? metrics.viewportWidth / 2, metrics.viewportWidth),
+        y: clampScrollOffset(anchor?.y ?? metrics.viewportHeight / 2, metrics.viewportHeight),
+      };
+    }
+
+    function resolveImageAnchor(metrics, anchor = null) {
+      const viewportAnchor = resolveViewportAnchor(metrics, anchor);
+      return {
+        viewportX: viewportAnchor.x,
+        viewportY: viewportAnchor.y,
+        ratioX: clampImageRatio(
+          (contentEl.scrollLeft + viewportAnchor.x - metrics.marginLeft) / metrics.imageWidth,
+        ),
+        ratioY: clampImageRatio(
+          (contentEl.scrollTop + viewportAnchor.y - metrics.marginTop) / metrics.imageHeight,
+        ),
+      };
+    }
+
+    function getScrollTargetForScale(nextScale, anchor = null) {
+      const previousMetrics = getImageLayoutMetrics(scale);
+      const nextMetrics = getImageLayoutMetrics(nextScale);
+      if (!previousMetrics || !nextMetrics) {
+        return null;
+      }
+      const imageAnchor = resolveImageAnchor(previousMetrics, anchor);
+      return {
+        left: clampScrollOffset(
+          nextMetrics.marginLeft + imageAnchor.ratioX * nextMetrics.imageWidth - imageAnchor.viewportX,
+          nextMetrics.contentWidth - nextMetrics.viewportWidth,
+        ),
+        top: clampScrollOffset(
+          nextMetrics.marginTop + imageAnchor.ratioY * nextMetrics.imageHeight - imageAnchor.viewportY,
+          nextMetrics.contentHeight - nextMetrics.viewportHeight,
+        ),
+      };
+    }
+
+    function applyScrollTarget(scrollTarget) {
+      if (!scrollTarget) {
+        return;
+      }
+      contentEl.scrollLeft = scrollTarget.left;
+      contentEl.scrollTop = scrollTarget.top;
+    }
+
+    function getEventAnchor(event) {
+      const rect = contentEl.getBoundingClientRect();
+      const styles = window.getComputedStyle(contentEl);
+      const paddingLeft = parseCssPixels(styles.paddingLeft);
+      const paddingTop = parseCssPixels(styles.paddingTop);
+      return {
+        x: event.clientX - rect.left - paddingLeft,
+        y: event.clientY - rect.top - paddingTop,
+      };
+    }
+
+    function samePayloadIdentity(left, right) {
+      return Boolean(left && right)
+        && left.id === right.id
+        && left.image_path === right.image_path;
+    }
+
+    function stepScale(currentScale, direction, stepPercent) {
+      const factor = 1 + Math.max(1, Number(stepPercent) || 10) / 100;
+      const nextScale = direction > 0 ? currentScale * factor : currentScale / factor;
+      return clampScale(nextScale);
+    }
+
     function render() {
+      const imageMetrics = payload ? getImageLayoutMetrics(scale) : null;
+      const canPan = Boolean(
+        imageMetrics
+        && (imageMetrics.contentWidth > imageMetrics.viewportWidth
+          || imageMetrics.contentHeight > imageMetrics.viewportHeight),
+      );
       zoomLabelEl.textContent = `${Math.round(scale * 100)}%`;
       zoomOutBtn.disabled = scale <= FIT_SCALE;
       zoomResetBtn.disabled = scale === FIT_SCALE;
       zoomInBtn.disabled = !payload;
+      contentEl.classList.toggle('has-image', Boolean(imageMetrics));
+      contentEl.classList.toggle('can-pan', canPan);
+      contentEl.classList.toggle('is-panning', panSession !== null);
 
       if (!payload) {
         sourceEl.textContent = '';
@@ -210,7 +387,13 @@
         imageEl.classList.remove('visible');
         imageEl.classList.remove('zoomed');
         imageEl.removeAttribute('src');
-        imageEl.style.transform = '';
+        imageEl.style.width = '';
+        imageEl.style.height = '';
+        imageEl.style.marginLeft = '';
+        imageEl.style.marginRight = '';
+        imageEl.style.marginTop = '';
+        imageEl.style.marginBottom = '';
+        stopPan();
         return;
       }
 
@@ -218,25 +401,57 @@
       emptyEl.hidden = true;
       imageEl.classList.add('visible');
 
-      // At fit-scale (1.0) we let the browser size the image to the content area
-      // via max-width/height so the whole picture is visible at once. Above 1.0
-      // we drop those caps and apply a CSS transform; .content's overflow:auto
-      // then provides the scrollbars.
-      if (scale > FIT_SCALE) {
-        imageEl.classList.add('zoomed');
-        imageEl.style.transform = `scale(${scale})`;
+      // Use explicit width/height plus computed margins on every zoom level so the
+      // same image point can remain under the mouse and portrait images stay
+      // centered on the non-overflow axis.
+      if (imageMetrics) {
+        imageEl.classList.toggle('zoomed', scale > FIT_SCALE);
+        imageEl.style.width = `${imageMetrics.imageWidth}px`;
+        imageEl.style.height = `${imageMetrics.imageHeight}px`;
+        imageEl.style.marginLeft = `${imageMetrics.marginLeft}px`;
+        imageEl.style.marginRight = `${imageMetrics.marginRight}px`;
+        imageEl.style.marginTop = `${imageMetrics.marginTop}px`;
+        imageEl.style.marginBottom = `${imageMetrics.marginBottom}px`;
       } else {
         imageEl.classList.remove('zoomed');
-        imageEl.style.transform = '';
+        imageEl.style.width = '';
+        imageEl.style.height = '';
+        imageEl.style.marginLeft = '';
+        imageEl.style.marginRight = '';
+        imageEl.style.marginTop = '';
+        imageEl.style.marginBottom = '';
+      }
+
+      if (scale <= FIT_SCALE) {
+        stopPan();
       }
     }
 
-    function applyPayload(nextPayload) {
+    function stopPan() {
+      if (!panSession) {
+        contentEl.classList.remove('is-panning');
+        return;
+      }
+      try {
+        contentEl.releasePointerCapture?.(panSession.pointerId);
+      } catch (_) {
+        // Ignore missing capture / detached pointer state.
+      }
+      panSession = null;
+      contentEl.classList.remove('is-panning');
+    }
+
+    function applyPayload(nextPayload, options = {}) {
+      const preserveView = Boolean(options.preserveView) && samePayloadIdentity(payload, nextPayload);
       payload = nextPayload;
-      scale = FIT_SCALE;
       imageEl.src = internals?.convertFileSrc
         ? internals.convertFileSrc(payload.image_path)
         : payload.image_path;
+      if (!preserveView) {
+        scale = FIT_SCALE;
+        contentEl.scrollLeft = 0;
+        contentEl.scrollTop = 0;
+      }
       render();
     }
 
@@ -246,18 +461,24 @@
       render();
     }
 
-    function changeZoom(direction) {
+    function setScale(nextScale, anchor = null) {
+      const clampedScale = clampScale(nextScale);
+      const scrollTarget = clampedScale === scale ? null : getScrollTargetForScale(clampedScale, anchor);
+      scale = clampedScale;
+      render();
+      applyScrollTarget(scrollTarget);
+    }
+
+    function changeZoom(direction, stepPercent = null, anchor = null) {
       if (!payload || (direction < 0 && scale <= FIT_SCALE)) {
         return;
       }
-      const step = Math.max(1, Number(payload.zoom_step) || 10) / 100;
-      scale = clampScale(scale + direction * step);
-      render();
+      const nextScale = stepScale(scale, direction, stepPercent ?? payload.zoom_step);
+      setScale(nextScale, anchor);
     }
 
     function resetZoom() {
-      scale = FIT_SCALE;
-      render();
+      setScale(FIT_SCALE);
     }
 
     async function refreshPayload() {
@@ -267,7 +488,7 @@
       try {
         const nextPayload = await internals.invoke('cb_get_image_preview_payload');
         if (nextPayload) {
-          applyPayload(nextPayload);
+          applyPayload(nextPayload, { preserveView: true });
         } else {
           clearPayload();
         }
@@ -298,23 +519,73 @@
       }
     }
 
-    zoomOutBtn.addEventListener('click', () => changeZoom(-1));
+    zoomOutBtn.addEventListener('click', () => changeZoom(-1, WHEEL_STEP_PERCENT));
     zoomResetBtn.addEventListener('click', resetZoom);
-    zoomInBtn.addEventListener('click', () => changeZoom(1));
+    zoomInBtn.addEventListener('click', () => changeZoom(1, WHEEL_STEP_PERCENT));
     fullscreenBtn.addEventListener('click', () => { void toggleFullscreen(); });
 
     imageEl.addEventListener('dblclick', resetZoom);
+    imageEl.addEventListener('dragstart', (event) => event.preventDefault());
+    imageEl.addEventListener('load', render);
+    window.addEventListener('resize', render);
+
+    contentEl.addEventListener('pointerdown', (event) => {
+      if (!payload || !contentEl.classList.contains('can-pan')) {
+        return;
+      }
+      if (event.button !== 0 || !event.isPrimary || event.target !== imageEl) {
+        return;
+      }
+      panSession = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        scrollLeft: contentEl.scrollLeft,
+        scrollTop: contentEl.scrollTop,
+      };
+      contentEl.classList.add('is-panning');
+      contentEl.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+    });
+
+    contentEl.addEventListener('pointermove', (event) => {
+      if (!panSession || event.pointerId !== panSession.pointerId) {
+        return;
+      }
+      const deltaX = event.clientX - panSession.startX;
+      const deltaY = event.clientY - panSession.startY;
+      contentEl.scrollLeft = panSession.scrollLeft - deltaX;
+      contentEl.scrollTop = panSession.scrollTop - deltaY;
+      event.preventDefault();
+    });
+
+    contentEl.addEventListener('pointerup', (event) => {
+      if (panSession && event.pointerId === panSession.pointerId) {
+        stopPan();
+      }
+    });
+
+    contentEl.addEventListener('pointercancel', (event) => {
+      if (panSession && event.pointerId === panSession.pointerId) {
+        stopPan();
+      }
+    });
+
+    contentEl.addEventListener('lostpointercapture', (event) => {
+      if (panSession && event.pointerId === panSession.pointerId) {
+        stopPan();
+      }
+    });
 
     contentEl.addEventListener('wheel', (event) => {
       if (!payload) {
         return;
       }
-      // Plain wheel scrolls when zoomed; Ctrl+wheel always zooms.
-      if (!event.ctrlKey && scale > FIT_SCALE) {
+      if (event.deltaY === 0) {
         return;
       }
       event.preventDefault();
-      changeZoom(event.deltaY < 0 ? 1 : -1);
+      changeZoom(event.deltaY < 0 ? 1 : -1, WHEEL_STEP_PERCENT, getEventAnchor(event));
     }, { passive: false });
 
     document.addEventListener('keydown', (event) => {

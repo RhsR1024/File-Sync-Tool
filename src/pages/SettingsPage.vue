@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw } from 'lucide-vue-next';
+import { ref, onMounted, computed, watch, nextTick } from 'vue';
+import { Save, Plus, Trash2, FolderOpen, Globe, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw, RefreshCw } from 'lucide-vue-next';
 import { getConfig, saveConfig, testSshConnection, addSystemEvent, getAppPaths, openPathParent, getCustomDataDir, setCustomDataDir, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { restartSchedulerInterval } from '@/lib/scheduler';
 import DirectoryPathInput from '@/components/settings/DirectoryPathInput.vue';
+import Empty from '@/components/Empty.vue';
 import { getDirectoryInputValue, getTaskLocalPathHint, getTaskLocalPathPlaceholder, toOptionalDirectoryValue } from '@/lib/settingsDirectoryPathState';
 import { createDefaultClipboardSettings } from '@/lib/clipboardTypes';
 import { useI18n } from 'vue-i18n';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { pushToast, dismissToast } from '@/composables/useToast';
 
 defineOptions({ name: 'SettingsPage' });
 
@@ -52,80 +54,127 @@ const config = ref<AppConfig>({
 const newExt = ref('');
 const newInclude = ref('');
 const newTimeRange = ref('');
-const statusMsg = ref('');
-const statusTone = ref<'success' | 'error' | 'info'>('success');
 const isServerManagerOpen = ref(false);
-let statusMsgTimer: ReturnType<typeof setTimeout> | null = null;
+const isSaving = ref(false);
+const serverManagerCloseBtn = ref<HTMLButtonElement | null>(null);
+let serverManagerOpenerEl: HTMLElement | null = null;
 
 const enabledServerCount = computed(() => config.value.servers.filter(server => server.enabled).length);
 const intervalError = computed(() => config.value.interval_minutes < 5 ? t('settings.minIntervalError', { min: 5 }) : '');
 const stabilityCheckError = computed(() => config.value.stability_check_secs < 60 ? t('settings.minStabilityCheckError', { min: 60 }) : '');
 const recentFileGuardError = computed(() => config.value.recent_file_guard_mins < 3 ? t('settings.minRecentFileGuardError', { min: 3 }) : '');
 const hasConfigErrors = computed(() => Boolean(intervalError.value || stabilityCheckError.value || recentFileGuardError.value));
-const launchAndAutoStartFileShareTitle = computed(() => locale.value.startsWith('zh') ? '开机后自动恢复文件共享' : 'Launch On Startup And Restore File Share');
-const launchAndAutoStartFileShareDesc = computed(() => locale.value.startsWith('zh')
-  ? '启用后，应用会随系统启动，并在启动后按已保存的文件共享配置自动恢复服务。'
-  : 'When enabled, the app starts with the system and restores file share from saved settings.');
+const launchAndAutoStartFileShareTitle = computed(() => t('settings.launchAndAutoStartFileShare'));
+const launchAndAutoStartFileShareDesc = computed(() => t('settings.launchAndAutoStartFileShareDesc'));
 
 function serverDisplayName(server: DeployServer) {
     return server.name || server.host;
 }
 
+function rememberOpener() {
+    const active = document.activeElement;
+    serverManagerOpenerEl = active instanceof HTMLElement ? active : null;
+}
+
 function openServerManager() {
+    rememberOpener();
     isServerManagerOpen.value = true;
+    nextTick(() => {
+        serverManagerCloseBtn.value?.focus();
+    });
 }
 
 function closeServerManager() {
     isServerManagerOpen.value = false;
+    nextTick(() => {
+        serverManagerOpenerEl?.focus?.();
+        serverManagerOpenerEl = null;
+    });
 }
 
-function clearStatusMsg() {
-    if (statusMsgTimer) {
-        clearTimeout(statusMsgTimer);
-        statusMsgTimer = null;
+function trapServerManagerFocus(event: KeyboardEvent) {
+    if (event.key !== 'Tab') return;
+    const dialog = document.getElementById('settings-server-manager-dialog');
+    if (!dialog) return;
+    const focusable = dialog.querySelectorAll<HTMLElement>(
+        'a[href], area[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    );
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
     }
-    statusMsg.value = '';
 }
 
-function showStatusMsg(
-    message: string,
-    tone: 'success' | 'error' | 'info' = 'success',
-    duration = 3000,
-) {
-    clearStatusMsg();
-    statusMsg.value = message;
-    statusTone.value = tone;
-    if (duration > 0) {
-        statusMsgTimer = setTimeout(() => {
-            statusMsg.value = '';
-            statusMsgTimer = null;
-        }, duration);
+function handleServerManagerKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closeServerManager();
+        return;
     }
+    trapServerManagerFocus(event);
 }
+
+// Transient operation feedback flows through the shared toast queue (M01).
+// Inline field-level validation (e.g. intervalError, stabilityCheckError)
+// continues to render directly under the offending input — see template.
 
 // ── Command Group Management ──────────────────────────────────────────────────
-const builtinCommandGroups: CommandGroup[] = [
+// Built-in groups carry stable ids; their human-facing name is i18n-driven so
+// language switches reflect immediately while config persistence stays stable.
+type BuiltinCommandKey = 'unzip' | 'uninstall' | 'cleanup' | 'install';
+const builtinCommandDescriptors: ReadonlyArray<{ id: string; key: BuiltinCommandKey; commands: string[] }> = [
     {
         id: '__builtin_extract__',
-        name: '解压安装包',
+        key: 'unzip',
         commands: ['cd ${remote_target} && tar -zxvf ${filename}.tar.gz'],
     },
     {
         id: '__builtin_uninstall__',
-        name: '卸载旧版本',
+        key: 'uninstall',
         commands: ['cd ${remote_target}/${filename} && echo y | ./integrated_uninstall.sh'],
     },
     {
         id: '__builtin_cleanup__',
-        name: '清理 OMC/HA',
+        key: 'cleanup',
         commands: ['which omc_uninstall.sh > /dev/null 2>&1 && echo yes | omc_uninstall.sh || true; which hauninstall.sh > /dev/null 2>&1 && printf \'yes\\n\' | hauninstall.sh || true'],
     },
     {
         id: '__builtin_install__',
-        name: '安装新版本',
+        key: 'install',
         commands: ['cd ${remote_target}/${filename} && printf \'yes\\ny\\n\' | ./update -f'],
     },
 ];
+
+const builtinKeyById: Record<string, BuiltinCommandKey> = builtinCommandDescriptors.reduce(
+    (acc, descriptor) => {
+        acc[descriptor.id] = descriptor.key;
+        return acc;
+    },
+    {} as Record<string, BuiltinCommandKey>,
+);
+
+function builtinDisplayName(group: CommandGroup): string {
+    const key = builtinKeyById[group.id];
+    return key ? t(`settings.builtinCommands.${key}.name`) : group.name;
+}
+
+function makeBuiltinGroup(descriptor: typeof builtinCommandDescriptors[number]): CommandGroup {
+    return {
+        id: descriptor.id,
+        name: t(`settings.builtinCommands.${descriptor.key}.name`),
+        commands: [...descriptor.commands],
+    };
+}
+
+const builtinCommandGroups = computed<CommandGroup[]>(() =>
+    builtinCommandDescriptors.map(makeBuiltinGroup),
+);
 
 const isEditingCommandGroup = ref(false);
 const editingCommandGroupIndex = ref(-1);
@@ -135,7 +184,7 @@ const newGroupCommand = ref('');
 function restoreBuiltinCommandGroups() {
     if (!confirm(t('settings.confirmRestoreBuiltin'))) return;
     const existing = config.value.command_groups;
-    for (const builtin of builtinCommandGroups) {
+    for (const builtin of builtinCommandGroups.value) {
         const idx = existing.findIndex(g => g.id === builtin.id);
         if (idx >= 0) {
             existing[idx] = { ...builtin, commands: [...builtin.commands] };
@@ -195,7 +244,9 @@ function removeGroupCommand(index: number) {
 }
 
 function commandGroupName(id: string) {
-    return config.value.command_groups.find(g => g.id === id)?.name || id.substring(0, 8);
+    const group = config.value.command_groups.find(g => g.id === id);
+    if (!group) return id.substring(0, 8);
+    return builtinDisplayName(group);
 }
 
 // ── Local Script Groups ──────────────────────────────────────────────────────
@@ -514,13 +565,18 @@ async function testServerConnection(index: number) {
 }
 
 async function testAllServers() {
-    showStatusMsg(t('settings.testing'), 'info', 0);
-    for (let i = 0; i < config.value.servers.length; i++) {
-        const server = config.value.servers[i];
-        if (!server.enabled) continue;
-        await testServerConnection(i);
+    const id = pushToast(t('settings.testing'), 'info', { ttlMs: 0 });
+    try {
+        for (let i = 0; i < config.value.servers.length; i++) {
+            const server = config.value.servers[i];
+            if (!server.enabled) continue;
+            await testServerConnection(i);
+        }
+    } finally {
+        // Replace the persistent "testing" toast with a brief completion ping
+        // so the user knows the run finished.
+        dismissToast(id);
     }
-    clearStatusMsg();
 }
 
 // ── Manual Deploy ─────────────────────────────────────────────────────────────
@@ -657,7 +713,7 @@ function changeLanguage(lang: string) {
 async function copyToClipboard(text: string) {
     try {
         await writeText(text);
-        showStatusMsg(t('settings.pathCopied'), 'success', 2000);
+        pushToast(t('settings.pathCopied'), 'success', { ttlMs: 2000 });
     } catch (e) {
         console.error('Failed to copy', e);
     }
@@ -673,7 +729,7 @@ async function openParentFolder(path: string) {
 }
 
 function handleDirectoryPickError(error: string) {
-    showStatusMsg(t('settings.selectDirectoryFailed', { error }), 'error', 4000);
+    pushToast(t('settings.selectDirectoryFailed', { error }), 'error', { ttlMs: 4000 });
 }
 
 async function load() {
@@ -681,7 +737,7 @@ async function load() {
         config.value = await getConfig();
         // Auto-populate built-in groups when none are configured (e.g. fresh install)
         if (config.value.command_groups.length === 0) {
-            config.value.command_groups = builtinCommandGroups.map(g => ({ ...g, commands: [...g.commands] }));
+            config.value.command_groups = builtinCommandGroups.value.map(g => ({ ...g, commands: [...g.commands] }));
         }
         const [cfg, log] = await getAppPaths();
         configPath.value = cfg;
@@ -703,24 +759,31 @@ async function saveCustomDataDir() {
         const [cfg, log] = await getAppPaths();
         configPath.value = cfg;
         logPath.value = log;
-        showStatusMsg(t('settings.customDataDirMigrated'), 'success', 4000);
+        pushToast(t('settings.customDataDirMigrated'), 'success', { ttlMs: 4000 });
     } catch (e) {
-        showStatusMsg(String(e), 'error', 4000);
+        pushToast(String(e), 'error', { ttlMs: 4000 });
     } finally {
         customDataDirSaving.value = false;
     }
 }
 
 async function save() {
-    if (hasConfigErrors.value) return;
+    if (hasConfigErrors.value) {
+        pushToast(t('settings.toast.invalid'), 'warning');
+        return;
+    }
+    if (isSaving.value) return;
+    isSaving.value = true;
     try {
         await saveConfig(config.value);
         if (config.value.max_log_lines > 0) appStore.maxLogLines = config.value.max_log_lines;
-        showStatusMsg(t('settings.saved'));
+        pushToast(t('settings.toast.saved'), 'success');
         addSystemEvent('CONFIG_CHANGE', t('settings.saved'));
         await restartSchedulerInterval();
     } catch (e) {
-        showStatusMsg(t('settings.saveError', { error: e }), 'error', 5000);
+        pushToast(t('settings.toast.saveError', { error: String(e) }), 'error', { ttlMs: 5000 });
+    } finally {
+        isSaving.value = false;
     }
 }
 
@@ -732,36 +795,13 @@ watch(() => taskForm.value.rule.type, (newType) => {
 });
 
 onMounted(load);
-onUnmounted(clearStatusMsg);
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto">
-  <div class="p-6 max-w-4xl mx-auto space-y-8 pb-28">
+  <div class="h-full min-h-0 overflow-y-auto overscroll-y-none bg-slate-50">
+  <div class="min-h-full w-full p-6 max-w-4xl mx-auto space-y-6 pb-8">
     <div class="flex justify-between items-center">
-      <h2 class="text-2xl font-bold text-slate-800">{{ t('settings.title') }}</h2>
-    </div>
-
-    <div
-      v-if="statusMsg"
-      class="fixed left-1/2 top-6 z-[70] w-[min(calc(100vw-2rem),28rem)] -translate-x-1/2 rounded-2xl border px-4 py-3 text-sm font-medium shadow-2xl backdrop-blur"
-      :class="{
-        'border-emerald-200 bg-emerald-50/95 text-emerald-700 shadow-emerald-200/70': statusTone === 'success',
-        'border-rose-200 bg-rose-50/95 text-rose-700 shadow-rose-200/70': statusTone === 'error',
-        'border-sky-200 bg-sky-50/95 text-sky-700 shadow-sky-200/70': statusTone === 'info',
-      }"
-    >
-      <div class="flex items-start gap-2.5">
-        <span
-          class="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
-          :class="{
-            'bg-emerald-500': statusTone === 'success',
-            'bg-rose-500': statusTone === 'error',
-            'bg-sky-500': statusTone === 'info',
-          }"
-        ></span>
-        <span class="leading-5">{{ statusMsg }}</span>
-      </div>
+      <h2 class="text-2xl font-bold text-slate-950">{{ t('settings.title') }}</h2>
     </div>
 
     <!-- Startup Behavior -->
@@ -773,7 +813,7 @@ onUnmounted(clearStatusMsg);
         <h3 class="text-base font-semibold text-slate-700">{{ t('settings.startupOptions') }}</h3>
       </div>
       <div class="p-6 space-y-4">
-      <label class="flex items-center justify-between gap-3">
+      <label class="flex items-center justify-between gap-3" :title="t('settings.tooltip.launchAndAutoScan')">
         <div>
           <div class="text-sm font-medium text-slate-700">{{ t('settings.launchAndAutoScan') }}</div>
           <p class="text-xs text-slate-400 mt-1">{{ t('settings.launchAndAutoScanDesc') }}</p>
@@ -783,44 +823,44 @@ onUnmounted(clearStatusMsg);
           <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
         </div>
       </label>
-      <label class="flex items-center justify-between gap-3">
+      <label class="flex items-center justify-between gap-3" :title="t('settings.tooltip.launchAndAutoStartFileShare')">
         <div>
           <div class="text-sm font-medium text-slate-700">{{ launchAndAutoStartFileShareTitle }}</div>
           <p class="text-xs text-slate-400 mt-1">{{ launchAndAutoStartFileShareDesc }}</p>
         </div>
         <div class="shrink-0 relative inline-flex items-center cursor-pointer">
           <input type="checkbox" v-model="config.launch_and_auto_start_file_share" @change="save" class="sr-only peer">
-          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 motion-reduce:after:transition-none"></div>
         </div>
       </label>
-      <label class="flex items-center justify-between gap-3">
+      <label class="flex items-center justify-between gap-3" :title="t('settings.tooltip.closeToTray')">
         <div>
           <div class="text-sm font-medium text-slate-700">{{ t('settings.closeToTray') }}</div>
           <p class="text-xs text-slate-400 mt-1">{{ t('settings.closeToTrayDesc') }}</p>
         </div>
         <div class="shrink-0 relative inline-flex items-center cursor-pointer">
           <input type="checkbox" v-model="config.close_to_tray" @change="save" class="sr-only peer">
-          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 motion-reduce:after:transition-none"></div>
         </div>
       </label>
       <div class="flex items-center justify-between gap-3">
-        <div>
+        <label for="settings-max-log-lines">
           <div class="text-sm font-medium text-slate-700">{{ t('settings.maxLogLines') }}</div>
           <p class="text-xs text-slate-400 mt-1">{{ t('settings.maxLogLinesDesc') }}</p>
-        </div>
+        </label>
         <div class="flex items-center gap-2">
-          <input type="number" v-model.number="config.max_log_lines" @change="save" min="50" max="5000" step="50"
+          <input id="settings-max-log-lines" type="number" v-model.number="config.max_log_lines" @change="save" min="50" max="5000" step="50"
                  class="w-24 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-right focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
           <span class="text-xs text-slate-500">{{ t('settings.lines') }}</span>
         </div>
       </div>
       <div class="flex items-center justify-between gap-3">
-        <div>
+        <label for="settings-max-task-records">
           <div class="text-sm font-medium text-slate-700">{{ t('settings.maxTaskRecords') }}</div>
           <p class="text-xs text-slate-400 mt-1">{{ t('settings.maxTaskRecordsDesc') }}</p>
-        </div>
+        </label>
         <div class="flex items-center gap-2">
-          <input type="number" v-model.number="config.max_task_records" @change="save" min="10" max="500" step="10"
+          <input id="settings-max-task-records" type="number" v-model.number="config.max_task_records" @change="save" min="10" max="500" step="10"
                  class="w-24 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-right focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
           <span class="text-xs text-slate-500">{{ t('settings.lines') }}</span>
         </div>
@@ -828,6 +868,7 @@ onUnmounted(clearStatusMsg);
       </div>
     </div>
 
+    <!-- Update Checks -->
     <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
       <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
         <div class="w-8 h-8 rounded-lg bg-sky-100 text-sky-600 flex items-center justify-center shrink-0">
@@ -836,20 +877,21 @@ onUnmounted(clearStatusMsg);
         <h3 class="text-base font-semibold text-slate-700">{{ t('settings.update.section') }}</h3>
       </div>
       <div class="p-6 space-y-4">
-        <label class="flex items-center justify-between gap-3">
+        <label class="flex items-center justify-between gap-3" :title="t('settings.tooltip.notifyOnNewVersion')">
           <div>
             <div class="text-sm font-medium text-slate-700">{{ t('settings.update.notifyToggle') }}</div>
             <p class="text-xs text-slate-400 mt-1">{{ t('settings.update.notifyHelp') }}</p>
           </div>
           <div class="shrink-0 relative inline-flex items-center cursor-pointer">
             <input type="checkbox" v-model="config.notify_on_new_version" @change="save" class="sr-only peer">
-            <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-sky-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-sky-600"></div>
+            <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-sky-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-sky-600 motion-reduce:after:transition-none"></div>
           </div>
         </label>
 
         <div class="space-y-2">
-          <label class="block text-sm font-medium text-slate-700">{{ t('settings.update.serverLabel') }}</label>
+          <label for="settings-update-server-url" class="block text-sm font-medium text-slate-700">{{ t('settings.update.serverLabel') }}</label>
           <input
+            id="settings-update-server-url"
             v-model.trim="config.update_server_url"
             type="text"
             :placeholder="t('settings.update.serverPlaceholder')"
@@ -894,25 +936,25 @@ onUnmounted(clearStatusMsg);
       <div class="p-6 space-y-4">
       <div class="space-y-3">
          <div>
-            <label class="block text-xs font-medium text-slate-500 mb-1 uppercase tracking-wider">{{ t('settings.configFile') }}</label>
+            <label for="settings-config-path" class="block text-xs font-medium text-slate-500 mb-1 uppercase tracking-wider">{{ t('settings.configFile') }}</label>
             <div class="flex gap-2">
-               <code class="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 break-all">{{ configPath }}</code>
-               <button @click="copyToClipboard(configPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.copyPath')">
+               <code id="settings-config-path" class="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 break-all">{{ configPath }}</code>
+               <button @click="copyToClipboard(configPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.copyPath')" :aria-label="t('settings.copyPath')">
                   <Copy class="w-4 h-4" />
                </button>
-               <button @click="openParentFolder(configPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.openFolder')">
+               <button @click="openParentFolder(configPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.openFolder')" :aria-label="t('settings.openFolder')">
                   <FolderOpen class="w-4 h-4" />
                </button>
             </div>
          </div>
          <div>
-            <label class="block text-xs font-medium text-slate-500 mb-1 uppercase tracking-wider">{{ t('settings.logFile') }}</label>
+            <label for="settings-log-path" class="block text-xs font-medium text-slate-500 mb-1 uppercase tracking-wider">{{ t('settings.logFile') }}</label>
             <div class="flex gap-2">
-               <code class="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 break-all">{{ logPath }}</code>
-               <button @click="copyToClipboard(logPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.copyPath')">
+               <code id="settings-log-path" class="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 break-all">{{ logPath }}</code>
+               <button @click="copyToClipboard(logPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.copyPath')" :aria-label="t('settings.copyPath')">
                   <Copy class="w-4 h-4" />
                </button>
-               <button @click="openParentFolder(logPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.openFolder')">
+               <button @click="openParentFolder(logPath)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100" :title="t('settings.openFolder')" :aria-label="t('settings.openFolder')">
                   <FolderOpen class="w-4 h-4" />
                </button>
             </div>
@@ -928,9 +970,10 @@ onUnmounted(clearStatusMsg);
             </button>
          </div>
          <div v-if="showDirEditor" class="mt-2 p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
+            <label for="settings-custom-data-dir" class="block text-xs font-medium text-slate-500">{{ t('settings.customDataDir') }}</label>
             <p class="text-xs text-slate-500">{{ t('settings.customDataDirDesc') }}</p>
             <div class="flex gap-2">
-               <input v-model="customDataDirInput" class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-xs font-mono" :placeholder="t('settings.customDataDirPlaceholder')" />
+               <input id="settings-custom-data-dir" v-model="customDataDirInput" class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-xs font-mono" :placeholder="t('settings.customDataDirPlaceholder')" />
                <button @click="saveCustomDataDir" :disabled="customDataDirSaving"
                  class="px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-medium transition-colors disabled:opacity-50 whitespace-nowrap">
                  {{ customDataDirSaving ? t('settings.saving') : t('settings.save') }}
@@ -955,7 +998,10 @@ onUnmounted(clearStatusMsg);
       </div>
       <div class="p-6 space-y-4">
       <div>
-        <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.localPath') }}</label>
+        <span class="block text-sm font-medium text-slate-600 mb-1">
+          {{ t('settings.localPath') }}
+          <span class="text-rose-500" :aria-label="t('settings.required.indicator')">*</span>
+        </span>
         <DirectoryPathInput
           v-model="config.local_path"
           :title="t('settings.selectDirectory')"
@@ -980,9 +1026,13 @@ onUnmounted(clearStatusMsg);
         </button>
       </div>
       <div class="p-6 space-y-3">
-        <div v-if="config.tasks.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
-          {{ t('settings.noTasks') }}
-        </div>
+        <Empty
+          v-if="config.tasks.length === 0"
+          :icon="ListChecks"
+          :description="t('settings.noTasks')"
+          :action-label="t('settings.addTask')"
+          @action="addTask"
+        />
 
         <div v-else class="space-y-3">
           <div v-for="(task, idx) in config.tasks" :key="task.id"
@@ -1020,10 +1070,10 @@ onUnmounted(clearStatusMsg);
               </div>
             </div>
             <div class="flex items-center gap-1 shrink-0">
-              <button @click="editTask(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
+              <button @click="editTask(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')" :aria-label="t('settings.edit')">
                 <Edit class="w-4 h-4" />
               </button>
-              <button @click="removeTask(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')">
+              <button @click="removeTask(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')" :aria-label="t('settings.deleteTitle')">
                 <Trash2 class="w-4 h-4" />
               </button>
             </div>
@@ -1253,15 +1303,22 @@ onUnmounted(clearStatusMsg);
       </div>
       <div class="p-6 space-y-5">
       <div class="space-y-3">
-        <label class="block text-base font-medium text-slate-700">{{ t('settings.scanInterval') }}</label>
+        <label for="settings-scan-interval" class="block text-base font-medium text-slate-700">
+          {{ t('settings.scanInterval') }}
+          <span class="text-rose-500" :aria-label="t('settings.required.indicator')">*</span>
+        </label>
         <div class="flex items-center gap-3">
-          <input v-model.number="config.interval_minutes" type="number" min="5"
+          <input
+            id="settings-scan-interval"
+            v-model.number="config.interval_minutes" type="number" min="5"
             class="w-28 h-10 px-3 border rounded-lg text-slate-700 focus:ring-2 outline-none"
-            :class="intervalError ? 'border-red-400 focus:ring-red-200 focus:border-red-400 bg-red-50' : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'" />
+            :class="intervalError ? 'border-red-400 focus:ring-red-200 focus:border-red-400 bg-red-50' : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'"
+            :aria-invalid="intervalError ? 'true' : 'false'"
+            aria-describedby="settings-scan-interval-help" />
           <span class="text-sm font-medium text-slate-500">{{ t('settings.minutes') }}</span>
-          <span class="text-xs leading-5 text-slate-400">{{ t('settings.minInterval') }}</span>
+          <span id="settings-scan-interval-help" class="text-xs leading-5 text-slate-400">{{ t('settings.field.interval.helpMin') }}</span>
         </div>
-        <p v-if="intervalError" class="text-xs leading-5 text-red-500">{{ intervalError }}</p>
+        <p v-if="intervalError" class="text-xs leading-5 text-red-500" role="alert">{{ intervalError }}</p>
       </div>
 
       <div class="pt-5 border-t border-slate-100 space-y-4">
@@ -1269,37 +1326,47 @@ onUnmounted(clearStatusMsg);
         <p class="text-sm leading-6 text-slate-500">{{ t('settings.stabilityCheckDesc') }}</p>
         <div class="space-y-4">
           <div class="space-y-3">
-            <label class="block text-base font-medium text-slate-700">{{ t('settings.recentFileGuard') }}</label>
+            <label for="settings-recent-file-guard" class="block text-base font-medium text-slate-700">{{ t('settings.recentFileGuard') }}</label>
             <div class="flex items-center gap-3">
-              <input v-model.number="config.recent_file_guard_mins" type="number" min="3"
+              <input
+                id="settings-recent-file-guard"
+                v-model.number="config.recent_file_guard_mins" type="number" min="3"
                 class="w-28 h-10 px-3 border rounded-lg text-slate-700 focus:ring-2 outline-none"
-                :class="recentFileGuardError ? 'border-red-400 focus:ring-red-200 focus:border-red-400 bg-red-50' : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'" />
+                :class="recentFileGuardError ? 'border-red-400 focus:ring-red-200 focus:border-red-400 bg-red-50' : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'"
+                :aria-invalid="recentFileGuardError ? 'true' : 'false'"
+                aria-describedby="settings-recent-file-guard-help" />
               <span class="text-sm font-medium text-slate-500">{{ t('settings.minutes') }}</span>
+              <span class="text-xs leading-5 text-slate-400">{{ t('settings.field.guard.helpMin') }}</span>
             </div>
-            <p v-if="recentFileGuardError" class="text-xs leading-5 text-red-500">{{ recentFileGuardError }}</p>
-            <p class="text-sm leading-6 text-slate-500">{{ t('settings.recentFileGuardDesc') }}</p>
+            <p v-if="recentFileGuardError" class="text-xs leading-5 text-red-500" role="alert">{{ recentFileGuardError }}</p>
+            <p id="settings-recent-file-guard-help" class="text-sm leading-6 text-slate-500">{{ t('settings.recentFileGuardDesc') }}</p>
             <p class="text-xs leading-5 text-slate-400">{{ t('settings.recentFileGuardHint') }}</p>
           </div>
           <div class="space-y-3">
-            <label class="block text-base font-medium text-slate-700">{{ t('settings.stabilityCheckSeconds') }}</label>
+            <label for="settings-stability-check-secs" class="block text-base font-medium text-slate-700">{{ t('settings.stabilityCheckSeconds') }}</label>
             <div class="flex items-center gap-3">
-              <input v-model.number="config.stability_check_secs" type="number" min="60"
+              <input
+                id="settings-stability-check-secs"
+                v-model.number="config.stability_check_secs" type="number" min="60"
                 class="w-28 h-10 px-3 border rounded-lg text-slate-700 focus:ring-2 outline-none"
-                :class="stabilityCheckError ? 'border-red-400 focus:ring-red-200 focus:border-red-400 bg-red-50' : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'" />
+                :class="stabilityCheckError ? 'border-red-400 focus:ring-red-200 focus:border-red-400 bg-red-50' : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'"
+                :aria-invalid="stabilityCheckError ? 'true' : 'false'"
+                aria-describedby="settings-stability-check-secs-help" />
               <span class="text-sm font-medium text-slate-500">{{ t('settings.seconds') }}</span>
+              <span class="text-xs leading-5 text-slate-400">{{ t('settings.field.stability.helpMin') }}</span>
             </div>
-            <p v-if="stabilityCheckError" class="text-xs leading-5 text-red-500">{{ stabilityCheckError }}</p>
-            <p class="text-xs leading-5 text-slate-400">{{ t('settings.stabilityCheckHint') }}</p>
+            <p v-if="stabilityCheckError" class="text-xs leading-5 text-red-500" role="alert">{{ stabilityCheckError }}</p>
+            <p id="settings-stability-check-secs-help" class="text-xs leading-5 text-slate-400">{{ t('settings.stabilityCheckHint') }}</p>
           </div>
         </div>
       </div>
 
       <div class="pt-5 border-t border-slate-100 space-y-3">
         <div>
-          <label class="block text-base font-medium text-slate-700">{{ t('settings.copyBufferSize') }}</label>
+          <label for="settings-copy-buffer-size" class="block text-base font-medium text-slate-700">{{ t('settings.copyBufferSize') }}</label>
           <p class="text-sm leading-6 text-slate-500 mt-1">{{ t('settings.copyBufferSizeDesc') }}</p>
         </div>
-        <select v-model.number="config.copy_buffer_size_kb"
+        <select id="settings-copy-buffer-size" v-model.number="config.copy_buffer_size_kb"
                 class="w-44 h-10 px-3 border border-slate-300 rounded-lg text-slate-700 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white">
           <option :value="64">64 KB</option>
           <option :value="256">256 KB</option>
@@ -1314,17 +1381,23 @@ onUnmounted(clearStatusMsg);
         <h4 class="text-base font-medium text-slate-700">{{ t('settings.timeRanges') }}</h4>
         <p class="text-sm leading-6 text-slate-500">{{ t('settings.timeRangesDesc') }}</p>
         <div class="flex items-center gap-3">
-          <input v-model="newTimeRange" @keyup.enter="addTimeRange" placeholder="09:00-18:00"
+          <label for="settings-new-time-range" class="sr-only">{{ t('settings.timeRanges') }}</label>
+          <input id="settings-new-time-range" v-model="newTimeRange" @keyup.enter="addTimeRange" placeholder="09:00-18:00"
             class="flex-1 h-10 px-3 border border-slate-300 rounded-lg text-slate-700 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500 outline-none" />
-          <button @click="addTimeRange" class="h-10 w-10 shrink-0 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 flex items-center justify-center transition-colors">
+          <button @click="addTimeRange" class="h-10 w-10 shrink-0 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 flex items-center justify-center transition-colors" :aria-label="t('settings.addTimeRange')" :title="t('settings.addTimeRange')">
             <Plus class="w-5 h-5" />
           </button>
         </div>
-        <div class="flex flex-wrap gap-2">
+        <Empty
+          v-if="config.time_ranges.length === 0"
+          :icon="Clock"
+          :description="t('settings.timeRangesDesc')"
+        />
+        <div v-else class="flex flex-wrap gap-2">
           <div v-for="(range, i) in config.time_ranges" :key="i"
             class="bg-amber-50 text-amber-700 px-3 py-1.5 rounded-full text-sm font-medium border border-amber-100 flex items-center gap-2">
             {{ range }}
-            <button @click="removeTimeRange(i)" class="hover:text-amber-900"><Trash2 class="w-3 h-3" /></button>
+            <button @click="removeTimeRange(i)" class="hover:text-amber-900" :aria-label="t('settings.deleteTitle')" :title="t('settings.deleteTitle')"><Trash2 class="w-3 h-3" /></button>
           </div>
         </div>
       </div>
@@ -1343,15 +1416,16 @@ onUnmounted(clearStatusMsg);
         <div class="p-6 space-y-4">
           <p class="text-xs text-slate-400">{{ t('settings.fileExtensionsDesc') }}</p>
           <div class="flex gap-2">
-            <input v-model="newExt" @keyup.enter="addExt" placeholder="exe"
+            <label for="settings-new-ext" class="sr-only">{{ t('settings.fileExtensions') }}</label>
+            <input id="settings-new-ext" v-model="newExt" @keyup.enter="addExt" placeholder="exe"
               class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
-            <button @click="addExt" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600"><Plus class="w-5 h-5" /></button>
+            <button @click="addExt" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600" :aria-label="t('settings.fileExtensions')" :title="t('settings.fileExtensions')"><Plus class="w-5 h-5" /></button>
           </div>
           <div class="flex flex-wrap gap-2">
             <div v-for="(ext, i) in config.file_extensions" :key="i"
               class="bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full text-sm font-medium border border-indigo-100 flex items-center gap-2">
               {{ ext }}
-              <button @click="removeExt(i)" class="hover:text-indigo-900"><Trash2 class="w-3 h-3" /></button>
+              <button @click="removeExt(i)" class="hover:text-indigo-900" :aria-label="t('settings.deleteTitle')" :title="t('settings.deleteTitle')"><Trash2 class="w-3 h-3" /></button>
             </div>
           </div>
         </div>
@@ -1367,15 +1441,16 @@ onUnmounted(clearStatusMsg);
         <div class="p-6 space-y-4">
           <p class="text-xs text-slate-400">{{ t('settings.filenameKeywordsDesc') }}</p>
           <div class="flex gap-2">
-            <input v-model="newInclude" @keyup.enter="addInclude" placeholder="UMS"
+            <label for="settings-new-include" class="sr-only">{{ t('settings.filenameKeywords') }}</label>
+            <input id="settings-new-include" v-model="newInclude" @keyup.enter="addInclude" placeholder="UMS"
               class="flex-1 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
-            <button @click="addInclude" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600"><Plus class="w-5 h-5" /></button>
+            <button @click="addInclude" class="bg-slate-100 hover:bg-slate-200 p-2 rounded-lg text-slate-600" :aria-label="t('settings.filenameKeywords')" :title="t('settings.filenameKeywords')"><Plus class="w-5 h-5" /></button>
           </div>
           <div class="flex flex-wrap gap-2">
             <div v-for="(inc, i) in config.filename_includes" :key="i"
               class="bg-purple-50 text-purple-700 px-3 py-1 rounded-full text-sm font-medium border border-purple-100 flex items-center gap-2">
               {{ inc }}
-              <button @click="removeInclude(i)" class="hover:text-purple-900"><Trash2 class="w-3 h-3" /></button>
+              <button @click="removeInclude(i)" class="hover:text-purple-900" :aria-label="t('settings.deleteTitle')" :title="t('settings.deleteTitle')"><Trash2 class="w-3 h-3" /></button>
             </div>
           </div>
         </div>
@@ -1391,9 +1466,9 @@ onUnmounted(clearStatusMsg);
           </div>
           <h3 class="text-base font-semibold text-slate-700">{{ t('settings.remoteDeployment') }}</h3>
         </div>
-        <label class="relative inline-flex items-center cursor-pointer">
+        <label class="relative inline-flex items-center cursor-pointer" :title="t('settings.tooltip.deployEnabled')">
           <input type="checkbox" v-model="config.deploy_enabled" class="sr-only peer">
-          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 motion-reduce:after:transition-none"></div>
           <span class="ml-3 text-sm font-medium text-slate-700">{{ t('settings.enable') }}</span>
         </label>
       </div>
@@ -1417,9 +1492,13 @@ onUnmounted(clearStatusMsg);
             </div>
           </div>
 
-          <div v-if="config.servers.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
-            {{ t('settings.noServers') }}
-          </div>
+          <Empty
+            v-if="config.servers.length === 0"
+            :icon="Server"
+            :description="t('settings.noServers')"
+            :action-label="t('settings.addServer')"
+            @action="addServer"
+          />
 
           <div v-else class="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-4">
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1443,12 +1522,24 @@ onUnmounted(clearStatusMsg);
         </div>
 
         <!-- Server Manager Modal -->
-        <div v-if="isServerManagerOpen" class="fixed inset-0 bg-black/50 flex items-center justify-center z-[55] p-4">
-          <div class="bg-white rounded-xl p-6 w-full max-w-5xl shadow-2xl max-h-[86vh] overflow-hidden flex flex-col">
+        <div
+          v-if="isServerManagerOpen"
+          class="fixed inset-0 bg-black/50 flex items-center justify-center z-[55] p-4"
+          @click.self="closeServerManager"
+        >
+          <div
+            id="settings-server-manager-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-server-manager-title"
+            aria-describedby="settings-server-manager-desc"
+            class="bg-white rounded-2xl p-6 w-full max-w-5xl shadow-[0_20px_70px_rgba(15,23,42,0.18)] max-h-[86vh] overflow-hidden flex flex-col"
+            @keydown="handleServerManagerKeydown"
+          >
             <div class="flex items-center justify-between gap-4 mb-4">
               <div>
-                <h3 class="text-lg font-bold text-slate-800">{{ t('settings.serverDetailsTitle') }}</h3>
-                <p class="text-sm text-slate-400 mt-1">{{ t('settings.serverDetailsDesc') }}</p>
+                <h3 id="settings-server-manager-title" class="text-lg font-bold text-slate-950">{{ t('settings.serverDetailsTitle') }}</h3>
+                <p id="settings-server-manager-desc" class="text-sm text-slate-500 mt-1">{{ t('settings.serverDetailsDesc') }}</p>
               </div>
               <div class="flex items-center gap-2">
                 <button @click="testAllServers" v-if="config.servers.length > 0"
@@ -1459,7 +1550,11 @@ onUnmounted(clearStatusMsg);
                   class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors">
                   <Plus class="w-3 h-3" /> {{ t('settings.addServer') }}
                 </button>
-                <button @click="closeServerManager" class="px-3 py-1.5 text-slate-500 hover:bg-slate-100 rounded-lg transition-colors">{{ t('settings.close') }}</button>
+                <button
+                  ref="serverManagerCloseBtn"
+                  @click="closeServerManager"
+                  class="px-3 py-1.5 text-slate-500 hover:bg-slate-100 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2"
+                >{{ t('settings.close') }}</button>
               </div>
             </div>
 
@@ -1594,9 +1689,13 @@ onUnmounted(clearStatusMsg);
             </div>
           </div>
 
-          <div v-if="config.command_groups.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
-            {{ t('settings.noCommandGroups') }}
-          </div>
+          <Empty
+            v-if="config.command_groups.length === 0"
+            :icon="Layers"
+            :description="t('settings.noCommandGroups')"
+            :action-label="t('settings.addCommandGroup')"
+            @action="addCommandGroup"
+          />
 
           <div v-else class="space-y-2">
             <div v-for="(group, idx) in config.command_groups" :key="group.id"
@@ -1607,7 +1706,7 @@ onUnmounted(clearStatusMsg);
                 </div>
                 <div class="min-w-0">
                   <div class="font-medium text-slate-800 text-sm flex items-center gap-1.5">
-                    {{ group.name }}
+                    {{ builtinDisplayName(group) }}
                     <span v-if="group.id.startsWith('__builtin_')" class="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full font-normal leading-none">{{ t('settings.builtinBadge') }}</span>
                   </div>
                   <div class="text-xs text-slate-400">{{ group.commands.length }} {{ group.commands.length === 1 ? 'command' : 'commands' }}</div>
@@ -1620,10 +1719,10 @@ onUnmounted(clearStatusMsg);
                 </div>
               </div>
               <div class="flex items-center gap-1 shrink-0">
-                <button @click="editCommandGroup(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
+                <button @click="editCommandGroup(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')" :aria-label="t('settings.edit')">
                   <Edit class="w-4 h-4" />
                 </button>
-                <button @click="removeCommandGroup(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')">
+                <button @click="removeCommandGroup(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')" :aria-label="t('settings.deleteTitle')">
                   <Trash2 class="w-4 h-4" />
                 </button>
               </div>
@@ -1844,9 +1943,13 @@ onUnmounted(clearStatusMsg);
           </button>
         </div>
 
-        <div v-if="config.local_command_groups.length === 0" class="text-center p-6 bg-slate-50 rounded-lg border border-dashed border-slate-300 text-slate-500 text-sm">
-          {{ t('settings.noLocalScriptGroups') }}
-        </div>
+        <Empty
+          v-if="config.local_command_groups.length === 0"
+          :icon="Terminal"
+          :description="t('settings.noLocalScriptGroups')"
+          :action-label="t('settings.addLocalScriptGroup')"
+          @action="addLocalGroup"
+        />
 
         <div v-else class="space-y-2">
           <div v-for="(group, gi) in config.local_command_groups" :key="group.id"
@@ -1872,10 +1975,10 @@ onUnmounted(clearStatusMsg);
               </div>
             </div>
             <div class="flex items-center gap-1 shrink-0">
-              <button @click="editLocalGroup(gi)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')">
+              <button @click="editLocalGroup(gi)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')" :aria-label="t('settings.edit')">
                 <Edit class="w-4 h-4" />
               </button>
-              <button @click="removeLocalGroup(gi)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')">
+              <button @click="removeLocalGroup(gi)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')" :aria-label="t('settings.deleteTitle')">
                 <Trash2 class="w-4 h-4" />
               </button>
             </div>
@@ -1934,12 +2037,23 @@ onUnmounted(clearStatusMsg);
 
     <button
       @click="save"
-      :disabled="hasConfigErrors"
-      class="fixed right-6 bottom-6 z-40 bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-full font-medium flex items-center gap-2 transition-all shadow-lg shadow-blue-200/70"
-      :class="hasConfigErrors ? 'opacity-50 cursor-not-allowed hover:bg-blue-600 shadow-none' : 'hover:-translate-y-0.5'"
+      :disabled="hasConfigErrors || isSaving"
+      :aria-busy="isSaving ? 'true' : 'false'"
+      class="fixed right-6 bottom-6 z-40 bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-full font-medium flex items-center gap-2 transition-all shadow-lg shadow-blue-200/70 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-50"
+      :class="hasConfigErrors ? 'opacity-50 cursor-not-allowed hover:bg-blue-600 shadow-none' : 'hover:-translate-y-0.5 motion-reduce:hover:translate-y-0'"
     >
-      <Save class="w-4 h-4" />
-      {{ t('settings.save') }}
+      <svg
+        v-if="isSaving"
+        class="w-4 h-4 animate-spin motion-reduce:animate-none"
+        fill="none"
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+      >
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" />
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+      </svg>
+      <Save v-else class="w-4 h-4" aria-hidden="true" />
+      {{ isSaving ? t('settings.saving') : t('settings.save') }}
     </button>
   </div>
   </div>

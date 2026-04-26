@@ -34,8 +34,10 @@ test('resolveHoverPreviewTarget ignores non-previewable clipboard kinds', () => 
   assert.equal(resolveHoverPreviewTarget(null), null);
 });
 
-test('stepImagePreviewScale applies the zoom step percentage and clamps the result', () => {
+test('stepImagePreviewScale applies the zoom step multiplicatively and clamps the result', () => {
   assert.equal(stepImagePreviewScale(1, 1, 25), 1.25);
+  assert.equal(stepImagePreviewScale(1.25, 1, 25), 1.5625);
+  assert.equal(stepImagePreviewScale(1.5625, -1, 25), 1.25);
   assert.equal(stepImagePreviewScale(1.25, -1, 25), 1);
   assert.equal(stepImagePreviewScale(5.9, 1, 25), 6);
   assert.equal(stepImagePreviewScale(0.3, -1, 25), 0.25);

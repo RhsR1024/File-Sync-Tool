@@ -41,7 +41,9 @@ pub async fn run_sync(
     cache::write_cache(&dir, &files, &meta).map_err(|error| SyncError::Io(error.to_string()))?;
 
     {
-        let mut guard = store.lock().expect("error_code store mutex poisoned");
+        let mut guard = store
+            .lock()
+            .map_err(|_| SyncError::Io("store_poisoned".to_string()))?;
         guard.ingest(all_entries);
         guard.last_synced_at = Some(synced_at.clone());
         guard.loaded = true;
@@ -61,11 +63,11 @@ pub async fn run_sync(
     })
 }
 
-pub fn ensure_loaded(cache_root: &Path, store: &Mutex<ErrorCodeStore>) {
+pub fn ensure_loaded(cache_root: &Path, store: &Mutex<ErrorCodeStore>) -> Result<(), String> {
     {
-        let guard = store.lock().expect("error_code store mutex poisoned");
+        let guard = store.lock().map_err(|_| "store_poisoned".to_string())?;
         if guard.loaded {
-            return;
+            return Ok(());
         }
     }
 
@@ -73,12 +75,13 @@ pub fn ensure_loaded(cache_root: &Path, store: &Mutex<ErrorCodeStore>) {
     let entries = cache::load_cache_entries(&dir);
     let last_synced_at = cache::read_meta(&dir).and_then(|meta| meta.last_synced_at);
 
-    let mut guard = store.lock().expect("error_code store mutex poisoned");
+    let mut guard = store.lock().map_err(|_| "store_poisoned".to_string())?;
     if !guard.loaded {
         guard.ingest(entries);
         guard.last_synced_at = last_synced_at;
         guard.loaded = true;
     }
+    Ok(())
 }
 
 fn extract_csvs_from_zip(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, SyncError> {

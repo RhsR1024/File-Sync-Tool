@@ -213,16 +213,16 @@ function progressSizeText(row: TaskGroupListItem): string {
         </colgroup>
         <thead>
           <tr class="bg-slate-50/80 text-[11px] text-slate-500 font-semibold uppercase tracking-wider border-b border-slate-200 select-none">
-            <th class="text-left py-2.5 px-3">{{ t('console.startTime') }}</th>
-            <th class="text-left py-2.5 px-3">{{ t('console.name') }}</th>
-            <th class="text-center py-2.5 px-2">{{ t('console.status') }}</th>
-            <th class="text-left py-2.5 px-3">{{ t('console.progress') }}</th>
-            <th class="text-right py-2.5 px-2">{{ t('console.speed') }}</th>
-            <th class="text-right py-2.5 px-2">{{ t('console.eta') }}</th>
-            <th class="text-center py-2.5 px-2">{{ t('console.elapsed') }}</th>
-            <th class="text-center py-2.5 px-2">{{ t('console.filterRules') }}</th>
-            <th class="text-center py-2.5 px-2">{{ t('console.taskDetail') }}</th>
-            <th class="text-center py-2.5 px-2">{{ t('console.actions') }}</th>
+            <th scope="col" class="text-left py-2.5 px-3">{{ t('console.startTime') }}</th>
+            <th scope="col" class="text-left py-2.5 px-3">{{ t('console.name') }}</th>
+            <th scope="col" class="text-center py-2.5 px-2">{{ t('console.status') }}</th>
+            <th scope="col" class="text-left py-2.5 px-3">{{ t('console.progress') }}</th>
+            <th scope="col" class="text-right py-2.5 px-2">{{ t('console.speed') }}</th>
+            <th scope="col" class="text-right py-2.5 px-2">{{ t('console.eta') }}</th>
+            <th scope="col" class="text-center py-2.5 px-2">{{ t('console.elapsed') }}</th>
+            <th scope="col" class="text-center py-2.5 px-2">{{ t('console.filterRules') }}</th>
+            <th scope="col" class="text-center py-2.5 px-2">{{ t('console.taskDetail') }}</th>
+            <th scope="col" class="text-center py-2.5 px-2">{{ t('console.actions') }}</th>
           </tr>
         </thead>
 
@@ -290,13 +290,13 @@ function progressSizeText(row: TaskGroupListItem): string {
                 </div>
                 <div class="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
                   <div
-                    class="h-full rounded-full transition-all duration-300"
+                    class="h-full rounded-full transition-all duration-300 motion-reduce:transition-none"
                     :class="progressBarClass(row.summary_status)"
                     :style="{ width: `${progressPercent(row)}%` }"
                   ></div>
                 </div>
               </template>
-              <span v-else class="text-[12px] text-slate-300">-</span>
+              <span v-else class="text-[12px] text-slate-300" aria-hidden="true">—</span>
             </td>
 
             <!-- Speed -->
@@ -304,7 +304,7 @@ function progressSizeText(row: TaskGroupListItem): string {
               <span v-if="isLiveCopying(row) && getRowProgress(row)" class="text-[12px] font-mono tabular-nums text-blue-600 whitespace-nowrap">
                 {{ formatBytes(getRowProgress(row)!.speed) }}/s
               </span>
-              <span v-else class="text-[12px] text-slate-300">-</span>
+              <span v-else class="text-[12px] text-slate-300" aria-hidden="true">—</span>
             </td>
 
             <!-- ETA -->
@@ -312,7 +312,7 @@ function progressSizeText(row: TaskGroupListItem): string {
               <span v-if="isLiveCopying(row) && getRowProgress(row) && getRowProgress(row)!.eta > 0" class="text-[12px] font-mono tabular-nums text-amber-600 whitespace-nowrap">
                 {{ formatEta(getRowProgress(row)!.eta) }}
               </span>
-              <span v-else class="text-[12px] text-slate-300">-</span>
+              <span v-else class="text-[12px] text-slate-300" aria-hidden="true">—</span>
             </td>
 
             <!-- Elapsed -->
@@ -333,10 +333,11 @@ function progressSizeText(row: TaskGroupListItem): string {
             <td class="py-2.5 px-2 align-middle text-center">
               <button
                 @click.stop="emit('select', row.task_group_id)"
-                class="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-slate-500 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                class="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-slate-500 hover:text-blue-600 hover:bg-blue-50 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-1"
                 :title="t('console.viewPathInfo')"
+                :aria-label="t('console.viewPathInfo')"
               >
-                <Eye class="w-3.5 h-3.5" />
+                <Eye class="w-3.5 h-3.5" aria-hidden="true" />
                 {{ t('console.viewPathInfo') }}
               </button>
             </td>
@@ -349,25 +350,28 @@ function progressSizeText(row: TaskGroupListItem): string {
                   <button
                     v-if="row.summary_status === 'paused'"
                     @click.stop="emit('resumeRun', row.task_group_id, row.latest_run_id!)"
-                    class="p-2 rounded-md text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
+                    class="p-2 rounded-md text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 focus-visible:ring-offset-1"
                     :title="t('console.resume')"
+                    :aria-label="t('console.resume')"
                   >
-                    <PlayCircle class="w-4 h-4" />
+                    <PlayCircle class="w-4 h-4" aria-hidden="true" />
                   </button>
                   <button
                     v-else
                     @click.stop="emit('pauseRun', row.task_group_id, row.latest_run_id!)"
-                    class="p-2 rounded-md text-amber-500 hover:text-amber-700 hover:bg-amber-50 transition-colors"
+                    class="p-2 rounded-md text-amber-500 hover:text-amber-700 hover:bg-amber-50 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50 focus-visible:ring-offset-1"
                     :title="t('console.pause')"
+                    :aria-label="t('console.pause')"
                   >
-                    <Pause class="w-4 h-4" />
+                    <Pause class="w-4 h-4" aria-hidden="true" />
                   </button>
                   <button
                     @click.stop="emit('cancelRun', row.task_group_id, row.latest_run_id!)"
-                    class="p-2 rounded-md text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                    class="p-2 rounded-md text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50 focus-visible:ring-offset-1"
                     :title="t('console.cancel')"
+                    :aria-label="t('console.cancel')"
                   >
-                    <XCircle class="w-4 h-4" />
+                    <XCircle class="w-4 h-4" aria-hidden="true" />
                   </button>
                 </template>
                 <!-- Terminal: retry deploy (if had_failures) / retry run (if cancelled) + clear -->
@@ -375,29 +379,32 @@ function progressSizeText(row: TaskGroupListItem): string {
                   <button
                     v-if="row.summary_status === 'cancelled'"
                     @click.stop="emit('retryRun', row.task_group_id)"
-                    class="p-2 rounded-md bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 border border-emerald-200 transition-colors"
+                    class="p-2 rounded-md bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 border border-emerald-200 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 focus-visible:ring-offset-1"
                     :title="t('console.retryRun')"
+                    :aria-label="t('console.retryRun')"
                   >
-                    <RefreshCw class="w-4 h-4" />
+                    <RefreshCw class="w-4 h-4" aria-hidden="true" />
                   </button>
                   <button
                     v-else-if="row.had_failures"
                     @click.stop="emit('retryDeploy', row.task_group_id)"
-                    class="p-2 rounded-md bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700 border border-amber-200 transition-colors"
+                    class="p-2 rounded-md bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700 border border-amber-200 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50 focus-visible:ring-offset-1"
                     :title="t('console.retryDeploy')"
+                    :aria-label="t('console.retryDeploy')"
                   >
-                    <RotateCcw class="w-4 h-4" />
+                    <RotateCcw class="w-4 h-4" aria-hidden="true" />
                   </button>
                   <span v-else class="inline-block w-8 h-8 shrink-0" aria-hidden="true"></span>
                   <button
                     @click.stop="emit('clear', row.task_group_id)"
-                    class="p-2 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                    class="p-2 rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50 focus-visible:ring-offset-1"
                     :title="t('console.clearGroup')"
+                    :aria-label="t('console.clearGroup')"
                   >
-                    <Trash2 class="w-4 h-4" />
+                    <Trash2 class="w-4 h-4" aria-hidden="true" />
                   </button>
                 </template>
-                <span v-else class="text-[11px] text-slate-300">-</span>
+                <span v-else class="text-[11px] text-slate-300" aria-hidden="true">—</span>
               </div>
             </td>
           </tr>

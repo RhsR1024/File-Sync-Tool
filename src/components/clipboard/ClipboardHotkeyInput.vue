@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { X } from 'lucide-vue-next';
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
@@ -17,6 +18,12 @@ function start() {
 
 function cancel() {
   recording.value = false;
+}
+
+function clearHotkey() {
+  model.value = '';
+  recording.value = false;
+  emit('change');
 }
 
 function onKeyDown(e: KeyboardEvent) {
@@ -51,14 +58,31 @@ function onKeyDown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <input
-    readonly
-    :value="display"
-    :placeholder="t('clipboard.settings.hotkeyPlaceholder')"
-    class="w-40 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-mono outline-none transition-colors focus:border-slate-500"
-    :class="recording ? 'border-sky-400 ring-2 ring-sky-200' : ''"
-    @click="start"
-    @blur="cancel"
-    @keydown="onKeyDown"
-  />
+  <div class="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 transition-colors focus-within:border-slate-500">
+    <input
+      readonly
+      :value="display"
+      :placeholder="t('clipboard.settings.hotkeyPlaceholder')"
+      :aria-label="t('clipboard.settings.hotkeyLabel')"
+      :aria-describedby="'clipboard-hotkey-hint'"
+      class="w-32 bg-transparent text-sm font-mono outline-none"
+      :class="recording ? 'text-sky-700' : 'text-slate-700'"
+      @click="start"
+      @blur="cancel"
+      @keydown="onKeyDown"
+    >
+    <button
+      v-if="model"
+      type="button"
+      class="inline-flex h-6 w-6 items-center justify-center rounded text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+      :aria-label="t('clipboard.settings.hotkeyClear')"
+      :title="t('clipboard.settings.hotkeyClear')"
+      @click="clearHotkey"
+    >
+      <X class="h-3.5 w-3.5" />
+    </button>
+    <span id="clipboard-hotkey-hint" class="sr-only">
+      {{ t('clipboard.settings.hotkeyInstruction') }}
+    </span>
+  </div>
 </template>

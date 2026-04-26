@@ -56,6 +56,27 @@ const shortcutRows = computed(() => [
   },
 ]);
 
+const normalizedReservedShortcuts = computed(() => new Set(
+  [
+    props.settings.shortcuts.paste,
+    props.settings.shortcuts.plain_paste,
+    props.settings.shortcuts.delete,
+    props.settings.shortcuts.favorite,
+    props.settings.shortcuts.close,
+    ...props.settings.shortcuts.focus_search,
+  ]
+    .map(value => value.trim().toLowerCase())
+    .filter(Boolean),
+));
+
+const hotkeyConflict = computed(() => {
+  const current = hotkeyModel.value.trim().toLowerCase();
+  if (!current) {
+    return false;
+  }
+  return normalizedReservedShortcuts.value.has(current);
+});
+
 function patch(next: DeepPartial<ClipboardSettings>) {
   emit('patch', next);
 }
@@ -78,6 +99,13 @@ function onWinVChange(event: Event) {
           <span class="text-sm text-slate-700">{{ t('clipboard.settings.hotkeyLabel') }}</span>
           <ClipboardHotkeyInput v-model="hotkeyModel" @change="onHotkeyChange" />
         </label>
+        <p class="text-xs text-slate-500">
+          {{ t('clipboard.settings.hotkeyInstruction') }}
+        </p>
+
+        <div v-if="hotkeyConflict" class="rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-700">
+          {{ t('clipboard.settings.shortcuts.conflict') }}
+        </div>
 
         <label class="flex items-center justify-between gap-4">
           <span class="text-sm text-slate-700">{{ t('clipboard.settings.shortcuts.navigation') }}</span>

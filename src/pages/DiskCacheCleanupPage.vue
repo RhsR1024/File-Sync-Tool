@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -7,10 +7,12 @@ import {
   ChevronDown,
   ChevronRight,
   HardDrive,
+  Info,
   Loader,
   RefreshCw,
   Server,
   Trash2,
+  X,
 } from 'lucide-vue-next';
 
 import {
@@ -32,18 +34,27 @@ import {
 } from '../lib/tauri';
 import { getSuggestedDiskCleanupHosts } from '../lib/diskCacheCleanupPresentation';
 import { mergeRecentItems, normalizeRecentItems } from '../lib/recentHistory';
+import Empty from '../components/Empty.vue';
+import LoadingSkeleton from '../components/LoadingSkeleton.vue';
+import { useToast } from '../composables/useToast';
 
 defineOptions({
   name: 'DiskCacheCleanupPage',
 });
 
 type LocalDiskTab = 'windows' | 'linux';
+type LegendTone = 'normal' | 'pending' | 'warning' | 'error';
 
 const { t } = useI18n();
+const { pushToast } = useToast();
 
 const RECENT_KEY = 'diskCacheCleanup.recentHosts';
 const MAX_RECENT_HOSTS = 10;
 const TIMEOUT_OPTIONS = [1, 2, 3, 5, 10, 15, 30] as const;
+const BATCH_CONFIRM_TIMEOUT_MS = 3000;
+// Real appliances cap at ~24 disks per chassis and a small handful of IPSAN
+// entries; virtualizing the cache key list would add complexity without a
+// payoff. If a future device reports >100 entries, revisit this decision.
 
 const STATUS_GREEN = new Set([1, 13]);
 const STATUS_BLUE = new Set([4, 7, 8, 9, 10, 11, 12, 16, 20]);
@@ -58,8 +69,12 @@ const KNOWN_USAGES = new Set([1, 2, 3, 4, 5, 255, -1]);
 const config = ref<AppConfig | null>(null);
 const timeoutSecs = ref(5);
 const hostIp = ref('');
+const hostInputRef = ref<HTMLInputElement | null>(null);
 const recentHosts = ref<string[]>([]);
 const localDiskTab = ref<LocalDiskTab>('linux');
+const windowsTabRef = ref<HTMLButtonElement | null>(null);
+const linuxTabRef = ref<HTMLButtonElement | null>(null);
+const legendOpen = ref(false);
 
 const linuxServerList = ref<DiskServerItem[]>([]);
 const selectedLinuxServerIp = ref('');
@@ -70,6 +85,8 @@ const localPresentCacheKeys = ref<Set<string>>(new Set());
 const localCleaningKeys = ref<Set<string>>(new Set());
 const localLoading = ref(false);
 const localBatchCleaning = ref(false);
+const localBatchPendingCount = ref(0);
+const localBatchConfirmPending = ref(false);
 const localError = ref<string | null>(null);
 const localRedisAvailable = ref(true);
 const localRedisError = ref<string | null>(null);
@@ -80,6 +97,8 @@ const ipsanPresentCacheKeys = ref<Set<string>>(new Set());
 const ipsanCleaningKeys = ref<Set<string>>(new Set());
 const ipsanLoading = ref(false);
 const ipsanBatchCleaning = ref(false);
+const ipsanBatchPendingCount = ref(0);
+const ipsanBatchConfirmPending = ref(false);
 const ipsanError = ref<string | null>(null);
 const ipsanRedisAvailable = ref(true);
 const ipsanRedisError = ref<string | null>(null);
@@ -89,10 +108,13 @@ const cacheDetailLoading = ref(false);
 const cacheDetailError = ref<string | null>(null);
 const cacheDetailKey = ref('');
 const cacheDetailEntry = ref<CacheKeyContentEntry | null>(null);
+const cacheDetailModalRef = ref<HTMLDivElement | null>(null);
 
 let localRequestSeq = 0;
 let ipsanRequestSeq = 0;
 let cacheDetailRequestSeq = 0;
+let localBatchConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+let ipsanBatchConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 
 const savedSshHosts = computed(() => {
   return getSuggestedDiskCleanupHosts(config.value?.servers, recentHosts.value);
@@ -115,6 +137,42 @@ const fetchAllLoading = computed(() => localLoading.value || ipsanLoading.value)
 const canFetchAll = computed(
   () => hostIp.value.trim().length > 0 && !fetchAllLoading.value,
 );
+
+const initialFetchPending = computed(
+  () => fetchAllLoading.value && !hasFetchedLocal.value && !hasFetchedIpsan.value,
+);
+
+const legendEntries = computed<Array<{
+  key: LegendTone;
+  label: string;
+  badgeClass: string;
+  codes: number[];
+}>>(() => [
+  {
+    key: 'normal',
+    label: t('diskCacheCleanup.legend.normal'),
+    badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    codes: [...STATUS_GREEN].sort((a, b) => a - b),
+  },
+  {
+    key: 'pending',
+    label: t('diskCacheCleanup.legend.pending'),
+    badgeClass: 'border-sky-200 bg-sky-50 text-sky-700',
+    codes: [...STATUS_BLUE].sort((a, b) => a - b),
+  },
+  {
+    key: 'warning',
+    label: t('diskCacheCleanup.legend.warning'),
+    badgeClass: 'border-amber-200 bg-amber-50 text-amber-700',
+    codes: [...STATUS_AMBER].sort((a, b) => a - b),
+  },
+  {
+    key: 'error',
+    label: t('diskCacheCleanup.legend.error'),
+    badgeClass: 'border-rose-200 bg-rose-50 text-rose-700',
+    codes: [...STATUS_RED].sort((a, b) => a - b),
+  },
+]);
 
 const localRowCount = computed(() => {
   if (localDiskTab.value === 'windows') {
@@ -569,13 +627,13 @@ async function cleanLocalKeys(keys: string[], singleKey?: string) {
     next.add(singleKey);
     localCleaningKeys.value = next;
   } else {
-    const confirmed = window.confirm(
-      t('diskCacheCleanup.actions.cleanAllConfirm', {
-        count: keys.length,
-      }),
-    );
-    if (!confirmed) return;
+    if (!localBatchConfirmPending.value) {
+      armLocalBatchConfirm();
+      return;
+    }
+    cancelLocalBatchConfirm();
     localBatchCleaning.value = true;
+    localBatchPendingCount.value = keys.length;
   }
 
   localError.value = null;
@@ -607,6 +665,7 @@ async function cleanLocalKeys(keys: string[], singleKey?: string) {
       localCleaningKeys.value = next;
     } else {
       localBatchCleaning.value = false;
+      localBatchPendingCount.value = 0;
     }
   }
 }
@@ -620,13 +679,13 @@ async function cleanIpsanKeys(keys: string[], singleKey?: string) {
     next.add(singleKey);
     ipsanCleaningKeys.value = next;
   } else {
-    const confirmed = window.confirm(
-      t('diskCacheCleanup.actions.cleanAllConfirm', {
-        count: keys.length,
-      }),
-    );
-    if (!confirmed) return;
+    if (!ipsanBatchConfirmPending.value) {
+      armIpsanBatchConfirm();
+      return;
+    }
+    cancelIpsanBatchConfirm();
     ipsanBatchCleaning.value = true;
+    ipsanBatchPendingCount.value = keys.length;
   }
 
   ipsanError.value = null;
@@ -658,7 +717,94 @@ async function cleanIpsanKeys(keys: string[], singleKey?: string) {
       ipsanCleaningKeys.value = next;
     } else {
       ipsanBatchCleaning.value = false;
+      ipsanBatchPendingCount.value = 0;
     }
+  }
+}
+
+function armLocalBatchConfirm() {
+  cancelIpsanBatchConfirm();
+  localBatchConfirmPending.value = true;
+  if (localBatchConfirmTimer) {
+    clearTimeout(localBatchConfirmTimer);
+  }
+  localBatchConfirmTimer = setTimeout(() => {
+    localBatchConfirmPending.value = false;
+    localBatchConfirmTimer = null;
+  }, BATCH_CONFIRM_TIMEOUT_MS);
+}
+
+function cancelLocalBatchConfirm() {
+  if (localBatchConfirmTimer) {
+    clearTimeout(localBatchConfirmTimer);
+    localBatchConfirmTimer = null;
+  }
+  localBatchConfirmPending.value = false;
+}
+
+function armIpsanBatchConfirm() {
+  cancelLocalBatchConfirm();
+  ipsanBatchConfirmPending.value = true;
+  if (ipsanBatchConfirmTimer) {
+    clearTimeout(ipsanBatchConfirmTimer);
+  }
+  ipsanBatchConfirmTimer = setTimeout(() => {
+    ipsanBatchConfirmPending.value = false;
+    ipsanBatchConfirmTimer = null;
+  }, BATCH_CONFIRM_TIMEOUT_MS);
+}
+
+function cancelIpsanBatchConfirm() {
+  if (ipsanBatchConfirmTimer) {
+    clearTimeout(ipsanBatchConfirmTimer);
+    ipsanBatchConfirmTimer = null;
+  }
+  ipsanBatchConfirmPending.value = false;
+}
+
+async function clearRecentHosts() {
+  cancelLocalBatchConfirm();
+  cancelIpsanBatchConfirm();
+  await persistRecentHosts([]);
+  pushToast(t('diskCacheCleanup.recent.clear'), 'info');
+}
+
+function focusHostInput() {
+  hostInputRef.value?.focus();
+}
+
+function toggleLegend() {
+  legendOpen.value = !legendOpen.value;
+}
+
+function onTabKeydown(event: KeyboardEvent, currentTab: LocalDiskTab) {
+  const order: LocalDiskTab[] = ['windows', 'linux'];
+  const currentIndex = order.indexOf(currentTab);
+  let nextIndex = currentIndex;
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+    nextIndex = (currentIndex + 1) % order.length;
+  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+    nextIndex = (currentIndex - 1 + order.length) % order.length;
+  } else if (event.key === 'Home') {
+    nextIndex = 0;
+  } else if (event.key === 'End') {
+    nextIndex = order.length - 1;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  const nextTab = order[nextIndex];
+  localDiskTab.value = nextTab;
+  nextTick(() => {
+    const nextRef = nextTab === 'windows' ? windowsTabRef.value : linuxTabRef.value;
+    nextRef?.focus();
+  });
+}
+
+function onModalKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeCacheDetail();
   }
 }
 
@@ -676,8 +822,15 @@ async function saveTimeout() {
 }
 
 watch(localDiskTab, async () => {
+  cancelLocalBatchConfirm();
   if (!hasFetchedLocal.value || !hostIp.value.trim()) return;
   await fetchLocalRegion();
+});
+
+watch(cacheDetailOpen, async (isOpen) => {
+  if (!isOpen) return;
+  await nextTick();
+  cacheDetailModalRef.value?.focus();
 });
 
 onMounted(async () => {
@@ -692,6 +845,11 @@ onMounted(async () => {
   }
 
   await loadRecentHosts();
+});
+
+onBeforeUnmount(() => {
+  cancelLocalBatchConfirm();
+  cancelIpsanBatchConfirm();
 });
 </script>
 
@@ -758,6 +916,7 @@ onMounted(async () => {
               <label class="text-sm font-semibold text-slate-800">{{ t('diskCacheCleanup.hostIp.label') }}</label>
               <div class="mt-2 flex flex-col gap-3 sm:flex-row">
                 <input
+                  ref="hostInputRef"
                   v-model="hostIp"
                   type="text"
                   :placeholder="t('diskCacheCleanup.hostIp.placeholder')"
@@ -780,15 +939,27 @@ onMounted(async () => {
 
             <div v-if="recentHosts.length || savedSshHosts.length" class="space-y-3">
               <div v-if="recentHosts.length">
-                <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                  {{ t('diskCacheCleanup.hostIp.recentGroup') }}
-                </p>
+                <div class="mb-2 flex items-center justify-between gap-2">
+                  <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                    {{ t('diskCacheCleanup.hostIp.recentGroup') }}
+                  </p>
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-500 transition hover:border-rose-200 hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 focus-visible:ring-offset-1"
+                    :title="t('diskCacheCleanup.recent.clear')"
+                    :aria-label="t('diskCacheCleanup.recent.clear')"
+                    @click="clearRecentHosts"
+                  >
+                    <X class="h-3 w-3" aria-hidden="true" />
+                    <span>{{ t('diskCacheCleanup.recent.clear') }}</span>
+                  </button>
+                </div>
                 <div class="flex flex-wrap gap-2">
                   <button
                     v-for="item in recentHosts"
                     :key="`recent-${item}`"
                     type="button"
-                    class="rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 font-mono text-xs text-sky-700 transition hover:border-sky-300 hover:bg-sky-100"
+                    class="rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 font-mono text-xs text-sky-700 transition hover:border-sky-300 hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40 focus-visible:ring-offset-1"
                     @click="hostIp = item"
                   >
                     {{ item }}
@@ -805,7 +976,7 @@ onMounted(async () => {
                     v-for="item in savedSshHosts"
                     :key="`saved-${item}`"
                     type="button"
-                    class="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-xs text-slate-700 transition hover:border-slate-300 hover:bg-slate-100"
+                    class="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono text-xs text-slate-700 transition hover:border-slate-300 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 focus-visible:ring-offset-1"
                     @click="hostIp = item"
                   >
                     {{ item }}
@@ -820,20 +991,38 @@ onMounted(async () => {
               <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
                 {{ t('diskCacheCleanup.localDisk.title') }}
               </div>
-              <div class="mt-2 inline-flex gap-1 rounded-full border border-slate-200 bg-slate-100 p-1">
+              <div
+                class="mt-2 inline-flex gap-1 rounded-full border border-slate-200 bg-slate-100 p-1"
+                role="tablist"
+                :aria-label="t('diskCacheCleanup.localDisk.title')"
+              >
                 <button
+                  ref="windowsTabRef"
+                  id="local-disk-tab-windows"
                   type="button"
-                  class="rounded-full px-4 py-2 text-sm font-semibold transition"
+                  role="tab"
+                  :aria-selected="localDiskTab === 'windows'"
+                  :tabindex="localDiskTab === 'windows' ? 0 : -1"
+                  aria-controls="local-disk-panel"
+                  class="rounded-full px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-50"
                   :class="localDiskTab === 'windows' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                   @click="localDiskTab = 'windows'"
+                  @keydown="onTabKeydown($event, 'windows')"
                 >
                   {{ t('diskCacheCleanup.localDisk.tabs.windows') }}
                 </button>
                 <button
+                  ref="linuxTabRef"
+                  id="local-disk-tab-linux"
                   type="button"
-                  class="rounded-full px-4 py-2 text-sm font-semibold transition"
+                  role="tab"
+                  :aria-selected="localDiskTab === 'linux'"
+                  :tabindex="localDiskTab === 'linux' ? 0 : -1"
+                  aria-controls="local-disk-panel"
+                  class="rounded-full px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-50"
                   :class="localDiskTab === 'linux' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                   @click="localDiskTab = 'linux'"
+                  @keydown="onTabKeydown($event, 'linux')"
                 >
                   {{ t('diskCacheCleanup.localDisk.tabs.linux') }}
                 </button>
@@ -883,7 +1072,18 @@ onMounted(async () => {
           <div class="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              class="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              class="inline-flex items-center gap-1.5 rounded-2xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 focus-visible:ring-offset-1"
+              :aria-expanded="legendOpen"
+              :aria-label="legendOpen ? t('diskCacheCleanup.legend.toggleHide') : t('diskCacheCleanup.legend.toggleShow')"
+              :title="legendOpen ? t('diskCacheCleanup.legend.toggleHide') : t('diskCacheCleanup.legend.toggleShow')"
+              @click="toggleLegend"
+            >
+              <Info class="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{{ t('diskCacheCleanup.legend.title') }}</span>
+            </button>
+            <button
+              type="button"
+              class="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="!hostIp.trim() || localLoading"
               @click="handleRefreshLocal"
             >
@@ -892,35 +1092,74 @@ onMounted(async () => {
             </button>
             <button
               type="button"
-              class="inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:bg-slate-300"
-              :class="localRedisAvailable && localCleanableKeys.length > 0 ? 'bg-rose-500 hover:bg-rose-600' : 'bg-slate-300'"
+              class="inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-semibold text-white transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/40 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:bg-slate-300"
+              :class="localRedisAvailable && localCleanableKeys.length > 0
+                ? (localBatchConfirmPending ? 'bg-rose-600 hover:bg-rose-700 ring-2 ring-rose-300 ring-offset-1' : 'bg-rose-500 hover:bg-rose-600')
+                : 'bg-slate-300'"
               :disabled="!localRedisAvailable || localCleanableKeys.length === 0 || localBatchCleaning"
-              :title="!localRedisAvailable ? t('diskCacheCleanup.disabled.redisDown') : undefined"
+              :title="!localRedisAvailable ? t('diskCacheCleanup.disabled.redisDown') : (localBatchConfirmPending ? t('diskCacheCleanup.batch.confirmAria') : undefined)"
+              :aria-pressed="localBatchConfirmPending"
               @click="cleanLocalKeys(localCleanableKeys)"
             >
               <Loader v-if="localBatchCleaning" class="h-4 w-4 animate-spin" />
               <Trash2 v-else class="h-4 w-4" />
-              {{ localBatchCleaning ? t('diskCacheCleanup.actions.cleaningAll') : t('diskCacheCleanup.localDisk.actions.cleanAll', { count: localCleanableKeys.length }) }}
+              <span v-if="localBatchCleaning">{{ t('diskCacheCleanup.batch.progress', { count: localBatchPendingCount }) }}</span>
+              <span v-else-if="localBatchConfirmPending">{{ t('diskCacheCleanup.batch.confirm') }}</span>
+              <span v-else>{{ t('diskCacheCleanup.localDisk.actions.cleanAll', { count: localCleanableKeys.length }) }}</span>
             </button>
           </div>
         </div>
 
-        <div class="space-y-4 p-5">
-          <section
+        <div
+          v-if="legendOpen"
+          class="border-b border-slate-200/80 bg-slate-50/60 px-5 py-4"
+          aria-live="polite"
+        >
+          <div class="flex flex-wrap items-start gap-3">
+            <div class="flex flex-wrap items-start gap-3">
+              <div
+                v-for="entry in legendEntries"
+                :key="entry.key"
+                class="flex flex-col gap-1.5 rounded-2xl border border-slate-200 bg-white px-3 py-2"
+              >
+                <span
+                  class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold"
+                  :class="entry.badgeClass"
+                >
+                  <span class="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true"></span>
+                  {{ entry.label }}
+                </span>
+                <span class="text-[11px] text-slate-500">
+                  {{ t('diskCacheCleanup.legend.codes') }}: {{ entry.codes.join(', ') }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          id="local-disk-panel"
+          role="tabpanel"
+          :aria-labelledby="`local-disk-tab-${localDiskTab}`"
+          class="space-y-4 p-5"
+        >
+          <div
             v-if="localError"
             class="flex items-start gap-3 rounded-[20px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 shadow-sm"
+            role="alert"
           >
-            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
             <span>{{ localError }}</span>
-          </section>
+          </div>
 
-          <section
+          <div
             v-if="localRedisError && !localRedisAvailable"
             class="flex items-start gap-3 rounded-[20px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm"
+            role="status"
           >
-            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
             <span>{{ localRedisError }}</span>
-          </section>
+          </div>
 
           <section
             v-if="localDiskTab === 'linux' && (hasFetchedLocal || linuxServerList.length > 0)"
@@ -977,52 +1216,70 @@ onMounted(async () => {
             </div>
           </section>
 
+          <Empty
+            v-if="!hasFetchedLocal && !localLoading && !hostIp.trim()"
+            :icon="HardDrive"
+            :title="t('diskCacheCleanup.empty.noHost')"
+            :description="t('diskCacheCleanup.empty.noHostHint')"
+            :action-label="t('diskCacheCleanup.empty.noHostAction')"
+            class="min-h-[240px]"
+            @action="focusHostInput"
+          />
+
+          <Empty
+            v-else-if="!hasFetchedLocal && !localLoading"
+            :icon="HardDrive"
+            :title="t('diskCacheCleanup.disks.emptyIdle')"
+            :description="t('diskCacheCleanup.disks.emptyIdleHint')"
+            :action-label="t('diskCacheCleanup.actions.fetch')"
+            class="min-h-[240px]"
+            @action="handleFetchAll"
+          />
+
           <div
-            v-if="!hasFetchedLocal && !localLoading"
-            class="flex min-h-[240px] flex-col items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-slate-50/60 px-6 py-8 text-center"
+            v-else-if="initialFetchPending && localRowCount === 0"
+            class="rounded-[20px] border border-dashed border-slate-200 bg-slate-50/60 px-5 py-6"
+            role="status"
+            aria-live="polite"
           >
-            <div class="flex h-14 w-14 items-center justify-center rounded-2xl bg-sky-50 text-sky-600">
-              <HardDrive class="h-7 w-7" />
-            </div>
-            <p class="mt-4 text-base font-semibold text-slate-900">{{ t('diskCacheCleanup.disks.emptyIdle') }}</p>
-            <p class="mt-2 max-w-md text-sm leading-6 text-slate-500">{{ t('diskCacheCleanup.disks.emptyIdleHint') }}</p>
+            <p class="mb-3 text-sm font-semibold text-slate-700">{{ t('diskCacheCleanup.disks.loading') }}</p>
+            <LoadingSkeleton variant="list-row" :count="4" />
           </div>
 
           <div
             v-else-if="localLoading && localRowCount === 0 && (localDiskTab === 'windows' || linuxServerList.length === 0)"
             class="flex min-h-[240px] flex-col items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-slate-50/60 px-6 py-8 text-center"
+            role="status"
+            aria-live="polite"
           >
-            <Loader class="h-7 w-7 animate-spin text-sky-600" />
+            <Loader class="h-7 w-7 animate-spin text-sky-600" aria-hidden="true" />
             <p class="mt-4 text-base font-semibold text-slate-900">{{ t('diskCacheCleanup.disks.loading') }}</p>
             <p class="mt-2 text-sm text-slate-500">{{ t('diskCacheCleanup.disks.loadingHint') }}</p>
           </div>
 
-          <div
+          <Empty
             v-else-if="localDiskTab === 'linux' && hasFetchedLocal && linuxServerList.length === 0 && !localLoading"
-            class="flex min-h-[240px] flex-col items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-slate-50/60 px-6 py-8 text-center"
-          >
-            <Server class="h-8 w-8 text-slate-400" />
-            <p class="mt-4 text-base font-semibold text-slate-900">{{ t('diskCacheCleanup.server.empty') }}</p>
-            <p class="mt-2 text-sm leading-6 text-slate-500">{{ t('diskCacheCleanup.server.emptyHint') }}</p>
-          </div>
+            :icon="Server"
+            :title="t('diskCacheCleanup.server.empty')"
+            :description="t('diskCacheCleanup.server.emptyHint')"
+            class="min-h-[240px]"
+          />
 
-          <div
+          <Empty
             v-else-if="localDiskTab === 'linux' && linuxDisks.length === 0 && !localLoading"
-            class="flex min-h-[240px] flex-col items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-slate-50/60 px-6 py-8 text-center"
-          >
-            <HardDrive class="h-8 w-8 text-slate-400" />
-            <p class="mt-4 text-base font-semibold text-slate-900">{{ t('diskCacheCleanup.disks.empty') }}</p>
-            <p class="mt-2 text-sm leading-6 text-slate-500">{{ t('diskCacheCleanup.disks.emptyHint') }}</p>
-          </div>
+            :icon="HardDrive"
+            :title="t('diskCacheCleanup.disks.empty')"
+            :description="t('diskCacheCleanup.disks.emptyHint')"
+            class="min-h-[240px]"
+          />
 
-          <div
+          <Empty
             v-else-if="localDiskTab === 'windows' && windowsDisks.length === 0 && !localLoading"
-            class="flex min-h-[240px] flex-col items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-slate-50/60 px-6 py-8 text-center"
-          >
-            <HardDrive class="h-8 w-8 text-slate-400" />
-            <p class="mt-4 text-base font-semibold text-slate-900">{{ t('diskCacheCleanup.disks.empty') }}</p>
-            <p class="mt-2 text-sm leading-6 text-slate-500">{{ t('diskCacheCleanup.disks.emptyHint') }}</p>
-          </div>
+            :icon="HardDrive"
+            :title="t('diskCacheCleanup.disks.empty')"
+            :description="t('diskCacheCleanup.disks.emptyHint')"
+            class="min-h-[240px]"
+          />
 
           <div
             v-else-if="localDiskTab === 'linux'"
@@ -1353,7 +1610,7 @@ onMounted(async () => {
           <div class="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              class="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              class="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="!hostIp.trim() || ipsanLoading"
               @click="handleRefreshIpsan"
             >
@@ -1362,62 +1619,91 @@ onMounted(async () => {
             </button>
             <button
               type="button"
-              class="inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:bg-slate-300"
-              :class="ipsanRedisAvailable && ipsanCleanableKeys.length > 0 ? 'bg-rose-500 hover:bg-rose-600' : 'bg-slate-300'"
+              class="inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-semibold text-white transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/40 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:bg-slate-300"
+              :class="ipsanRedisAvailable && ipsanCleanableKeys.length > 0
+                ? (ipsanBatchConfirmPending ? 'bg-rose-600 hover:bg-rose-700 ring-2 ring-rose-300 ring-offset-1' : 'bg-rose-500 hover:bg-rose-600')
+                : 'bg-slate-300'"
               :disabled="!ipsanRedisAvailable || ipsanCleanableKeys.length === 0 || ipsanBatchCleaning"
-              :title="!ipsanRedisAvailable ? t('diskCacheCleanup.disabled.redisDown') : undefined"
+              :title="!ipsanRedisAvailable ? t('diskCacheCleanup.disabled.redisDown') : (ipsanBatchConfirmPending ? t('diskCacheCleanup.batch.confirmAria') : undefined)"
+              :aria-pressed="ipsanBatchConfirmPending"
               @click="cleanIpsanKeys(ipsanCleanableKeys)"
             >
               <Loader v-if="ipsanBatchCleaning" class="h-4 w-4 animate-spin" />
               <Trash2 v-else class="h-4 w-4" />
-              {{ ipsanBatchCleaning ? t('diskCacheCleanup.actions.cleaningAll') : t('diskCacheCleanup.ipsan.actions.cleanAll', { count: ipsanCleanableKeys.length }) }}
+              <span v-if="ipsanBatchCleaning">{{ t('diskCacheCleanup.batch.progress', { count: ipsanBatchPendingCount }) }}</span>
+              <span v-else-if="ipsanBatchConfirmPending">{{ t('diskCacheCleanup.batch.confirm') }}</span>
+              <span v-else>{{ t('diskCacheCleanup.ipsan.actions.cleanAll', { count: ipsanCleanableKeys.length }) }}</span>
             </button>
           </div>
         </div>
 
         <div class="space-y-4 p-5">
-          <section
+          <div
             v-if="ipsanError"
             class="flex items-start gap-3 rounded-[20px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 shadow-sm"
+            role="alert"
           >
-            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
             <span>{{ ipsanError }}</span>
-          </section>
-
-          <section
-            v-if="ipsanRedisError && !ipsanRedisAvailable"
-            class="flex items-start gap-3 rounded-[20px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm"
-          >
-            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{{ ipsanRedisError }}</span>
-          </section>
+          </div>
 
           <div
-            v-if="!hasFetchedIpsan && !ipsanLoading"
-            class="flex min-h-[220px] flex-col items-center justify-center rounded-[20px] border border-dashed border-orange-200 bg-orange-50/50 px-6 py-8 text-center"
+            v-if="ipsanRedisError && !ipsanRedisAvailable"
+            class="flex items-start gap-3 rounded-[20px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm"
+            role="status"
           >
-            <Server class="h-8 w-8 text-orange-300" />
-            <p class="mt-4 text-base font-semibold text-slate-900">{{ t('diskCacheCleanup.ipsan.title') }}</p>
-            <p class="mt-2 max-w-md text-sm leading-6 text-slate-500">{{ t('diskCacheCleanup.ipsan.description') }}</p>
+            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{{ ipsanRedisError }}</span>
+          </div>
+
+          <Empty
+            v-if="!hasFetchedIpsan && !ipsanLoading && !hostIp.trim()"
+            :icon="Server"
+            :title="t('diskCacheCleanup.empty.noHost')"
+            :description="t('diskCacheCleanup.empty.noHostHint')"
+            :action-label="t('diskCacheCleanup.empty.noHostAction')"
+            class="min-h-[220px]"
+            @action="focusHostInput"
+          />
+
+          <Empty
+            v-else-if="!hasFetchedIpsan && !ipsanLoading"
+            :icon="Server"
+            :title="t('diskCacheCleanup.ipsan.title')"
+            :description="t('diskCacheCleanup.ipsan.description')"
+            :action-label="t('diskCacheCleanup.actions.fetch')"
+            class="min-h-[220px]"
+            @action="handleFetchAll"
+          />
+
+          <div
+            v-else-if="initialFetchPending && ipsans.length === 0"
+            class="rounded-[20px] border border-dashed border-orange-200 bg-orange-50/40 px-5 py-6"
+            role="status"
+            aria-live="polite"
+          >
+            <p class="mb-3 text-sm font-semibold text-slate-700">{{ t('diskCacheCleanup.disks.loading') }}</p>
+            <LoadingSkeleton variant="list-row" :count="3" />
           </div>
 
           <div
             v-else-if="ipsanLoading && ipsans.length === 0"
             class="flex min-h-[220px] flex-col items-center justify-center rounded-[20px] border border-dashed border-orange-200 bg-orange-50/50 px-6 py-8 text-center"
+            role="status"
+            aria-live="polite"
           >
-            <Loader class="h-7 w-7 animate-spin text-orange-500" />
+            <Loader class="h-7 w-7 animate-spin text-orange-500" aria-hidden="true" />
             <p class="mt-4 text-base font-semibold text-slate-900">{{ t('diskCacheCleanup.disks.loading') }}</p>
             <p class="mt-2 text-sm text-slate-500">{{ t('diskCacheCleanup.ipsan.description') }}</p>
           </div>
 
-          <div
+          <Empty
             v-else-if="ipsans.length === 0"
-            class="flex min-h-[220px] flex-col items-center justify-center rounded-[20px] border border-dashed border-orange-200 bg-orange-50/50 px-6 py-8 text-center"
-          >
-            <Server class="h-8 w-8 text-orange-300" />
-            <p class="mt-4 text-base font-semibold text-slate-900">{{ t('diskCacheCleanup.disks.empty') }}</p>
-            <p class="mt-2 text-sm leading-6 text-slate-500">{{ t('diskCacheCleanup.ipsan.description') }}</p>
-          </div>
+            :icon="Server"
+            :title="t('diskCacheCleanup.disks.empty')"
+            :description="t('diskCacheCleanup.ipsan.description')"
+            class="min-h-[220px]"
+          />
 
           <div
             v-else
@@ -1529,18 +1815,28 @@ onMounted(async () => {
       v-if="cacheDetailOpen"
       class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6"
       @click.self="closeCacheDetail"
+      @keydown="onModalKeydown"
     >
-      <div class="max-h-[85vh] w-full max-w-4xl overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_24px_80px_rgba(15,23,42,0.24)]">
+      <div
+        ref="cacheDetailModalRef"
+        class="max-h-[85vh] w-full max-w-4xl overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_24px_80px_rgba(15,23,42,0.24)] focus:outline-none"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="disk-cache-detail-title"
+        aria-describedby="disk-cache-detail-key"
+        tabindex="-1"
+      >
         <div class="flex flex-col gap-3 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
           <div class="min-w-0">
-            <h3 class="text-lg font-bold text-slate-900">{{ t('diskCacheCleanup.cache.detailTitle') }}</h3>
-            <p class="mt-1 break-all font-mono text-xs text-slate-500">
+            <h3 id="disk-cache-detail-title" class="text-lg font-bold text-slate-900">{{ t('diskCacheCleanup.cache.detailTitle') }}</h3>
+            <p id="disk-cache-detail-key" class="mt-1 break-all font-mono text-xs text-slate-500">
               {{ cacheDetailKey || '--' }}
             </p>
           </div>
           <button
             type="button"
-            class="inline-flex items-center justify-center rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50"
+            class="inline-flex items-center justify-center rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/40 focus-visible:ring-offset-1"
+            :aria-label="t('settings.close')"
             @click="closeCacheDetail"
           >
             {{ t('settings.close') }}
@@ -1551,16 +1847,19 @@ onMounted(async () => {
           <div
             v-if="cacheDetailLoading"
             class="flex min-h-[240px] flex-col items-center justify-center rounded-[20px] border border-dashed border-slate-200 bg-slate-50 px-6 py-8 text-center"
+            role="status"
+            aria-live="polite"
           >
-            <Loader class="h-7 w-7 animate-spin text-indigo-500" />
+            <Loader class="h-7 w-7 animate-spin text-indigo-500" aria-hidden="true" />
             <p class="mt-4 text-base font-semibold text-slate-900">{{ t('diskCacheCleanup.cache.loadingDetail') }}</p>
           </div>
 
           <div
             v-else-if="cacheDetailError"
-            class="flex items-start gap-3 rounded-[20px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+            class="flex items-start gap-3 rounded-[20px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 shadow-sm"
+            role="alert"
           >
-            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
             <span>{{ cacheDetailError }}</span>
           </div>
 

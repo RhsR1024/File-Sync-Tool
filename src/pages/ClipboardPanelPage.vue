@@ -37,8 +37,10 @@ const previewDelayMs = ref(500);
 const clearDialogOpen = ref(false);
 const panelLocked = ref(false);
 const PANEL_WINDOW_CLASS = 'clipboard-panel-window';
+const DEBUG_EVENTS_ENABLED = import.meta.env.DEV;
 const filters: ClipboardFilter[] = ['all', 'text', 'image', 'file', 'favorite'];
 const toolbarActionItems = [...CLIPBOARD_TOOLBAR_ACTION_IDS];
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 const selectedId = computed<number | null>(
   () => store.visibleItems.value[selectedIndex.value]?.id ?? null,
@@ -237,7 +239,12 @@ function onHeaderMouseDown(event: MouseEvent) {
 
 function onSearchChange(value: string) {
   store.search.value = value;
-  void store.reload();
+  if (searchDebounceTimer !== null) {
+    clearTimeout(searchDebounceTimer);
+  }
+  searchDebounceTimer = setTimeout(() => {
+    void store.reload();
+  }, 200);
 }
 
 function changeFilter(direction: 1 | -1) {
@@ -419,11 +426,13 @@ const listKey = computed(
 onMounted(async () => {
   document.documentElement.classList.add(PANEL_WINDOW_CLASS);
   document.body.classList.add(PANEL_WINDOW_CLASS);
-  document.addEventListener('pointerdown', onDebugPointerEvent, true);
-  document.addEventListener('click', onDebugPointerEvent, true);
-  window.addEventListener('focus', onDebugWindowFocus, true);
-  window.addEventListener('blur', onDebugWindowFocus, true);
-  debugClipboardSnapshot('mounted');
+  if (DEBUG_EVENTS_ENABLED) {
+    document.addEventListener('pointerdown', onDebugPointerEvent, true);
+    document.addEventListener('click', onDebugPointerEvent, true);
+    window.addEventListener('focus', onDebugWindowFocus, true);
+    window.addEventListener('blur', onDebugWindowFocus, true);
+    debugClipboardSnapshot('mounted');
+  }
   await refreshPreviewSettings();
   clipboardApi
     .isPanelPinned()
@@ -451,10 +460,16 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   document.documentElement.classList.remove(PANEL_WINDOW_CLASS);
   document.body.classList.remove(PANEL_WINDOW_CLASS);
-  document.removeEventListener('pointerdown', onDebugPointerEvent, true);
-  document.removeEventListener('click', onDebugPointerEvent, true);
-  window.removeEventListener('focus', onDebugWindowFocus, true);
-  window.removeEventListener('blur', onDebugWindowFocus, true);
+  if (DEBUG_EVENTS_ENABLED) {
+    document.removeEventListener('pointerdown', onDebugPointerEvent, true);
+    document.removeEventListener('click', onDebugPointerEvent, true);
+    window.removeEventListener('focus', onDebugWindowFocus, true);
+    window.removeEventListener('blur', onDebugWindowFocus, true);
+  }
+  if (searchDebounceTimer !== null) {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = null;
+  }
   preview.hideNow();
   unlistenShown?.();
   unlistenStore?.();

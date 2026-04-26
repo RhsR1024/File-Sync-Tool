@@ -67,23 +67,27 @@ pub async fn start_update_download(
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
     {
-        let mut is_downloading = state
-            .updater
-            .is_downloading
-            .lock()
-            .map_err(|_| "updater_state_poisoned".to_string())?;
-        if *is_downloading {
-            return Err(UpdaterError::AlreadyInProgress.to_string());
-        }
-        *is_downloading = true;
-    }
-    {
         let mut cancel_slot = state
             .updater
             .cancel_tx
             .lock()
             .map_err(|_| "updater_state_poisoned".to_string())?;
         *cancel_slot = Some(cancel_tx);
+    }
+    {
+        let mut is_downloading = state
+            .updater
+            .is_downloading
+            .lock()
+            .map_err(|_| "updater_state_poisoned".to_string())?;
+        if *is_downloading {
+            // Roll back cancel_tx slot so a stale sender does not linger.
+            if let Ok(mut cancel_slot) = state.updater.cancel_tx.lock() {
+                *cancel_slot = None;
+            }
+            return Err(UpdaterError::AlreadyInProgress.to_string());
+        }
+        *is_downloading = true;
     }
 
     let config_state = state.config.clone();
@@ -120,7 +124,10 @@ pub async fn cancel_update_download(state: State<'_, AppState>) -> Result<(), St
         .clone();
 
     if let Some(cancel_tx) = cancel_tx {
-        cancel_tx.send(true).map_err(|_| "cancelled".to_string())?;
+        if cancel_tx.send(true).is_err() {
+            // Receiver already dropped: download has finished. Treat cancel as a no-op success.
+            log::debug!("[updater] cancel_update_download: receiver dropped (download finished)");
+        }
     }
 
     Ok(())
@@ -149,8 +156,6 @@ pub async fn apply_update_now(
     let temp_path = PathBuf::from(&pending.temp_path);
     let exe_path = std::env::current_exe().map_err(|error| format!("io: {error}"))?;
 
-    installer::spawn_helper(&temp_path, &exe_path).map_err(|error| error.to_string())?;
-
     let snapshot = {
         let mut config = state
             .config
@@ -160,6 +165,9 @@ pub async fn apply_update_now(
         config.clone()
     };
     config::save_config(&app_handle, &snapshot)?;
+
+    installer::spawn_helper(&temp_path, &exe_path).map_err(|error| error.to_string())?;
+
     let _ = emit_state_changed(&app_handle, &state.config, &state.updater);
 
     for window in app_handle.webview_windows().values() {

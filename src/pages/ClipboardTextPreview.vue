@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { X } from 'lucide-vue-next';
+import { useI18n } from 'vue-i18n';
 
 import {
   TEXT_PREVIEW_UPDATE_EVENT,
@@ -10,6 +13,7 @@ import { clipboardApi } from '@/lib/tauri';
 
 defineOptions({ name: 'ClipboardTextPreview' });
 
+const { t } = useI18n();
 const payload = ref<ClipboardTextPreviewPayload | null>(null);
 
 let unlisten: UnlistenFn | null = null;
@@ -31,6 +35,17 @@ function onVisibilityChange() {
   }
 }
 
+function closePreview() {
+  void getCurrentWindow().hide();
+}
+
+function onWindowKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closePreview();
+  }
+}
+
 onMounted(async () => {
   unlisten = await listen<ClipboardTextPreviewPayload>(
     TEXT_PREVIEW_UPDATE_EVENT,
@@ -40,6 +55,7 @@ onMounted(async () => {
   );
 
   window.addEventListener('focus', onWindowFocus);
+  window.addEventListener('keydown', onWindowKeydown);
   document.addEventListener('visibilitychange', onVisibilityChange);
   await refreshPayload();
 });
@@ -47,6 +63,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unlisten?.();
   window.removeEventListener('focus', onWindowFocus);
+  window.removeEventListener('keydown', onWindowKeydown);
   document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
@@ -56,7 +73,7 @@ onBeforeUnmount(() => {
     <header class="flex items-center justify-between gap-3 border-b border-slate-200/80 px-4 py-3">
       <div class="min-w-0">
         <p class="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-          Text Preview
+          {{ t('clipboard.preview.titleText') }}
         </p>
         <p
           v-if="payload?.source_app"
@@ -66,9 +83,20 @@ onBeforeUnmount(() => {
         </p>
       </div>
 
-      <span class="rounded-full bg-slate-900 px-2.5 py-1 text-[11px] font-semibold tracking-[0.18em] text-white">
-        {{ kindLabel }}
-      </span>
+      <div class="flex items-center gap-2">
+        <span class="rounded-full bg-slate-900 px-2.5 py-1 text-[11px] font-semibold tracking-[0.18em] text-white">
+          {{ kindLabel }}
+        </span>
+        <button
+          type="button"
+          class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-800"
+          :aria-label="t('clipboard.preview.close')"
+          :title="t('clipboard.preview.close')"
+          @click="closePreview"
+        >
+          <X class="h-4 w-4" />
+        </button>
+      </div>
     </header>
 
     <main class="flex-1 overflow-auto p-4">
@@ -80,7 +108,7 @@ onBeforeUnmount(() => {
         v-else
         class="flex h-full items-center justify-center text-sm text-slate-400"
       >
-        Hover a text item to preview it.
+        {{ t('clipboard.preview.emptyText') }}
       </div>
     </main>
   </div>

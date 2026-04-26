@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Minus, Plus, RotateCcw } from 'lucide-vue-next';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { useI18n } from 'vue-i18n';
 
 import {
   DEFAULT_IMAGE_PREVIEW_SCALE,
@@ -14,6 +16,7 @@ import { clipboardApi } from '@/lib/tauri';
 
 defineOptions({ name: 'ClipboardImagePreview' });
 
+const { t } = useI18n();
 const payload = ref<ClipboardImagePreviewPayload | null>(null);
 const scale = ref(DEFAULT_IMAGE_PREVIEW_SCALE);
 
@@ -48,6 +51,10 @@ function onWheel(event: WheelEvent) {
   changeZoom(event.deltaY < 0 ? 1 : -1);
 }
 
+function closePreview() {
+  void getCurrentWindow().hide();
+}
+
 async function refreshPayload() {
   const cachedPayload = await clipboardApi.getImagePreviewPayload();
   if (cachedPayload) {
@@ -67,6 +74,19 @@ function onVisibilityChange() {
   }
 }
 
+function onWindowKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closePreview();
+  } else if (event.key === '+' || event.key === '=') {
+    event.preventDefault();
+    changeZoom(1);
+  } else if (event.key === '-' || event.key === '_') {
+    event.preventDefault();
+    changeZoom(-1);
+  }
+}
+
 onMounted(async () => {
   unlisten = await listen<ClipboardImagePreviewPayload>(
     IMAGE_PREVIEW_UPDATE_EVENT,
@@ -76,6 +96,7 @@ onMounted(async () => {
   );
 
   window.addEventListener('focus', onWindowFocus);
+  window.addEventListener('keydown', onWindowKeydown);
   document.addEventListener('visibilitychange', onVisibilityChange);
   await refreshPayload();
 });
@@ -83,6 +104,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unlisten?.();
   window.removeEventListener('focus', onWindowFocus);
+  window.removeEventListener('keydown', onWindowKeydown);
   document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
@@ -92,7 +114,7 @@ onBeforeUnmount(() => {
     <header class="flex items-center justify-between gap-3 border-b border-white/60 px-4 py-3 backdrop-blur-sm">
       <div class="min-w-0">
         <p class="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-          Image Preview
+          {{ t('clipboard.preview.titleImage') }}
         </p>
         <p
           v-if="payload?.source_app"
@@ -109,7 +131,8 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/70 bg-white/70 text-slate-600 transition hover:bg-white hover:text-slate-900"
-          title="Zoom out"
+          :title="t('clipboard.preview.zoomOut')"
+          :aria-label="t('clipboard.preview.zoomOut')"
           @click="changeZoom(-1)"
         >
           <Minus class="h-4 w-4" />
@@ -117,7 +140,8 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/70 bg-white/70 text-slate-600 transition hover:bg-white hover:text-slate-900"
-          title="Reset zoom"
+          :title="t('clipboard.preview.resetZoom')"
+          :aria-label="t('clipboard.preview.resetZoom')"
           @click="resetZoom"
         >
           <RotateCcw class="h-4 w-4" />
@@ -125,10 +149,20 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/70 bg-white/70 text-slate-600 transition hover:bg-white hover:text-slate-900"
-          title="Zoom in"
+          :title="t('clipboard.preview.zoomIn')"
+          :aria-label="t('clipboard.preview.zoomIn')"
           @click="changeZoom(1)"
         >
           <Plus class="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/70 bg-white/70 text-slate-600 transition hover:bg-white hover:text-slate-900"
+          :title="t('clipboard.preview.close')"
+          :aria-label="t('clipboard.preview.close')"
+          @click="closePreview"
+        >
+          <span class="text-xs font-semibold">Esc</span>
         </button>
       </div>
     </header>
@@ -152,7 +186,7 @@ onBeforeUnmount(() => {
         v-else
         class="flex h-full items-center justify-center text-sm text-slate-400"
       >
-        Hover an image item to preview it.
+        {{ t('clipboard.preview.emptyImage') }}
       </div>
     </main>
   </div>

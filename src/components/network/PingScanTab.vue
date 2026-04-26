@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { X as XIcon } from 'lucide-vue-next';
 import { pingScan, cancelPingScan, saveTextFile, type PingResult, type PingScanRequest } from '../../lib/tauri';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../../lib/recentHistory';
+import Empty from '../Empty.vue';
 
 defineOptions({ name: 'PingScanTab' });
 
@@ -427,6 +428,13 @@ function hideTooltip() {
       </div>
     </div>
 
+    <Empty
+      v-if="!isScanning && results.size === 0"
+      :title="t('networkTools.ping.emptyTitle')"
+      :description="t('networkTools.ping.emptyDescription')"
+      dashed
+    />
+
     <!-- Results area: only show when there are results or scanning -->
     <div v-if="isScanning || results.size > 0" class="space-y-3">
       <!-- Stats bar + view toggle -->
@@ -547,13 +555,13 @@ function hideTooltip() {
           <table class="w-full">
             <thead>
               <tr class="border-b border-slate-100 bg-slate-50/80">
-                <th class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                <th scope="col" class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
                   {{ t('networkTools.ping.ipAddress') }}
                 </th>
-                <th class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                <th scope="col" class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
                   {{ t('networkTools.ping.status') }}
                 </th>
-                <th class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                <th scope="col" class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
                   {{ t('networkTools.ping.latency') }}
                 </th>
               </tr>

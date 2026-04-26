@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { computed } from 'vue';
+import { AppWindow } from 'lucide-vue-next';
+import { computed, ref } from 'vue';
 
 const props = withDefaults(
   defineProps<{
@@ -18,11 +19,7 @@ const props = withDefaults(
 const iconSrc = computed(() =>
   props.iconPath ? convertFileSrc(props.iconPath) : null,
 );
-const fallbackLabel = computed(() => {
-  const source = props.sourceApp?.trim();
-  if (!source) return '?';
-  return source.charAt(0).toUpperCase();
-});
+const imageFailed = ref(false);
 const wrapperClass = computed(() =>
   props.size === 'md'
     ? 'h-7 w-7 text-[11px]'
@@ -40,11 +37,12 @@ const title = computed(() =>
     :title="title"
   >
     <img
-      v-if="iconSrc"
+      v-if="iconSrc && !imageFailed"
       :src="iconSrc"
       class="h-full w-full object-cover"
       alt=""
+      @error="imageFailed = true"
     >
-    <span v-else>{{ fallbackLabel }}</span>
+    <AppWindow v-else class="h-3.5 w-3.5" />
   </span>
 </template>

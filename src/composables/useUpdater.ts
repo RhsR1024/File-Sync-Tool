@@ -26,6 +26,8 @@ const dialogError = ref<string | null>(null);
 let initialized = false;
 let initPromise: Promise<void> | null = null;
 
+const EVENT_OPEN_DIALOG = 'open-update-dialog';
+
 function applyInitialDialogState() {
   if (state.value?.pending_update) {
     dialogState.value = 'resume';
@@ -72,7 +74,7 @@ async function init() {
     }
 
     dialogError.value = error;
-    dialogState.value = error.includes('verify_failed') ? 'verify_failed' : 'network_error';
+    dialogState.value = error === 'verify_failed' ? 'verify_failed' : 'network_error';
     dialogOpen.value = true;
   });
 
@@ -84,8 +86,6 @@ async function init() {
     }
   });
 }
-
-const EVENT_OPEN_DIALOG = 'open-update-dialog';
 
 export function ensureUpdaterInitialized() {
   if (initialized) {

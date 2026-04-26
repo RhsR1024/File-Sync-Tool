@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import Sidebar from '@/components/Sidebar.vue';
+import ToastContainer from '@/components/ToastContainer.vue';
 import UpdateDialog from '@/components/UpdateDialog.vue';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -219,14 +220,38 @@ onUnmounted(() => {
 <template>
   <router-view v-if="$route.meta?.noLayout" />
   <div v-else class="flex h-screen bg-slate-50 font-sans text-slate-900">
+    <a
+      href="#main-content"
+      class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:bg-white focus:px-3 focus:py-1 focus:rounded-md focus:shadow-lg focus:text-slate-900 focus:outline focus:outline-2 focus:outline-sky-500"
+    >
+      {{ $t('common.skipToMain') }}
+    </a>
     <Sidebar />
-    <main class="flex flex-1 flex-col overflow-hidden">
+    <main
+      id="main-content"
+      role="main"
+      class="flex flex-1 flex-col overflow-hidden"
+    >
       <router-view v-slot="{ Component }">
+        <!--
+          Keep-alive list intentionally narrow:
+          - MainConsole: preserves the live log buffer / scroll position so
+            users don't lose console state when bouncing between routes.
+          - CodeStatisticsPage: large analysis results and form inputs are
+            expensive to recompute; keep-alive preserves them across nav.
+          - NetworkToolsPage: holds tab state (ping scan, port test, WOL,
+            subnet calc, TCP table) — remounting would lose in-progress data.
+          - SettingsPage: a 1900-line form with many nested mutable refs;
+            keep-alive avoids the cost of reloading config + remounting fields.
+          Other pages either reload cheaply or rely on Tauri events that
+          re-hydrate state on mount, so they intentionally remount.
+        -->
         <keep-alive include="MainConsole,CodeStatisticsPage,NetworkToolsPage,SettingsPage">
           <component :is="Component" />
         </keep-alive>
       </router-view>
     </main>
     <UpdateDialog />
+    <ToastContainer />
   </div>
 </template>

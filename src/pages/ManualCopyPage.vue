@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { ArrowRight, Copy, Settings, ShieldCheck, AlertCircle } from 'lucide-vue-next';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
+import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
 import { getConfig, type AppConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
@@ -95,9 +96,9 @@ onMounted(loadConfig);
 
       <router-link
         to="/settings"
-        class="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-200 bg-white text-slate-600 hover:text-blue-600 hover:border-blue-200 transition-colors"
+        class="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-200 bg-white text-slate-600 hover:text-blue-600 hover:border-blue-200 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-1"
       >
-        <Settings class="w-4 h-4" />
+        <Settings class="w-4 h-4" aria-hidden="true" />
         {{ t('manualCopy.viewRules') }}
       </router-link>
     </div>
@@ -110,9 +111,11 @@ onMounted(loadConfig);
           <p class="text-slate-600 mb-4">{{ t('manualCopy.subtitle') }}</p>
           <button
             @click="openManualCopyModal"
-            class="inline-flex items-center gap-3 px-8 py-4 rounded-xl text-white font-semibold text-lg transition-all bg-blue-600 hover:bg-blue-700 active:scale-95 shadow-md hover:shadow-lg"
+            :disabled="isLoadingConfig"
+            class="inline-flex items-center gap-3 px-8 py-4 rounded-xl text-white font-semibold text-lg transition-all motion-reduce:transition-none bg-blue-600 hover:bg-blue-700 active:scale-95 motion-reduce:active:scale-100 shadow-md hover:shadow-lg disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 focus-visible:ring-offset-2"
+            :aria-label="t('manualCopy.startCopy')"
           >
-            <Copy class="w-6 h-6" />
+            <Copy class="w-6 h-6" aria-hidden="true" />
             {{ t('manualCopy.startCopy') }}
           </button>
         </div>
@@ -124,9 +127,9 @@ onMounted(loadConfig);
       <!-- Right Sidebar -->
       <div class="space-y-4">
         <!-- Error Alert -->
-        <div v-if="configError" class="bg-red-50 rounded-2xl border border-red-200 shadow-sm p-5">
+        <div v-if="configError" class="bg-red-50 rounded-2xl border border-red-200 shadow-sm p-5" role="alert" aria-live="assertive">
           <div class="flex items-start gap-3">
-            <AlertCircle class="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+            <AlertCircle class="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" aria-hidden="true" />
             <div>
               <div class="font-semibold text-red-800">{{ t('common.error') }}</div>
               <p class="text-sm text-red-700 mt-1">{{ configError }}</p>
@@ -137,11 +140,19 @@ onMounted(loadConfig);
         <!-- Rules Card -->
         <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
           <div class="flex items-center gap-2 text-slate-800 font-semibold">
-            <ShieldCheck class="w-4 h-4 text-blue-600" />
+            <ShieldCheck class="w-4 h-4 text-blue-600" aria-hidden="true" />
             {{ t('manualCopy.ruleCard') }}
           </div>
 
-          <div class="rounded-xl bg-slate-50 border border-slate-200 p-4 space-y-3 text-sm text-slate-600">
+          <div
+            v-if="isLoadingConfig && !config"
+            class="rounded-xl bg-slate-50 border border-slate-200 p-4"
+            role="status"
+            aria-live="polite"
+          >
+            <LoadingSkeleton variant="text-line" :lines="3" />
+          </div>
+          <div v-else class="rounded-xl bg-slate-50 border border-slate-200 p-4 space-y-3 text-sm text-slate-600">
             <div>
               <div class="font-medium text-slate-700 mb-1">{{ t('manualCopy.filterTitle') }}</div>
               <div>{{ filterSummary }}</div>
@@ -160,16 +171,16 @@ onMounted(loadConfig);
         <!-- Progress Tracking Card -->
         <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
           <div class="flex items-center gap-2 text-slate-800 font-semibold">
-            <AlertCircle class="w-4 h-4 text-amber-500" />
+            <AlertCircle class="w-4 h-4 text-amber-500" aria-hidden="true" />
             {{ t('manualCopy.queueHintTitle') }}
           </div>
           <p class="text-sm text-slate-500">{{ t('manualCopy.queueHintDesc') }}</p>
           <button
             @click="router.push('/')"
-            class="inline-flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 font-medium"
+            class="inline-flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-1 rounded-md"
           >
             {{ t('manualCopy.goToConsole') }}
-            <ArrowRight class="w-3.5 h-3.5" />
+            <ArrowRight class="w-3.5 h-3.5" aria-hidden="true" />
           </button>
         </div>
       </div>

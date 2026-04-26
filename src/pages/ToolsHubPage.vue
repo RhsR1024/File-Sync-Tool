@@ -34,6 +34,19 @@ function isToolActive(key: string) {
   return false;
 }
 
+function openCard(card: ToolCard) {
+  router.push(card.path);
+}
+
+function onCardKeydown(event: KeyboardEvent, card: ToolCard) {
+  // Activate the card with Enter or Space, matching button semantics for the
+  // role="button" wrapper. Space scrolls the page by default — prevent that.
+  if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+    event.preventDefault();
+    openCard(card);
+  }
+}
+
 const toolCards = computed<ToolCard[]>(() => [
   {
     key: 'framework-password',
@@ -123,8 +136,8 @@ const toolCards = computed<ToolCard[]>(() => [
   <div class="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.16),_transparent_30%),linear-gradient(180deg,_#f8fbff_0%,_#eef4fb_42%,_#f8fafc_100%)]">
     <div class="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-6 pb-10">
       <section class="relative overflow-hidden rounded-[28px] border border-white/70 bg-white/80 px-6 py-7 shadow-[0_18px_60px_rgba(15,23,42,0.08)] backdrop-blur">
-        <div class="absolute -right-16 -top-16 h-40 w-40 rounded-full bg-sky-100/80 blur-3xl"></div>
-        <div class="absolute bottom-0 right-8 h-24 w-24 rounded-full bg-amber-100/70 blur-2xl"></div>
+        <div class="pointer-events-none absolute -right-16 -top-16 -z-10 h-40 w-40 rounded-full bg-sky-100/80 blur-3xl" aria-hidden="true"></div>
+        <div class="pointer-events-none absolute bottom-0 right-8 -z-10 h-24 w-24 rounded-full bg-amber-100/70 blur-2xl" aria-hidden="true"></div>
 
         <div class="relative flex items-center justify-between gap-6">
           <div class="space-y-2">
@@ -171,7 +184,13 @@ const toolCards = computed<ToolCard[]>(() => [
         <article
           v-for="card in toolCards"
           :key="card.key"
-          class="group flex min-h-[320px] flex-col rounded-[24px] border border-slate-200/80 bg-white/90 p-5 shadow-[0_14px_40px_rgba(15,23,42,0.06)] transition-all duration-200 hover:-translate-y-1 hover:border-slate-300 hover:shadow-[0_22px_48px_rgba(15,23,42,0.10)]"
+          role="button"
+          tabindex="0"
+          :aria-label="t(card.titleKey)"
+          :title="t(card.descriptionKey)"
+          class="group flex min-h-[320px] cursor-pointer flex-col rounded-[24px] border border-slate-200/80 bg-white/90 p-5 shadow-[0_14px_40px_rgba(15,23,42,0.06)] transition-all duration-200 hover:-translate-y-1 hover:border-slate-300 hover:shadow-[0_22px_48px_rgba(15,23,42,0.10)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white motion-reduce:transform-none motion-reduce:transition-none"
+          @click="openCard(card)"
+          @keydown="onCardKeydown($event, card)"
         >
           <div class="flex items-start justify-between gap-3">
             <div
@@ -181,12 +200,12 @@ const toolCards = computed<ToolCard[]>(() => [
               <span
                 v-if="isToolActive(card.key)"
                 class="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center"
-                aria-hidden="true"
               >
-                <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/70"></span>
-                <span class="relative inline-flex h-2.5 w-2.5 rounded-full border border-white bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.18)]"></span>
+                <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/70 motion-reduce:animate-none" aria-hidden="true"></span>
+                <span class="relative inline-flex h-2.5 w-2.5 rounded-full border border-white bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.18)]" aria-hidden="true"></span>
+                <span class="sr-only">{{ t('toolsHub.runtimeActive') }}</span>
               </span>
-              <component :is="card.icon" class="h-6 w-6" />
+              <component :is="card.icon" class="h-6 w-6" aria-hidden="true" />
             </div>
             <span class="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold tracking-[0.14em] text-slate-500 uppercase">
               {{ t(card.chipKey) }}
@@ -202,14 +221,13 @@ const toolCards = computed<ToolCard[]>(() => [
             </p>
 
             <div class="mt-auto pt-6">
-              <button
-                type="button"
-                class="inline-flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-left text-sm font-semibold text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500/30"
-                @click="router.push(card.path)"
+              <div
+                class="inline-flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-left text-sm font-semibold text-slate-800 transition-colors group-hover:border-slate-300 group-hover:bg-slate-100"
+                aria-hidden="true"
               >
                 <span>{{ t('toolsHub.openAction') }}</span>
-                <ArrowRight class="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-              </button>
+                <ArrowRight class="h-4 w-4 transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none" aria-hidden="true" />
+              </div>
             </div>
           </div>
         </article>

@@ -42,10 +42,12 @@ import {
   type FileShareUserSaveRequest,
   type FileShareUserView,
 } from '../lib/tauri';
+import { pushToast } from '../composables/useToast';
 
 defineOptions({ name: 'FileSharePage' });
 
 const MAX_SESSION_TTL_MINUTES = 7 * 24 * 60;
+const AUTO_REFRESH_SECONDS = Math.round(LAN_SHARE_STATUS_REFRESH_INTERVAL_MS / 1000);
 type PermKey = keyof FileSharePermissionSet;
 type EditUser = FileShareUserView & {
   draft_key: string;
@@ -515,11 +517,12 @@ const copy = async (text: string) => {
   try {
     await navigator.clipboard.writeText(text);
     copiedUrl.value = text;
+    pushToast(t('tools.fileShare.copyUrl'), 'success', { ttlMs: 1600 });
     setTimeout(() => {
       if (copiedUrl.value === text) copiedUrl.value = null;
     }, 1800);
-  } catch {
-    /* Clipboard access can fail in restricted environments. */
+  } catch (error) {
+    pushToast(String(error), 'error', { ttlMs: 3200 });
   }
 };
 
@@ -626,7 +629,7 @@ onUnmounted(() => {
           </div>
         </div>
         <div class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm" :class="isActive ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'">
-          <span class="h-2 w-2 rounded-full" :class="isActive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'"></span>
+          <span class="h-2 w-2 rounded-full" :class="isActive ? 'bg-emerald-500 motion-safe:animate-pulse motion-reduce:animate-none' : 'bg-slate-300'"></span>
           {{ isActive ? t('tools.fileShare.statusActive') : t('tools.fileShare.statusIdle') }}
         </div>
       </div>
@@ -907,9 +910,9 @@ onUnmounted(() => {
                 <div v-for="url in allUrls" :key="url" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
                   <div class="flex items-center gap-2">
                     <code class="flex-1 truncate font-mono text-sm font-semibold text-teal-700">{{ url }}</code>
-                    <button type="button" @click="copy(url)" class="fs-icon" :title="t('tools.fileShare.copyUrl')"><Copy class="h-4 w-4" :class="copiedUrl === url ? 'text-teal-600' : ''" /></button>
-                    <button type="button" @click="toggleQr(url)" class="fs-icon" :title="qrForUrl === url ? t('tools.fileShare.hideQrCode') : t('tools.fileShare.showQrCode')"><QrCode class="h-4 w-4" :class="qrForUrl === url ? 'text-teal-600' : ''" /></button>
-                    <button type="button" @click="openBrowser(url)" class="fs-icon" :title="t('tools.fileShare.openInBrowser')"><ExternalLink class="h-4 w-4" /></button>
+                    <button type="button" @click="copy(url)" class="fs-icon" :title="t('tools.fileShare.copyUrl')" :aria-label="t('tools.fileShare.copyUrl')"><Copy class="h-4 w-4" :class="copiedUrl === url ? 'text-teal-600' : ''" /></button>
+                    <button type="button" @click="toggleQr(url)" class="fs-icon" :title="qrForUrl === url ? t('tools.fileShare.hideQrCode') : t('tools.fileShare.showQrCode')" :aria-label="qrForUrl === url ? t('tools.fileShare.hideQrCode') : t('tools.fileShare.showQrCode')"><QrCode class="h-4 w-4" :class="qrForUrl === url ? 'text-teal-600' : ''" /></button>
+                    <button type="button" @click="openBrowser(url)" class="fs-icon" :title="t('tools.fileShare.openInBrowser')" :aria-label="t('tools.fileShare.openInBrowser')"><ExternalLink class="h-4 w-4" /></button>
                   </div>
                   <div v-if="qrForUrl === url" class="mt-3 flex justify-center">
                     <div class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
@@ -930,6 +933,7 @@ onUnmounted(() => {
                 <div>
                   <div class="text-sm font-semibold text-slate-900">{{ t('tools.fileShare.connectedIpList') }}</div>
                   <div class="mt-1 text-xs text-slate-500">{{ t('tools.fileShare.connectionCount') }}: {{ connCount }}</div>
+                  <div class="mt-1 text-xs text-slate-400">{{ t('tools.fileShare.autoRefreshHint', { seconds: AUTO_REFRESH_SECONDS }) }}</div>
                 </div>
                 <button
                   type="button"

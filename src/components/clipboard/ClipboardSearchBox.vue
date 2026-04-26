@@ -43,16 +43,19 @@ defineExpose({ focus });
     <input
       ref="inputRef"
       v-model="model"
+      role="searchbox"
+      :aria-label="t('clipboard.search.aria')"
       type="search"
       :placeholder="placeholder"
       :disabled="disabled"
-      class="w-full rounded-xl border border-slate-200 bg-white px-10 py-2 text-sm shadow-sm outline-none transition-colors focus:border-slate-400 disabled:cursor-not-allowed disabled:bg-slate-50"
+      class="w-full rounded-xl border border-slate-200 bg-white px-10 py-2 text-sm shadow-sm outline-none transition-colors focus:border-slate-400 focus-visible:ring-2 focus-visible:ring-slate-900/15 disabled:cursor-not-allowed disabled:bg-slate-50"
     >
     <button
       v-if="model"
       type="button"
       class="absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
       :title="t('clipboard.search.clear')"
+      :aria-label="t('clipboard.search.clear')"
       @click="clearValue"
     >
       <X class="h-4 w-4" />

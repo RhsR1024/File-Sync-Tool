@@ -62,8 +62,9 @@ impl ErrorCodeStore {
 pub(crate) fn paginate(items: Vec<ErrorCodeEntry>, page: u32) -> QueryResult {
     let total = items.len();
     let normalized_page = page.max(1);
-    let start = (normalized_page - 1) as usize * PAGE_SIZE as usize;
-    let end = (start + PAGE_SIZE as usize).min(total);
+    let page_index = (normalized_page - 1) as usize;
+    let start = page_index.saturating_mul(PAGE_SIZE as usize);
+    let end = start.saturating_add(PAGE_SIZE as usize).min(total);
     let entries = if start >= total {
         Vec::new()
     } else {

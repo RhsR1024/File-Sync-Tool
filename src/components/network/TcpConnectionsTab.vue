@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { RefreshCw } from 'lucide-vue-next';
+import { Activity, RefreshCw, Search } from 'lucide-vue-next';
 import { getTcpConnections, type TcpConnectionStats } from '../../lib/tauri';
+import Empty from '../Empty.vue';
+import LoadingSkeleton from '../LoadingSkeleton.vue';
 
 defineOptions({ name: 'TcpConnectionsTab' });
 
 const { t } = useI18n();
+const AUTO_REFRESH_SECONDS = 5;
 
 const stats = ref<TcpConnectionStats | null>(null);
 const isLoading = ref(false);
 const autoRefresh = ref(false);
 const lastUpdate = ref('');
+const filterText = ref('');
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 async function fetchData() {
@@ -29,7 +33,7 @@ async function fetchData() {
 
 watch(autoRefresh, (val) => {
   if (val) {
-    refreshTimer = setInterval(fetchData, 5000);
+    refreshTimer = setInterval(fetchData, AUTO_REFRESH_SECONDS * 1000);
   } else {
     if (refreshTimer !== null) {
       clearInterval(refreshTimer);
@@ -107,6 +111,25 @@ function barWidth(count: number, max: number): string {
 function portLabel(port: number, name: string): string {
   return name ? `:${port} (${name})` : `:${port}`;
 }
+
+const stateLegend = ['ESTABLISHED', 'TIME_WAIT', 'CLOSE_WAIT', 'LISTEN'];
+
+const filteredRemoteIps = computed(() => {
+  const query = filterText.value.trim().toLowerCase();
+  const rows = stats.value?.byRemoteIp ?? [];
+  if (!query) return rows.slice(0, 20);
+  return rows.filter(item => item.ip.toLowerCase().includes(query)).slice(0, 20);
+});
+
+const filteredRemotePorts = computed(() => {
+  const query = filterText.value.trim().toLowerCase();
+  const rows = stats.value?.byRemotePort ?? [];
+  if (!query) return rows.slice(0, 20);
+  return rows.filter((item) => {
+    const combined = `${item.port} ${item.name ?? ''}`.toLowerCase();
+    return combined.includes(query);
+  }).slice(0, 20);
+});
 </script>
 
 <template>
@@ -131,8 +154,34 @@ function portLabel(port: number, name: string): string {
         {{ t('networkTools.tcp.autoRefresh') }}
       </label>
 
+      <div class="relative min-w-[220px] flex-1 max-w-sm">
+        <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+        <input
+          v-model="filterText"
+          type="search"
+          :placeholder="t('networkTools.tcp.filterPlaceholder')"
+          class="w-full rounded-xl border border-slate-200 bg-white px-10 py-2 text-sm text-slate-700 outline-none transition-colors focus:border-blue-400 focus-visible:ring-2 focus-visible:ring-blue-500/30"
+        >
+      </div>
+
       <span v-if="lastUpdate" class="text-xs text-slate-400">
         {{ t('networkTools.tcp.lastUpdate') }}: {{ lastUpdate }}
+      </span>
+      <span class="text-xs text-slate-400">
+        {{ t('networkTools.tcp.autoRefreshHint', { seconds: AUTO_REFRESH_SECONDS }) }}
+      </span>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+      <span class="font-medium">{{ t('networkTools.tcp.stateLegend') }}</span>
+      <span
+        v-for="state in stateLegend"
+        :key="state"
+        class="inline-flex items-center gap-1 rounded-full border px-2.5 py-1"
+        :class="stateCardClasses(state)"
+      >
+        <span class="h-1.5 w-1.5 rounded-full bg-current"></span>
+        {{ state }}
       </span>
     </div>
 
@@ -155,13 +204,8 @@ function portLabel(port: number, name: string): string {
 
     <!-- Skeleton cards while loading and no data -->
     <div v-else-if="isLoading" class="grid grid-cols-5 gap-3">
-      <div
-        v-for="n in 5"
-        :key="n"
-        class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-center animate-pulse"
-      >
-        <div class="h-7 bg-slate-200 rounded mb-2 mx-auto w-10"></div>
-        <div class="h-3 bg-slate-200 rounded mx-auto w-16"></div>
+      <div v-for="n in 5" :key="n" class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-center">
+        <LoadingSkeleton variant="text-line" :lines="2" />
       </div>
     </div>
 
@@ -174,9 +218,16 @@ function portLabel(port: number, name: string): string {
         </div>
         <div class="overflow-y-auto max-h-80">
           <table class="w-full text-xs">
+            <thead class="bg-white sticky top-0 z-10">
+              <tr class="text-slate-500">
+                <th scope="col" class="px-3 py-2 text-left font-semibold">{{ t('networkTools.tcp.remoteIpColumn') }}</th>
+                <th scope="col" class="px-2 py-2 text-right font-semibold">{{ t('networkTools.tcp.countColumn') }}</th>
+                <th scope="col" class="px-3 py-2 text-left font-semibold">{{ t('networkTools.tcp.shareColumn') }}</th>
+              </tr>
+            </thead>
             <tbody>
               <tr
-                v-for="item in stats?.byRemoteIp.slice(0, 20)"
+                v-for="item in filteredRemoteIps"
                 :key="item.ip"
                 class="border-b border-slate-50 hover:bg-slate-50 transition-colors"
               >
@@ -195,9 +246,14 @@ function portLabel(port: number, name: string): string {
                   </div>
                 </td>
               </tr>
-              <tr v-if="!stats || stats.byRemoteIp.length === 0">
-                <td colspan="3" class="px-3 py-6 text-center text-slate-400">
-                  {{ isLoading ? '...' : '-' }}
+              <tr v-if="!stats || filteredRemoteIps.length === 0">
+                <td colspan="3" class="px-3 py-6">
+                  <Empty
+                    :icon="Activity"
+                    :title="t(filterText ? 'networkTools.tcp.noMatchTitle' : 'networkTools.tcp.emptyTitle')"
+                    :description="t(filterText ? 'networkTools.tcp.noMatchDescription' : 'networkTools.tcp.emptyDescription')"
+                    dashed
+                  />
                 </td>
               </tr>
             </tbody>
@@ -212,9 +268,16 @@ function portLabel(port: number, name: string): string {
         </div>
         <div class="overflow-y-auto max-h-80">
           <table class="w-full text-xs">
+            <thead class="bg-white sticky top-0 z-10">
+              <tr class="text-slate-500">
+                <th scope="col" class="px-3 py-2 text-left font-semibold">{{ t('networkTools.tcp.portColumn') }}</th>
+                <th scope="col" class="px-2 py-2 text-right font-semibold">{{ t('networkTools.tcp.countColumn') }}</th>
+                <th scope="col" class="px-3 py-2 text-left font-semibold">{{ t('networkTools.tcp.shareColumn') }}</th>
+              </tr>
+            </thead>
             <tbody>
               <tr
-                v-for="item in stats?.byRemotePort.slice(0, 20)"
+                v-for="item in filteredRemotePorts"
                 :key="item.port"
                 class="border-b border-slate-50 hover:bg-slate-50 transition-colors"
               >
@@ -233,9 +296,14 @@ function portLabel(port: number, name: string): string {
                   </div>
                 </td>
               </tr>
-              <tr v-if="!stats || stats.byRemotePort.length === 0">
-                <td colspan="3" class="px-3 py-6 text-center text-slate-400">
-                  {{ isLoading ? '...' : '-' }}
+              <tr v-if="!stats || filteredRemotePorts.length === 0">
+                <td colspan="3" class="px-3 py-6">
+                  <Empty
+                    :icon="Activity"
+                    :title="t(filterText ? 'networkTools.tcp.noMatchTitle' : 'networkTools.tcp.emptyTitle')"
+                    :description="t(filterText ? 'networkTools.tcp.noMatchDescription' : 'networkTools.tcp.emptyDescription')"
+                    dashed
+                  />
                 </td>
               </tr>
             </tbody>

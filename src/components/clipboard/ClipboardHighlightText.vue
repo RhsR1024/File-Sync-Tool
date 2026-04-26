@@ -41,7 +41,7 @@ const clampStyle = computed<Record<string, string>>(() => {
     <template v-for="(part, index) in parts" :key="`${index}-${part.text}`">
       <mark
         v-if="part.match"
-        class="rounded bg-amber-200/80 px-[1px] text-inherit"
+        class="rounded bg-amber-100 px-[1px] text-slate-900"
       >{{ part.text }}</mark>
       <template v-else>{{ part.text }}</template>
     </template>

@@ -2,9 +2,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { AlertCircle, CheckCircle2, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, X as XIcon } from 'lucide-vue-next';
+import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, X as XIcon } from 'lucide-vue-next';
 import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshResult, type ApplianceSshTarget } from '../lib/tauri';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
+import Empty from '../components/Empty.vue';
+import { pushToast } from '../composables/useToast';
 
 defineOptions({
   name: 'EnableApplianceSshPage',
@@ -20,6 +22,7 @@ const ipInputRef = ref<HTMLInputElement | null>(null);
 const recentIps = ref<string[]>([]);
 const sshUsername = ref<string>('root');
 const sshPassword = ref<string>('admin_123');
+const showSshPassword = ref(false);
 const addWhitelistRule = ref<boolean>(true);
 const isLoading = ref<boolean>(false);
 const results = ref<ApplianceSshResult[]>([]);
@@ -45,6 +48,7 @@ const whitelistCidr = ref<string>('');
 const useSeparateJumpHostCreds = ref<boolean>(false);
 const jumpHostUsername = ref<string>('');
 const jumpHostPassword = ref<string>('');
+const showJumpHostPassword = ref(false);
 const RECENT_IPS_KEY = 'applianceSsh.recentIps';
 const RECENT_IPS_LIMIT = 10;
 
@@ -253,12 +257,12 @@ const saveApiTimeout = async () => {
 
 const handleExecute = async () => {
   if (allTargetsSummary.value.length === 0) {
-    alert(t('tools.applianceSsh.noIps'));
+    pushToast(t('tools.applianceSsh.noIps'), 'warning');
     return;
   }
 
   if (hasWhitelistConfigError.value) {
-    alert(t('tools.applianceSsh.sshCredentialsRequired'));
+    pushToast(t('tools.applianceSsh.sshCredentialsRequired'), 'warning');
     return;
   }
 
@@ -288,6 +292,7 @@ const handleExecute = async () => {
       jumpHostPassword: useSeparateJumpHostCreds.value ? jumpHostPassword.value : undefined,
     });
     results.value = response;
+    pushToast(t('tools.applianceSsh.completed', { success: response.filter(item => item.success).length, total: response.length }), 'success', { ttlMs: 2600 });
     currentProgress.value = { current: targets.length, total: targets.length };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -297,6 +302,7 @@ const handleExecute = async () => {
       message: `Error: ${errorMessage}`,
       jumpHost: target.jumpHost,
     }));
+    pushToast(errorMessage, 'error', { ttlMs: 4200 });
   } finally {
     isLoading.value = false;
     currentProgress.value = null;
@@ -408,6 +414,8 @@ const enableStateClass = (value?: number) => {
               </div>
               <!-- Tag Input -->
               <div
+                role="listbox"
+                :aria-label="t('tools.applianceSsh.manualIp')"
                 class="min-h-[2.375rem] w-full flex flex-wrap gap-1.5 px-2.5 py-1.5 border border-slate-200 rounded-lg transition-colors cursor-text"
                 :class="isLoading ? 'bg-slate-50 cursor-not-allowed' : 'bg-white focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-400/20'"
                 @click="ipInputRef?.focus()"
@@ -597,11 +605,20 @@ const enableStateClass = (value?: number) => {
                     <label class="block text-xs font-medium text-slate-600 mb-1.5">{{ t('tools.applianceSsh.sshPassword') }}</label>
                     <input
                       v-model="sshPassword"
-                      type="password"
+                      :type="showSshPassword ? 'text' : 'password'"
+                      autocomplete="new-password"
                       :placeholder="t('tools.applianceSsh.sshPasswordPlaceholder')"
                       :disabled="isLoading"
                       class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
                     />
+                    <button
+                      type="button"
+                      class="mt-2 inline-flex items-center gap-1 text-xs font-medium text-slate-500 transition-colors hover:text-slate-700"
+                      @click="showSshPassword = !showSshPassword"
+                    >
+                      <component :is="showSshPassword ? EyeOff : Eye" class="h-3.5 w-3.5" />
+                      {{ t(showSshPassword ? 'tools.applianceSsh.hidePassword' : 'tools.applianceSsh.showPassword') }}
+                    </button>
                   </div>
                 </div>
 
@@ -698,11 +715,20 @@ const enableStateClass = (value?: number) => {
                               <label class="block text-xs font-medium text-slate-600 mb-1.5">{{ t('tools.applianceSsh.jumpHostPassword') }}</label>
                               <input
                                 v-model="jumpHostPassword"
-                                type="password"
+                                :type="showJumpHostPassword ? 'text' : 'password'"
+                                autocomplete="new-password"
                                 :placeholder="t('tools.applianceSsh.sshPasswordPlaceholder')"
                                 :disabled="isLoading"
                                 class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
                               />
+                              <button
+                                type="button"
+                                class="mt-2 inline-flex items-center gap-1 text-xs font-medium text-slate-500 transition-colors hover:text-slate-700"
+                                @click="showJumpHostPassword = !showJumpHostPassword"
+                              >
+                                <component :is="showJumpHostPassword ? EyeOff : Eye" class="h-3.5 w-3.5" />
+                                {{ t(showJumpHostPassword ? 'tools.applianceSsh.hidePassword' : 'tools.applianceSsh.showPassword') }}
+                              </button>
                             </div>
                           </div>
                         </div>
@@ -795,9 +821,13 @@ const enableStateClass = (value?: number) => {
           </div>
 
           <!-- Empty state hint -->
-          <div v-if="results.length === 0 && !currentProgress" class="mt-4 pt-3 border-t border-slate-100">
-            <p class="text-xs text-slate-400 text-center py-2">{{ t('tools.applianceSsh.noIps') }}</p>
-          </div>
+          <Empty
+            v-if="results.length === 0 && !currentProgress"
+            class="mt-4 pt-3 border-t border-slate-100"
+            :title="t('tools.applianceSsh.emptyTitle')"
+            :description="t('tools.applianceSsh.emptyDescription')"
+            dashed
+          />
         </div>
       </div>
 
@@ -808,9 +838,9 @@ const enableStateClass = (value?: number) => {
             <table class="w-full">
               <thead>
                 <tr class="border-b border-slate-100 bg-slate-50/80">
-                  <th class="px-5 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide w-44">IP {{ t('tools.applianceSsh.address') }}</th>
-                  <th class="px-5 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide w-24">{{ t('tools.applianceSsh.status') }}</th>
-                  <th class="px-5 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">{{ t('tools.applianceSsh.message') }}</th>
+                  <th scope="col" class="px-5 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide w-44">IP {{ t('tools.applianceSsh.address') }}</th>
+                  <th scope="col" class="px-5 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide w-24">{{ t('tools.applianceSsh.status') }}</th>
+                  <th scope="col" class="px-5 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">{{ t('tools.applianceSsh.message') }}</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100">

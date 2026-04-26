@@ -22,6 +22,33 @@ export const messages = {
       clipboardManager: 'Clipboard Manager',
       errorCodeLookup: 'Error Code Lookup',
       versionChipTooltip: 'Open About & Updates',
+      navigation: 'Main navigation',
+      runtimeActive: 'Active',
+      updateAvailable: 'Update available',
+      section: {
+        common: 'Common',
+        tools: 'Tools',
+        system: 'System',
+      },
+    },
+    common: {
+      toast: {
+        dismiss: 'Dismiss',
+      },
+      close: 'Close',
+      skipToMain: 'Skip to main content',
+      error: 'Error',
+      loading: 'Loading…',
+    },
+    tasks: {
+      empty: {
+        notRunning: 'Scheduler not running',
+        notRunningHint: 'Start the scheduler or trigger a manual scan to populate task groups.',
+        actionStart: 'Start scheduler',
+      },
+      loading: {
+        tasks: 'Loading tasks…',
+      },
     },
     console: {
       status: 'Status',
@@ -129,6 +156,16 @@ export const messages = {
       copiedPath: 'Copied!',
       speedDisplay: '{speed}/s',
       etaDisplay: 'ETA {time}',
+      clear: 'Clear',
+      empty: {
+        title: 'No logs yet',
+      },
+      logKind: {
+        info: 'Info',
+        success: 'Success',
+        error: 'Error',
+        command: 'Command',
+      },
     },
     settings: {
       title: 'Settings',
@@ -231,6 +268,8 @@ export const messages = {
       startupOptions: 'Startup Options',
       launchAndAutoScan: 'Launch On Startup And Auto Scan',
       launchAndAutoScanDesc: 'When enabled, the app starts with the system and automatically starts scheduled scanning.',
+      launchAndAutoStartFileShare: 'Launch On Startup And Restore File Share',
+      launchAndAutoStartFileShareDesc: 'When enabled, the app starts with the system and restores file share from saved settings.',
       closeToTray: 'Close To Tray',
       closeToTrayDesc: 'When enabled, clicking the close button hides the window to the system tray instead of exiting the app.',
       configFile: 'Config File',
@@ -351,6 +390,44 @@ export const messages = {
         serverPlaceholder: 'http://192.115.1.3:8080',
         serverHint: 'http or https. Leave empty to disable auto checks.',
       },
+      required: {
+        indicator: 'Required',
+      },
+      field: {
+        interval: { helpMin: 'Min 5 minutes' },
+        stability: { helpMin: 'Min 60 seconds' },
+        guard: { helpMin: 'Min 3 minutes' },
+      },
+      tooltip: {
+        launchAndAutoScan: 'Launch on startup and start scheduled scanning automatically.',
+        launchAndAutoStartFileShare: 'Launch on startup and restore file share from saved settings.',
+        closeToTray: 'Hide to system tray instead of exiting when the window is closed.',
+        notifyOnNewVersion: 'Show a popup when a newer version is available.',
+        deployEnabled: 'Enable remote SFTP/SSH deployment for completed copies.',
+      },
+      toast: {
+        saved: 'Settings saved successfully.',
+        invalid: 'Please fix invalid fields before saving.',
+        saveError: 'Save failed: {error}',
+      },
+      builtinCommands: {
+        unzip: {
+          name: 'Extract Package',
+          description: 'Untar the uploaded .tar.gz package on the remote server.',
+        },
+        uninstall: {
+          name: 'Uninstall Old Version',
+          description: 'Run the bundled uninstaller from the previous deployment.',
+        },
+        cleanup: {
+          name: 'Clean OMC/HA',
+          description: 'Run any matching omc_uninstall.sh / hauninstall.sh scripts.',
+        },
+        install: {
+          name: 'Install New Version',
+          description: 'Run the bundled installer with default acceptance prompts.',
+        },
+      },
     },
     about: {
       title: 'About & Updates',
@@ -362,7 +439,7 @@ export const messages = {
       testing: 'Testing...',
       checkNow: 'Check Now',
       checking: 'Checking...',
-      devModeBadge: 'Debug build - update checks disabled',
+      devModeBadge: 'Debug build — update checks disabled',
       bannerTitle: 'New version {version} available',
       bannerReleasedOn: 'Released {date}',
       upgradeCta: 'Upgrade Now',
@@ -381,7 +458,7 @@ export const messages = {
         titleError: 'Download failed',
         titleResume: 'Pending update detected',
         bodyCurrentLatest: 'Current: {current}  Latest: {latest} (released {date})',
-        bodyResume: 'Version {version} is already downloaded. Upgrade now?',
+        bodyResume: 'A pending update ({version}) was not applied last time. Upgrade now?',
         changelogHeader: 'Changes',
         actionLater: 'Remind Me Later',
         actionUpgrade: 'Upgrade Now',
@@ -393,6 +470,9 @@ export const messages = {
         progress: '{percent}% · {downloaded} / {total} · {speed}/s',
         progressUnknownTotal: 'Downloaded {downloaded} · {speed}/s',
         verifyHint: 'The downloaded file may be corrupted. Please try again.',
+        aria: {
+          progress: 'Download progress',
+        },
       },
       toast: {
         upToDate: 'You are already on the latest version.',
@@ -443,6 +523,12 @@ export const messages = {
         newPassword: 'New Password',
         newPasswordPlaceholder: 'Default: admin_123',
         passwordConfigHint: 'Passwords will be SHA-256 hashed before transmission. Leave blank to use defaults.',
+        showPassword: 'Show password',
+        hidePassword: 'Hide password',
+        samePasswordError: 'Old and new passwords cannot be the same.',
+        completed: 'Password update finished: {success}/{total} succeeded.',
+        emptyTitle: 'Add one or more targets to start a batch run',
+        emptyDescription: 'Server shortcuts and recent IP chips are both supported.',
       },
       applianceSsh: {
         title: 'Enable Appliance SSH',
@@ -465,6 +551,8 @@ export const messages = {
         sshUsernamePlaceholder: 'e.g. root',
         sshPassword: 'SSH Password',
         sshPasswordPlaceholder: 'Enter SSH password',
+        showPassword: 'Show password',
+        hidePassword: 'Hide password',
         whitelistHint: 'The whitelist source IP is automatically derived from this machine\'s route to the target appliance. If the appliance sees a different NAT egress IP, use a device-side rule manually instead.',
         sshCredentialsRequired: 'SSH username and password are required when adding an iptables whitelist rule',
         selectedIps: 'Selected IP addresses ({count})',
@@ -474,6 +562,9 @@ export const messages = {
         totalLabel: 'Total',
         successLabel: 'Success',
         failedLabel: 'Failed',
+        completed: 'SSH enable finished: {success}/{total} succeeded.',
+        emptyTitle: 'Add targets to prepare an SSH batch run',
+        emptyDescription: 'You can mix direct IPs, recent IPs, and jump-host pairs.',
         status: 'Status',
         message: 'Message',
         address: 'Address',
@@ -547,6 +638,7 @@ export const messages = {
         connectionDetails: 'Details',
         connectedIpList: 'Connected IPs',
         refreshStatus: 'Refresh',
+        autoRefreshHint: 'Auto-refresh every {seconds}s while the service is running.',
         noConnections: 'No connection records yet',
         showMoreIps: 'Show {n} more',
         collapseIps: 'Collapse',
@@ -605,6 +697,7 @@ export const messages = {
         connectionDetails: 'Details',
         connectedIpList: 'Connected IPs',
         refreshStatus: 'Refresh',
+        autoRefreshHint: 'Auto-refresh every {seconds}s while the service is running.',
         noConnections: 'No connection records yet',
         uptime: 'Uptime',
         logTitle: 'Log',
@@ -708,6 +801,7 @@ export const messages = {
       title: 'Other Tools',
       description: 'Common utility tools — select a card to open.',
       openAction: 'Open Tool',
+      runtimeActive: 'Active',
       cards: {
         frameworkPassword: {
           chip: 'Password',
@@ -748,7 +842,7 @@ export const messages = {
       title: 'Error Code Lookup',
       description: 'Sync error-code dictionaries from internal GitLab and search by code, range, or keyword.',
       syncButton: 'Sync',
-      syncing: 'Syncing...',
+      syncing: 'Syncing…',
       lastSyncedAt: 'Last synced: {time}',
       lastSyncedTooltip: '{files} file(s), {rows} entries',
       neverSynced: 'Not synced yet',
@@ -802,6 +896,11 @@ export const messages = {
       detail: {
         expand: 'Click to expand',
         collapse: 'Click to collapse',
+      },
+      aria: {
+        modeGroup: 'Query mode',
+        jumpInput: 'Jump to page',
+        expandRow: 'Expand error code details',
       },
     },
     diskCacheCleanup: {
@@ -939,6 +1038,29 @@ export const messages = {
       },
       disabled: {
         redisDown: 'Redis is unavailable, cleanup is disabled.',
+      },
+      legend: {
+        title: 'Status legend',
+        toggleShow: 'Show status legend',
+        toggleHide: 'Hide status legend',
+        normal: 'Normal',
+        pending: 'Pending',
+        warning: 'Warning',
+        error: 'Error',
+        codes: 'Codes',
+      },
+      batch: {
+        confirm: 'Click again to confirm cleanup',
+        confirmAria: 'Click again within 3 seconds to confirm batch cleanup',
+        progress: 'Deleting {count} entries…',
+      },
+      empty: {
+        noHost: 'Select a host to view cache',
+        noHostHint: 'Enter an IP above and load the disk list to inspect Redis cache.',
+        noHostAction: 'Focus host input',
+      },
+      recent: {
+        clear: 'Clear recent hosts',
       },
       status: {
         unknown: 'Unknown Status',
@@ -1079,9 +1201,29 @@ export const messages = {
       totalChanges: 'Total',
       totalRow: 'Total',
       clearResults: 'Clear Results',
+      aria: {
+        scopeTree: 'Project scope tree',
+        metricCard: 'Metric: {label} {value}',
+        chart: {
+          codeComment:
+            'Code vs comment chart: code added {codeAdded}, deleted {codeDeleted}, modified {codeModified}; comments added {commentAdded}, deleted {commentDeleted}, modified {commentModified}.',
+          changeType:
+            'Change type distribution: {addedTotal} added, {deletedTotal} deleted, {modifiedTotal} modified.',
+          fileType:
+            'File type changes across {count} type(s); the largest is {topType} with {topTotal} changes.',
+        },
+      },
+      tooltip: {
+        exact: 'Exact value',
+      },
     },
     networkTools: {
       title: 'Network Tools',
+      copy: {
+        copied: 'Copied',
+        failed: 'Copy failed: {error}',
+        field: 'Copy {field}',
+      },
       tabs: {
         pingScan: 'Ping Scan',
         tcpConnections: 'TCP Connections',
@@ -1117,14 +1259,27 @@ export const messages = {
         recentPrefixes: 'Recent Prefixes',
         clearRecentPrefixes: 'Clear',
         removeRecentPrefix: 'Remove recent prefix',
+        emptyTitle: 'Enter a subnet range to start scanning',
+        emptyDescription: 'Results will appear as a grid or table, and you can export them to CSV.',
       },
       tcp: {
         refresh: 'Refresh',
         autoRefresh: 'Auto Refresh (5s)',
+        autoRefreshHint: 'Auto-refresh every {seconds}s while enabled',
         lastUpdate: 'Last Update',
         total: 'Total',
         byRemoteIp: 'By Remote IP (Top 20)',
         byPort: 'By Port (Top 20)',
+        filterPlaceholder: 'Filter by IP, port, or service',
+        stateLegend: 'State legend',
+        remoteIpColumn: 'Remote IP',
+        portColumn: 'Port',
+        countColumn: 'Count',
+        shareColumn: 'Share',
+        emptyTitle: 'Run a refresh to inspect current TCP activity',
+        emptyDescription: 'Connection summaries will appear here once data is available.',
+        noMatchTitle: 'No TCP rows match this filter',
+        noMatchDescription: 'Try a different IP, port, or service keyword.',
       },
       port: {
         targetHost: 'Target Host',
@@ -1139,6 +1294,7 @@ export const messages = {
         addPreset: 'Add Preset',
         editPreset: 'Edit',
         deletePreset: 'Delete',
+        copyResults: 'Copy Results',
         presetName: 'Preset Name',
         presetPorts: 'Ports',
         save: 'Save',
@@ -1152,6 +1308,8 @@ export const messages = {
         hostError: 'Enter a valid IP or hostname',
         portsError: 'Enter valid ports (comma-separated or range)',
         tooManyPorts: 'Max 1000 ports allowed',
+        emptyTitle: 'Pick a host and one or more ports to start',
+        emptyDescription: 'Common presets can quickly seed web, SSH, or database ports.',
       },
       wol: {
         macAddress: 'MAC Address',
@@ -1168,6 +1326,9 @@ export const messages = {
         deviceNamePlaceholder: 'e.g. Server A',
         macError: 'Invalid MAC address format',
         noDevices: 'No saved devices yet',
+        noDevicesHint: 'Save a device after filling the current target so you can wake it again with one click.',
+        deviceSaved: 'Saved device',
+        deviceDeleted: 'Saved device removed',
       },
       subnet: {
         ipAddress: 'IP Address',
@@ -1257,7 +1418,7 @@ export const messages = {
     history: {
       title: 'Operation History',
       clear: 'Clear History',
-      clearConfirm: 'Are you sure you want to clear all history records? This action cannot be undone.',
+      clearConfirm: 'Click again to confirm',
       noHistory: 'No copy history found.',
       folder: 'Folder',
       time: 'Time',
@@ -1267,6 +1428,10 @@ export const messages = {
       size: 'Size',
       count: 'Count',
       viewFiles: 'View Files',
+      recentN: 'Showing the most recent {n} entries',
+      empty: {
+        actionLabel: 'Refresh',
+      },
     },
     clipboard: {
       tool: {
@@ -1278,6 +1443,7 @@ export const messages = {
       search: {
         placeholder: 'Search clipboard...',
         clear: 'Clear search',
+        aria: 'Search clipboard items',
       },
       panel: { empty: 'No clipboard history yet', noMatch: 'No matching items' },
       actions: {
@@ -1411,6 +1577,7 @@ export const messages = {
       settings: {
         title: 'Settings',
         saving: 'Saving...',
+        saved: 'Saved',
         sectionBasic: 'Basic',
         sectionHotkey: 'Hotkey',
         sectionData: 'Data',
@@ -1420,6 +1587,8 @@ export const messages = {
         hotkeyLabel: 'Global Hotkey',
         hotkeyPlaceholder: 'Click to set…',
         hotkeyRecording: 'Press a hotkey…',
+        hotkeyClear: 'Clear hotkey',
+        hotkeyInstruction: 'Click the field, then press a modifier plus another key. Press Escape to cancel.',
         maxItemsLabel: 'Max Items (0 = unlimited)',
         retainDaysLabel: 'Retain Days (0 = unlimited)',
         previewDelayLabel: 'Hover Preview Delay (ms)',
@@ -1482,6 +1651,7 @@ export const messages = {
           defaults: 'Current shortcuts',
           focusSearch: 'Focus search',
           quickPaste: 'Quick paste',
+          conflict: 'This hotkey conflicts with an existing clipboard shortcut.',
         },
         data: {
           maxItemBytes: 'Max item size (bytes)',
@@ -1592,6 +1762,16 @@ export const messages = {
           alwaysNew: 'Always create a new entry',
         },
       },
+      preview: {
+        titleText: 'Text Preview',
+        titleImage: 'Image Preview',
+        close: 'Close preview',
+        emptyText: 'Hover a text item to preview it.',
+        emptyImage: 'Hover an image item to preview it.',
+        zoomOut: 'Zoom out',
+        zoomIn: 'Zoom in',
+        resetZoom: 'Reset zoom',
+      },
     },
   },
   zh: {
@@ -1617,6 +1797,33 @@ export const messages = {
       clipboardManager: '剪贴板管理',
       errorCodeLookup: '错误码查询',
       versionChipTooltip: '打开关于与更新页',
+      navigation: '主导航',
+      runtimeActive: '运行中',
+      updateAvailable: '有新版本可用',
+      section: {
+        common: '常用',
+        tools: '工具',
+        system: '系统',
+      },
+    },
+    common: {
+      toast: {
+        dismiss: '关闭',
+      },
+      close: '关闭',
+      skipToMain: '跳到主内容',
+      error: '错误',
+      loading: '加载中…',
+    },
+    tasks: {
+      empty: {
+        notRunning: '调度器未启动',
+        notRunningHint: '启动调度器或触发一次扫描后，任务组会显示在此。',
+        actionStart: '启动调度器',
+      },
+      loading: {
+        tasks: '加载任务中…',
+      },
     },
     console: {
       status: '状态',
@@ -1724,6 +1931,16 @@ export const messages = {
       copiedPath: '已复制!',
       speedDisplay: '{speed}/s',
       etaDisplay: '预计 {time}',
+      clear: '清空',
+      empty: {
+        title: '暂无日志',
+      },
+      logKind: {
+        info: '信息',
+        success: '成功',
+        error: '错误',
+        command: '命令',
+      },
     },
     settings: {
       title: '设置',
@@ -1826,6 +2043,8 @@ export const messages = {
       startupOptions: '启动选项',
       launchAndAutoScan: '开机自启并自动运行扫描',
       launchAndAutoScanDesc: '开启后，应用会随系统启动并自动开始定时扫描。',
+      launchAndAutoStartFileShare: '开机后自动恢复文件共享',
+      launchAndAutoStartFileShareDesc: '启用后，应用会随系统启动，并在启动后按已保存的文件共享配置自动恢复服务。',
       closeToTray: '关闭窗口时最小化到托盘',
       closeToTrayDesc: '开启后，点击右上角关闭按钮不会退出软件，而是隐藏到系统托盘。',
       configFile: '配置文件',
@@ -1946,6 +2165,44 @@ export const messages = {
         serverPlaceholder: 'http://192.115.1.3:8080',
         serverHint: '支持 http/https，留空将禁用自动检查。',
       },
+      required: {
+        indicator: '必填',
+      },
+      field: {
+        interval: { helpMin: '最小 5 分钟' },
+        stability: { helpMin: '最少 60 秒' },
+        guard: { helpMin: '最少 3 分钟' },
+      },
+      tooltip: {
+        launchAndAutoScan: '应用随系统启动，并自动开始定时扫描。',
+        launchAndAutoStartFileShare: '应用随系统启动，并按已保存的配置恢复文件共享。',
+        closeToTray: '点击窗口关闭按钮时隐藏到系统托盘，不退出应用。',
+        notifyOnNewVersion: '检测到新版本时弹窗提示。',
+        deployEnabled: '启用远程 SFTP/SSH 部署。',
+      },
+      toast: {
+        saved: '设置已保存。',
+        invalid: '请先修复无效项再保存。',
+        saveError: '保存失败：{error}',
+      },
+      builtinCommands: {
+        unzip: {
+          name: '解压安装包',
+          description: '在远程服务器上解压上传的 .tar.gz 安装包。',
+        },
+        uninstall: {
+          name: '卸载旧版本',
+          description: '执行前一版本目录中的卸载脚本。',
+        },
+        cleanup: {
+          name: '清理 OMC/HA',
+          description: '尝试运行 omc_uninstall.sh / hauninstall.sh（如存在）。',
+        },
+        install: {
+          name: '安装新版本',
+          description: '运行新版本中的安装脚本，自动确认默认提示。',
+        },
+      },
     },
     about: {
       title: '关于与更新',
@@ -1957,7 +2214,7 @@ export const messages = {
       testing: '测试中...',
       checkNow: '立即检查',
       checking: '检查中...',
-      devModeBadge: '开发模式：更新检查已禁用',
+      devModeBadge: '开发模式 — 更新检查已禁用',
       bannerTitle: '发现新版本 {version}',
       bannerReleasedOn: '{date} 发布',
       upgradeCta: '立即升级',
@@ -1976,7 +2233,7 @@ export const messages = {
         titleError: '下载失败',
         titleResume: '检测到待应用更新',
         bodyCurrentLatest: '当前版本：{current}  最新版本：{latest}（{date} 发布）',
-        bodyResume: '版本 {version} 已经下载完成，现在升级吗？',
+        bodyResume: '上次有未应用的更新（{version}），现在升级？',
         changelogHeader: '更新内容',
         actionLater: '稍后提醒',
         actionUpgrade: '立即升级',
@@ -1988,6 +2245,9 @@ export const messages = {
         progress: '{percent}% · {downloaded} / {total} · {speed}/s',
         progressUnknownTotal: '已下载 {downloaded} · {speed}/s',
         verifyHint: '下载的文件可能已损坏，请稍后重试。',
+        aria: {
+          progress: '下载进度',
+        },
       },
       toast: {
         upToDate: '当前已经是最新版本。',
@@ -2038,6 +2298,12 @@ export const messages = {
         newPassword: '新密码',
         newPasswordPlaceholder: '默认：admin_123',
         passwordConfigHint: '密码在传输前会进行 SHA-256 哈希处理，留空则使用默认值。',
+        showPassword: '显示密码',
+        hidePassword: '隐藏密码',
+        samePasswordError: '旧密码与新密码不能相同。',
+        completed: '密码修改完成：成功 {success} / {total}。',
+        emptyTitle: '添加一个或多个目标后即可开始批量执行',
+        emptyDescription: '支持服务器快捷选择，也支持最近 IP 标签。',
       },
       applianceSsh: {
         title: '开启一体机 SSH',
@@ -2060,6 +2326,8 @@ export const messages = {
         sshUsernamePlaceholder: '例如 root',
         sshPassword: 'SSH 密码',
         sshPasswordPlaceholder: '请输入 SSH 密码',
+        showPassword: '显示密码',
+        hidePassword: '隐藏密码',
         whitelistHint: '白名单源 IP 会根据当前机器到目标一体机的路由自动识别。如果设备实际看到的是 NAT 出口 IP，请改为手工在设备侧添加规则。',
         sshCredentialsRequired: '勾选添加 iptables 白名单规则时，必须填写 SSH 用户名和密码',
         selectedIps: '已选择的IP地址({count})',
@@ -2069,6 +2337,9 @@ export const messages = {
         totalLabel: '总计',
         successLabel: '成功',
         failedLabel: '失败',
+        completed: 'SSH 开启完成：成功 {success} / {total}。',
+        emptyTitle: '添加目标后即可准备 SSH 批量执行',
+        emptyDescription: '可混合直接 IP、最近 IP 与跳板机目标。',
         status: '状态',
         message: '信息',
         address: '地址',
@@ -2142,6 +2413,7 @@ export const messages = {
         connectionDetails: '详情',
         connectedIpList: '连接 IP 列表',
         refreshStatus: '刷新',
+        autoRefreshHint: '服务运行时每 {seconds} 秒自动刷新一次。',
         noConnections: '暂时还没有连接记录',
         showMoreIps: '展开剩余 {n} 个',
         collapseIps: '收起',
@@ -2200,6 +2472,7 @@ export const messages = {
         connectionDetails: '详情',
         connectedIpList: '连接 IP 列表',
         refreshStatus: '刷新',
+        autoRefreshHint: '服务运行时每 {seconds} 秒自动刷新一次。',
         noConnections: '暂时还没有连接记录',
         showMoreIps: '展开剩余 {n} 个',
         collapseIps: '收起',
@@ -2303,6 +2576,7 @@ export const messages = {
       title: '其他工具',
       description: '常用辅助工具集，点击卡片即可进入。',
       openAction: '进入工具',
+      runtimeActive: '运行中',
       cards: {
         frameworkPassword: {
           chip: '密码',
@@ -2343,7 +2617,7 @@ export const messages = {
       title: '错误码查询',
       description: '从内部 GitLab 同步错误码字典，按错误码、范围或关键字检索。',
       syncButton: '同步',
-      syncing: '同步中...',
+      syncing: '同步中…',
       lastSyncedAt: '上次同步：{time}',
       lastSyncedTooltip: '共 {files} 个文件，{rows} 条错误码',
       neverSynced: '尚未同步',
@@ -2397,6 +2671,11 @@ export const messages = {
       detail: {
         expand: '点击展开',
         collapse: '点击收起',
+      },
+      aria: {
+        modeGroup: '查询模式',
+        jumpInput: '跳转到页码',
+        expandRow: '展开错误码详情',
       },
     },
     diskCacheCleanup: {
@@ -2534,6 +2813,29 @@ export const messages = {
       },
       disabled: {
         redisDown: 'Redis 不可用，无法执行清理。',
+      },
+      legend: {
+        title: '状态说明',
+        toggleShow: '显示状态说明',
+        toggleHide: '隐藏状态说明',
+        normal: '正常',
+        pending: '等待中',
+        warning: '异常',
+        error: '错误',
+        codes: '编码',
+      },
+      batch: {
+        confirm: '再次点击确认清理',
+        confirmAria: '请在 3 秒内再次点击以确认批量清理',
+        progress: '正在删除 {count} 条缓存…',
+      },
+      empty: {
+        noHost: '选择主机查看缓存',
+        noHostHint: '在上方输入接入 IP 并获取列表后即可查看 Redis 缓存。',
+        noHostAction: '聚焦主机输入',
+      },
+      recent: {
+        clear: '清除最近主机',
       },
       status: {
         unknown: '未知状态',
@@ -2674,9 +2976,29 @@ export const messages = {
       exportCancelled: '已取消导出。',
       openExportFolder: '打开目录',
       openExportPathFailed: '打开导出目录失败：{error}',
+      aria: {
+        scopeTree: '项目作用域树',
+        metricCard: '指标卡片：{label} {value}',
+        chart: {
+          codeComment:
+            '代码与注释图表：代码新增 {codeAdded}、删除 {codeDeleted}、修改 {codeModified}；注释新增 {commentAdded}、删除 {commentDeleted}、修改 {commentModified}。',
+          changeType:
+            '变更类型分布：新增 {addedTotal}、删除 {deletedTotal}、修改 {modifiedTotal}。',
+          fileType:
+            '文件类型变更涉及 {count} 种类型，占比最高的是 {topType}（{topTotal} 处变更）。',
+        },
+      },
+      tooltip: {
+        exact: '精确值',
+      },
     },
     networkTools: {
       title: '网络工具',
+      copy: {
+        copied: '已复制',
+        failed: '复制失败：{error}',
+        field: '复制 {field}',
+      },
       tabs: {
         pingScan: 'Ping 扫描',
         tcpConnections: 'TCP 连接统计',
@@ -2712,14 +3034,27 @@ export const messages = {
         recentPrefixes: '最近前缀',
         clearRecentPrefixes: '清空',
         removeRecentPrefix: '移除最近前缀',
+        emptyTitle: '输入网段范围后即可开始扫描',
+        emptyDescription: '扫描结果会以网格或表格方式展示，并支持导出 CSV。',
       },
       tcp: {
         refresh: '刷新',
         autoRefresh: '自动刷新 (5秒)',
+        autoRefreshHint: '启用后每 {seconds} 秒自动刷新一次',
         lastUpdate: '最后更新',
         total: '总连接',
         byRemoteIp: '按远程 IP 聚合 (Top 20)',
         byPort: '按端口聚合 (Top 20)',
+        filterPlaceholder: '按 IP、端口或服务名筛选',
+        stateLegend: '状态图例',
+        remoteIpColumn: '远端 IP',
+        portColumn: '端口',
+        countColumn: '数量',
+        shareColumn: '占比',
+        emptyTitle: '刷新后查看当前 TCP 活动',
+        emptyDescription: '这里会展示连接状态汇总。',
+        noMatchTitle: '没有匹配当前筛选的 TCP 记录',
+        noMatchDescription: '请尝试其他 IP、端口或服务关键词。',
       },
       port: {
         targetHost: '目标地址',
@@ -2734,6 +3069,7 @@ export const messages = {
         addPreset: '添加预设',
         editPreset: '编辑',
         deletePreset: '删除',
+        copyResults: '复制结果',
         presetName: '预设名称',
         presetPorts: '端口列表',
         save: '保存',
@@ -2747,6 +3083,8 @@ export const messages = {
         hostError: '请输入有效的 IP 或域名',
         portsError: '请输入有效的端口（逗号分隔或范围）',
         tooManyPorts: '最多支持 1000 个端口',
+        emptyTitle: '先填写目标主机和端口范围',
+        emptyDescription: '可先用预设快速填充 Web、SSH 或数据库端口。',
       },
       wol: {
         macAddress: 'MAC 地址',
@@ -2763,6 +3101,9 @@ export const messages = {
         deviceNamePlaceholder: '如 服务器A',
         macError: 'MAC 地址格式无效',
         noDevices: '暂无已保存设备',
+        noDevicesHint: '填写当前目标后可先保存，后续一键唤醒。',
+        deviceSaved: '已保存设备',
+        deviceDeleted: '已删除保存的设备',
       },
       subnet: {
         ipAddress: 'IP 地址',
@@ -2852,7 +3193,7 @@ export const messages = {
     history: {
       title: '历史记录',
       clear: '清空历史',
-      clearConfirm: '确定要清空所有历史记录吗？此操作无法撤销。',
+      clearConfirm: '再次点击确认清空',
       noHistory: '暂无复制记录',
       folder: '文件夹',
       time: '时间',
@@ -2862,6 +3203,10 @@ export const messages = {
       size: '大小',
       count: '数量',
       viewFiles: '查看文件',
+      recentN: '显示最近 {n} 条',
+      empty: {
+        actionLabel: '刷新',
+      },
     },
     clipboard: {
       tool: {
@@ -2873,6 +3218,7 @@ export const messages = {
       search: {
         placeholder: '搜索剪贴板…',
         clear: '清空搜索',
+        aria: '搜索剪贴板条目',
       },
       panel: { empty: '暂无剪贴板历史', noMatch: '没有匹配的记录' },
       actions: {
@@ -3005,6 +3351,7 @@ export const messages = {
       settings: {
         title: '设置',
         saving: '保存中…',
+        saved: '已保存',
         sectionBasic: '基础',
         sectionHotkey: '快捷键',
         sectionData: '数据管理',
@@ -3014,6 +3361,8 @@ export const messages = {
         hotkeyLabel: '全局快捷键',
         hotkeyPlaceholder: '点击录入…',
         hotkeyRecording: '请按下快捷键…',
+        hotkeyClear: '清除快捷键',
+        hotkeyInstruction: '点击输入框后，按下修饰键加字母或功能键；按 Escape 取消录入。',
         maxItemsLabel: '最大条数（0 = 不限）',
         retainDaysLabel: '保留天数（0 = 不限）',
         previewDelayLabel: '悬浮预览延迟 (ms)',
@@ -3072,6 +3421,7 @@ export const messages = {
           defaults: '当前快捷键',
           focusSearch: '聚焦搜索',
           quickPaste: '快速粘贴',
+          conflict: '该快捷键与现有剪贴板操作冲突。',
         },
         data: {
           maxItemBytes: '单项大小上限（字节）',
@@ -3181,6 +3531,16 @@ export const messages = {
           ignore: '忽略重复内容',
           alwaysNew: '始终创建新条目',
         },
+      },
+      preview: {
+        titleText: '文本预览',
+        titleImage: '图片预览',
+        close: '关闭预览',
+        emptyText: '悬停文本条目即可预览。',
+        emptyImage: '悬停图片条目即可预览。',
+        zoomOut: '缩小',
+        zoomIn: '放大',
+        resetZoom: '重置缩放',
       },
     },
   },

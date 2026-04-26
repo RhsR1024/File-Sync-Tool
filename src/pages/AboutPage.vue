@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue';
-import { ArrowLeft, RefreshCw, Router, ShieldCheck } from 'lucide-vue-next';
+import { computed, ref, watch } from 'vue';
+import { ArrowLeft, Globe, Minus, Plus, RefreshCw, ShieldCheck } from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 
 import { updaterApi } from '@/lib/tauri';
 import { addLog } from '@/lib/store';
 import { useUpdater } from '@/composables/useUpdater';
+import { useToast } from '@/composables/useToast';
 import { compareVersionsAsc, formatReleaseDate, isCurrentVersion } from './about/version';
 
 defineOptions({ name: 'AboutPage' });
@@ -14,40 +15,17 @@ defineOptions({ name: 'AboutPage' });
 const router = useRouter();
 const { t } = useI18n();
 const { state, dialogOpen, dialogState, dialogError } = useUpdater();
+const { pushToast } = useToast();
 
 const expandedVersion = ref<string | null>(null);
 const isChecking = ref(false);
 const isTesting = ref(false);
-const statusMsg = ref('');
-const statusTone = ref<'success' | 'error' | 'info'>('info');
-let statusTimer: ReturnType<typeof setTimeout> | null = null;
 
-function clearStatus() {
-  if (statusTimer) {
-    clearTimeout(statusTimer);
-    statusTimer = null;
-  }
-  statusMsg.value = '';
-}
-
-function showStatus(message: string, tone: 'success' | 'error' | 'info' = 'info', duration = 3200) {
-  clearStatus();
-  statusMsg.value = message;
-  statusTone.value = tone;
-  if (duration > 0) {
-    statusTimer = setTimeout(() => {
-      statusMsg.value = '';
-      statusTimer = null;
-    }, duration);
-  }
-}
-
-const fallbackVersionLabel = computed(() => t('sidebar.version'));
-
-const fallbackReleaseDate = computed(() => {
-  const raw = fallbackVersionLabel.value.split('·')[1]?.trim() ?? '';
-  return raw.replace(/\./g, '-');
-});
+// Build-time injected release date (see `vite.config.ts` `define`).
+// Acts as the structured fallback when the manifest does not yet list the
+// currently running version. Falling back to an empty string allows
+// `formatReleaseDate` to render an empty value cleanly.
+const fallbackReleaseDate = typeof __APP_RELEASE_DATE__ === 'string' ? __APP_RELEASE_DATE__ : '';
 
 const sortedVersions = computed(() => {
   const versions = [...(state.value?.manifest?.versions ?? [])];
@@ -68,7 +46,7 @@ const currentEntry = computed(() => {
   return sortedVersions.value.find((entry) => isCurrentVersion(entry.version, currentVersion)) ?? null;
 });
 
-const currentReleaseDate = computed(() => currentEntry.value?.released_at ?? fallbackReleaseDate.value);
+const currentReleaseDate = computed(() => currentEntry.value?.released_at ?? fallbackReleaseDate);
 
 watch(
   () => state.value?.current,
@@ -85,17 +63,19 @@ async function checkNow() {
   try {
     const result = await updaterApi.check();
     if (result.has_update) {
+      // The persistent in-page banner (right column) acts as the passive
+      // notice; the dialog is the active prompt. No toast — avoid duplicating
+      // the same announcement across three surfaces.
       dialogState.value = 'found';
       dialogError.value = null;
       dialogOpen.value = true;
-      showStatus(t('about.bannerTitle', { version: result.latest ?? '' }), 'success');
       return;
     }
 
-    showStatus(t('updater.toast.upToDate'), 'info');
+    pushToast(t('updater.toast.upToDate'), 'info');
   } catch (error) {
     const message = String(error);
-    showStatus(message, 'error', 4800);
+    pushToast(message, 'error', { ttlMs: 4800 });
     addLog(`[updater] ${message}`, 'error');
   } finally {
     isChecking.value = false;
@@ -107,12 +87,16 @@ async function testConnection() {
   try {
     const result = await updaterApi.testServer();
     if (result.ok) {
-      showStatus(t('updater.toast.testOk'), 'success');
+      pushToast(t('updater.toast.testOk'), 'success');
     } else {
-      showStatus(t('updater.toast.testFail', { detail: result.error ?? result.status ?? 'unknown' }), 'error', 4800);
+      pushToast(
+        t('updater.toast.testFail', { detail: result.error ?? result.status ?? 'unknown' }),
+        'error',
+        { ttlMs: 4800 },
+      );
     }
   } catch (error) {
-    showStatus(t('updater.toast.testFail', { detail: String(error) }), 'error', 4800);
+    pushToast(t('updater.toast.testFail', { detail: String(error) }), 'error', { ttlMs: 4800 });
   } finally {
     isTesting.value = false;
   }
@@ -128,28 +112,37 @@ function toggleExpanded(version: string) {
   expandedVersion.value = expandedVersion.value === version ? null : version;
 }
 
-onUnmounted(clearStatus);
+// Vue transition hooks for the changelog accordion. We measure scrollHeight
+// at runtime so each entry expands to its own intrinsic height. The
+// `prefers-reduced-motion` rule in <style> drops the height tween and falls
+// back to opacity-only for users who request reduced motion.
+function onExpandEnter(el: Element) {
+  const target = el as HTMLElement;
+  target.style.height = '0px';
+  // Force a reflow so the transition picks up the change from 0.
+  void target.offsetHeight;
+  target.style.height = `${target.scrollHeight}px`;
+}
+
+function onExpandAfterEnter(el: Element) {
+  (el as HTMLElement).style.height = '';
+}
+
+function onExpandLeave(el: Element) {
+  const target = el as HTMLElement;
+  target.style.height = `${target.scrollHeight}px`;
+  void target.offsetHeight;
+  target.style.height = '0px';
+}
 </script>
 
 <template>
   <div class="h-full overflow-y-auto bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.12),_transparent_45%),linear-gradient(180deg,_#f8fbff_0%,_#eef4fb_100%)]">
     <div class="mx-auto max-w-5xl space-y-6 px-6 py-6">
-      <div
-        v-if="statusMsg"
-        class="fixed left-1/2 top-6 z-[70] w-[min(calc(100vw-2rem),32rem)] -translate-x-1/2 rounded-2xl border px-4 py-3 text-sm font-medium shadow-2xl backdrop-blur"
-        :class="{
-          'border-emerald-200 bg-emerald-50/95 text-emerald-700 shadow-emerald-200/70': statusTone === 'success',
-          'border-rose-200 bg-rose-50/95 text-rose-700 shadow-rose-200/70': statusTone === 'error',
-          'border-sky-200 bg-sky-50/95 text-sky-700 shadow-sky-200/70': statusTone === 'info',
-        }"
-      >
-        {{ statusMsg }}
-      </div>
-
       <div class="flex flex-wrap items-center justify-between gap-3">
         <button
           type="button"
-          class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/85 px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-white"
+          class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/85 px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
           @click="router.back()"
         >
           <ArrowLeft class="h-4 w-4" />
@@ -188,7 +181,7 @@ onUnmounted(clearStatus);
 
             <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
               <div class="flex items-center gap-2 text-sm font-medium text-slate-700">
-                <Router class="h-4 w-4 text-slate-400" />
+                <Globe class="h-4 w-4 text-slate-400" aria-hidden="true" />
                 <span>{{ t('about.serverLabel') }}</span>
               </div>
               <div class="mt-2 break-all text-sm text-slate-500">
@@ -199,20 +192,20 @@ onUnmounted(clearStatus);
             <div class="flex flex-wrap gap-3">
               <button
                 type="button"
-                class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
                 :disabled="isTesting || !state?.server_url"
                 @click="testConnection"
               >
-                <RefreshCw class="h-4 w-4" :class="isTesting ? 'animate-spin' : ''" />
+                <RefreshCw class="h-4 w-4" :class="isTesting ? 'animate-spin' : ''" aria-hidden="true" />
                 {{ isTesting ? t('about.testing') : t('about.testConnection') }}
               </button>
               <button
                 type="button"
-                class="inline-flex items-center gap-2 rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+                class="inline-flex items-center gap-2 rounded-full bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
                 :disabled="isChecking || state?.debug_build || !state?.server_url"
                 @click="checkNow"
               >
-                <RefreshCw class="h-4 w-4" :class="isChecking ? 'animate-spin' : ''" />
+                <RefreshCw class="h-4 w-4" :class="isChecking ? 'animate-spin' : ''" aria-hidden="true" />
                 {{ isChecking ? t('about.checking') : t('about.checkNow') }}
               </button>
             </div>
@@ -234,7 +227,7 @@ onUnmounted(clearStatus);
               </ul>
               <button
                 type="button"
-                class="mt-4 inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-100"
+                class="mt-4 inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
                 @click="openUpgradeDialog"
               >
                 {{ t('about.upgradeCta') }}
@@ -263,11 +256,13 @@ onUnmounted(clearStatus);
           <article
             v-for="entry in sortedVersions"
             :key="entry.version"
-            class="overflow-hidden rounded-3xl border border-slate-200 bg-slate-50/75"
+            class="overflow-hidden rounded-3xl border border-slate-200 bg-slate-50/75 transition-colors duration-150 hover:bg-slate-50"
           >
             <button
               type="button"
-              class="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+              class="flex w-full items-center justify-between gap-4 px-5 py-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+              :aria-expanded="expandedVersion === entry.version"
+              :aria-controls="`changelog-${entry.version}`"
               @click="toggleExpanded(entry.version)"
             >
               <div class="min-w-0">
@@ -275,6 +270,7 @@ onUnmounted(clearStatus);
                   <span class="text-lg font-semibold text-slate-900">{{ entry.version }}</span>
                   <span
                     v-if="isCurrentVersion(entry.version, state?.current ?? '')"
+                    aria-current="true"
                     class="rounded-full bg-sky-100 px-2.5 py-0.5 text-xs font-semibold text-sky-700"
                   >
                     {{ t('about.currentTag') }}
@@ -284,19 +280,31 @@ onUnmounted(clearStatus);
                   {{ formatReleaseDate(entry.released_at) }}
                 </div>
               </div>
-              <div class="text-sm text-slate-400">
-                {{ expandedVersion === entry.version ? '−' : '+' }}
-              </div>
+              <span class="text-slate-400" aria-hidden="true">
+                <Minus v-if="expandedVersion === entry.version" class="h-4 w-4" />
+                <Plus v-else class="h-4 w-4" />
+              </span>
             </button>
 
-            <div v-if="expandedVersion === entry.version" class="border-t border-slate-200 bg-white px-5 py-4">
-              <ul class="list-disc space-y-2 pl-5 text-sm leading-6 text-slate-700">
-                <li v-for="(line, index) in entry.changelog" :key="index">{{ line }}</li>
-                <li v-if="entry.changelog.length === 0" class="list-none pl-0 text-slate-400">
-                  {{ t('about.changelogEmpty') }}
-                </li>
-              </ul>
-            </div>
+            <transition
+              name="changelog-expand"
+              @enter="onExpandEnter"
+              @after-enter="onExpandAfterEnter"
+              @leave="onExpandLeave"
+            >
+              <div
+                v-if="expandedVersion === entry.version"
+                :id="`changelog-${entry.version}`"
+                class="changelog-panel border-t border-slate-200 bg-white"
+              >
+                <ul class="list-disc space-y-2 px-5 py-4 pl-10 text-sm leading-6 text-slate-700">
+                  <li v-for="(line, index) in entry.changelog" :key="index">{{ line }}</li>
+                  <li v-if="entry.changelog.length === 0" class="list-none pl-0 text-slate-400">
+                    {{ t('about.changelogEmpty') }}
+                  </li>
+                </ul>
+              </div>
+            </transition>
           </article>
         </div>
         <p v-else class="mt-6 text-sm text-slate-500">
@@ -306,3 +314,32 @@ onUnmounted(clearStatus);
     </div>
   </div>
 </template>
+
+<style scoped>
+.changelog-panel {
+  overflow: hidden;
+}
+.changelog-expand-enter-active,
+.changelog-expand-leave-active {
+  transition: height 200ms ease-out, opacity 160ms ease-out;
+}
+.changelog-expand-enter-from,
+.changelog-expand-leave-to {
+  opacity: 0;
+}
+.changelog-expand-enter-to,
+.changelog-expand-leave-from {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .changelog-expand-enter-active,
+  .changelog-expand-leave-active {
+    transition: opacity 120ms linear;
+  }
+  /* Ensure no height tween runs under reduced motion. The hooks still set
+     heights, but the transition is opacity-only so the size jumps instantly. */
+  .changelog-panel {
+    height: auto !important;
+  }
+}
+</style>

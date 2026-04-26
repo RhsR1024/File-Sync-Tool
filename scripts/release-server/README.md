@@ -2,6 +2,10 @@
 
 Serve `manifest.json` and versioned `*.exe` files over plain HTTP on the LAN.
 
+Detailed deployment and rollout guide:
+
+- [UPDATE_DEPLOYMENT_GUIDE.md](./UPDATE_DEPLOYMENT_GUIDE.md)
+
 ## Quick start
 
 ```bash

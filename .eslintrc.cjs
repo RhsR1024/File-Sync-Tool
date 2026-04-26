@@ -5,6 +5,9 @@ module.exports = {
     es2022: true,
     node: true,
   },
+  globals: {
+    __APP_RELEASE_DATE__: 'readonly',
+  },
   extends: [
     'eslint:recommended',
     'plugin:vue/vue3-essential',

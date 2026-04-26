@@ -31,10 +31,12 @@ import {
   type ScreenShareConfig,
   type ScreenShareStatus,
 } from '../lib/tauri';
+import { pushToast } from '../composables/useToast';
 
 defineOptions({ name: 'ScreenSharePage' });
 
 const { t } = useI18n();
+const AUTO_REFRESH_SECONDS = Math.round(LAN_SHARE_STATUS_REFRESH_INTERVAL_MS / 1000);
 
 const monitors = ref<MonitorInfo[]>([]);
 const interfaces = ref<NetworkInterfaceInfo[]>([]);
@@ -259,11 +261,12 @@ async function copyUrl(url: string) {
   try {
     await navigator.clipboard.writeText(url);
     copiedUrl.value = url;
+    pushToast(t('tools.screenShare.copyUrl'), 'success', { ttlMs: 1600 });
     setTimeout(() => {
       if (copiedUrl.value === url) copiedUrl.value = null;
     }, 1800);
-  } catch {
-    /* Clipboard access can fail in restricted environments. */
+  } catch (error) {
+    pushToast(String(error), 'error', { ttlMs: 3200 });
   }
 }
 
@@ -419,7 +422,7 @@ onUnmounted(() => {
           class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm"
           :class="isActive ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'"
         >
-          <span class="h-2 w-2 rounded-full" :class="isActive ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'"></span>
+          <span class="h-2 w-2 rounded-full" :class="isActive ? 'bg-emerald-500 motion-safe:animate-pulse motion-reduce:animate-none' : 'bg-slate-300'"></span>
           {{ isActive ? t('tools.screenShare.statusActive') : t('tools.screenShare.statusIdle') }}
         </div>
       </div>
@@ -625,7 +628,7 @@ onUnmounted(() => {
                       @click="copyUrl(url)"
                       class="ss-icon-button"
                       :title="t('tools.screenShare.copyUrl')"
-                      aria-label="Copy URL"
+                      :aria-label="t('tools.screenShare.copyUrl')"
                     >
                       <Copy class="h-4 w-4" :class="copiedUrl === url ? 'text-violet-600' : ''" />
                     </button>
@@ -634,6 +637,7 @@ onUnmounted(() => {
                       @click="toggleQr(url)"
                       class="ss-icon-button"
                       :title="qrForUrl === url ? t('tools.screenShare.hideQrCode') : t('tools.screenShare.showQrCode')"
+                      :aria-label="qrForUrl === url ? t('tools.screenShare.hideQrCode') : t('tools.screenShare.showQrCode')"
                     >
                       <QrCode class="h-4 w-4" :class="qrForUrl === url ? 'text-violet-600' : ''" />
                     </button>
@@ -642,6 +646,7 @@ onUnmounted(() => {
                       @click="openInBrowser(url)"
                       class="ss-icon-button"
                       :title="t('tools.screenShare.openInBrowser')"
+                      :aria-label="t('tools.screenShare.openInBrowser')"
                     >
                       <ExternalLink class="h-4 w-4" />
                     </button>
@@ -697,6 +702,7 @@ onUnmounted(() => {
                 <div>
                   <h3 class="text-sm font-semibold text-slate-900">{{ t('tools.screenShare.connectedIpList') }}</h3>
                   <p class="text-xs text-slate-500">{{ t('tools.screenShare.connectionCount') }}: {{ connectionCount }}</p>
+                  <p class="text-xs text-slate-400">{{ t('tools.screenShare.autoRefreshHint', { seconds: AUTO_REFRESH_SECONDS }) }}</p>
                 </div>
                 <button
                   type="button"

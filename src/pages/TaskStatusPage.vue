@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onActivated } from 'vue';
 import { Play, Square, RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, Trash2 } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
+import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
 import TaskGroupsTable from '@/components/tasks/TaskGroupsTable.vue';
 import TaskGroupDetailPanel from '@/components/tasks/TaskGroupDetailPanel.vue';
@@ -19,6 +20,7 @@ import { appStore, addLog } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { buildTaskRows } from '@/lib/taskStatusView';
 import { startScheduler, stopScheduler, executeScan } from '@/lib/scheduler';
+import { pushToast, type ToastTone } from '@/composables/useToast';
 
 defineOptions({
   name: 'TaskStatusPage',
@@ -27,24 +29,23 @@ defineOptions({
 const { t } = useI18n();
 const config = ref<AppConfig | null>(null);
 const isManualCopyModalOpen = ref(false);
+const manualCopyTriggerRef = ref<HTMLButtonElement | null>(null);
 
-const toastMessage = ref('');
-const toastTone = ref<'success' | 'error' | 'info'>('info');
-let toastTimer: ReturnType<typeof setTimeout> | null = null;
+// Tracks whether the first hydrate of taskStateStore has resolved during this
+// page lifecycle so we can show a skeleton instead of a blank panel on cold
+// boot.
+const isInitialLoading = ref(false);
+
+// Pushes a toast through the M01 shared queue. Kept as a thin wrapper so the
+// migration from the old local timer is grep-able and the call sites stay
+// short.
+function notify(message: string, tone: ToastTone = 'info') {
+  pushToast(message, tone);
+}
 
 // For retry run with target existence check
 const retryTargetPreview = ref<ManualCopyPreview | null>(null);
 const pendingRetryRequest = ref<{ taskGroupId: string; source: string; target: string } | null>(null);
-
-function showToast(message: string, tone: 'success' | 'error' | 'info' = 'info') {
-  toastMessage.value = message;
-  toastTone.value = tone;
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    toastMessage.value = '';
-    toastTimer = null;
-  }, 2400);
-}
 
 const rows = computed(() => buildTaskRows(taskStateStore.groups));
 
@@ -61,20 +62,20 @@ async function handleSelect(taskGroupId: string) {
 async function handleClearGroup(taskGroupId: string) {
   try {
     await clearTaskGroup(taskGroupId);
-    showToast(t('console.clearGroup'), 'success');
+    notify(t('console.clearGroup'), 'success');
   } catch (e) {
     addLog(`Clear failed: ${e}`, 'error');
-    showToast(`${t('console.clearGroup')} - ${e}`, 'error');
+    notify(`${t('console.clearGroup')} - ${e}`, 'error');
   }
 }
 
 async function handleClearAll() {
   try {
     await clearTaskGroups();
-    showToast(t('console.clearAllGroups'), 'success');
+    notify(t('console.clearAllGroups'), 'success');
   } catch (e) {
     addLog(`Clear all failed: ${e}`, 'error');
-    showToast(`${t('console.clearAllGroups')} - ${e}`, 'error');
+    notify(`${t('console.clearAllGroups')} - ${e}`, 'error');
   }
 }
 
@@ -83,10 +84,10 @@ async function handlePause(taskGroupId: string, runId: string) {
   try {
     await pauseTaskRun(taskGroupId, runId);
     addLog(t('console.paused'), 'info');
-    showToast(t('console.paused'), 'success');
+    notify(t('console.paused'), 'success');
   } catch (e) {
     addLog(`Pause failed: ${e}`, 'error');
-    showToast(`${t('console.pause')} - ${e}`, 'error');
+    notify(`${t('console.pause')} - ${e}`, 'error');
   }
 }
 
@@ -95,10 +96,10 @@ async function handleResume(taskGroupId: string, runId: string) {
   try {
     await resumeTaskRun(taskGroupId, runId);
     addLog(t('console.resumed'), 'info');
-    showToast(t('console.resumed'), 'success');
+    notify(t('console.resumed'), 'success');
   } catch (e) {
     addLog(`Resume failed: ${e}`, 'error');
-    showToast(`${t('console.resume')} - ${e}`, 'error');
+    notify(`${t('console.resume')} - ${e}`, 'error');
   }
 }
 
@@ -107,10 +108,10 @@ async function handleCancel(taskGroupId: string, runId: string) {
   try {
     await cancelTaskRun(taskGroupId, runId);
     addLog(t('console.cancelling'), 'info');
-    showToast(t('console.cancelling'), 'info');
+    notify(t('console.cancelling'), 'info');
   } catch (e) {
     addLog(`Cancel failed: ${e}`, 'error');
-    showToast(`${t('console.cancel')} - ${e}`, 'error');
+    notify(`${t('console.cancel')} - ${e}`, 'error');
   }
 }
 
@@ -118,10 +119,10 @@ async function handleRetryDeploy(taskGroupId: string) {
   try {
     await retryTaskGroupDeploy(taskGroupId);
     addLog(t('console.retryDeploy'), 'info');
-    showToast(t('console.retryDeploy'), 'success');
+    notify(t('console.retryDeploy'), 'success');
   } catch (e) {
     addLog(`Retry deploy failed: ${e}`, 'error');
-    showToast(`${t('console.retryDeploy')} - ${e}`, 'error');
+    notify(`${t('console.retryDeploy')} - ${e}`, 'error');
   }
 }
 
@@ -129,7 +130,7 @@ async function handleRetryRun(taskGroupId: string) {
   // Find the task group from the rows
   const taskRow = rows.value.find(r => r.task_group_id === taskGroupId);
   if (!taskRow) {
-    showToast('Task not found', 'error');
+    notify('Task not found', 'error');
     return;
   }
 
@@ -158,7 +159,7 @@ async function handleRetryRun(taskGroupId: string) {
     }
   } catch (e) {
     addLog(`Retry run preview failed: ${e}`, 'error');
-    showToast(`Failed to preview: ${e}`, 'error');
+    notify(`Failed to preview: ${e}`, 'error');
   }
 }
 
@@ -202,7 +203,7 @@ async function retryConfirmQueue(source: string, target: string, overwriteExisti
     const ack = await queueTemporaryCopy(source, target, overwriteExisting);
 
     addLog(t('manualCopy.addedToQueue'), 'success');
-    showToast(
+    notify(
       ack.queued_ahead > 0
         ? t('manualCopy.addedToQueueWithAhead', { count: ack.queued_ahead })
         : t('manualCopy.addedToQueue'),
@@ -214,7 +215,7 @@ async function retryConfirmQueue(source: string, target: string, overwriteExisti
     await taskStateStore.hydrateTaskState();
   } catch (e) {
     addLog(`Queue copy failed: ${e}`, 'error');
-    showToast(`Failed to queue: ${e}`, 'error');
+    notify(`Failed to queue: ${e}`, 'error');
   }
 }
 
@@ -243,9 +244,25 @@ onActivated(() => {
 onMounted(async () => {
   loadConfig();
   if (!taskStateStore.isHydrated) {
-    await taskStateStore.hydrateTaskState();
+    isInitialLoading.value = true;
+    try {
+      await taskStateStore.hydrateTaskState();
+    } finally {
+      isInitialLoading.value = false;
+    }
   }
 });
+
+// Returns focus to the Manual Copy trigger after the modal closes so that
+// keyboard users land back on a sensible anchor element.
+function handleManualCopyClose() {
+  isManualCopyModalOpen.value = false;
+  // Wait one tick so Vue has actually unmounted the modal contents before we
+  // try to refocus — otherwise the trigger could lose focus again.
+  requestAnimationFrame(() => {
+    manualCopyTriggerRef.value?.focus();
+  });
+}
 </script>
 
 <template>
@@ -287,39 +304,48 @@ onMounted(async () => {
         <div class="flex gap-3">
           <button
             @click="appStore.isRunning ? stopScheduler() : startScheduler()"
-            class="px-6 py-2 rounded-lg font-bold transition-all flex items-center justify-center gap-2 shadow-sm active:scale-95"
+            class="px-6 py-2 rounded-lg font-bold transition-all motion-reduce:transition-none flex items-center justify-center gap-2 shadow-sm active:scale-95 motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2"
             :class="appStore.isRunning
               ? 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200'
               : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-200'"
+            :aria-label="appStore.isRunning ? t('console.stop') : t('console.start')"
+            :title="appStore.isRunning ? t('console.stop') : t('console.start')"
           >
-            <component :is="appStore.isRunning ? Square : Play" class="w-4 h-4 fill-current" />
+            <component :is="appStore.isRunning ? Square : Play" class="w-4 h-4 fill-current" aria-hidden="true" />
             {{ appStore.isRunning ? t('console.stop') : t('console.start') }}
           </button>
 
           <button
             @click="handleScanClick"
-            class="px-4 py-2 rounded-lg font-bold bg-white text-blue-600 border border-blue-200 hover:bg-blue-50 hover:border-blue-300 transition-all flex items-center gap-2 shadow-sm active:scale-95"
+            class="px-4 py-2 rounded-lg font-bold bg-white text-blue-600 border border-blue-200 hover:bg-blue-50 hover:border-blue-300 transition-all motion-reduce:transition-none flex items-center gap-2 shadow-sm active:scale-95 motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 disabled:hover:bg-white disabled:hover:border-blue-200"
             :disabled="appStore.isRunning"
             :class="{ 'opacity-50 cursor-not-allowed': appStore.isRunning }"
+            :aria-label="t('console.scanNow')"
+            :title="t('console.scanNow')"
           >
-            <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': appStore.isRunning }" />
+            <RefreshCw class="w-4 h-4 motion-reduce:animate-none" :class="{ 'animate-spin': appStore.isRunning }" aria-hidden="true" />
             {{ t('console.scanNow') }}
           </button>
 
           <button
+            ref="manualCopyTriggerRef"
             @click="isManualCopyModalOpen = true"
-            class="px-4 py-2 rounded-lg font-bold bg-white text-purple-600 border border-purple-200 hover:bg-purple-50 hover:border-purple-300 transition-all flex items-center gap-2 shadow-sm active:scale-95"
+            class="px-4 py-2 rounded-lg font-bold bg-white text-purple-600 border border-purple-200 hover:bg-purple-50 hover:border-purple-300 transition-all motion-reduce:transition-none flex items-center gap-2 shadow-sm active:scale-95 motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2"
+            :aria-label="t('manualCopy.title')"
+            :title="t('manualCopy.title')"
           >
-            <Copy class="w-4 h-4" />
+            <Copy class="w-4 h-4" aria-hidden="true" />
             {{ t('manualCopy.title') }}
           </button>
 
           <button
             v-if="hasAnyTerminal"
             @click="handleClearAll"
-            class="px-4 py-2 rounded-lg font-bold bg-white text-slate-500 border border-slate-200 hover:bg-red-50 hover:border-red-200 hover:text-red-600 transition-all flex items-center gap-2 shadow-sm active:scale-95"
+            class="px-4 py-2 rounded-lg font-bold bg-white text-slate-500 border border-slate-200 hover:bg-red-50 hover:border-red-200 hover:text-red-600 transition-all motion-reduce:transition-none flex items-center gap-2 shadow-sm active:scale-95 motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2"
+            :aria-label="t('console.clearAllGroups')"
+            :title="t('console.clearAllGroups')"
           >
-            <Trash2 class="w-4 h-4" />
+            <Trash2 class="w-4 h-4" aria-hidden="true" />
             {{ t('console.clearAllGroups') }}
           </button>
         </div>
@@ -327,11 +353,27 @@ onMounted(async () => {
 
       <!-- Task groups table area -->
       <div class="flex-1 min-h-0 bg-slate-50 p-4 overflow-auto">
+        <!-- Cold-boot skeleton: shown only on the very first hydrate, never on
+             subsequent re-renders so the table never visibly disappears once we
+             have any data. -->
+        <div
+          v-if="isInitialLoading && !rows.length"
+          class="rounded-xl border border-slate-200 bg-white p-4"
+          role="status"
+          aria-live="polite"
+          :aria-label="t('tasks.loading.tasks')"
+        >
+          <LoadingSkeleton variant="list-row" :count="3" />
+        </div>
+
         <Empty
-          v-if="!rows.length"
+          v-else-if="!rows.length"
           :icon="Activity"
-          :title="t('console.noTaskGroups')"
+          :title="appStore.isRunning ? t('console.noTaskGroups') : t('tasks.empty.notRunning')"
+          :description="appStore.isRunning ? '' : t('tasks.empty.notRunningHint')"
+          :action-label="appStore.isRunning ? undefined : t('tasks.empty.actionStart')"
           class="h-full min-h-[320px]"
+          @action="startScheduler"
         />
 
         <TaskGroupsTable
@@ -361,7 +403,7 @@ onMounted(async () => {
     <!-- Manual Copy Modal -->
     <ManualCopyModal
       :is-open="isManualCopyModalOpen"
-      @close="isManualCopyModalOpen = false"
+      @close="handleManualCopyClose"
       @success="() => {}"
     />
 
@@ -397,16 +439,17 @@ onMounted(async () => {
 
             <!-- Option cards -->
             <div class="p-4 space-y-2.5">
-              <!-- Overwrite -->
+              <!-- Overwrite (destructive) -->
               <button
                 @click="retryConfirmQueue(pendingRetryRequest!.source, pendingRetryRequest!.target, true)"
-                class="w-full flex items-start gap-3.5 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3.5 text-left transition-all hover:border-blue-300 hover:bg-blue-100 hover:shadow-sm active:scale-[0.99]"
+                class="w-full flex items-start gap-3.5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3.5 text-left transition-all motion-reduce:transition-none hover:border-amber-400 hover:bg-amber-100 hover:shadow-sm active:scale-[0.99] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 focus-visible:ring-offset-2"
+                :aria-label="t('manualCopy.overwriteAndQueue')"
               >
-                <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center mt-0.5">
-                  <RefreshCw class="w-3.5 h-3.5 text-white" />
+                <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-amber-600 flex items-center justify-center mt-0.5">
+                  <RefreshCw class="w-3.5 h-3.5 text-white" aria-hidden="true" />
                 </div>
                 <div class="min-w-0 flex-1">
-                  <div class="text-sm font-semibold text-blue-800">
+                  <div class="text-sm font-semibold text-amber-800">
                     {{ t('manualCopy.overwriteAndQueue') }}
                   </div>
                   <div class="text-xs text-slate-600 mt-1 leading-5 break-words">
@@ -415,13 +458,14 @@ onMounted(async () => {
                 </div>
               </button>
 
-              <!-- Skip -->
+              <!-- Skip (safe option) -->
               <button
                 @click="retryConfirmQueue(pendingRetryRequest!.source, pendingRetryRequest!.target, false)"
-                class="w-full flex items-start gap-3.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3.5 text-left transition-all hover:border-emerald-300 hover:bg-emerald-100 hover:shadow-sm active:scale-[0.99]"
+                class="w-full flex items-start gap-3.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3.5 text-left transition-all motion-reduce:transition-none hover:border-emerald-300 hover:bg-emerald-100 hover:shadow-sm active:scale-[0.99] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 focus-visible:ring-offset-2"
+                :aria-label="t('manualCopy.skipAndQueue')"
               >
                 <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center mt-0.5">
-                  <FilePlus2 class="w-3.5 h-3.5 text-white" />
+                  <FilePlus2 class="w-3.5 h-3.5 text-white" aria-hidden="true" />
                 </div>
                 <div class="min-w-0 flex-1">
                   <div class="text-sm font-semibold text-emerald-800">
@@ -438,7 +482,7 @@ onMounted(async () => {
             <div class="px-4 pb-4 flex justify-end border-t border-slate-100 pt-3">
               <button
                 @click="clearRetryTargetDecision"
-                class="px-4 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors"
+                class="px-4 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2"
               >
                 {{ t('manualCopy.cancelConflictDecision') }}
               </button>
@@ -448,30 +492,7 @@ onMounted(async () => {
       </Transition>
     </Teleport>
 
-    <!-- Action feedback toast -->
-    <Teleport to="body">
-      <Transition
-        enter-active-class="transition-all duration-200 ease-out"
-        leave-active-class="transition-all duration-200 ease-in"
-        enter-from-class="opacity-0 translate-y-2"
-        leave-to-class="opacity-0 translate-y-2"
-      >
-        <div
-          v-if="toastMessage"
-          class="fixed bottom-6 right-6 z-[200] px-4 py-2.5 rounded-lg shadow-lg font-medium text-sm border flex items-center gap-2 max-w-md"
-          :class="toastTone === 'success'
-            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-            : toastTone === 'error'
-              ? 'bg-rose-50 text-rose-700 border-rose-200'
-              : 'bg-blue-50 text-blue-700 border-blue-200'"
-        >
-          <span class="w-2 h-2 rounded-full shrink-0"
-            :class="toastTone === 'success' ? 'bg-emerald-500' : toastTone === 'error' ? 'bg-rose-500' : 'bg-blue-500'">
-          </span>
-          <span class="break-all">{{ toastMessage }}</span>
-        </div>
-      </Transition>
-    </Teleport>
+    <!-- Toast container is mounted globally in App.vue via M01 primitives. -->
   </div>
 </template>
 
@@ -494,5 +515,13 @@ onMounted(async () => {
 .retry-confirm-fade-leave-to > div {
   opacity: 0;
   transform: scale(0.96);
+}
+
+/* Drop the scale/translate when the OS reports prefers-reduced-motion. */
+@media (prefers-reduced-motion: reduce) {
+  .retry-confirm-fade-enter-from > div,
+  .retry-confirm-fade-leave-to > div {
+    transform: none;
+  }
 }
 </style>

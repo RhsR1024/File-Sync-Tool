@@ -33,7 +33,7 @@ pub fn error_code_query(
     request: QueryRequest,
 ) -> Result<QueryResult, String> {
     let root = cache_root(&app_handle)?;
-    sync_mod::ensure_loaded(&root, &state.error_code);
+    sync_mod::ensure_loaded(&root, &state.error_code)?;
 
     let store = state
         .error_code
@@ -77,7 +77,7 @@ pub fn error_code_get_meta(
     state: State<'_, AppState>,
 ) -> Result<MetaInfo, String> {
     let root = cache_root(&app_handle)?;
-    sync_mod::ensure_loaded(&root, &state.error_code);
+    sync_mod::ensure_loaded(&root, &state.error_code)?;
 
     let dir = cache::cache_dir(&root);
     let meta = read_meta(&dir);

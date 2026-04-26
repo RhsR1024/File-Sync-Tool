@@ -258,9 +258,10 @@ function onReorderEnd() {
     <div
       v-for="(item, index) in draggableItems"
       :key="item.id"
-      role="button"
+      role="option"
+      :aria-selected="item.id === props.selectedId || (props.batchMode && isSelected(item.id))"
       tabindex="0"
-      class="group relative flex w-full cursor-move flex-col rounded-lg border text-left shadow-sm transition-all"
+      class="group relative flex w-full cursor-move flex-col rounded-lg border text-left shadow-sm transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/15 active:scale-[0.99]"
       :class="[
         densityClasses.card,
         item.id === props.selectedId
@@ -392,6 +393,7 @@ function onReorderEnd() {
           type="button"
           class="rounded-full p-1 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-500"
           :title="item.is_favorite ? t('clipboard.actions.unfavorite') : t('clipboard.actions.favorite')"
+          :aria-label="item.is_favorite ? t('clipboard.actions.unfavorite') : t('clipboard.actions.favorite')"
           @click.stop="emit('favorite', item.id)"
         >
           <Star class="h-3.5 w-3.5" :fill="item.is_favorite ? 'currentColor' : 'none'" />
@@ -401,6 +403,7 @@ function onReorderEnd() {
           type="button"
           class="rounded-full p-1 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-700"
           :title="item.is_pinned ? t('clipboard.actions.unpin') : t('clipboard.actions.pin')"
+          :aria-label="item.is_pinned ? t('clipboard.actions.unpin') : t('clipboard.actions.pin')"
           @click.stop="emit('pin', item.id)"
         >
           <Pin class="h-3.5 w-3.5" :fill="item.is_pinned ? 'currentColor' : 'none'" />
@@ -410,6 +413,7 @@ function onReorderEnd() {
           type="button"
           class="rounded-full p-1 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
           :title="t('clipboard.actions.delete')"
+          :aria-label="t('clipboard.actions.delete')"
           @click.stop="emit('remove', item.id)"
         >
           <Trash2 class="h-3.5 w-3.5" />
@@ -418,6 +422,7 @@ function onReorderEnd() {
           type="button"
           class="rounded-full p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
           :title="t('clipboard.actions.moreActions')"
+          :aria-label="t('clipboard.actions.moreActions')"
           @click.stop="onMenuButtonClick($event, item)"
         >
           <Ellipsis class="h-3.5 w-3.5" />
@@ -451,9 +456,10 @@ function onReorderEnd() {
         ]"
       >
         <div
-          role="button"
+          role="option"
+          :aria-selected="item.id === props.selectedId || (props.batchMode && isSelected(item.id))"
           tabindex="0"
-          class="group relative mx-1 my-0.5 flex w-[calc(100%-0.5rem)] cursor-pointer flex-col rounded-lg border text-left shadow-sm transition-all"
+          class="group relative mx-1 my-0.5 flex w-[calc(100%-0.5rem)] cursor-pointer flex-col rounded-lg border text-left shadow-sm transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/15 active:scale-[0.99]"
           :class="[
             densityClasses.card,
             item.id === props.selectedId
@@ -585,6 +591,7 @@ function onReorderEnd() {
               type="button"
               class="rounded-full p-1 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-500"
               :title="item.is_favorite ? t('clipboard.actions.unfavorite') : t('clipboard.actions.favorite')"
+              :aria-label="item.is_favorite ? t('clipboard.actions.unfavorite') : t('clipboard.actions.favorite')"
               @click.stop="emit('favorite', item.id)"
             >
               <Star class="h-3.5 w-3.5" :fill="item.is_favorite ? 'currentColor' : 'none'" />
@@ -594,6 +601,7 @@ function onReorderEnd() {
               type="button"
               class="rounded-full p-1 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-700"
               :title="item.is_pinned ? t('clipboard.actions.unpin') : t('clipboard.actions.pin')"
+              :aria-label="item.is_pinned ? t('clipboard.actions.unpin') : t('clipboard.actions.pin')"
               @click.stop="emit('pin', item.id)"
             >
               <Pin class="h-3.5 w-3.5" :fill="item.is_pinned ? 'currentColor' : 'none'" />
@@ -603,6 +611,7 @@ function onReorderEnd() {
               type="button"
               class="rounded-full p-1 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
               :title="t('clipboard.actions.delete')"
+              :aria-label="t('clipboard.actions.delete')"
               @click.stop="emit('remove', item.id)"
             >
               <Trash2 class="h-3.5 w-3.5" />
@@ -611,6 +620,7 @@ function onReorderEnd() {
               type="button"
               class="rounded-full p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
               :title="t('clipboard.actions.moreActions')"
+              :aria-label="t('clipboard.actions.moreActions')"
               @click.stop="onMenuButtonClick($event, item)"
             >
               <Ellipsis class="h-3.5 w-3.5" />

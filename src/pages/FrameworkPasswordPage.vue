@@ -2,9 +2,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { AlertCircle, CheckCircle2, Globe, KeyRound, Loader, Server, X as XIcon } from 'lucide-vue-next';
+import { AlertCircle, CheckCircle2, Eye, EyeOff, Globe, KeyRound, Loader, Server, X as XIcon } from 'lucide-vue-next';
 import { changeFrameworkPassword, getConfig, saveConfig, type AppConfig, type FrameworkPasswordResult } from '../lib/tauri';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
+import Empty from '../components/Empty.vue';
+import { pushToast } from '../composables/useToast';
 
 const { t } = useI18n();
 
@@ -16,6 +18,8 @@ const fpIpInputRef = ref<HTMLInputElement | null>(null);
 const recentIps = ref<string[]>([]);
 const oldPassword = ref<string>('123456');
 const newPassword = ref<string>('admin_123');
+const showOldPassword = ref(false);
+const showNewPassword = ref(false);
 const apiTimeoutSecs = ref<number>(5);
 const isLoading = ref<boolean>(false);
 const results = ref<FrameworkPasswordResult[]>([]);
@@ -146,8 +150,10 @@ const clearRecentIps = async () => {
 };
 
 const isFormValid = computed(() => {
-  return allSelectedIps.value.length > 0 && !isLoading.value;
+  return allSelectedIps.value.length > 0 && !isLoading.value && oldPassword.value !== newPassword.value;
 });
+
+const passwordMismatch = computed(() => oldPassword.value === newPassword.value);
 
 onMounted(async () => {
   try {
@@ -177,7 +183,11 @@ const saveApiTimeout = async () => {
 
 const handleExecute = async () => {
   if (allSelectedIps.value.length === 0) {
-    alert(t('tools.frameworkPassword.noIps'));
+    pushToast(t('tools.frameworkPassword.noIps'), 'warning');
+    return;
+  }
+  if (passwordMismatch.value) {
+    pushToast(t('tools.frameworkPassword.samePasswordError'), 'warning');
     return;
   }
 
@@ -196,6 +206,7 @@ const handleExecute = async () => {
       newPassword.value || undefined,
     );
     results.value = response;
+    pushToast(t('tools.frameworkPassword.completed', { success: response.filter(item => item.success).length, total: response.length }), 'success', { ttlMs: 2600 });
     currentProgress.value = { current: ipList.length, total: ipList.length };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -205,6 +216,7 @@ const handleExecute = async () => {
       message: `Error: ${errorMessage}`,
       failedAt: 'login',
     }));
+    pushToast(errorMessage, 'error', { ttlMs: 4200 });
   } finally {
     isLoading.value = false;
     currentProgress.value = null;
@@ -297,23 +309,43 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
               <label class="block text-xs font-medium text-slate-600">{{ t('tools.frameworkPassword.oldPassword') }}</label>
               <input
                 v-model="oldPassword"
-                type="text"
+                :type="showOldPassword ? 'text' : 'password'"
+                autocomplete="new-password"
                 :placeholder="t('tools.frameworkPassword.oldPasswordPlaceholder')"
                 :disabled="isLoading"
                 class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
               />
+              <button
+                type="button"
+                class="mt-2 inline-flex items-center gap-1 text-xs font-medium text-slate-500 transition-colors hover:text-slate-700"
+                @click="showOldPassword = !showOldPassword"
+              >
+                <component :is="showOldPassword ? EyeOff : Eye" class="h-3.5 w-3.5" />
+                {{ t(showOldPassword ? 'tools.frameworkPassword.hidePassword' : 'tools.frameworkPassword.showPassword') }}
+              </button>
             </div>
             <div class="space-y-1.5">
               <label class="block text-xs font-medium text-slate-600">{{ t('tools.frameworkPassword.newPassword') }}</label>
               <input
                 v-model="newPassword"
-                type="text"
+                :type="showNewPassword ? 'text' : 'password'"
+                autocomplete="new-password"
                 :placeholder="t('tools.frameworkPassword.newPasswordPlaceholder')"
                 :disabled="isLoading"
-                class="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                class="w-full px-3 py-2 text-sm border rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                :class="passwordMismatch ? 'border-amber-300 bg-amber-50' : 'border-slate-200'"
               />
+              <button
+                type="button"
+                class="mt-2 inline-flex items-center gap-1 text-xs font-medium text-slate-500 transition-colors hover:text-slate-700"
+                @click="showNewPassword = !showNewPassword"
+              >
+                <component :is="showNewPassword ? EyeOff : Eye" class="h-3.5 w-3.5" />
+                {{ t(showNewPassword ? 'tools.frameworkPassword.hidePassword' : 'tools.frameworkPassword.showPassword') }}
+              </button>
             </div>
           </div>
+          <p v-if="passwordMismatch" class="mt-2 text-xs font-medium text-amber-700">{{ t('tools.frameworkPassword.samePasswordError') }}</p>
           <p class="text-xs text-slate-400 mt-2">{{ t('tools.frameworkPassword.passwordConfigHint') }}</p>
         </div>
 
@@ -326,6 +358,8 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
           <div class="space-y-2">
             <!-- Tag Input -->
             <div
+              role="listbox"
+              :aria-label="t('tools.frameworkPassword.manualIp')"
               class="min-h-[2.375rem] w-full flex flex-wrap gap-1.5 px-2.5 py-1.5 border border-slate-200 rounded-lg transition-colors cursor-text"
               :class="isLoading ? 'bg-slate-50 cursor-not-allowed' : 'bg-white focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-400/20'"
               @click="fpIpInputRef?.focus()"
@@ -476,6 +510,13 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
               ></div>
             </div>
           </div>
+
+          <Empty
+            v-if="results.length === 0 && !currentProgress"
+            :title="t('tools.frameworkPassword.emptyTitle')"
+            :description="t('tools.frameworkPassword.emptyDescription')"
+            dashed
+          />
         </div>
       </div>
     </div>
@@ -487,9 +528,9 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
           <table class="w-full">
             <thead>
               <tr class="border-b border-slate-200 bg-slate-50">
-                <th class="px-6 py-3 text-left text-sm font-semibold text-slate-700">IP {{ t('tools.frameworkPassword.address') }}</th>
-                <th class="px-6 py-3 text-left text-sm font-semibold text-slate-700">{{ t('tools.frameworkPassword.status') }}</th>
-                <th class="px-6 py-3 text-left text-sm font-semibold text-slate-700">{{ t('tools.frameworkPassword.message') }}</th>
+                <th scope="col" class="px-6 py-3 text-left text-sm font-semibold text-slate-700">IP {{ t('tools.frameworkPassword.address') }}</th>
+                <th scope="col" class="px-6 py-3 text-left text-sm font-semibold text-slate-700">{{ t('tools.frameworkPassword.status') }}</th>
+                <th scope="col" class="px-6 py-3 text-left text-sm font-semibold text-slate-700">{{ t('tools.frameworkPassword.message') }}</th>
               </tr>
             </thead>
             <tbody>

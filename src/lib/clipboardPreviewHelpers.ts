@@ -66,6 +66,7 @@ export function stepImagePreviewScale(
   direction: 1 | -1,
   zoomStep: number,
 ): number {
-  const delta = Math.max(1, zoomStep) / 100;
-  return clampImagePreviewScale(current + direction * delta);
+  const factor = 1 + Math.max(1, zoomStep) / 100;
+  const next = direction > 0 ? current * factor : current / factor;
+  return clampImagePreviewScale(next);
 }

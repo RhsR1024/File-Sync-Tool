@@ -25,3 +25,9 @@ test('screen share places connection count and uptime side by side like file sha
     /<div class="ss-stat-card">[\s\S]*?tools\.screenShare\.connectionCount[\s\S]*?{{ connectionCount }}[\s\S]*?<\/div>\s*<div class="ss-stat-card">[\s\S]*?tools\.screenShare\.uptime[\s\S]*?{{ formattedUptime }}/,
   );
 });
+
+test('screen share stop action executes directly without a confirmation prompt', () => {
+  assert.doesNotMatch(pageSource, /window\.confirm\(t\('tools\.screenShare\.stopConfirm'\)\)/);
+  assert.match(pageSource, /@click="stopShare"/);
+  assert.doesNotMatch(pageSource, /@click="confirmStopShare"/);
+});
