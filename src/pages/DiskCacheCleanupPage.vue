@@ -20,6 +20,7 @@ import {
   diskCleanupDeleteCacheKeys,
   diskCleanupGetCacheKeyContents,
   diskCleanupListIpsans,
+  diskCleanupListIpsanResourceGroups,
   diskCleanupListLinuxDisks,
   diskCleanupListLinuxServers,
   diskCleanupListWindowsDisks,
@@ -30,10 +31,13 @@ import {
   type DiskInfoItem,
   type DiskServerItem,
   type IpsanItem,
+  type IpsanResourceGroupItem,
   type WindowsDiskItem,
 } from '../lib/tauri';
+import { buildCacheDetailPreview } from '../lib/diskCacheCleanupCacheDetail';
 import { getSuggestedDiskCleanupHosts } from '../lib/diskCacheCleanupPresentation';
 import { mergeRecentItems, normalizeRecentItems } from '../lib/recentHistory';
+import CacheStateInline from '../components/CacheStateInline.vue';
 import Empty from '../components/Empty.vue';
 import LoadingSkeleton from '../components/LoadingSkeleton.vue';
 import { useToast } from '../composables/useToast';
@@ -43,6 +47,7 @@ defineOptions({
 });
 
 type LocalDiskTab = 'windows' | 'linux';
+type IpsanSubTab = 'devices' | 'resourceGroups';
 type LegendTone = 'normal' | 'pending' | 'warning' | 'error';
 
 const { t } = useI18n();
@@ -69,11 +74,13 @@ const KNOWN_USAGES = new Set([1, 2, 3, 4, 5, 255, -1]);
 const config = ref<AppConfig | null>(null);
 const timeoutSecs = ref(5);
 const hostIp = ref('');
-const hostInputRef = ref<HTMLInputElement | null>(null);
 const recentHosts = ref<string[]>([]);
 const localDiskTab = ref<LocalDiskTab>('linux');
 const windowsTabRef = ref<HTMLButtonElement | null>(null);
 const linuxTabRef = ref<HTMLButtonElement | null>(null);
+const ipsanSubTab = ref<IpsanSubTab>('devices');
+const ipsanDevicesTabRef = ref<HTMLButtonElement | null>(null);
+const ipsanResourceGroupsTabRef = ref<HTMLButtonElement | null>(null);
 const legendOpen = ref(false);
 
 const linuxServerList = ref<DiskServerItem[]>([]);
@@ -93,6 +100,9 @@ const localRedisError = ref<string | null>(null);
 const hasFetchedLocal = ref(false);
 
 const ipsans = ref<IpsanItem[]>([]);
+const ipsanResourceGroups = ref<IpsanResourceGroupItem[]>([]);
+const ipsanExpandedGroupIds = ref<Set<string>>(new Set());
+const highlightedIpsanResourceGroupId = ref('');
 const ipsanPresentCacheKeys = ref<Set<string>>(new Set());
 const ipsanCleaningKeys = ref<Set<string>>(new Set());
 const ipsanLoading = ref(false);
@@ -102,6 +112,14 @@ const ipsanBatchConfirmPending = ref(false);
 const ipsanError = ref<string | null>(null);
 const ipsanRedisAvailable = ref(true);
 const ipsanRedisError = ref<string | null>(null);
+const ipsanResourceGroupPresentCacheKeys = ref<Set<string>>(new Set());
+const ipsanResourceGroupCleaningKeys = ref<Set<string>>(new Set());
+const ipsanResourceGroupBatchCleaning = ref(false);
+const ipsanResourceGroupBatchPendingCount = ref(0);
+const ipsanResourceGroupBatchConfirmPending = ref(false);
+const ipsanResourceGroupError = ref<string | null>(null);
+const ipsanResourceGroupRedisAvailable = ref(true);
+const ipsanResourceGroupRedisError = ref<string | null>(null);
 const hasFetchedIpsan = ref(false);
 const cacheDetailOpen = ref(false);
 const cacheDetailLoading = ref(false);
@@ -115,6 +133,7 @@ let ipsanRequestSeq = 0;
 let cacheDetailRequestSeq = 0;
 let localBatchConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 let ipsanBatchConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+let ipsanResourceGroupBatchConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 
 const savedSshHosts = computed(() => {
   return getSuggestedDiskCleanupHosts(config.value?.servers, recentHosts.value);
@@ -123,6 +142,36 @@ const savedSshHosts = computed(() => {
 const selectedLinuxServer = computed(
   () => linuxServerList.value.find((item) => item.serverIp === selectedLinuxServerIp.value) ?? null,
 );
+
+const ipsanItemById = computed(() =>
+  new Map(ipsans.value.map((item) => [item.IPSANId, item])),
+);
+
+const ipsanResourceGroupMetaByMemberId = computed(() => {
+  const map = new Map<string, {
+    groupId: string;
+    groupName: string;
+    memberCount: number;
+    groupStatus: number;
+    usage: number;
+  }>();
+
+  for (const group of ipsanResourceGroups.value) {
+    const memberCount = group.resourceInfoList?.length ?? 0;
+    for (const member of group.resourceInfoList ?? []) {
+      if (map.has(member.IPSANId)) continue;
+      map.set(member.IPSANId, {
+        groupId: group.groupId,
+        groupName: group.groupName,
+        memberCount,
+        groupStatus: group.groupStatus,
+        usage: group.usage,
+      });
+    }
+  }
+
+  return map;
+});
 
 const localTabTitle = computed(() =>
   t(
@@ -183,6 +232,16 @@ const localRowCount = computed(() => {
 
 const localCachedCount = computed(() => localCleanableKeys.value.length);
 const ipsanCachedCount = computed(() => ipsanCleanableKeys.value.length);
+const ipsanResourceGroupCachedCount = computed(() => ipsanResourceGroupCleanableKeys.value.length);
+const ipsanTotalCachedCount = computed(
+  () => ipsanCachedCount.value + ipsanResourceGroupCachedCount.value,
+);
+const ipsanGroupedCount = computed(() =>
+  ipsans.value.filter((item) => ipsanResourceGroupMetaByMemberId.value.has(item.IPSANId)).length,
+);
+const ipsanUngroupedCount = computed(() =>
+  Math.max(ipsans.value.length - ipsanGroupedCount.value, 0),
+);
 
 const localSummaryText = computed(() => {
   if (!hasFetchedLocal.value) {
@@ -198,9 +257,13 @@ const ipsanSummaryText = computed(() => {
   if (!hasFetchedIpsan.value) {
     return t('diskCacheCleanup.ipsan.description');
   }
-  return t('diskCacheCleanup.disks.summary', {
-    total: ipsans.value.length,
-    cached: ipsanCachedCount.value,
+  return t('diskCacheCleanup.ipsan.summary', {
+    devices: ipsans.value.length,
+    groups: ipsanResourceGroups.value.length,
+    grouped: ipsanGroupedCount.value,
+    ungrouped: ipsanUngroupedCount.value,
+    cachedDevices: ipsanCachedCount.value,
+    cachedGroups: ipsanResourceGroupCachedCount.value,
   });
 });
 
@@ -217,6 +280,56 @@ const localCleanableKeys = computed(() => {
 const ipsanCleanableKeys = computed(() =>
   ipsanCacheKeys(ipsans.value).filter((key) => ipsanPresentCacheKeys.value.has(key)),
 );
+const ipsanResourceGroupCleanableKeys = computed(() =>
+  ipsanResourceGroupCacheKeys(ipsanResourceGroups.value)
+    .filter((key) => ipsanResourceGroupPresentCacheKeys.value.has(key)),
+);
+const activeIpsanRedisAvailable = computed(() =>
+  ipsanSubTab.value === 'devices'
+    ? ipsanRedisAvailable.value
+    : ipsanResourceGroupRedisAvailable.value,
+);
+const activeIpsanRedisError = computed(() =>
+  ipsanSubTab.value === 'devices'
+    ? ipsanRedisError.value
+    : ipsanResourceGroupRedisError.value,
+);
+const activeIpsanBatchCleaning = computed(() =>
+  ipsanSubTab.value === 'devices'
+    ? ipsanBatchCleaning.value
+    : ipsanResourceGroupBatchCleaning.value,
+);
+const activeIpsanBatchPendingCount = computed(() =>
+  ipsanSubTab.value === 'devices'
+    ? ipsanBatchPendingCount.value
+    : ipsanResourceGroupBatchPendingCount.value,
+);
+const activeIpsanBatchConfirmPending = computed(() =>
+  ipsanSubTab.value === 'devices'
+    ? ipsanBatchConfirmPending.value
+    : ipsanResourceGroupBatchConfirmPending.value,
+);
+const activeIpsanCleanableCount = computed(() =>
+  ipsanSubTab.value === 'devices'
+    ? ipsanCleanableKeys.value.length
+    : ipsanResourceGroupCleanableKeys.value.length,
+);
+const activeIpsanCleanAllLabel = computed(() =>
+  ipsanSubTab.value === 'devices'
+    ? t('diskCacheCleanup.ipsan.actions.cleanAll', { count: activeIpsanCleanableCount.value })
+    : t('diskCacheCleanup.ipsan.resourceGroups.actions.cleanAll', {
+      count: activeIpsanCleanableCount.value,
+    }),
+);
+const cacheDetailPreview = computed(() => {
+  const entry = cacheDetailEntry.value;
+  if (!entry) {
+    return t('diskCacheCleanup.cache.emptyContent');
+  }
+
+  const preview = buildCacheDetailPreview(entry.full_value, entry.preview);
+  return preview || t('diskCacheCleanup.cache.emptyContent');
+});
 const cacheDetailValue = computed(() =>
   cacheDetailEntry.value?.full_value || t('diskCacheCleanup.cache.emptyContent'),
 );
@@ -240,6 +353,10 @@ function ipsanCacheKey(ipsanId: string) {
   return `Storage:${ipsanId}`;
 }
 
+function ipsanResourceGroupCacheKey(groupId: string) {
+  return `Storage:${groupId}`;
+}
+
 function linuxDiskCacheKeys(items: DiskInfoItem[]) {
   return items.map((item) => linuxDiskCacheKey(item.storageId));
 }
@@ -252,6 +369,10 @@ function windowsPartitionCacheKeys(items: WindowsDiskItem[]) {
 
 function ipsanCacheKeys(items: IpsanItem[]) {
   return items.map((item) => ipsanCacheKey(item.IPSANId));
+}
+
+function ipsanResourceGroupCacheKeys(items: IpsanResourceGroupItem[]) {
+  return items.map((item) => ipsanResourceGroupCacheKey(item.groupId));
 }
 
 function statusLabelKey(status: number) {
@@ -350,6 +471,10 @@ function resetIpsanCacheState() {
   ipsanCleaningKeys.value = new Set();
   ipsanRedisAvailable.value = true;
   ipsanRedisError.value = null;
+  ipsanResourceGroupPresentCacheKeys.value = new Set();
+  ipsanResourceGroupCleaningKeys.value = new Set();
+  ipsanResourceGroupRedisAvailable.value = true;
+  ipsanResourceGroupRedisError.value = null;
 }
 
 async function loadLinuxDisksFor(host: string, serverIp: string, requestSeq: number) {
@@ -476,24 +601,64 @@ async function fetchIpsanRegion() {
   ipsanLoading.value = true;
   hasFetchedIpsan.value = true;
   ipsanError.value = null;
+  ipsanResourceGroupError.value = null;
+  highlightedIpsanResourceGroupId.value = '';
   resetIpsanCacheState();
 
   try {
-    const items = await diskCleanupListIpsans(host, timeoutSecs.value);
+    const [itemsResult, resourceGroupsResult] = await Promise.allSettled([
+      diskCleanupListIpsans(host, timeoutSecs.value),
+      diskCleanupListIpsanResourceGroups(host, timeoutSecs.value),
+    ]);
     if (requestSeq !== ipsanRequestSeq) return;
 
+    if (itemsResult.status === 'rejected') {
+      ipsans.value = [];
+      ipsanResourceGroups.value = [];
+      ipsanPresentCacheKeys.value = new Set();
+      ipsanResourceGroupPresentCacheKeys.value = new Set();
+      ipsanError.value = t('diskCacheCleanup.errors.ipsanHttp', {
+        reason: formatError(itemsResult.reason),
+      });
+      return;
+    }
+
+    const items = itemsResult.value;
     ipsans.value = items;
-    const result = await diskCleanupCheckCacheKeys(host, ipsanCacheKeys(items));
+    ipsanResourceGroups.value = resourceGroupsResult.status === 'fulfilled'
+      ? resourceGroupsResult.value
+      : [];
+    ipsanExpandedGroupIds.value = new Set();
+
+    if (resourceGroupsResult.status === 'rejected') {
+      ipsanResourceGroupError.value = t('diskCacheCleanup.errors.ipsanResourceGroupHttp', {
+        reason: formatError(resourceGroupsResult.reason),
+      });
+    }
+
+    const [ipsanCacheResult, ipsanResourceGroupCacheResult] = await Promise.all([
+      diskCleanupCheckCacheKeys(host, ipsanCacheKeys(items)),
+      diskCleanupCheckCacheKeys(
+        host,
+        ipsanResourceGroupCacheKeys(ipsanResourceGroups.value),
+      ),
+    ]);
     if (requestSeq !== ipsanRequestSeq) return;
 
-    ipsanRedisAvailable.value = result.redis_available;
-    ipsanRedisError.value = result.error;
-    const presentKeys = result.present_keys ?? [];
-    ipsanPresentCacheKeys.value = new Set(presentKeys);
+    ipsanRedisAvailable.value = ipsanCacheResult.redis_available;
+    ipsanRedisError.value = ipsanCacheResult.error;
+    ipsanPresentCacheKeys.value = new Set(ipsanCacheResult.present_keys ?? []);
+    ipsanResourceGroupRedisAvailable.value = ipsanResourceGroupCacheResult.redis_available;
+    ipsanResourceGroupRedisError.value = ipsanResourceGroupCacheResult.error;
+    ipsanResourceGroupPresentCacheKeys.value = new Set(
+      ipsanResourceGroupCacheResult.present_keys ?? [],
+    );
   } catch (error) {
     if (requestSeq !== ipsanRequestSeq) return;
     ipsans.value = [];
+    ipsanResourceGroups.value = [];
     ipsanPresentCacheKeys.value = new Set();
+    ipsanResourceGroupPresentCacheKeys.value = new Set();
     ipsanError.value = t('diskCacheCleanup.errors.ipsanHttp', {
       reason: formatError(error),
     });
@@ -564,6 +729,67 @@ function toggleExpanded(storageId: string) {
     next.add(storageId);
   }
   localExpandedIds.value = next;
+}
+
+function toggleIpsanResourceGroupExpanded(groupId: string) {
+  const next = new Set(ipsanExpandedGroupIds.value);
+  if (next.has(groupId)) {
+    next.delete(groupId);
+  } else {
+    next.add(groupId);
+  }
+  ipsanExpandedGroupIds.value = next;
+}
+
+function jumpToIpsanResourceGroup(groupId: string) {
+  ipsanSubTab.value = 'resourceGroups';
+  highlightedIpsanResourceGroupId.value = groupId;
+  const next = new Set(ipsanExpandedGroupIds.value);
+  next.add(groupId);
+  ipsanExpandedGroupIds.value = next;
+}
+
+function onIpsanSubTabKeydown(event: KeyboardEvent, currentTab: IpsanSubTab) {
+  const order: IpsanSubTab[] = ['devices', 'resourceGroups'];
+  const currentIndex = order.indexOf(currentTab);
+  let nextIndex = currentIndex;
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+    nextIndex = (currentIndex + 1) % order.length;
+  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+    nextIndex = (currentIndex - 1 + order.length) % order.length;
+  } else if (event.key === 'Home') {
+    nextIndex = 0;
+  } else if (event.key === 'End') {
+    nextIndex = order.length - 1;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  const nextTab = order[nextIndex];
+  ipsanSubTab.value = nextTab;
+  highlightedIpsanResourceGroupId.value = '';
+  nextTick(() => {
+    const nextRef = nextTab === 'devices'
+      ? ipsanDevicesTabRef.value
+      : ipsanResourceGroupsTabRef.value;
+  nextRef?.focus();
+  });
+}
+
+function ipsanGroupMetaFor(ipsanId: string) {
+  return ipsanResourceGroupMetaByMemberId.value.get(ipsanId) ?? null;
+}
+
+function ipsanResourceGroupTitle(group: IpsanResourceGroupItem) {
+  return group.groupName || group.groupId || '--';
+}
+
+function ipsanMemberReturned(memberId: string) {
+  return ipsans.value.some((item) => item.IPSANId === memberId);
+}
+
+function ipsanItemFor(memberId: string) {
+  return ipsanItemById.value.get(memberId) ?? null;
 }
 
 function closeCacheDetail() {
@@ -722,6 +948,66 @@ async function cleanIpsanKeys(keys: string[], singleKey?: string) {
   }
 }
 
+async function cleanIpsanResourceGroupKeys(keys: string[], singleKey?: string) {
+  const host = hostIp.value.trim();
+  if (!host || keys.length === 0) return;
+
+  if (singleKey) {
+    const next = new Set(ipsanResourceGroupCleaningKeys.value);
+    next.add(singleKey);
+    ipsanResourceGroupCleaningKeys.value = next;
+  } else {
+    if (!ipsanResourceGroupBatchConfirmPending.value) {
+      armIpsanResourceGroupBatchConfirm();
+      return;
+    }
+    cancelIpsanResourceGroupBatchConfirm();
+    ipsanResourceGroupBatchCleaning.value = true;
+    ipsanResourceGroupBatchPendingCount.value = keys.length;
+  }
+
+  ipsanResourceGroupError.value = null;
+
+  try {
+    const result = await diskCleanupDeleteCacheKeys(host, keys);
+    if (!result.redis_available || result.error) {
+      ipsanResourceGroupRedisAvailable.value = result.redis_available;
+      ipsanResourceGroupRedisError.value = result.error;
+      ipsanResourceGroupError.value = t('diskCacheCleanup.errors.ipsanResourceGroupDelete', {
+        reason: result.error ?? t('diskCacheCleanup.cache.unavailable'),
+      });
+      return;
+    }
+
+    if (cacheDetailEntry.value && keys.includes(cacheDetailEntry.value.key)) {
+      closeCacheDetail();
+    }
+
+    await fetchIpsanRegion();
+  } catch (error) {
+    ipsanResourceGroupError.value = t('diskCacheCleanup.errors.ipsanResourceGroupDelete', {
+      reason: formatError(error),
+    });
+  } finally {
+    if (singleKey) {
+      const next = new Set(ipsanResourceGroupCleaningKeys.value);
+      next.delete(singleKey);
+      ipsanResourceGroupCleaningKeys.value = next;
+    } else {
+      ipsanResourceGroupBatchCleaning.value = false;
+      ipsanResourceGroupBatchPendingCount.value = 0;
+    }
+  }
+}
+
+function handleActiveIpsanBatchClean() {
+  if (ipsanSubTab.value === 'devices') {
+    void cleanIpsanKeys(ipsanCleanableKeys.value);
+    return;
+  }
+  void cleanIpsanResourceGroupKeys(ipsanResourceGroupCleanableKeys.value);
+}
+
 function armLocalBatchConfirm() {
   cancelIpsanBatchConfirm();
   localBatchConfirmPending.value = true;
@@ -744,6 +1030,7 @@ function cancelLocalBatchConfirm() {
 
 function armIpsanBatchConfirm() {
   cancelLocalBatchConfirm();
+  cancelIpsanResourceGroupBatchConfirm();
   ipsanBatchConfirmPending.value = true;
   if (ipsanBatchConfirmTimer) {
     clearTimeout(ipsanBatchConfirmTimer);
@@ -762,15 +1049,33 @@ function cancelIpsanBatchConfirm() {
   ipsanBatchConfirmPending.value = false;
 }
 
+function armIpsanResourceGroupBatchConfirm() {
+  cancelLocalBatchConfirm();
+  cancelIpsanBatchConfirm();
+  ipsanResourceGroupBatchConfirmPending.value = true;
+  if (ipsanResourceGroupBatchConfirmTimer) {
+    clearTimeout(ipsanResourceGroupBatchConfirmTimer);
+  }
+  ipsanResourceGroupBatchConfirmTimer = setTimeout(() => {
+    ipsanResourceGroupBatchConfirmPending.value = false;
+    ipsanResourceGroupBatchConfirmTimer = null;
+  }, BATCH_CONFIRM_TIMEOUT_MS);
+}
+
+function cancelIpsanResourceGroupBatchConfirm() {
+  if (ipsanResourceGroupBatchConfirmTimer) {
+    clearTimeout(ipsanResourceGroupBatchConfirmTimer);
+    ipsanResourceGroupBatchConfirmTimer = null;
+  }
+  ipsanResourceGroupBatchConfirmPending.value = false;
+}
+
 async function clearRecentHosts() {
   cancelLocalBatchConfirm();
   cancelIpsanBatchConfirm();
+  cancelIpsanResourceGroupBatchConfirm();
   await persistRecentHosts([]);
   pushToast(t('diskCacheCleanup.recent.clear'), 'info');
-}
-
-function focusHostInput() {
-  hostInputRef.value?.focus();
 }
 
 function toggleLegend() {
@@ -827,6 +1132,14 @@ watch(localDiskTab, async () => {
   await fetchLocalRegion();
 });
 
+watch(ipsanSubTab, () => {
+  cancelIpsanBatchConfirm();
+  cancelIpsanResourceGroupBatchConfirm();
+  if (ipsanSubTab.value !== 'resourceGroups') {
+    highlightedIpsanResourceGroupId.value = '';
+  }
+});
+
 watch(cacheDetailOpen, async (isOpen) => {
   if (!isOpen) return;
   await nextTick();
@@ -850,6 +1163,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   cancelLocalBatchConfirm();
   cancelIpsanBatchConfirm();
+  cancelIpsanResourceGroupBatchConfirm();
 });
 </script>
 
@@ -903,7 +1217,7 @@ onBeforeUnmount(() => {
               <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
                 {{ t('diskCacheCleanup.ipsan.title') }}
               </div>
-              <div class="mt-2 font-mono text-2xl font-bold text-slate-900">{{ ipsanCachedCount }}</div>
+              <div class="mt-2 font-mono text-2xl font-bold text-slate-900">{{ ipsanTotalCachedCount }}</div>
             </div>
           </div>
         </div>
@@ -916,7 +1230,6 @@ onBeforeUnmount(() => {
               <label class="text-sm font-semibold text-slate-800">{{ t('diskCacheCleanup.hostIp.label') }}</label>
               <div class="mt-2 flex flex-col gap-3 sm:flex-row">
                 <input
-                  ref="hostInputRef"
                   v-model="hostIp"
                   type="text"
                   :placeholder="t('diskCacheCleanup.hostIp.placeholder')"
@@ -1221,9 +1534,7 @@ onBeforeUnmount(() => {
             :icon="HardDrive"
             :title="t('diskCacheCleanup.empty.noHost')"
             :description="t('diskCacheCleanup.empty.noHostHint')"
-            :action-label="t('diskCacheCleanup.empty.noHostAction')"
             class="min-h-[240px]"
-            @action="focusHostInput"
           />
 
           <Empty
@@ -1350,21 +1661,16 @@ onBeforeUnmount(() => {
                       </span>
                     </td>
                     <td class="px-3 py-3">
-                      <span
-                        v-if="!localRedisAvailable"
-                        class="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700"
-                      >
-                        {{ t('diskCacheCleanup.cache.unavailable') }}
-                      </span>
-                      <span
-                        v-else-if="localPresentCacheKeys.has(linuxDiskCacheKey(disk.storageId))"
-                        class="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700"
-                      >
-                        {{ t('diskCacheCleanup.cache.present') }}
-                      </span>
-                      <span v-else class="text-sm text-slate-400">
-                        {{ t('diskCacheCleanup.cache.absent') }}
-                      </span>
+                      <CacheStateInline
+                        :present="localPresentCacheKeys.has(linuxDiskCacheKey(disk.storageId))"
+                        :redis-available="localRedisAvailable"
+                        :present-label="t('diskCacheCleanup.cache.present')"
+                        :absent-label="t('diskCacheCleanup.cache.absent')"
+                        :unavailable-label="t('diskCacheCleanup.cache.unavailable')"
+                        :detail-label="t('diskCacheCleanup.cache.detailCompact')"
+                        :detail-aria-label="t('diskCacheCleanup.actions.viewDetails')"
+                        @open-detail="openCacheDetail(linuxDiskCacheKey(disk.storageId))"
+                      />
                     </td>
                     <td class="px-3 py-3 text-right">
                       <button
@@ -1416,28 +1722,6 @@ onBeforeUnmount(() => {
                             </div>
                           </div>
 
-                          <div
-                            v-if="localPresentCacheKeys.has(linuxDiskCacheKey(disk.storageId))"
-                            class="rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-3"
-                          >
-                            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                              <div>
-                                <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                                  {{ t('diskCacheCleanup.cache.content') }}
-                                </div>
-                                <span class="mt-2 inline-flex items-center rounded-full border border-indigo-200 bg-white px-2.5 py-1 text-xs font-semibold text-indigo-700">
-                                  {{ t('diskCacheCleanup.cache.present') }}
-                                </span>
-                              </div>
-                              <button
-                                type="button"
-                                class="inline-flex items-center justify-center rounded-xl border border-indigo-200 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:border-indigo-300 hover:bg-indigo-50"
-                                @click="openCacheDetail(linuxDiskCacheKey(disk.storageId))"
-                              >
-                                {{ t('diskCacheCleanup.actions.viewDetails') }}
-                              </button>
-                            </div>
-                          </div>
                         </div>
 
                         <div class="rounded-2xl border border-slate-200 bg-white px-4 py-4">
@@ -1539,32 +1823,16 @@ onBeforeUnmount(() => {
                         </span>
                       </td>
                       <td class="px-4 py-3">
-                        <span
-                          v-if="!localRedisAvailable"
-                          class="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700"
-                        >
-                          {{ t('diskCacheCleanup.cache.unavailable') }}
-                        </span>
-                        <div
-                          v-else-if="localPresentCacheKeys.has(windowsPartitionCacheKey(partition.partitionGUID))"
-                          class="space-y-2"
-                        >
-                          <span
-                            class="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700"
-                          >
-                            {{ t('diskCacheCleanup.cache.present') }}
-                          </span>
-                          <button
-                            type="button"
-                            class="inline-flex items-center justify-center rounded-xl border border-indigo-200 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:border-indigo-300 hover:bg-indigo-50"
-                            @click="openCacheDetail(windowsPartitionCacheKey(partition.partitionGUID))"
-                          >
-                            {{ t('diskCacheCleanup.actions.viewDetails') }}
-                          </button>
-                        </div>
-                        <span v-else class="text-sm text-slate-400">
-                          {{ t('diskCacheCleanup.cache.absent') }}
-                        </span>
+                        <CacheStateInline
+                          :present="localPresentCacheKeys.has(windowsPartitionCacheKey(partition.partitionGUID))"
+                          :redis-available="localRedisAvailable"
+                          :present-label="t('diskCacheCleanup.cache.present')"
+                          :absent-label="t('diskCacheCleanup.cache.absent')"
+                          :unavailable-label="t('diskCacheCleanup.cache.unavailable')"
+                          :detail-label="t('diskCacheCleanup.cache.detailCompact')"
+                          :detail-aria-label="t('diskCacheCleanup.actions.viewDetails')"
+                          @open-detail="openCacheDetail(windowsPartitionCacheKey(partition.partitionGUID))"
+                        />
                       </td>
                       <td class="px-4 py-3 text-right">
                         <button
@@ -1620,19 +1888,19 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-semibold text-white transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/40 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:bg-slate-300"
-              :class="ipsanRedisAvailable && ipsanCleanableKeys.length > 0
-                ? (ipsanBatchConfirmPending ? 'bg-rose-600 hover:bg-rose-700 ring-2 ring-rose-300 ring-offset-1' : 'bg-rose-500 hover:bg-rose-600')
+              :class="activeIpsanRedisAvailable && activeIpsanCleanableCount > 0
+                ? (activeIpsanBatchConfirmPending ? 'bg-rose-600 hover:bg-rose-700 ring-2 ring-rose-300 ring-offset-1' : 'bg-rose-500 hover:bg-rose-600')
                 : 'bg-slate-300'"
-              :disabled="!ipsanRedisAvailable || ipsanCleanableKeys.length === 0 || ipsanBatchCleaning"
-              :title="!ipsanRedisAvailable ? t('diskCacheCleanup.disabled.redisDown') : (ipsanBatchConfirmPending ? t('diskCacheCleanup.batch.confirmAria') : undefined)"
-              :aria-pressed="ipsanBatchConfirmPending"
-              @click="cleanIpsanKeys(ipsanCleanableKeys)"
+              :disabled="!activeIpsanRedisAvailable || activeIpsanCleanableCount === 0 || activeIpsanBatchCleaning"
+              :title="!activeIpsanRedisAvailable ? t('diskCacheCleanup.disabled.redisDown') : (activeIpsanBatchConfirmPending ? t('diskCacheCleanup.batch.confirmAria') : undefined)"
+              :aria-pressed="activeIpsanBatchConfirmPending"
+              @click="handleActiveIpsanBatchClean"
             >
-              <Loader v-if="ipsanBatchCleaning" class="h-4 w-4 animate-spin" />
+              <Loader v-if="activeIpsanBatchCleaning" class="h-4 w-4 animate-spin" />
               <Trash2 v-else class="h-4 w-4" />
-              <span v-if="ipsanBatchCleaning">{{ t('diskCacheCleanup.batch.progress', { count: ipsanBatchPendingCount }) }}</span>
-              <span v-else-if="ipsanBatchConfirmPending">{{ t('diskCacheCleanup.batch.confirm') }}</span>
-              <span v-else>{{ t('diskCacheCleanup.ipsan.actions.cleanAll', { count: ipsanCleanableKeys.length }) }}</span>
+              <span v-if="activeIpsanBatchCleaning">{{ t('diskCacheCleanup.batch.progress', { count: activeIpsanBatchPendingCount }) }}</span>
+              <span v-else-if="activeIpsanBatchConfirmPending">{{ t('diskCacheCleanup.batch.confirm') }}</span>
+              <span v-else>{{ activeIpsanCleanAllLabel }}</span>
             </button>
           </div>
         </div>
@@ -1647,23 +1915,12 @@ onBeforeUnmount(() => {
             <span>{{ ipsanError }}</span>
           </div>
 
-          <div
-            v-if="ipsanRedisError && !ipsanRedisAvailable"
-            class="flex items-start gap-3 rounded-[20px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm"
-            role="status"
-          >
-            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-            <span>{{ ipsanRedisError }}</span>
-          </div>
-
           <Empty
             v-if="!hasFetchedIpsan && !ipsanLoading && !hostIp.trim()"
             :icon="Server"
             :title="t('diskCacheCleanup.empty.noHost')"
             :description="t('diskCacheCleanup.empty.noHostHint')"
-            :action-label="t('diskCacheCleanup.empty.noHostAction')"
             class="min-h-[220px]"
-            @action="focusHostInput"
           />
 
           <Empty
@@ -1701,111 +1958,384 @@ onBeforeUnmount(() => {
             v-else-if="ipsans.length === 0"
             :icon="Server"
             :title="t('diskCacheCleanup.disks.empty')"
-            :description="t('diskCacheCleanup.ipsan.description')"
+            :description="t('diskCacheCleanup.ipsan.emptyNoIpsans')"
             class="min-h-[220px]"
           />
 
           <div
             v-else
-            class="overflow-x-auto"
+            class="space-y-4"
             :class="{ 'opacity-70': ipsanLoading }"
           >
-            <table class="min-w-[920px] w-full text-sm">
-              <thead>
-                <tr class="border-b border-orange-100 bg-orange-50/60 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                  <th class="px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.name') }}</th>
-                  <th class="w-48 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.id') }}</th>
-                  <th class="w-40 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.status') }}</th>
-                  <th class="w-28 px-4 py-3 text-right">{{ t('diskCacheCleanup.ipsan.columns.capacity') }}</th>
-                  <th class="w-40 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.purpose') }}</th>
-                  <th class="w-36 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.cache') }}</th>
-                  <th class="w-40 px-4 py-3 text-right">{{ t('diskCacheCleanup.ipsan.columns.actions') }}</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-orange-50">
-                <tr
-                  v-for="item in ipsans"
-                  :key="item.IPSANId"
-                  class="hover:bg-orange-50/40 transition-colors"
-                >
-                  <td class="px-4 py-3">
-                    <div class="font-medium text-slate-900">{{ item.IPSANName || item.IPSANIp || '--' }}</div>
-                    <div class="mt-1 font-mono text-xs text-slate-400">{{ item.IPSANIp || '--' }}</div>
-                  </td>
-                  <td class="px-4 py-3 font-mono text-xs text-slate-700">
-                    {{ item.IPSANId }}
-                  </td>
-                  <td class="px-4 py-3">
-                    <span
-                      class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold"
-                      :class="statusBadgeClass(item.IPSANStatus)"
-                    >
+            <div
+              class="inline-flex gap-1 rounded-full border border-orange-100 bg-orange-50/80 p-1"
+              role="tablist"
+              :aria-label="t('diskCacheCleanup.ipsan.title')"
+            >
+              <button
+                ref="ipsanDevicesTabRef"
+                type="button"
+                role="tab"
+                :aria-selected="ipsanSubTab === 'devices'"
+                :tabindex="ipsanSubTab === 'devices' ? 0 : -1"
+                class="rounded-full px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/40 focus-visible:ring-offset-1"
+                :class="ipsanSubTab === 'devices' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                @click="ipsanSubTab = 'devices'"
+                @keydown="onIpsanSubTabKeydown($event, 'devices')"
+              >
+                {{ t('diskCacheCleanup.ipsan.subTabs.devices') }}
+              </button>
+              <button
+                ref="ipsanResourceGroupsTabRef"
+                type="button"
+                role="tab"
+                :aria-selected="ipsanSubTab === 'resourceGroups'"
+                :tabindex="ipsanSubTab === 'resourceGroups' ? 0 : -1"
+                class="rounded-full px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/40 focus-visible:ring-offset-1"
+                :class="ipsanSubTab === 'resourceGroups' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                @click="ipsanSubTab = 'resourceGroups'"
+                @keydown="onIpsanSubTabKeydown($event, 'resourceGroups')"
+              >
+                {{ t('diskCacheCleanup.ipsan.subTabs.resourceGroups') }}
+              </button>
+            </div>
+
+            <div
+              v-if="activeIpsanRedisError && !activeIpsanRedisAvailable"
+              class="flex items-start gap-3 rounded-[20px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm"
+              role="status"
+            >
+              <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>{{ activeIpsanRedisError }}</span>
+            </div>
+
+            <div
+              v-if="ipsanSubTab === 'resourceGroups' && ipsanResourceGroupError"
+              class="flex items-start gap-3 rounded-[20px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm"
+              role="status"
+            >
+              <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>{{ ipsanResourceGroupError }}</span>
+            </div>
+
+            <div
+              v-if="ipsanSubTab === 'devices'"
+              class="overflow-x-auto"
+            >
+              <table class="min-w-[1120px] w-full text-sm">
+                <thead>
+                  <tr class="border-b border-orange-100 bg-orange-50/60 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    <th class="px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.name') }}</th>
+                    <th class="w-48 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.id') }}</th>
+                    <th class="w-40 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.status') }}</th>
+                    <th class="w-28 px-4 py-3 text-right">{{ t('diskCacheCleanup.ipsan.columns.capacity') }}</th>
+                    <th class="w-40 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.purpose') }}</th>
+                    <th class="w-56 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.resourceGroup') }}</th>
+                    <th class="w-40 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.columns.cache') }}</th>
+                    <th class="w-40 px-4 py-3 text-right">{{ t('diskCacheCleanup.ipsan.columns.actions') }}</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-orange-50">
+                  <tr
+                    v-for="item in ipsans"
+                    :key="item.IPSANId"
+                    class="hover:bg-orange-50/40 transition-colors"
+                  >
+                    <td class="px-4 py-3">
+                      <div class="font-medium text-slate-900">{{ item.IPSANName || item.IPSANIp || '--' }}</div>
+                      <div class="mt-1 font-mono text-xs text-slate-400">{{ item.IPSANIp || '--' }}</div>
+                    </td>
+                    <td class="px-4 py-3 font-mono text-xs text-slate-700">
+                      {{ item.IPSANId }}
+                    </td>
+                    <td class="px-4 py-3">
                       <span
-                        class="h-1.5 w-1.5 rounded-full bg-current"
-                        :class="{ 'animate-pulse': statusIsBusy(item.IPSANStatus) }"
-                      ></span>
-                      {{ t(statusLabelKey(item.IPSANStatus)) }}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3 text-right font-mono text-slate-700">
-                    {{ formatCapacity(item.totalCapacity) }}
-                  </td>
-                  <td class="px-4 py-3">
-                    <span
-                      class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold"
-                      :class="usageBadgeClass(item.usage)"
-                    >
-                      {{ t(usageLabelKey(item.usage)) }}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3">
-                    <span
-                      v-if="!ipsanRedisAvailable"
-                      class="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700"
-                    >
-                      {{ t('diskCacheCleanup.cache.unavailable') }}
-                    </span>
-                    <div
-                      v-else-if="ipsanPresentCacheKeys.has(ipsanCacheKey(item.IPSANId))"
-                      class="space-y-2"
-                    >
-                      <span
-                        class="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700"
+                        class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold"
+                        :class="statusBadgeClass(item.IPSANStatus)"
                       >
-                        {{ t('diskCacheCleanup.cache.present') }}
+                        <span
+                          class="h-1.5 w-1.5 rounded-full bg-current"
+                          :class="{ 'animate-pulse': statusIsBusy(item.IPSANStatus) }"
+                        ></span>
+                        {{ t(statusLabelKey(item.IPSANStatus)) }}
                       </span>
-                      <button
-                        type="button"
-                        class="inline-flex items-center justify-center rounded-xl border border-indigo-200 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:border-indigo-300 hover:bg-indigo-50"
-                        @click="openCacheDetail(ipsanCacheKey(item.IPSANId))"
+                    </td>
+                    <td class="px-4 py-3 text-right font-mono text-slate-700">
+                      {{ formatCapacity(item.totalCapacity) }}
+                    </td>
+                    <td class="px-4 py-3">
+                      <span
+                        class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold"
+                        :class="usageBadgeClass(item.usage)"
                       >
-                        {{ t('diskCacheCleanup.actions.viewDetails') }}
-                      </button>
-                    </div>
-                    <span v-else class="text-sm text-slate-400">
-                      {{ t('diskCacheCleanup.cache.absent') }}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3 text-right">
-                    <button
-                      v-if="ipsanPresentCacheKeys.has(ipsanCacheKey(item.IPSANId))"
-                      type="button"
-                      class="inline-flex items-center justify-center gap-2 rounded-xl bg-rose-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-rose-600 disabled:cursor-not-allowed disabled:bg-slate-300"
-                      :disabled="!ipsanRedisAvailable || ipsanCleaningKeys.has(ipsanCacheKey(item.IPSANId))"
-                      :title="!ipsanRedisAvailable ? t('diskCacheCleanup.disabled.redisDown') : undefined"
-                      @click="cleanIpsanKeys([ipsanCacheKey(item.IPSANId)], ipsanCacheKey(item.IPSANId))"
-                    >
-                      <Loader
-                        v-if="ipsanCleaningKeys.has(ipsanCacheKey(item.IPSANId))"
-                        class="h-3.5 w-3.5 animate-spin"
+                        {{ t(usageLabelKey(item.usage)) }}
+                      </span>
+                    </td>
+                    <td class="px-4 py-3">
+                      <template v-if="ipsanGroupMetaFor(item.IPSANId)">
+                        <span class="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-700">
+                          RG: {{ ipsanGroupMetaFor(item.IPSANId)?.groupName || ipsanGroupMetaFor(item.IPSANId)?.groupId }}
+                        </span>
+                        <div class="mt-2 flex items-center gap-2 text-xs text-slate-500">
+                          <span>{{ t('diskCacheCleanup.ipsan.groupMemberCount', { count: ipsanGroupMetaFor(item.IPSANId)?.memberCount || 0 }) }}</span>
+                          <button
+                            type="button"
+                            class="font-semibold text-sky-700 transition hover:text-sky-800"
+                            @click="jumpToIpsanResourceGroup(ipsanGroupMetaFor(item.IPSANId)?.groupId || '')"
+                          >
+                            {{ t('diskCacheCleanup.ipsan.actions.viewGroup') }}
+                          </button>
+                        </div>
+                      </template>
+                      <span
+                        v-else
+                        class="inline-flex items-center rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-500"
+                      >
+                        {{ t('diskCacheCleanup.ipsan.ungrouped') }}
+                      </span>
+                    </td>
+                    <td class="px-4 py-3">
+                      <CacheStateInline
+                        :present="ipsanPresentCacheKeys.has(ipsanCacheKey(item.IPSANId))"
+                        :redis-available="ipsanRedisAvailable"
+                        :present-label="t('diskCacheCleanup.cache.present')"
+                        :absent-label="t('diskCacheCleanup.cache.absent')"
+                        :unavailable-label="t('diskCacheCleanup.cache.unavailable')"
+                        :detail-label="t('diskCacheCleanup.cache.detailCompact')"
+                        :detail-aria-label="t('diskCacheCleanup.actions.viewDetails')"
+                        @open-detail="openCacheDetail(ipsanCacheKey(item.IPSANId))"
                       />
-                      <Trash2 v-else class="h-3.5 w-3.5" />
-                      <span>{{ ipsanCleaningKeys.has(ipsanCacheKey(item.IPSANId)) ? t('diskCacheCleanup.actions.cleaningOne') : t('diskCacheCleanup.actions.cleanOne') }}</span>
-                    </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+                    </td>
+                    <td class="px-4 py-3 text-right">
+                      <button
+                        v-if="ipsanPresentCacheKeys.has(ipsanCacheKey(item.IPSANId))"
+                        type="button"
+                        class="inline-flex items-center justify-center gap-2 rounded-xl bg-rose-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-rose-600 disabled:cursor-not-allowed disabled:bg-slate-300"
+                        :disabled="!ipsanRedisAvailable || ipsanCleaningKeys.has(ipsanCacheKey(item.IPSANId))"
+                        :title="!ipsanRedisAvailable ? t('diskCacheCleanup.disabled.redisDown') : undefined"
+                        @click="cleanIpsanKeys([ipsanCacheKey(item.IPSANId)], ipsanCacheKey(item.IPSANId))"
+                      >
+                        <Loader
+                          v-if="ipsanCleaningKeys.has(ipsanCacheKey(item.IPSANId))"
+                          class="h-3.5 w-3.5 animate-spin"
+                        />
+                        <Trash2 v-else class="h-3.5 w-3.5" />
+                        <span>{{ ipsanCleaningKeys.has(ipsanCacheKey(item.IPSANId)) ? t('diskCacheCleanup.actions.cleaningOne') : t('diskCacheCleanup.actions.cleanOne') }}</span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <Empty
+              v-else-if="ipsanResourceGroups.length === 0"
+              :icon="Server"
+              :title="t('diskCacheCleanup.ipsan.resourceGroups.empty')"
+              :description="t('diskCacheCleanup.ipsan.resourceGroups.emptyHint')"
+              class="min-h-[220px]"
+            />
+
+            <div v-else class="overflow-x-auto">
+              <table class="min-w-[1160px] w-full text-sm">
+                <thead>
+                  <tr class="border-b border-orange-100 bg-orange-50/60 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    <th class="w-12 px-3 py-3 text-left"></th>
+                    <th class="px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.columns.name') }}</th>
+                    <th class="w-48 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.columns.id') }}</th>
+                    <th class="w-40 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.columns.status') }}</th>
+                    <th class="w-28 px-4 py-3 text-right">{{ t('diskCacheCleanup.ipsan.resourceGroups.columns.capacity') }}</th>
+                    <th class="w-40 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.columns.purpose') }}</th>
+                    <th class="w-28 px-4 py-3 text-right">{{ t('diskCacheCleanup.ipsan.resourceGroups.columns.members') }}</th>
+                    <th class="w-40 px-4 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.columns.cache') }}</th>
+                    <th class="w-40 px-4 py-3 text-right">{{ t('diskCacheCleanup.ipsan.resourceGroups.columns.actions') }}</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-orange-50">
+                  <template
+                    v-for="group in ipsanResourceGroups"
+                    :key="group.groupId"
+                  >
+                    <tr
+                      class="transition-colors"
+                      :class="highlightedIpsanResourceGroupId === group.groupId ? 'bg-orange-50/80' : 'hover:bg-orange-50/40'"
+                    >
+                      <td class="px-3 py-3">
+                        <button
+                          type="button"
+                          class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-orange-100 bg-white text-slate-500 transition hover:border-orange-200 hover:bg-orange-50"
+                          :aria-expanded="ipsanExpandedGroupIds.has(group.groupId)"
+                          @click="toggleIpsanResourceGroupExpanded(group.groupId)"
+                        >
+                          <ChevronDown
+                            v-if="ipsanExpandedGroupIds.has(group.groupId)"
+                            class="h-4 w-4"
+                          />
+                          <ChevronRight v-else class="h-4 w-4" />
+                        </button>
+                      </td>
+                      <td class="px-4 py-3">
+                        <div class="font-medium text-slate-900">{{ ipsanResourceGroupTitle(group) }}</div>
+                        <div class="mt-1 text-xs text-slate-500">
+                          {{ t('diskCacheCleanup.ipsan.groupMemberCount', { count: group.resourceInfoList.length }) }}
+                        </div>
+                      </td>
+                      <td class="px-4 py-3 font-mono text-xs text-slate-700">
+                        {{ group.groupId }}
+                      </td>
+                      <td class="px-4 py-3">
+                        <span
+                          class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold"
+                          :class="statusBadgeClass(group.groupStatus)"
+                        >
+                          <span
+                            class="h-1.5 w-1.5 rounded-full bg-current"
+                            :class="{ 'animate-pulse': statusIsBusy(group.groupStatus) }"
+                          ></span>
+                          {{ t(statusLabelKey(group.groupStatus)) }}
+                        </span>
+                      </td>
+                      <td class="px-4 py-3 text-right font-mono text-slate-700">
+                        {{ formatCapacity(group.totalCapacity) }}
+                      </td>
+                      <td class="px-4 py-3">
+                        <span
+                          class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold"
+                          :class="usageBadgeClass(group.usage)"
+                        >
+                          {{ t(usageLabelKey(group.usage)) }}
+                        </span>
+                      </td>
+                      <td class="px-4 py-3 text-right font-mono text-slate-700">
+                        {{ group.resourceInfoList.length }}
+                      </td>
+                      <td class="px-4 py-3">
+                        <CacheStateInline
+                          :present="ipsanResourceGroupPresentCacheKeys.has(ipsanResourceGroupCacheKey(group.groupId))"
+                          :redis-available="ipsanResourceGroupRedisAvailable"
+                          :present-label="t('diskCacheCleanup.cache.present')"
+                          :absent-label="t('diskCacheCleanup.cache.absent')"
+                          :unavailable-label="t('diskCacheCleanup.cache.unavailable')"
+                          :detail-label="t('diskCacheCleanup.cache.detailCompact')"
+                          :detail-aria-label="t('diskCacheCleanup.actions.viewDetails')"
+                          @open-detail="openCacheDetail(ipsanResourceGroupCacheKey(group.groupId))"
+                        />
+                      </td>
+                      <td class="px-4 py-3 text-right">
+                        <button
+                          v-if="ipsanResourceGroupPresentCacheKeys.has(ipsanResourceGroupCacheKey(group.groupId))"
+                          type="button"
+                          class="inline-flex items-center justify-center gap-2 rounded-xl bg-rose-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-rose-600 disabled:cursor-not-allowed disabled:bg-slate-300"
+                          :disabled="!ipsanResourceGroupRedisAvailable || ipsanResourceGroupCleaningKeys.has(ipsanResourceGroupCacheKey(group.groupId))"
+                          :title="!ipsanResourceGroupRedisAvailable ? t('diskCacheCleanup.disabled.redisDown') : undefined"
+                          @click="cleanIpsanResourceGroupKeys([ipsanResourceGroupCacheKey(group.groupId)], ipsanResourceGroupCacheKey(group.groupId))"
+                        >
+                          <Loader
+                            v-if="ipsanResourceGroupCleaningKeys.has(ipsanResourceGroupCacheKey(group.groupId))"
+                            class="h-3.5 w-3.5 animate-spin"
+                          />
+                          <Trash2 v-else class="h-3.5 w-3.5" />
+                          <span>{{ ipsanResourceGroupCleaningKeys.has(ipsanResourceGroupCacheKey(group.groupId)) ? t('diskCacheCleanup.actions.cleaningOne') : t('diskCacheCleanup.actions.cleanOne') }}</span>
+                        </button>
+                      </td>
+                    </tr>
+
+                    <tr v-if="ipsanExpandedGroupIds.has(group.groupId)" class="bg-orange-50/40">
+                      <td colspan="9" class="px-5 py-4">
+                        <div class="rounded-2xl border border-orange-100 bg-white px-4 py-4">
+                          <div class="mb-3 flex items-center justify-between gap-3">
+                            <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                              {{ t('diskCacheCleanup.ipsan.resourceGroups.membersTitle') }}
+                            </div>
+                            <div
+                              v-if="group.resourceInfoList.some((member) => !ipsanMemberReturned(member.IPSANId))"
+                              class="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700"
+                            >
+                              {{ t('diskCacheCleanup.ipsan.resourceGroups.incompleteMembers') }}
+                            </div>
+                          </div>
+
+                          <div class="overflow-x-auto">
+                            <table class="min-w-[860px] w-full text-sm">
+                              <thead>
+                                <tr class="border-b border-orange-100 bg-orange-50/50 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                                  <th class="px-3 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.memberColumns.name') }}</th>
+                                  <th class="w-48 px-3 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.memberColumns.id') }}</th>
+                                  <th class="w-40 px-3 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.memberColumns.status') }}</th>
+                                  <th class="w-28 px-3 py-3 text-right">{{ t('diskCacheCleanup.ipsan.resourceGroups.memberColumns.capacity') }}</th>
+                                  <th class="w-40 px-3 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.memberColumns.purpose') }}</th>
+                                  <th class="w-36 px-3 py-3 text-left">{{ t('diskCacheCleanup.ipsan.resourceGroups.memberColumns.cache') }}</th>
+                                </tr>
+                              </thead>
+                              <tbody class="divide-y divide-orange-50">
+                                <tr
+                                  v-for="member in group.resourceInfoList"
+                                  :key="`${group.groupId}-${member.IPSANId}`"
+                                  class="hover:bg-orange-50/30"
+                                >
+                                  <td class="px-3 py-3">
+                                    <div class="font-medium text-slate-900">{{ member.IPSANName || member.IPSANIp || '--' }}</div>
+                                    <div class="mt-1 font-mono text-xs text-slate-400">{{ member.IPSANIp || '--' }}</div>
+                                    <div
+                                      v-if="!ipsanMemberReturned(member.IPSANId)"
+                                      class="mt-2 text-xs font-semibold text-amber-700"
+                                    >
+                                      {{ t('diskCacheCleanup.ipsan.resourceGroups.memberMissing') }}
+                                    </div>
+                                  </td>
+                                  <td class="px-3 py-3 font-mono text-xs text-slate-700">
+                                    {{ member.IPSANId }}
+                                  </td>
+                                  <td class="px-3 py-3">
+                                    <span
+                                      class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold"
+                                      :class="statusBadgeClass(member.IPSANStatus)"
+                                    >
+                                      <span
+                                        class="h-1.5 w-1.5 rounded-full bg-current"
+                                        :class="{ 'animate-pulse': statusIsBusy(member.IPSANStatus) }"
+                                      ></span>
+                                      {{ t(statusLabelKey(member.IPSANStatus)) }}
+                                    </span>
+                                  </td>
+                                  <td class="px-3 py-3 text-right font-mono text-slate-700">
+                                    {{ formatCapacity(member.capacity) }}
+                                  </td>
+                                  <td class="px-3 py-3">
+                                    <span
+                                      v-if="ipsanItemFor(member.IPSANId)"
+                                      class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold"
+                                      :class="usageBadgeClass(ipsanItemFor(member.IPSANId)?.usage ?? -1)"
+                                    >
+                                      {{ t(usageLabelKey(ipsanItemFor(member.IPSANId)?.usage ?? -1)) }}
+                                    </span>
+                                    <span v-else class="text-sm text-slate-400">
+                                      {{ t('diskCacheCleanup.usage.unknown') }}
+                                    </span>
+                                  </td>
+                                  <td class="px-3 py-3">
+                                    <CacheStateInline
+                                      :present="ipsanPresentCacheKeys.has(ipsanCacheKey(member.IPSANId))"
+                                      :redis-available="ipsanRedisAvailable"
+                                      :present-label="t('diskCacheCleanup.cache.present')"
+                                      :absent-label="t('diskCacheCleanup.cache.absent')"
+                                      :unavailable-label="t('diskCacheCleanup.cache.unavailable')"
+                                      :detail-label="t('diskCacheCleanup.cache.detailCompact')"
+                                      :detail-aria-label="t('diskCacheCleanup.actions.viewDetails')"
+                                      @open-detail="openCacheDetail(ipsanCacheKey(member.IPSANId))"
+                                    />
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </section>
@@ -1879,7 +2409,7 @@ onBeforeUnmount(() => {
                   {{ t('diskCacheCleanup.cache.preview') }}
                 </div>
                 <div class="mt-2 whitespace-pre-wrap break-all font-mono text-xs leading-6 text-slate-700">
-                  {{ cacheDetailEntry.preview || t('diskCacheCleanup.cache.emptyContent') }}
+                  {{ cacheDetailPreview }}
                 </div>
               </div>
             </div>

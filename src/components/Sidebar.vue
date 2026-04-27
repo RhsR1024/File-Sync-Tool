@@ -68,7 +68,7 @@ const fallbackVersionLabel = computed(() => t('sidebar.version'));
 
 const versionChipLabel = computed(() => {
   const fallbackParts = fallbackVersionLabel.value.split('·').map((part) => part.trim());
-  const fallbackVersion = fallbackParts[0] ?? '1.0.7';
+  const fallbackVersion = fallbackParts[0] ?? '1.1.0';
   const fallbackDate = fallbackParts[1] ?? '';
   const current = updaterState.value?.current ?? fallbackVersion;
   const currentEntry = updaterState.value?.manifest?.versions.find((entry) => entry.version === current);

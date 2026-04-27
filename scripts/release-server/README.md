@@ -38,8 +38,15 @@ systemctl enable --now file-sync-tool-releases
 ## Publish a new release
 
 1. Build on Windows: `pnpm tauri:build:versioned-exe`
-2. Copy the generated `.exe` into the release directory
-3. Prepend a new entry to `manifest.json` and bump `latest`
-4. Compute SHA-256 with `sha256sum file-sync-tool-*.exe`
+2. The command also creates or updates `scripts/release-server/manifest.json`
+3. Fill in the new entry's `changelog`
+4. Copy the generated `.exe` and `manifest.json` into the release directory
+
+Behavior notes:
+
+- `pnpm tauri:build:versioned-exe` is a project custom command.
+- `manifest.json` is updated incrementally by `version`.
+- Rebuilding the same version refreshes `url`, `sha256`, and `released_at`, and preserves the existing `changelog`.
+- If `manifest.json` is malformed, the script fails instead of overwriting history.
 
 No service restart is required.

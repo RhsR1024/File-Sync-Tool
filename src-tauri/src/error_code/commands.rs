@@ -8,6 +8,8 @@ use crate::error_code::{
 };
 use crate::AppState;
 
+const TOOL_NAME: &str = "错误码查询";
+
 fn cache_root(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     app_handle
         .path()
@@ -15,15 +17,29 @@ fn cache_root(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("resolve_app_data_dir: {error}"))
 }
 
+fn emit_tool_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, level: &str, message: &str) {
+    crate::scanner::emit_tool_log(app_handle, TOOL_NAME, message, level);
+}
+
 #[tauri::command]
 pub async fn error_code_sync(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SyncReport, String> {
-    let root = cache_root(&app_handle)?;
-    sync_mod::run_sync(&root, &state.error_code)
+    let root = cache_root(&app_handle).inspect_err(|error| {
+        emit_tool_log(&app_handle, "error", &format!("解析应用数据目录失败：{error}"));
+    })?;
+    let log_app = app_handle.clone();
+    let mut emit_sync_log = move |level: &str, message: String| {
+        emit_tool_log(&log_app, level, &message);
+    };
+
+    sync_mod::run_sync(&root, &state.error_code, &mut emit_sync_log)
         .await
-        .map_err(|error| format!("{}|{}", error.toast_key(), error))
+        .map_err(|error| {
+            emit_tool_log(&app_handle, "error", &format!("错误码同步失败：{error}"));
+            format!("{}|{}", error.toast_key(), error)
+        })
 }
 
 #[tauri::command]

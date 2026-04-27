@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.0.7"
+version = "1.1.0"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
@@ -34,7 +34,8 @@ ssh2 = "0.9.5"
 tauri-plugin-clipboard-manager = "2.3.2"
 flate2 = "1"
 rfd = "0.14"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", features = ["json", "cookies"] }
+git2 = { version = "0.20.4", features = ["vendored-libgit2", "vendored-openssl"] }
 encoding_rs = "0.8"
 chardetng = "0.1"
 csv = "1.3"

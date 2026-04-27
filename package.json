@@ -1,7 +1,7 @@
 {
   "name": "trae-project",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,7 @@
     "lint": "eslint . --ext .ts,.vue",
     "lint:fix": "eslint . --ext .ts,.vue --fix",
     "tauri": "tauri",
-    "tauri:build:versioned-exe": "pnpm tauri build && node scripts/rename-tauri-exe.mjs",
+    "tauri:build:versioned-exe": "pnpm tauri build && node scripts/rename-tauri-exe.mjs && node scripts/release-server/update-manifest.mjs",
     "check-env": "cargo --version"
   },
   "dependencies": {

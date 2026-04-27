@@ -2958,6 +2958,7 @@ fn main() {
             disk_cleanup::disk_cleanup_list_linux_disks,
             disk_cleanup::disk_cleanup_list_windows_disks,
             disk_cleanup::disk_cleanup_list_ipsans,
+            disk_cleanup::disk_cleanup_list_ipsan_resource_groups,
             disk_cleanup::disk_cleanup_check_cache_keys,
             disk_cleanup::disk_cleanup_get_cache_key_contents,
             disk_cleanup::disk_cleanup_delete_cache_keys,

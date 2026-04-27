@@ -139,6 +139,14 @@ scp scripts/release-server/serve.py user@your-server:/opt/file-sync-tool-release
 
 建议第一次上线时，就把“当前已发给用户的版本”也写进 `manifest.json`，这样客户端历史版本列表不会是空的。
 
+如果你已经使用本项目当前的自定义构建命令：
+
+```bash
+pnpm tauri:build:versioned-exe
+```
+
+那么 `scripts/release-server/manifest.json` 会在本地自动创建或自动增量更新。第一次发布时，可以直接使用这份自动生成的 `manifest.json`，再手动补充 `changelog`。
+
 最小示例：
 
 ```json
@@ -284,12 +292,15 @@ pnpm tauri:build:versioned-exe
 
 - 执行 Tauri release 构建
 - 自动把生成的 exe 重命名为带版本号和时间戳的文件名
+- 自动创建或更新 `scripts/release-server/manifest.json`
 
 示例输出文件名：
 
 ```text
 file-sync-tool-1.0.8-202604261530.exe
 ```
+
+`pnpm tauri:build:versioned-exe` 不是 Tauri 默认命令，而是本项目的自定义命令。
 
 重要说明：
 
@@ -298,7 +309,11 @@ file-sync-tool-1.0.8-202604261530.exe
 
 ## 7.2 计算新 exe 的 SHA-256
 
-在生成目录或服务器目录执行：
+正常情况下，这一步不需要手动做。
+
+因为 `pnpm tauri:build:versioned-exe` 已经会自动对新 exe 计算 SHA-256，并写入本地的 `scripts/release-server/manifest.json`。
+
+只有在排查问题、人工校验，或者你手动替换了服务器上的 exe 时，才需要自己执行：
 
 ```bash
 sha256sum file-sync-tool-1.0.8-202604261530.exe
@@ -310,7 +325,7 @@ sha256sum file-sync-tool-1.0.8-202604261530.exe
 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  file-sync-tool-1.0.8-202604261530.exe
 ```
 
-取前面的 64 位十六进制字符串，写入 `manifest.json` 的 `sha256` 字段。
+取前面的 64 位十六进制字符串，和 `manifest.json` 里的 `sha256` 字段进行比对即可。
 
 ## 7.3 上传新 exe 到服务器
 
@@ -322,7 +337,19 @@ scp src-tauri/target/release/file-sync-tool-1.0.8-202604261530.exe user@your-ser
 
 ## 7.4 更新 `manifest.json`
 
-把新版本插到 `versions` 最前面，并把 `latest` 改成新版本。
+正常情况下，这一步也不需要手动从零开始写。
+
+`pnpm tauri:build:versioned-exe` 执行完成后，会自动更新本地的 `scripts/release-server/manifest.json`：
+
+- 如果 `manifest.json` 不存在，就自动创建第一版
+- 如果当前 `version` 不存在，就插入一条新记录
+- 如果当前 `version` 已存在，就只刷新该版本的 `url`、`sha256`、`released_at`
+- 如果当前 `version` 已存在，会保留原有 `changelog`
+- `latest` 会更新为这次构建的版本
+
+开发者通常只需要手动补充这次版本的 `changelog`，然后把新的 exe 和这份 `manifest.json` 一起复制到 Linux 服务器。
+
+如果你不走自动脚本，仍然可以手动维护，格式如下：
 
 示例：
 

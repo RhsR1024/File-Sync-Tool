@@ -763,6 +763,23 @@ export interface IpsanItem {
   usage: number;
 }
 
+export interface IpsanResourceGroupMemberItem {
+  IPSANId: string;
+  IPSANName: string;
+  IPSANIp: string;
+  IPSANStatus: number;
+  capacity: number;
+}
+
+export interface IpsanResourceGroupItem {
+  groupId: string;
+  groupName: string;
+  groupStatus: number;
+  totalCapacity: number;
+  usage: number;
+  resourceInfoList: IpsanResourceGroupMemberItem[];
+}
+
 export interface CacheKeyCheckResult {
   present_keys: string[];
   redis_available: boolean;
@@ -826,6 +843,16 @@ export async function diskCleanupListIpsans(
   timeoutSecs: number,
 ): Promise<IpsanItem[]> {
   return await invoke<IpsanItem[]>('disk_cleanup_list_ipsans', {
+    host,
+    timeoutSecs,
+  });
+}
+
+export async function diskCleanupListIpsanResourceGroups(
+  host: string,
+  timeoutSecs: number,
+): Promise<IpsanResourceGroupItem[]> {
+  return await invoke<IpsanResourceGroupItem[]>('disk_cleanup_list_ipsan_resource_groups', {
     host,
     timeoutSecs,
   });

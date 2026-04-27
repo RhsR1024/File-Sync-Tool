@@ -171,7 +171,7 @@ function onExpandLeave(el: Element) {
                   {{ t('about.title') }}
                 </h1>
                 <p class="text-sm leading-6 text-slate-500">
-                  {{ t('about.currentVersion', { version: state?.current ?? '1.0.7' }) }}
+                  {{ t('about.currentVersion', { version: state?.current ?? '1.1.0' }) }}
                 </p>
                 <p class="text-sm leading-6 text-slate-500">
                   {{ t('about.releasedOn', { date: formatReleaseDate(currentReleaseDate) }) }}

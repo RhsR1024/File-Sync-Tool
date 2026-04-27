@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -13,18 +12,23 @@ use crate::error_code::{
 pub async fn run_sync(
     cache_root: &Path,
     store: &Mutex<ErrorCodeStore>,
+    emit_log: &mut impl FnMut(&str, String),
 ) -> Result<SyncReport, SyncError> {
-    let bytes = gitlab::fetch_archive().await?;
+    emit_log("info", "Start syncing error code dictionary".to_string());
+    let (files, source_url) = gitlab::fetch_archive_with_logger(emit_log).await?;
+    emit_log("info", format!("Error code sync source: {source_url}"));
 
-    let files = extract_csvs_from_zip(&bytes)?;
     if files.is_empty() {
-        return Err(SyncError::Archive("no_csv_in_archive".to_string()));
+        emit_log("error", "No CSV files found in repository".to_string());
+        return Err(SyncError::Archive("no_csv_in_repository".to_string()));
     }
+    emit_log("info", format!("Collected {} CSV files", files.len()));
 
     let mut all_entries: Vec<ErrorCodeEntry> = Vec::new();
     for (name, raw) in &files {
         let parsed = parser::parse_csv_bytes(raw, name);
         log::info!("[error_code] parsed {} -> {} rows", name, parsed.len());
+        emit_log("info", format!("Parsed {name} -> {} rows", parsed.len()));
         all_entries.extend(parsed);
     }
 
@@ -55,6 +59,13 @@ pub async fn run_sync(
         row_count,
         synced_at
     );
+    emit_log(
+        "success",
+        format!(
+            "Error code sync complete: {} file(s), {} row(s), at {}",
+            file_count, row_count, synced_at
+        ),
+    );
 
     Ok(SyncReport {
         file_count,
@@ -82,86 +93,4 @@ pub fn ensure_loaded(cache_root: &Path, store: &Mutex<ErrorCodeStore>) -> Result
         guard.loaded = true;
     }
     Ok(())
-}
-
-fn extract_csvs_from_zip(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, SyncError> {
-    let cursor = std::io::Cursor::new(bytes);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|error| SyncError::Archive(error.to_string()))?;
-    let mut output = Vec::new();
-
-    for index in 0..archive.len() {
-        let mut file = archive
-            .by_index(index)
-            .map_err(|error| SyncError::Archive(error.to_string()))?;
-        if !file.is_file() {
-            continue;
-        }
-
-        let raw_name = file.name().to_string();
-        let Some(basename) = std::path::Path::new(&raw_name)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        if !basename.to_ascii_lowercase().ends_with(".csv") {
-            continue;
-        }
-
-        let mut buffer = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut buffer)
-            .map_err(|error| SyncError::Archive(error.to_string()))?;
-        output.push((basename, buffer));
-    }
-
-    Ok(output)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Write;
-
-    use super::*;
-
-    fn build_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        {
-            let cursor = std::io::Cursor::new(&mut buffer);
-            let mut writer = zip::ZipWriter::new(cursor);
-            let options: zip::write::FileOptions<()> = zip::write::FileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored);
-
-            for (name, data) in files {
-                writer.start_file(*name, options).unwrap();
-                writer.write_all(data).unwrap();
-            }
-            writer.finish().unwrap();
-        }
-
-        buffer
-    }
-
-    #[test]
-    fn extract_csvs_filters_non_csv_and_strips_directory_prefix() {
-        let zip_bytes = build_zip(&[
-            (
-                "errorcode-main-abc/10w.csv",
-                b"code,cn,en,solution,module,remark\n0,A,A,,,",
-            ),
-            ("errorcode-main-abc/README.md", b"# readme"),
-            (
-                "errorcode-main-abc/sub/20w.csv",
-                b"code,cn,en,solution,module,remark\n200,B,B,,,",
-            ),
-        ]);
-
-        let result = extract_csvs_from_zip(&zip_bytes).unwrap();
-        let names: Vec<&str> = result.iter().map(|(name, _)| name.as_str()).collect();
-
-        assert!(names.contains(&"10w.csv"));
-        assert!(names.contains(&"20w.csv"));
-        assert!(!names.iter().any(|name| name.contains("README")));
-    }
 }

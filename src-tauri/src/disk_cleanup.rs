@@ -8,6 +8,7 @@ const DISK_SERVER_LIST_PATH: &str = "/openAPI/system/v1/disk/server/list";
 const DISK_LIST_PATH: &str = "/openAPI/system/v1/disk/list";
 const RAW_DISK_LIST_PATH: &str = "/openAPI/system/v1/raw-disk/list";
 const IPSAN_LIST_PATH: &str = "/openAPI/system/v1/IPSAN/list";
+const IPSAN_RESOURCE_GROUP_LIST_PATH: &str = "/openAPI/system/v1/IPSAN/resourceGroup/list";
 const REDIS_PORT: u16 = 6379;
 const REDIS_PASSWORD: &str = "ums@redis_service";
 const REDIS_OP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -107,6 +108,36 @@ pub struct IpsanItem {
     pub usage: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IpsanResourceGroupMemberItem {
+    #[serde(rename = "IPSANId")]
+    pub ipsan_id: String,
+    #[serde(rename = "IPSANName", default)]
+    pub ipsan_name: String,
+    #[serde(rename = "IPSANIp", default)]
+    pub ipsan_ip: String,
+    #[serde(rename = "IPSANStatus", default)]
+    pub ipsan_status: i32,
+    #[serde(default)]
+    pub capacity: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IpsanResourceGroupItem {
+    #[serde(rename = "groupId")]
+    pub group_id: String,
+    #[serde(rename = "groupName", default)]
+    pub group_name: String,
+    #[serde(rename = "groupStatus", default)]
+    pub group_status: i32,
+    #[serde(rename = "totalCapacity", default)]
+    pub total_capacity: f64,
+    #[serde(default = "default_usage")]
+    pub usage: i32,
+    #[serde(rename = "resourceInfoList", default)]
+    pub resource_info_list: Vec<IpsanResourceGroupMemberItem>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct CacheKeyCheckResult {
     pub present_keys: Vec<String>,
@@ -180,6 +211,12 @@ struct WindowsRawDiskListData {
 struct IpsanListData {
     #[serde(rename = "IPSANInfoList", default)]
     ipsan_info_list: Vec<IpsanItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IpsanResourceGroupListData {
+    #[serde(rename = "groupInfoList", default)]
+    group_info_list: Vec<IpsanResourceGroupItem>,
 }
 
 fn default_usage() -> i32 {
@@ -566,6 +603,18 @@ pub async fn disk_cleanup_list_ipsans(
 }
 
 #[tauri::command]
+pub async fn disk_cleanup_list_ipsan_resource_groups(
+    host: String,
+    timeout_secs: u32,
+) -> Result<Vec<IpsanResourceGroupItem>, String> {
+    let host = normalize_host(&host)?;
+    let client = build_http_client(timeout_secs)?;
+    let url = build_disk_cleanup_url(&host, IPSAN_RESOURCE_GROUP_LIST_PATH);
+    let data: IpsanResourceGroupListData = post_json(&client, &url, serde_json::json!({})).await?;
+    Ok(data.group_info_list)
+}
+
+#[tauri::command]
 pub async fn disk_cleanup_check_cache_keys(host: String, keys: Vec<String>) -> CacheKeyCheckResult {
     let host = match normalize_host(&host) {
         Ok(host) => host,
@@ -814,7 +863,8 @@ mod tests {
     use super::{
         build_disk_cleanup_url, build_storage_key, legacy_present_keys_to_storage_ids,
         legacy_storage_ids_to_cache_keys, normalize_cache_keys, normalize_storage_ids,
-        parse_api_payload, DiskListData, IpsanListData, WindowsRawDiskListData, DISK_LIST_PATH,
+        parse_api_payload, DiskListData, IpsanListData, IpsanResourceGroupListData,
+        WindowsRawDiskListData, DISK_LIST_PATH,
     };
     use reqwest::StatusCode;
 
@@ -967,6 +1017,44 @@ mod tests {
 
         let parsed = parse_api_payload::<IpsanListData>(StatusCode::OK, body).unwrap();
         assert_eq!(parsed.ipsan_info_list[0].usage, 5);
+    }
+
+    #[test]
+    fn parse_ipsan_resource_group_payload_returns_members() {
+        let body = r#"{
+            "code": 0,
+            "message": "Success",
+            "data": {
+                "groupInfoList": [
+                    {
+                        "groupId": "439245456753561600",
+                        "groupName": "192.115.2.26",
+                        "groupStatus": 1,
+                        "totalCapacity": 1296,
+                        "usage": 2,
+                        "resourceInfoList": [
+                            {
+                                "IPSANId": "438596966545362944",
+                                "IPSANName": "192.115.2.26",
+                                "IPSANIp": "192.115.2.26",
+                                "IPSANStatus": 1,
+                                "capacity": 648
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let parsed =
+            parse_api_payload::<IpsanResourceGroupListData>(StatusCode::OK, body).unwrap();
+        assert_eq!(parsed.group_info_list.len(), 1);
+        assert_eq!(parsed.group_info_list[0].resource_info_list.len(), 1);
+        assert_eq!(parsed.group_info_list[0].usage, 2);
+        assert_eq!(
+            parsed.group_info_list[0].resource_info_list[0].ipsan_id,
+            "438596966545362944"
+        );
     }
 
     #[test]
