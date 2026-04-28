@@ -1,5 +1,6 @@
 use semver::Version;
 use serde::Deserialize;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::updater::{Manifest, ManifestVersion, UpdaterError};
@@ -27,6 +28,43 @@ pub fn resolve_download_url(server_url: &str, url: &str) -> String {
     }
 
     format!("{base}/{url}")
+}
+
+/// Extract a safe file name from a resolved or relative download URL.
+pub fn download_file_name_from_url(url: &str) -> Option<String> {
+    if url.trim_end().ends_with('/') || url.trim_end().ends_with('\\') {
+        return None;
+    }
+
+    let raw = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()
+                .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            Path::new(url)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })?;
+
+    sanitize_download_file_name(&raw)
+}
+
+fn sanitize_download_file_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let sanitized = trimmed.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_");
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        return None;
+    }
+
+    Some(sanitized)
 }
 
 fn find_authority_end(base: &str) -> Option<usize> {
@@ -205,6 +243,23 @@ mod tests {
             resolve_download_url("http://srv:8080/dir/", "foo.exe"),
             "http://srv:8080/dir/foo.exe"
         );
+    }
+
+    #[test]
+    fn download_file_name_from_url_extracts_safe_leaf_name() {
+        assert_eq!(
+            download_file_name_from_url("http://srv:8080/releases/file-sync-tool-1.1.0.exe"),
+            Some("file-sync-tool-1.1.0.exe".to_string())
+        );
+        assert_eq!(
+            download_file_name_from_url("nested/file-sync-tool-1.1.0.exe"),
+            Some("file-sync-tool-1.1.0.exe".to_string())
+        );
+        assert_eq!(
+            download_file_name_from_url("bad:name.exe"),
+            Some("bad_name.exe".to_string())
+        );
+        assert_eq!(download_file_name_from_url("http://srv:8080/releases/"), None);
     }
 
     #[test]

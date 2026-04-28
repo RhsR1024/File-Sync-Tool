@@ -574,6 +574,7 @@ mod tests {
         cfg.pending_update = Some(crate::updater::PendingUpdate {
             target_version: "1.0.8".into(),
             temp_path: r"C:\Users\u\AppData\Local\Temp\fst-update.exe".into(),
+            target_file_name: "file-sync-tool-1.0.8.exe".into(),
             sha256: "ab".repeat(32),
             downloaded_at: "2026-04-25T10:00:00+08:00".into(),
         });

@@ -1,6 +1,6 @@
 //! Tauri command handlers and startup orchestration for the updater feature.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,6 +64,8 @@ pub async fn start_update_download(
     if !manifest::is_newer(&latest.version, CURRENT_VERSION) {
         return Err("manifest_invalid: latest version is not newer".to_string());
     }
+    let target_file_name = manifest::download_file_name_from_url(&latest.url)
+        .ok_or_else(|| "manifest_invalid: latest url has no usable file name".to_string())?;
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
     {
@@ -95,7 +97,7 @@ pub async fn start_update_download(
     let version = latest.version.clone();
     let url = latest.url.clone();
     let sha256 = latest.sha256.clone();
-    let dest = temp_download_path(&version);
+    let dest = temp_download_path(&version, &target_file_name);
 
     tauri::async_runtime::spawn(async move {
         run_download_task(
@@ -105,6 +107,7 @@ pub async fn start_update_download(
             version,
             url,
             sha256,
+            target_file_name,
             dest,
             cancel_rx,
         )
@@ -154,7 +157,8 @@ pub async fn apply_update_now(
         .ok_or_else(|| "io: pending_update_missing_or_invalid".to_string())?;
 
     let temp_path = PathBuf::from(&pending.temp_path);
-    let exe_path = std::env::current_exe().map_err(|error| format!("io: {error}"))?;
+    let current_exe_path = std::env::current_exe().map_err(|error| format!("io: {error}"))?;
+    let target_exe_path = resolve_apply_target_path(&current_exe_path, &pending.target_file_name)?;
 
     let snapshot = {
         let mut config = state
@@ -166,7 +170,8 @@ pub async fn apply_update_now(
     };
     config::save_config(&app_handle, &snapshot)?;
 
-    installer::spawn_helper(&temp_path, &exe_path).map_err(|error| error.to_string())?;
+    installer::spawn_helper(&temp_path, &current_exe_path, &target_exe_path)
+        .map_err(|error| error.to_string())?;
 
     let _ = emit_state_changed(&app_handle, &state.config, &state.updater);
 
@@ -465,6 +470,7 @@ async fn run_download_task(
     version: String,
     url: String,
     sha256: String,
+    target_file_name: String,
     dest: PathBuf,
     cancel_rx: watch::Receiver<bool>,
 ) {
@@ -504,6 +510,7 @@ async fn run_download_task(
         result,
         version,
         sha256,
+        target_file_name,
         dest,
     );
 }
@@ -515,6 +522,7 @@ fn finish_download_task(
     result: Result<(), UpdaterError>,
     version: String,
     sha256: String,
+    target_file_name: String,
     dest: PathBuf,
 ) {
     if let Ok(mut is_downloading) = updater_state.is_downloading.lock() {
@@ -529,6 +537,7 @@ fn finish_download_task(
             let pending_update = PendingUpdate {
                 target_version: version.clone(),
                 temp_path: dest.to_string_lossy().to_string(),
+                target_file_name,
                 sha256,
                 downloaded_at: Utc::now().to_rfc3339(),
             };
@@ -618,11 +627,72 @@ fn latest_entry(manifest: &Manifest) -> Option<ManifestVersion> {
         .or_else(|| manifest.versions.first().cloned())
 }
 
-fn temp_download_path(version: &str) -> PathBuf {
+fn resolve_apply_target_path(current_exe: &Path, target_file_name: &str) -> Result<PathBuf, String> {
+    let parent = current_exe
+        .parent()
+        .ok_or_else(|| "io: current_exe_has_no_parent".to_string())?;
+    let trimmed = target_file_name.trim();
+    if trimmed.is_empty() {
+        return Err("io: pending_update_missing_target_file_name".to_string());
+    }
+
+    let candidate = Path::new(trimmed);
+    let file_name = candidate
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "io: invalid_pending_update_target_file_name".to_string())?;
+    if candidate.components().count() != 1 || file_name != trimmed {
+        return Err("io: invalid_pending_update_target_file_name".to_string());
+    }
+
+    Ok(parent.join(file_name))
+}
+
+fn temp_download_path(version: &str, target_file_name: &str) -> PathBuf {
     let sanitized = version.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let safe_name = target_file_name.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_");
     let timestamp = Utc::now().format("%Y%m%d%H%M%S");
     std::env::temp_dir().join(format!(
-        "file-sync-tool-update-{sanitized}-{timestamp}-{}.exe",
-        std::process::id()
+        "file-sync-tool-update-{sanitized}-{timestamp}-{}-{safe_name}",
+        std::process::id(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_apply_target_path_switches_to_new_version_file_name() {
+        let resolved = resolve_apply_target_path(
+            Path::new(r"C:\Tools\file-sync-tool-1.0.7-202604271553.exe"),
+            "file-sync-tool-1.1.0-202604271707.exe",
+        )
+        .expect("resolve target path");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from(r"C:\Tools\file-sync-tool-1.1.0-202604271707.exe")
+        );
+    }
+
+    #[test]
+    fn resolve_apply_target_path_rejects_nested_target_names() {
+        let error = resolve_apply_target_path(
+            Path::new(r"C:\Tools\file-sync-tool-1.0.7-202604271553.exe"),
+            r"nested\file-sync-tool-1.1.0.exe",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("invalid_pending_update_target_file_name"));
+    }
+
+    #[test]
+    fn temp_download_path_keeps_target_file_name_suffix() {
+        let path = temp_download_path("1.1.0", "file-sync-tool-1.1.0-202604271707.exe");
+        let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+
+        assert!(file_name.contains("file-sync-tool-1.1.0-202604271707.exe"));
+        assert!(file_name.contains("1.1.0"));
+    }
 }

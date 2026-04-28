@@ -14,7 +14,13 @@ pub fn write_helper() -> Result<PathBuf, UpdaterError> {
     Ok(path)
 }
 
-pub fn build_helper_args(bat_path: &Path, pid: u32, src: &Path, dst: &Path) -> Vec<String> {
+pub fn build_helper_args(
+    bat_path: &Path,
+    pid: u32,
+    src: &Path,
+    current_path: &Path,
+    target_path: &Path,
+) -> Vec<String> {
     vec![
         "/c".to_string(),
         "start".to_string(),
@@ -23,13 +29,20 @@ pub fn build_helper_args(bat_path: &Path, pid: u32, src: &Path, dst: &Path) -> V
         bat_path.display().to_string(),
         pid.to_string(),
         src.display().to_string(),
-        dst.display().to_string(),
+        current_path.display().to_string(),
+        target_path.display().to_string(),
     ]
 }
 
-pub fn spawn_helper(src: &Path, dst: &Path) -> Result<(), UpdaterError> {
+pub fn spawn_helper(src: &Path, current_path: &Path, target_path: &Path) -> Result<(), UpdaterError> {
     let bat_path = write_helper()?;
-    let args = build_helper_args(&bat_path, std::process::id(), src, dst);
+    let args = build_helper_args(
+        &bat_path,
+        std::process::id(),
+        src,
+        current_path,
+        target_path,
+    );
     std::process::Command::new("cmd.exe")
         .args(args)
         .spawn()
@@ -58,8 +71,9 @@ mod tests {
         assert!(bat.contains("%~1"));
         assert!(bat.contains("%~2"));
         assert!(bat.contains("%~3"));
-        assert!(bat.contains("move /y \"%~2\" \"%~3\""));
-        assert!(bat.contains("start \"\" \"%~3\""));
+        assert!(bat.contains("%~4"));
+        assert!(bat.contains("move /y \"%~2\" \"%~4\""));
+        assert!(bat.contains("start \"\" \"%~4\""));
         assert!(bat.contains("del \"%~f0\""));
     }
 
@@ -84,7 +98,8 @@ mod tests {
             bat_path,
             12345,
             std::path::Path::new(r"C:\Temp\with space\new.exe"),
-            std::path::Path::new(r"C:\Program Files\app.exe"),
+            std::path::Path::new(r"C:\Program Files\file-sync-tool-1.0.7.exe"),
+            std::path::Path::new(r"C:\Program Files\file-sync-tool-1.1.0.exe"),
         );
         assert_eq!(args[0], "/c");
         assert_eq!(args[1], "start");
@@ -93,6 +108,7 @@ mod tests {
         assert_eq!(args[4], r"C:\Temp\fst-update.bat");
         assert_eq!(args[5], "12345");
         assert_eq!(args[6], r"C:\Temp\with space\new.exe");
-        assert_eq!(args[7], r"C:\Program Files\app.exe");
+        assert_eq!(args[7], r"C:\Program Files\file-sync-tool-1.0.7.exe");
+        assert_eq!(args[8], r"C:\Program Files\file-sync-tool-1.1.0.exe");
     }
 }

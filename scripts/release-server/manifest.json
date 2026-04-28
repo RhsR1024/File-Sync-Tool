@@ -3,8 +3,8 @@
   "versions": [
     {
       "version": "1.1.0",
-      "url": "file-sync-tool-1.1.0-202604271707.exe",
-      "sha256": "01109ea2cb9279a322747296f5945c50a708f5d30142ac70cd3d98b8c3780c1a",
+      "url": "file-sync-tool-1.1.0-202604271814.exe",
+      "sha256": "74bd36ff5a7163b567a985089bbef76d1749291acf21865c44eae6099e2844af",
       "released_at": "2026-04-27",
       "changelog": [
         "新增错误码查询工具，支持同步和检索内部错误码字典，并改为内置 Git 拉取方案，无需本机额外安装 Git。",
@@ -20,7 +20,9 @@
       "url": "file-sync-tool-1.0.7-202604271553.exe",
       "sha256": "e7673b1349def87fc4fc57a52ea2bb57967876a9ad7a6942500cf5d967794158",
       "released_at": "2026-04-27",
-      "changelog": []
+      "changelog": [
+        "支持升级的第一个版本"
+      ]
     }
   ]
 }

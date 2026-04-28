@@ -31,6 +31,8 @@ pub struct Manifest {
 pub struct PendingUpdate {
     pub target_version: String,
     pub temp_path: String,
+    #[serde(default)]
+    pub target_file_name: String,
     pub sha256: String,
     pub downloaded_at: String,
 }

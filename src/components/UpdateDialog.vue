@@ -396,7 +396,7 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="rounded-2xl border border-emerald-200 bg-emerald-50/80 p-4 text-sm text-emerald-800">
-              <div class="font-medium">{{ pendingEntry?.target_version ?? latestEntry?.version }}</div>
+              <div class="font-medium">{{ pendingEntry?.target_file_name || pendingEntry?.target_version || latestEntry?.version }}</div>
               <div class="mt-1 break-all text-xs text-emerald-700/80">
                 {{ pendingEntry?.temp_path }}
               </div>

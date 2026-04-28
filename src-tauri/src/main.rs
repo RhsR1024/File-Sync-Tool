@@ -2779,6 +2779,27 @@ fn main() {
             let _ = sync_launch_on_startup(
                 config.launch_and_auto_scan || config.launch_and_auto_start_file_share,
             );
+            if config.clipboard.run_as_admin {
+                match std::env::current_exe() {
+                    Ok(exe) => {
+                        let exe_path = exe.to_string_lossy().to_string();
+                        if let Err(error) =
+                            crate::clipboard::admin::set_autostart_as_admin(&exe_path, true)
+                        {
+                            log::warn!(
+                                "[clipboard] failed to refresh admin autostart path on startup: {}",
+                                error
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "[clipboard] failed to resolve current exe for admin autostart refresh: {}",
+                            error
+                        );
+                    }
+                }
+            }
 
             let app_data_dir = app
                 .path()

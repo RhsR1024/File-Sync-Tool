@@ -161,6 +161,7 @@ export interface Manifest {
 export interface PendingUpdate {
   target_version: string;
   temp_path: string;
+  target_file_name: string;
   sha256: string;
   downloaded_at: string;
 }

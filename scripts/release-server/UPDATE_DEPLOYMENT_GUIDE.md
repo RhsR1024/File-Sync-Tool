@@ -203,6 +203,25 @@ python3 serve.py 8080
 http://<服务器IP>:8080/manifest.json
 ```
 
+如果你只是想让服务在当前终端关闭后继续运行，可以使用 `nohup`：
+
+```bash
+cd /opt/file-sync-tool-releases
+nohup python3 serve.py 8080 > release-server.log 2>&1 &
+```
+
+常用排查命令：
+
+```bash
+tail -f /opt/file-sync-tool-releases/release-server.log
+ps -ef | grep serve.py
+```
+
+注意：
+
+- `nohup` 适合临时后台运行或快速验证。
+- `nohup` 不会在服务器重启后自动拉起服务。
+
 ## 5.6 用 systemd 设置为开机自启
 
 在 Linux 上推荐这样做。
@@ -233,12 +252,14 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable --now file-sync-tool-releases
 sudo systemctl status file-sync-tool-releases
+sudo journalctl -u file-sync-tool-releases -f
 ```
 
 注意：
 
 - `WorkingDirectory` 必须指向发布目录
 - `serve.py` 会把“当前工作目录”当成静态文件根目录
+- `systemd` 方式更适合长期运行，支持关掉终端后继续运行，也支持服务器重启后自动拉起
 
 ## 5.7 放行防火墙端口
 

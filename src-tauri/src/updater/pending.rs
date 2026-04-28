@@ -5,6 +5,11 @@ use std::path::Path;
 
 pub fn validate(pending: Option<PendingUpdate>) -> Option<PendingUpdate> {
     let pending = pending?;
+    if pending.target_file_name.trim().is_empty() {
+        let _ = std::fs::remove_file(&pending.temp_path);
+        return None;
+    }
+
     let path = Path::new(&pending.temp_path);
     if !path.exists() {
         return None;
@@ -53,6 +58,7 @@ mod tests {
         let pending = PendingUpdate {
             target_version: "1.0.8".into(),
             temp_path: path.to_string_lossy().into_owned(),
+            target_file_name: "file-sync-tool-1.0.8.exe".into(),
             sha256: crate::updater::download::sha256_hex(bytes),
             downloaded_at: "2026-04-25T10:00:00+08:00".into(),
         };
@@ -68,6 +74,7 @@ mod tests {
         let pending = PendingUpdate {
             target_version: "1.0.8".into(),
             temp_path: path.to_string_lossy().into_owned(),
+            target_file_name: "file-sync-tool-1.0.8.exe".into(),
             sha256: "deadbeef".into(),
             downloaded_at: "2026-04-25T10:00:00+08:00".into(),
         };
@@ -85,10 +92,27 @@ mod tests {
         let pending = PendingUpdate {
             target_version: "1.0.8".into(),
             temp_path: path.to_string_lossy().into_owned(),
+            target_file_name: "file-sync-tool-1.0.8.exe".into(),
             sha256: "ab".repeat(32),
             downloaded_at: "2026-04-25T10:00:00+08:00".into(),
         };
 
         assert!(validate(Some(pending)).is_none());
+    }
+
+    #[test]
+    fn returns_none_and_deletes_when_target_file_name_missing() {
+        let bytes = b"hello world";
+        let path = write_temp(bytes);
+        let pending = PendingUpdate {
+            target_version: "1.0.8".into(),
+            temp_path: path.to_string_lossy().into_owned(),
+            target_file_name: String::new(),
+            sha256: crate::updater::download::sha256_hex(bytes),
+            downloaded_at: "2026-04-25T10:00:00+08:00".into(),
+        };
+
+        assert!(validate(Some(pending)).is_none());
+        assert!(!path.exists());
     }
 }

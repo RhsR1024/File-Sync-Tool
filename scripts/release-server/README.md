@@ -15,7 +15,28 @@ python3 serve.py 8080
 
 The app will then fetch `http://<host>:8080/manifest.json`.
 
+## Run in background with nohup
+
+Use this when you want the server to keep running after the current shell exits:
+
+```bash
+cd /opt/file-sync-tool-releases
+nohup python3 serve.py 8080 > release-server.log 2>&1 &
+```
+
+Useful follow-up commands:
+
+```bash
+tail -f /opt/file-sync-tool-releases/release-server.log
+ps -ef | grep serve.py
+```
+
+Note: `nohup` does not automatically start the server again after a reboot.
+
 ## systemd example
+
+Recommended for long-term deployment. This keeps the service running after logout
+and can start it automatically on reboot.
 
 ```ini
 [Unit]
@@ -32,7 +53,10 @@ WantedBy=multi-user.target
 ```
 
 ```bash
+systemctl daemon-reload
 systemctl enable --now file-sync-tool-releases
+systemctl status file-sync-tool-releases
+journalctl -u file-sync-tool-releases -f
 ```
 
 ## Publish a new release
