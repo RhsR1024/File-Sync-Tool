@@ -22,6 +22,8 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const startTimeTextClass = 'text-[12px] text-slate-500 font-medium tabular-nums whitespace-nowrap';
+const inactiveMetricPlaceholderClass = 'inline-flex w-full items-center justify-center text-[12px] text-slate-300';
 
 function isTerminal(status: TaskSummaryStatus): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled'
@@ -239,7 +241,7 @@ function progressSizeText(row: TaskGroupListItem): string {
           >
             <!-- Start Time -->
             <td class="py-2.5 px-3 align-middle">
-              <span class="text-[11px] text-slate-400 font-mono tabular-nums whitespace-nowrap">
+              <span :class="startTimeTextClass">
                 {{ formatStartTime(row.started_at) }}
               </span>
             </td>
@@ -296,7 +298,7 @@ function progressSizeText(row: TaskGroupListItem): string {
                   ></div>
                 </div>
               </template>
-              <span v-else class="text-[12px] text-slate-300" aria-hidden="true">—</span>
+              <span v-else :class="inactiveMetricPlaceholderClass" aria-hidden="true">--</span>
             </td>
 
             <!-- Speed -->
@@ -304,7 +306,7 @@ function progressSizeText(row: TaskGroupListItem): string {
               <span v-if="isLiveCopying(row) && getRowProgress(row)" class="text-[12px] font-mono tabular-nums text-blue-600 whitespace-nowrap">
                 {{ formatBytes(getRowProgress(row)!.speed) }}/s
               </span>
-              <span v-else class="text-[12px] text-slate-300" aria-hidden="true">—</span>
+              <span v-else :class="inactiveMetricPlaceholderClass" aria-hidden="true">--</span>
             </td>
 
             <!-- ETA -->
@@ -312,7 +314,7 @@ function progressSizeText(row: TaskGroupListItem): string {
               <span v-if="isLiveCopying(row) && getRowProgress(row) && getRowProgress(row)!.eta > 0" class="text-[12px] font-mono tabular-nums text-amber-600 whitespace-nowrap">
                 {{ formatEta(getRowProgress(row)!.eta) }}
               </span>
-              <span v-else class="text-[12px] text-slate-300" aria-hidden="true">—</span>
+              <span v-else :class="inactiveMetricPlaceholderClass" aria-hidden="true">--</span>
             </td>
 
             <!-- Elapsed -->

@@ -81,12 +81,14 @@ pub struct PingScanRequest {
 
 pub struct NetworkState {
     pub ping_cancel: Arc<AtomicBool>,
+    pub port_cancel: Arc<AtomicBool>,
 }
 
 impl Default for NetworkState {
     fn default() -> Self {
         Self {
             ping_cancel: Arc::new(AtomicBool::new(false)),
+            port_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -388,25 +390,59 @@ pub struct SinglePortResult {
     pub name: String,
 }
 
-#[tauri::command]
-pub async fn test_ports(request: PortTestRequest) -> Result<PortTestResult, String> {
-    if request.ports.is_empty() {
+const PORT_TEST_CONCURRENCY: usize = 200;
+
+fn normalize_requested_ports(mut ports: Vec<u16>) -> Result<Vec<u16>, String> {
+    if ports.is_empty() {
         return Err("No ports specified".to_string());
     }
-    if request.ports.len() > 1000 {
-        return Err("Too many ports (max 1000)".to_string());
-    }
 
+    ports.sort_unstable();
+    ports.dedup();
+    Ok(ports)
+}
+
+async fn probe_port(host: String, port: u16, timeout: std::time::Duration) -> SinglePortResult {
+    let addr = format!("{}:{}", host, port);
+    let start = std::time::Instant::now();
+
+    let open = matches!(
+        tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await,
+        Ok(Ok(_))
+    );
+
+    let latency_ms = if open {
+        Some(start.elapsed().as_secs_f64() * 1000.0)
+    } else {
+        None
+    };
+
+    SinglePortResult {
+        port,
+        open,
+        latency_ms,
+        name: well_known_port_name(port).to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn test_ports(
+    app_handle: tauri::AppHandle,
+    state: State<'_, NetworkState>,
+    request: PortTestRequest,
+) -> Result<PortTestResult, String> {
+    let ports = normalize_requested_ports(request.ports)?;
     let host = request.host.trim().to_string();
     if host.is_empty() {
         return Err("Host is required".to_string());
     }
 
     let timeout_ms = if request.timeout_ms == 0 {
-        2000
+        500
     } else {
-        request.timeout_ms
+        request.timeout_ms.clamp(100, 30_000)
     };
+    let timeout = std::time::Duration::from_millis(timeout_ms);
 
     // DNS resolution
     let resolved_ip = match tokio::net::lookup_host(format!("{}:0", host)).await {
@@ -414,56 +450,57 @@ pub async fn test_ports(request: PortTestRequest) -> Result<PortTestResult, Stri
         Err(_) => None,
     };
 
-    let semaphore = Arc::new(Semaphore::new(50));
-    let mut handles = Vec::new();
-
-    for &port in &request.ports {
-        let host = host.clone();
-        let sem = semaphore.clone();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-
-        let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await;
-            let addr = format!("{}:{}", host, port);
-            let start = std::time::Instant::now();
-
-            let open = matches!(
-                tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await,
-                Ok(Ok(_))
-            );
-
-            let latency_ms = if open {
-                Some(start.elapsed().as_secs_f64() * 1000.0)
-            } else {
-                None
-            };
-
-            SinglePortResult {
-                port,
-                open,
-                latency_ms,
-                name: well_known_port_name(port).to_string(),
-            }
-        });
-
-        handles.push(handle);
-    }
+    state.port_cancel.store(false, Ordering::SeqCst);
+    let cancel = state.port_cancel.clone();
 
     let mut results = Vec::new();
-    for handle in handles {
-        if let Ok(result) = handle.await {
-            results.push(result);
+    let mut tasks = JoinSet::new();
+    let mut next_index = 0usize;
+    let mut active = 0usize;
+
+    while next_index < ports.len() || active > 0 {
+        while active < PORT_TEST_CONCURRENCY && next_index < ports.len() {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let host = host.clone();
+            let port = ports[next_index];
+            tasks.spawn(probe_port(host, port, timeout));
+            next_index += 1;
+            active += 1;
+        }
+
+        if active == 0 {
+            break;
+        }
+
+        if let Some(joined) = tasks.join_next().await {
+            active = active.saturating_sub(1);
+            if cancel.load(Ordering::SeqCst) {
+                tasks.abort_all();
+                break;
+            }
+            if let Ok(result) = joined {
+                let _ = app_handle.emit("port-test-result", &result);
+                results.push(result);
+            }
         }
     }
 
-    // Sort by port number
     results.sort_by_key(|r| r.port);
+    let _ = app_handle.emit("port-test-complete", ());
 
     Ok(PortTestResult {
         host,
         resolved_ip,
         results,
     })
+}
+
+#[tauri::command]
+pub fn cancel_port_test(state: State<'_, NetworkState>) {
+    state.port_cancel.store(true, Ordering::SeqCst);
 }
 
 // ─── Wake-on-LAN ────────────────────────────────────────────────────────────
@@ -560,7 +597,7 @@ pub async fn send_wol(request: WolRequest) -> Result<WolResult, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_successful_probe, top_port_counts, PortCount};
+    use super::{first_successful_probe, normalize_requested_ports, top_port_counts, PortCount};
     use std::pin::Pin;
     use std::time::{Duration, Instant};
 
@@ -616,5 +653,29 @@ mod tests {
         let ports_only: Vec<u16> = top.into_iter().map(|entry| entry.port).collect();
 
         assert_eq!(ports_only, vec![1003, 1001]);
+    }
+
+    #[test]
+    fn normalize_requested_ports_accepts_full_tcp_range() {
+        let ports: Vec<u16> = (1..=u16::MAX).collect();
+
+        let normalized = normalize_requested_ports(ports).expect("full TCP range should be valid");
+
+        assert_eq!(normalized.len(), 65_535);
+        assert_eq!(normalized.first(), Some(&1));
+        assert_eq!(normalized.last(), Some(&65_535));
+    }
+
+    #[test]
+    fn normalize_requested_ports_sorts_and_deduplicates_without_a_thousand_port_limit() {
+        let ports = (1..=1001).chain([22, 80, 80]).collect();
+
+        let normalized = normalize_requested_ports(ports).expect("1001+ ports should be valid");
+
+        assert_eq!(normalized.len(), 1001);
+        assert_eq!(normalized[0], 1);
+        assert_eq!(normalized[21], 22);
+        assert_eq!(normalized[79], 80);
+        assert_eq!(normalized.last(), Some(&1001));
     }
 }

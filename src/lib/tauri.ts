@@ -970,6 +970,10 @@ export async function testPorts(request: PortTestRequest): Promise<PortTestResul
   return await invoke('test_ports', { request });
 }
 
+export async function cancelPortTest(): Promise<void> {
+  await invoke('cancel_port_test');
+}
+
 export async function sendWol(request: WolRequest): Promise<WolResult> {
   return await invoke('send_wol', { request });
 }

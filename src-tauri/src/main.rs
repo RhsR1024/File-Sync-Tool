@@ -2998,6 +2998,7 @@ fn main() {
             network::cancel_ping_scan,
             network::get_tcp_connections,
             network::test_ports,
+            network::cancel_port_test,
             network::send_wol,
             screenshare::screen_share_list_monitors,
             screenshare::screen_share_list_interfaces,

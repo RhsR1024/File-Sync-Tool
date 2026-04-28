@@ -8,7 +8,7 @@ import {
   AlertCircle, MinusCircle, Hourglass,
 } from 'lucide-vue-next';
 import type {
-  TaskGroup, TaskLogEntry, ServerRollup,
+  TaskGroup, TaskLogEntry,
   TaskSummaryStatus, AttemptStatus, DeployState,
 } from '@/lib/tauri';
 import { openPathParent } from '@/lib/tauri';
@@ -85,6 +85,9 @@ const filteredLogs = computed(() => {
   if (!props.group) return [];
   return props.taskLogs.filter(log => log.task_group_id === props.group!.task_group_id);
 });
+const runHistoryHeadCellClass = 'py-2 px-2 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500';
+const runHistoryBodyCellClass = 'py-2.5 px-2 text-[12px] leading-5 text-slate-700';
+const runHistoryTimeCellClass = `${runHistoryBodyCellClass} tabular-nums`;
 
 function statusLabel(status: TaskSummaryStatus): string {
   const map: Record<TaskSummaryStatus, string> = {
@@ -191,14 +194,6 @@ function formatFullTime(isoStr: string): string {
   return `${year}-${month}-${day} ${hour}:${min}:${sec}`;
 }
 
-function formatDuration(seconds: number): string {
-  if (seconds == null || seconds < 0 || !isFinite(seconds)) return '-';
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  const m = Math.floor(seconds / 60);
-  const s = Math.round(seconds % 60);
-  return `${m}m${s}s`;
-}
-
 function runTypeLabel(runType: string): string {
   const map: Record<string, string> = {
     copy_and_deploy: t('console.runTypeCopyAndDeploy'),
@@ -206,14 +201,6 @@ function runTypeLabel(runType: string): string {
     manual_deploy: t('console.runTypeManualDeploy'),
   };
   return map[runType] ?? runType;
-}
-
-function logLevelClass(level: string): string {
-  if (level === 'error') return 'text-rose-600';
-  if (level === 'warn') return 'text-amber-600';
-  if (level === 'success') return 'text-emerald-600';
-  if (level === 'command') return 'text-purple-600';
-  return 'text-slate-600';
 }
 
 // Terminal-toned variant of logLevelClass — used inside the dark log area so
@@ -536,25 +523,25 @@ function phaseIconClass(status: string): string {
                   {{ t('console.runHistory') }}
                 </div>
                 <div class="overflow-x-auto">
-                  <table class="w-full text-xs">
+                  <table class="w-full">
                     <thead>
-                      <tr class="text-[11px] text-slate-500 border-b border-slate-200 uppercase tracking-wider">
-                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.runType') }}</th>
-                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.copyStatus') }}</th>
-                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.phaseLocalScripts') }}</th>
-                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.deployStatus') }}</th>
-                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.startTime') }}</th>
-                        <th class="text-left py-2 px-2 font-semibold">{{ t('console.endTime') }}</th>
+                      <tr class="border-b border-slate-200">
+                        <th :class="runHistoryHeadCellClass">{{ t('console.runType') }}</th>
+                        <th :class="runHistoryHeadCellClass">{{ t('console.copyStatus') }}</th>
+                        <th :class="runHistoryHeadCellClass">{{ t('console.phaseLocalScripts') }}</th>
+                        <th :class="runHistoryHeadCellClass">{{ t('console.deployStatus') }}</th>
+                        <th :class="runHistoryHeadCellClass">{{ t('console.startTime') }}</th>
+                        <th :class="runHistoryHeadCellClass">{{ t('console.endTime') }}</th>
                       </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-100">
                       <tr v-for="run in sections.runs" :key="run.run_id" class="hover:bg-slate-50">
-                        <td class="py-2 px-2 text-xs text-slate-700 font-medium">{{ runTypeLabel(run.run_type) }}</td>
-                        <td class="py-2 px-2 text-xs text-slate-600">{{ copyStatusLabel(run.copy_phase) }}</td>
-                        <td class="py-2 px-2 text-xs text-slate-600">{{ localExecStatusLabel(run.local_exec_phase) }}</td>
-                        <td class="py-2 px-2 text-xs text-slate-600">{{ deployStatusLabel(run.deploy_phase) }}</td>
-                        <td class="py-2 px-2 text-[11px] text-slate-500 font-mono tabular-nums">{{ formatFullTime(run.started_at) }}</td>
-                        <td class="py-2 px-2 text-[11px] text-slate-500 font-mono tabular-nums">{{ run.finished_at ? formatFullTime(run.finished_at) : '-' }}</td>
+                        <td :class="runHistoryBodyCellClass">{{ runTypeLabel(run.run_type) }}</td>
+                        <td :class="runHistoryBodyCellClass">{{ copyStatusLabel(run.copy_phase) }}</td>
+                        <td :class="runHistoryBodyCellClass">{{ localExecStatusLabel(run.local_exec_phase) }}</td>
+                        <td :class="runHistoryBodyCellClass">{{ deployStatusLabel(run.deploy_phase) }}</td>
+                        <td :class="runHistoryTimeCellClass">{{ formatFullTime(run.started_at) }}</td>
+                        <td :class="runHistoryTimeCellClass">{{ run.finished_at ? formatFullTime(run.finished_at) : '-' }}</td>
                       </tr>
                     </tbody>
                   </table>

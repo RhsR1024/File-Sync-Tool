@@ -236,6 +236,8 @@ const isServerSelected = (ip: string) => selectedIps.value.includes(ip);
 
 const successCount = computed(() => results.value.filter(r => r.success).length);
 const failureCount = computed(() => results.value.filter(r => !r.success).length);
+const frameworkResultStatusWrapClass = 'flex items-center gap-2 whitespace-nowrap';
+const frameworkResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
 </script>
 
 <template>
@@ -525,7 +527,12 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
     <div v-if="results.length > 0" class="mt-8">
       <div class="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
         <div class="overflow-x-auto">
-          <table class="w-full">
+          <table class="w-full table-fixed">
+            <colgroup>
+              <col style="width: 160px">
+              <col style="width: 128px">
+              <col>
+            </colgroup>
             <thead>
               <tr class="border-b border-slate-200 bg-slate-50">
                 <th scope="col" class="px-6 py-3 text-left text-sm font-semibold text-slate-700">IP {{ t('tools.frameworkPassword.address') }}</th>
@@ -537,7 +544,7 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
               <tr v-for="result in results" :key="result.ip" class="border-b border-slate-200 hover:bg-slate-50 transition-colors">
                 <td class="px-6 py-3 text-sm font-mono text-slate-900">{{ result.ip }}</td>
                 <td class="px-6 py-3">
-                  <div class="flex items-center gap-2">
+                  <div :class="frameworkResultStatusWrapClass">
                     <component
                       :is="result.success ? CheckCircle2 : AlertCircle"
                       :class="result.success ? 'text-green-500' : 'text-red-500'"
@@ -548,7 +555,7 @@ const failureCount = computed(() => results.value.filter(r => !r.success).length
                     </span>
                   </div>
                 </td>
-                <td class="px-6 py-3 text-sm text-slate-600">{{ result.message }}</td>
+                <td :class="frameworkResultMessageCellClass">{{ result.message }}</td>
               </tr>
             </tbody>
           </table>
