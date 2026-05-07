@@ -376,10 +376,10 @@ function progressSizeText(row: TaskGroupListItem): string {
                     <XCircle class="w-4 h-4" aria-hidden="true" />
                   </button>
                 </template>
-                <!-- Terminal: retry deploy (if had_failures) / retry run (if cancelled) + clear -->
+                <!-- Terminal: retry deploy (if had_failures) / retry run (if cancelled or interrupted) + clear -->
                 <template v-else-if="isTerminal(row.summary_status)">
                   <button
-                    v-if="row.summary_status === 'cancelled'"
+                    v-if="row.summary_status === 'cancelled' || row.summary_status === 'interrupted'"
                     @click.stop="emit('retryRun', row.task_group_id)"
                     class="p-2 rounded-md bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 border border-emerald-200 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 focus-visible:ring-offset-1"
                     :title="t('console.retryRun')"

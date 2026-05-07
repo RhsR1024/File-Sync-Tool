@@ -1798,31 +1798,36 @@ mod tests {
 
 #[tauri::command]
 async fn open_directory() -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let selected_dir = rfd::FileDialog::new().pick_folder();
-        Ok(selected_dir.map(|path| path.to_string_lossy().to_string()))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    // Must use AsyncFileDialog: the sync rfd::FileDialog inside spawn_blocking
+    // runs on a Tokio worker that defaults to MTA on Windows, while IFileDialog
+    // ("New Folder" → IShellItem ops) requires STA. AsyncFileDialog spins up a
+    // dedicated STA thread, which keeps the dialog stable when the user creates
+    // a new folder mid-selection.
+    let picked = rfd::AsyncFileDialog::new().pick_folder().await;
+    Ok(picked.map(|handle| handle.path().to_string_lossy().to_string()))
 }
 
 #[tauri::command]
-fn save_text_file(
+async fn save_text_file(
     content: String,
     default_file_name: String,
     filter_name: String,
     extensions: Vec<String>,
 ) -> Result<Option<String>, String> {
+    // AsyncFileDialog avoids the same COM apartment crash open_directory hit:
+    // sync rfd on a Tokio worker is MTA on Windows, IFileSaveDialog needs STA.
     let extension_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
-    let mut dialog = rfd::FileDialog::new().set_file_name(&default_file_name);
+    let mut dialog = rfd::AsyncFileDialog::new().set_file_name(&default_file_name);
 
     if !extension_refs.is_empty() {
         dialog = dialog.add_filter(&filter_name, &extension_refs);
     }
 
-    let Some(mut target_path) = dialog.save_file() else {
+    let Some(handle) = dialog.save_file().await else {
         return Ok(None);
     };
+
+    let mut target_path = handle.path().to_path_buf();
 
     if target_path.extension().is_none() {
         if let Some(default_extension) = extensions.first() {
