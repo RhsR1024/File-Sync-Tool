@@ -3,9 +3,9 @@
   "versions": [
     {
       "version": "1.1.0",
-      "url": "file-sync-tool-1.1.0-202605071054.exe",
-      "sha256": "d91a93b419f1f61a4550d13b9a3b14564d9a0d6648e96ab80b65a0f3435c3855",
-      "released_at": "2026-05-07",
+      "url": "file-sync-tool-1.1.0-202605091750.exe",
+      "sha256": "a6d309632735417e1865017741758c27dc0ef970bc15ad518af3ed39095b6627",
+      "released_at": "2026-05-09",
       "changelog": [
         "新增错误码查询工具，支持同步和检索内部错误码字典，并改为内置 Git 拉取方案，无需本机额外安装 Git。",
         "新增应用内版本检查、更新提示与版本历史查看能力，可直接读取 release manifest 展示更新信息。",

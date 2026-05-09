@@ -13,6 +13,7 @@
 | [Error Code Lookup](./error-code-lookup.md) | Contracts for GitLab archive sync, on-disk cache, and Tauri query commands backing the error-code tool | Active |
 | [Network Tools](./network-tools.md) | Contracts for streaming port scan events, cancellation, and full TCP port-range support | Active |
 | [Update Checker](./update-checker.md) | Contracts for manifest fetch, verified update download/apply flow, updater events, and config migration | Active |
+| [Tauri Native Dialogs](./tauri-native-dialogs.md) | Contracts for Windows-safe native folder picker execution through the Tauri main thread | Active |
 
 ---
 

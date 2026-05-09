@@ -15,7 +15,7 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tokio::sync::oneshot;
 
 pub mod auth;
@@ -166,14 +166,16 @@ impl HttpState {
 // ─── Tauri Commands ─────────────────────────────────────────
 
 #[tauri::command]
-pub async fn file_share_pick_directory() -> Result<Option<SharedDir>, String> {
-    let picked = rfd::AsyncFileDialog::new()
-        .set_title("选择共享目录 / Select Shared Directory")
-        .pick_folder()
-        .await;
+pub async fn file_share_pick_directory(window: WebviewWindow) -> Result<Option<SharedDir>, String> {
+    let picked = crate::run_dialog_task_on_main_thread(&window, || {
+        Ok(rfd::FileDialog::new()
+            .set_title("选择共享目录 / Select Shared Directory")
+            .pick_folder()
+            .map(|path| path.to_string_lossy().to_string()))
+    })
+    .await?;
 
-    Ok(picked.map(|handle| {
-        let path = handle.path().to_string_lossy().to_string();
+    Ok(picked.map(|path| {
         let alias = make_alias(&path);
         SharedDir { alias, path }
     }))

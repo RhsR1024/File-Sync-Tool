@@ -1759,10 +1759,69 @@ fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+type MainThreadDialogTask = Box<dyn FnOnce() + Send + 'static>;
+
+fn schedule_dialog_task<T, Schedule, Run>(
+    schedule: Schedule,
+    run: Run,
+) -> Result<tokio::sync::oneshot::Receiver<Result<T, String>>, String>
+where
+    T: Send + 'static,
+    Schedule: FnOnce(MainThreadDialogTask) -> Result<(), String>,
+    Run: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    schedule(Box::new(move || {
+        let _ = tx.send(run());
+    }))?;
+    Ok(rx)
+}
+
+pub(crate) async fn run_dialog_task_on_main_thread<T, Run>(
+    window: &WebviewWindow,
+    run: Run,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    Run: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let rx = schedule_dialog_task(
+        |task| {
+            window
+                .run_on_main_thread(task)
+                .map_err(|error| format!("MAIN_THREAD_DIALOG_DISPATCH_FAILED::{}", error))
+        },
+        run,
+    )?;
+
+    rx.await
+        .map_err(|_| "MAIN_THREAD_DIALOG_RESULT_DROPPED".to_string())?
+}
+
+pub(crate) async fn pick_directory_on_main_thread_with<Schedule, Pick>(
+    schedule: Schedule,
+    pick: Pick,
+) -> Result<Option<String>, String>
+where
+    Schedule: FnOnce(MainThreadDialogTask) -> Result<(), String>,
+    Pick: FnOnce() -> Option<PathBuf> + Send + 'static,
+{
+    let rx = schedule_dialog_task(schedule, move || {
+        Ok(pick().map(|path| path.to_string_lossy().to_string()))
+    })?;
+
+    rx.await
+        .map_err(|_| "MAIN_THREAD_DIALOG_RESULT_DROPPED".to_string())?
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     #[cfg(target_os = "windows")]
     use super::open_url_windows_with;
+    use super::pick_directory_on_main_thread_with;
+    use super::schedule_dialog_task;
     #[cfg(target_os = "windows")]
     use std::cell::Cell;
 
@@ -1794,17 +1853,74 @@ mod tests {
             "Windows URL open should go through ShellExecute"
         );
     }
+
+    #[test]
+    fn schedules_dialog_task_on_main_thread_and_returns_result() {
+        let receiver = schedule_dialog_task(
+            |task| {
+                task();
+                Ok(())
+            },
+            || Ok(Some("C:\\selected".to_string())),
+        )
+        .expect("dialog task should be scheduled");
+
+        let result = tauri::async_runtime::block_on(receiver)
+            .expect("dialog task should send a result")
+            .expect("dialog task should succeed");
+
+        assert_eq!(result, Some("C:\\selected".to_string()));
+    }
+
+    #[test]
+    fn schedule_dialog_task_reports_dispatch_failure() {
+        let result = schedule_dialog_task::<Option<String>, _, _>(
+            |_task| Err("main thread unavailable".to_string()),
+            || Ok(Some("C:\\selected".to_string())),
+        );
+
+        assert_eq!(result.unwrap_err(), "main thread unavailable");
+    }
+
+    #[test]
+    fn pick_directory_on_main_thread_maps_selected_path() {
+        let result = tauri::async_runtime::block_on(pick_directory_on_main_thread_with(
+            |task| {
+                task();
+                Ok(())
+            },
+            || Some(PathBuf::from(r"C:\selected\new-folder")),
+        ))
+        .expect("directory picker should succeed");
+
+        assert_eq!(result, Some(r"C:\selected\new-folder".to_string()));
+    }
+
+    #[test]
+    fn pick_directory_on_main_thread_reports_dispatch_failure() {
+        let result = tauri::async_runtime::block_on(pick_directory_on_main_thread_with(
+            |_task| Err("main thread unavailable".to_string()),
+            || Some(PathBuf::from(r"C:\selected\new-folder")),
+        ));
+
+        assert_eq!(result.unwrap_err(), "main thread unavailable");
+    }
 }
 
 #[tauri::command]
-async fn open_directory() -> Result<Option<String>, String> {
-    // Must use AsyncFileDialog: the sync rfd::FileDialog inside spawn_blocking
-    // runs on a Tokio worker that defaults to MTA on Windows, while IFileDialog
-    // ("New Folder" → IShellItem ops) requires STA. AsyncFileDialog spins up a
-    // dedicated STA thread, which keeps the dialog stable when the user creates
-    // a new folder mid-selection.
-    let picked = rfd::AsyncFileDialog::new().pick_folder().await;
-    Ok(picked.map(|handle| handle.path().to_string_lossy().to_string()))
+async fn open_directory(window: WebviewWindow) -> Result<Option<String>, String> {
+    // Windows shell folder dialogs are sensitive to COM apartment ownership
+    // when users create a folder inside the dialog. Run the sync dialog on
+    // Tauri's main UI thread instead of a transient async worker thread.
+    pick_directory_on_main_thread_with(
+        |task| {
+            window
+                .run_on_main_thread(task)
+                .map_err(|error| format!("MAIN_THREAD_DIALOG_DISPATCH_FAILED::{}", error))
+        },
+        || rfd::FileDialog::new().pick_folder(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1814,8 +1930,8 @@ async fn save_text_file(
     filter_name: String,
     extensions: Vec<String>,
 ) -> Result<Option<String>, String> {
-    // AsyncFileDialog avoids the same COM apartment crash open_directory hit:
-    // sync rfd on a Tokio worker is MTA on Windows, IFileSaveDialog needs STA.
+    // Save dialogs do not exercise the folder-picker confirmation path fixed
+    // above, so keep the non-blocking async save dialog here.
     let extension_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
     let mut dialog = rfd::AsyncFileDialog::new().set_file_name(&default_file_name);
 
@@ -2104,12 +2220,14 @@ fn build_iptables_whitelist_command(source_ip: &str, port: u16) -> String {
 /// that reports the real port is only available on direct targets).
 const JUMP_HOST_DEFAULT_TARGET_SSH_PORT: u16 = 23333;
 
-/// Build a command to be executed on the jump host that SSHes into the target
-/// and runs the idempotent iptables whitelist insert on the target. Appliance
-/// master/backup pairs come pre-provisioned with passwordless SSH (key-based
-/// or host-based auth) between each other, so no password is passed here;
-/// `BatchMode=yes` makes ssh fail fast if interactive auth would be required
-/// instead of hanging. `source` may be a single IPv4 address or a CIDR.
+/// Build a command to be executed on the jump host that (1) opens the
+/// idempotent iptables whitelist locally on A so future user→A SSH attempts
+/// pass A's firewall, and (2) SSHes into the target B to apply the same rule.
+/// Appliance master/backup pairs come pre-provisioned with passwordless SSH
+/// (key-based or host-based auth) between each other, so no password is
+/// passed here; `BatchMode=yes` makes ssh fail fast if interactive auth would
+/// be required instead of hanging. `source` may be a single IPv4 address or
+/// a CIDR.
 fn build_nested_iptables_whitelist_command(
     target_user: &str,
     target_ip: &str,
@@ -2117,10 +2235,12 @@ fn build_nested_iptables_whitelist_command(
     iptables_source: &str,
     iptables_port: u16,
 ) -> String {
+    let rule = format!(
+        "iptables -C INPUT -p tcp -s {iptables_source} --dport {iptables_port} -j ACCEPT || iptables -I INPUT 1 -p tcp -s {iptables_source} --dport {iptables_port} -j ACCEPT"
+    );
     format!(
-        "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
--p {target_port} {target_user}@{target_ip} \
-'iptables -C INPUT -p tcp -s {iptables_source} --dport {iptables_port} -j ACCEPT || iptables -I INPUT 1 -p tcp -s {iptables_source} --dport {iptables_port} -j ACCEPT'"
+        "({rule}) && ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+-p {target_port} {target_user}@{target_ip} '{rule}'"
     )
 }
 
@@ -2130,6 +2250,36 @@ fn run_remote_command_over_ssh(
     username: &str,
     password: &str,
     command: &str,
+) -> Result<String, String> {
+    // Some hardened appliances ship sshd with `ForceCommand` or a restricted
+    // login shell that rejects non-interactive `exec` channels with messages
+    // like "Remote command execution is not allowed.". Try plain exec first
+    // (the standard, lower-overhead path); on a restriction-shaped failure,
+    // retry once with a PTY allocated, which often bypasses the gate.
+    match exec_over_ssh(ip, port, username, password, command, false) {
+        Ok(out) => Ok(out),
+        Err(e) if exec_restriction_hint(&e) => {
+            exec_over_ssh(ip, port, username, password, command, true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn exec_restriction_hint(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("not allowed")
+        || lower.contains("not permitted")
+        || lower.contains("forbidden")
+        || lower.contains("restricted")
+}
+
+fn exec_over_ssh(
+    ip: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    command: &str,
+    request_pty: bool,
 ) -> Result<String, String> {
     let socket_addr: SocketAddr = format!("{}:{}", ip, port)
         .parse()
@@ -2153,6 +2303,11 @@ fn run_remote_command_over_ssh(
     let mut channel = sess
         .channel_session()
         .map_err(|e| format!("SSH channel init failed: {}", e))?;
+    if request_pty {
+        channel
+            .request_pty("xterm", None, None)
+            .map_err(|e| format!("SSH PTY allocation failed: {}", e))?;
+    }
     channel
         .handle_extended_data(ExtendedData::Merge)
         .map_err(|e| format!("SSH channel stderr merge failed: {}", e))?;
