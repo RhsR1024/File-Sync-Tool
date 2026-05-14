@@ -2,10 +2,14 @@
 import { useI18n } from 'vue-i18n';
 
 import type { FileShareSearchScope } from '../types';
+import type { EntryViewMode } from '../lib/view-mode';
+
+import { Icon } from './icons';
 
 defineProps<{
   keyword: string;
   scope: FileShareSearchScope;
+  view: EntryViewMode;
   canSearchCurrent: boolean;
   canSearchGlobal: boolean;
   busy?: boolean;
@@ -14,199 +18,82 @@ defineProps<{
 const emit = defineEmits<{
   'update:keyword': [value: string];
   'update:scope': [value: FileShareSearchScope];
+  'update:view': [value: EntryViewMode];
   search: [];
   clear: [];
 }>();
 
 const { t } = useI18n();
+
+function handleInput(event: Event) {
+  const target = event.target as HTMLInputElement;
+  emit('update:keyword', target.value);
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Enter') {
+    emit('search');
+  } else if (event.key === 'Escape') {
+    emit('clear');
+  }
+}
 </script>
 
 <template>
-  <div class="search-shell">
-    <div class="scope-segment" role="group" :aria-label="t('search.scopeLabel')">
-      <span class="scope-label">{{ t('search.scopeLabel') }}</span>
-      <div class="scope-toggle">
-        <button
-          v-if="canSearchCurrent"
-          type="button"
-          class="scope-button"
-          :class="{ active: scope === 'current' }"
-          @click="emit('update:scope', 'current')"
-        >
-          {{ t('search.current') }}
-        </button>
-        <button
-          v-if="canSearchGlobal"
-          type="button"
-          class="scope-button"
-          :class="{ active: scope === 'global' }"
-          @click="emit('update:scope', 'global')"
-        >
-          {{ t('search.global') }}
-        </button>
-      </div>
-    </div>
-
-    <div class="search-box">
+  <div class="toolbar">
+    <label class="search">
+      <Icon name="search" />
       <input
-        :value="keyword"
         type="search"
+        :value="keyword"
         :placeholder="t('search.placeholder')"
         :disabled="busy"
-        @input="emit('update:keyword', ($event.target as HTMLInputElement).value)"
-        @keyup.enter="emit('search')"
+        :aria-label="t('search.placeholder')"
+        @input="handleInput"
+        @keydown="handleKeydown"
       />
-      <button type="button" class="search-button" :disabled="busy" @click="emit('search')">
-        {{ t('search.submit') }}
+      <kbd>⌘K</kbd>
+    </label>
+
+    <div class="scope-toggle" role="tablist" :aria-label="t('search.scopeLabel')">
+      <button
+        type="button"
+        :class="{ active: scope === 'current' }"
+        :disabled="!canSearchCurrent || busy"
+        :title="canSearchCurrent ? t('search.current') : t('search.scopeCurrentUnavailable')"
+        @click="emit('update:scope', 'current'); emit('search')"
+      >
+        {{ t('search.current') }}
       </button>
-      <button type="button" class="clear-button" :disabled="busy" @click="emit('clear')">
-        {{ t('search.clear') }}
+      <button
+        type="button"
+        :class="{ active: scope === 'global' }"
+        :disabled="!canSearchGlobal || busy"
+        @click="emit('update:scope', 'global'); emit('search')"
+      >
+        {{ t('search.global') }}
+      </button>
+    </div>
+
+    <div class="view-toggle" role="tablist" :aria-label="t('app.viewLabel')">
+      <button
+        type="button"
+        :class="{ active: view === 'list' }"
+        :title="t('app.viewList')"
+        :aria-label="t('app.viewList')"
+        @click="emit('update:view', 'list')"
+      >
+        <Icon name="list" />
+      </button>
+      <button
+        type="button"
+        :class="{ active: view === 'grid' }"
+        :title="t('app.viewGrid')"
+        :aria-label="t('app.viewGrid')"
+        @click="emit('update:view', 'grid')"
+      >
+        <Icon name="grid" />
       </button>
     </div>
   </div>
 </template>
-
-<style scoped>
-.search-shell {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-}
-
-.scope-segment {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 42px;
-  border-radius: 12px;
-  border: 1px solid var(--fs-panel-border);
-  background: var(--fs-surface);
-  padding: 4px 8px 4px 10px;
-}
-
-.scope-label {
-  color: var(--fs-muted);
-  font-size: 12px;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.scope-toggle {
-  display: inline-flex;
-  gap: 4px;
-  padding: 2px;
-  border-radius: 10px;
-  background: rgba(226, 232, 242, 0.9);
-}
-
-.scope-button {
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--fs-muted);
-  padding: 6px 10px;
-  font-size: 13px;
-  line-height: 1.2;
-}
-
-.scope-button.active {
-  border-color: rgba(11, 158, 144, 0.3);
-  border-color: color-mix(in srgb, var(--fs-accent) 30%, transparent);
-  background: rgba(11, 158, 144, 0.1);
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--fs-accent-2) 16%, transparent),
-    color-mix(in srgb, var(--fs-accent) 16%, transparent)
-  );
-  color: var(--fs-text);
-}
-
-.search-box {
-  display: flex;
-  flex: 1;
-  min-width: min(100%, 360px);
-  gap: 8px;
-}
-
-.search-box input {
-  flex: 1;
-  min-width: 180px;
-  border: 1px solid var(--fs-panel-border);
-  border-radius: 12px;
-  background: var(--fs-surface-strong);
-  color: var(--fs-text);
-  padding: 10px 12px;
-}
-
-.search-button,
-.clear-button {
-  border: 1px solid transparent;
-  border-radius: 12px;
-  padding: 0 14px;
-  white-space: nowrap;
-}
-
-.search-button {
-  background: linear-gradient(135deg, var(--fs-accent-2), var(--fs-accent));
-  color: #031018;
-  font-weight: 700;
-}
-
-.clear-button {
-  border-color: var(--fs-panel-border);
-  background: var(--fs-surface);
-  color: var(--fs-text);
-}
-
-.scope-button:disabled,
-.search-button:disabled,
-.clear-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-@media (max-width: 860px) {
-  .scope-segment {
-    width: 100%;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    row-gap: 8px;
-  }
-
-  .scope-label {
-    width: 100%;
-  }
-
-  .scope-toggle {
-    width: 100%;
-  }
-
-  .search-box {
-    width: 100%;
-    min-width: 0;
-  }
-}
-
-@media (max-width: 480px) {
-  .search-box {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .search-box input {
-    grid-column: 1 / -1;
-    min-width: 0;
-  }
-
-  .scope-button {
-    flex: 1 1 0;
-    text-align: center;
-  }
-
-  .search-button,
-  .clear-button {
-    min-height: 40px;
-  }
-}
-</style>

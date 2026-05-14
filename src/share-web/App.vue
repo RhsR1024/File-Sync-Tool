@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watchEffect, type Ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch, watchEffect, type Ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import {
@@ -9,16 +9,27 @@ import {
   isNotFound,
   isUnauthorized,
 } from './api';
+import Breadcrumbs from './components/Breadcrumbs.vue';
+import BulkActionBar from './components/BulkActionBar.vue';
 import CreateDirectoryDialog from './components/CreateDirectoryDialog.vue';
 import DeleteConfirmDialog from './components/DeleteConfirmDialog.vue';
 import EntryTable from './components/EntryTable.vue';
+import Flash from './components/Flash.vue';
 import ImagePreviewDialog from './components/ImagePreviewDialog.vue';
 import LoginDialog from './components/LoginDialog.vue';
 import NewTextDialog from './components/NewTextDialog.vue';
 import RenameDialog from './components/RenameDialog.vue';
 import SearchBar from './components/SearchBar.vue';
+import Sidebar from './components/Sidebar.vue';
 import ToolbarActions from './components/ToolbarActions.vue';
+import TopBar from './components/TopBar.vue';
 import UploadDialog from './components/UploadDialog.vue';
+import { Icon } from './components/icons';
+import {
+  loadRecentPaths,
+  recordRecentPath,
+  type RecentPathEntry,
+} from './lib/recent-paths';
 import {
   parseHash,
   pushPath,
@@ -26,6 +37,7 @@ import {
   subscribe,
   type UrlState,
 } from './lib/url-state';
+import { loadViewMode, saveViewMode, type EntryViewMode } from './lib/view-mode';
 import { FILE_SHARE_WEB_SESSION_HEARTBEAT_INTERVAL_MS } from '../lib/lanShareStatus';
 import {
   canPreviewEntry,
@@ -51,11 +63,16 @@ type SearchStateSnapshot = {
 
 const session = ref<FileShareSession | null>(null);
 const tree = ref<FileShareTreeResponse | null>(null);
+const shareRoots = ref<FileShareNode[]>([]);
+const recentPaths = ref<RecentPathEntry[]>(loadRecentPaths());
 const keyword = ref('');
 const activeKeyword = ref('');
 const searchScope = ref<FileShareSearchScope>('global');
 const activeSearchScope = ref<FileShareSearchScope>('global');
 const searchResults = ref<FileShareNode[]>([]);
+
+const view = ref<EntryViewMode>(loadViewMode());
+const selectedIds = ref<Set<string>>(new Set());
 
 const pageError = ref('');
 const loginError = ref('');
@@ -65,6 +82,7 @@ const renameError = ref('');
 const deleteError = ref('');
 const createDirectoryError = ref('');
 const flashMessage = ref('');
+const guestNoticeOpen = ref(true);
 
 const loadingSession = ref(true);
 const loadingEntries = ref(false);
@@ -85,6 +103,7 @@ const renameTarget = ref<FileShareNode | null>(null);
 const deleteTarget = ref<FileShareNode | null>(null);
 let unsubscribeFromUrl: (() => void) | null = null;
 let sessionHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let flashTimer: ReturnType<typeof setTimeout> | null = null;
 let unmounted = false;
 let latestViewIntentId = 0;
 let latestSessionRequestId = 0;
@@ -93,6 +112,7 @@ let latestSearchRequestId = 0;
 
 const currentNodeId = computed(() => tree.value?.current.node_id ?? null);
 const currentKind = computed<FileShareTreeCurrentKind | null>(() => tree.value?.current.kind ?? null);
+const currentName = computed(() => tree.value?.current.name ?? '');
 const breadcrumbs = computed(() => tree.value?.breadcrumbs ?? []);
 const searchActive = computed(() => activeKeyword.value.length > 0);
 const displayedEntries = computed(() => (
@@ -101,11 +121,15 @@ const displayedEntries = computed(() => (
     : tree.value?.children ?? []
 ));
 
+const folderCount = computed(() => displayedEntries.value.filter((entry) => entry.is_dir).length);
+const fileCount = computed(() => displayedEntries.value.length - folderCount.value);
+
 const canSearchCurrent = computed(() => (
   currentKind.value !== 'home'
   && Boolean(session.value?.permissions.search_current)
 ));
 const canSearchGlobal = computed(() => Boolean(session.value?.permissions.search_global));
+
 const browseOnlyHint = computed(() => {
   const permissions = session.value?.permissions;
   if (!permissions) {
@@ -121,6 +145,12 @@ const browseOnlyHint = computed(() => {
     ? t('app.browseOnlyHint')
     : '';
 });
+
+const showGuestNotice = computed(() => (
+  Boolean(session.value?.is_guest)
+  && guestNoticeOpen.value
+));
+
 const emptyText = computed(() => {
   if (searchActive.value) {
     return activeSearchScope.value === 'global'
@@ -131,26 +161,75 @@ const emptyText = computed(() => {
     ? t('app.noRoots')
     : t('app.emptyDirectory');
 });
-const sessionChipText = computed(() => {
-  if (!session.value) {
-    return t('app.loggedOut');
-  }
-  return session.value.is_guest
-    ? t('app.guestLabel', { name: session.value.username })
-    : session.value.username;
-});
-const sessionActionLabel = computed(() => {
-  if (!session.value) {
-    return '';
-  }
-  return session.value.is_guest
-    ? t('app.switchAccount')
-    : t('app.signOut');
-});
+
 const loginDescription = computed(() => (
   session.value?.is_guest
     ? t('login.switchAccountDescription')
     : t('login.description')
+));
+
+const pageTitle = computed(() => {
+  if (!tree.value) {
+    return t('app.pageTitle');
+  }
+  if (currentKind.value === 'home') {
+    return t('app.sidebarHome');
+  }
+  return currentName.value || t('app.pageTitle');
+});
+
+const pageStatLabel = computed(() => {
+  if (currentKind.value === 'home' || displayedEntries.value.length === 0) {
+    return '';
+  }
+  return `${t('app.folderCount', { n: folderCount.value })} · ${t('app.fileCount', { n: fileCount.value })}`;
+});
+
+const pageSubText = computed(() => {
+  if (searchActive.value) {
+    const scopeLabel = activeSearchScope.value === 'global' ? t('search.global') : t('search.current');
+    return t('app.searchSummary', { query: activeKeyword.value, scope: scopeLabel });
+  }
+  if (currentKind.value === 'home') {
+    return t('app.homeSubtitle');
+  }
+  if (browseOnlyHint.value) {
+    return browseOnlyHint.value;
+  }
+  return '';
+});
+
+const activeRootNodeId = computed<string | null>(() => {
+  if (!tree.value) {
+    return null;
+  }
+  if (currentKind.value === 'share_root' && tree.value.current.node_id) {
+    return tree.value.current.node_id;
+  }
+  const rootCrumb = tree.value.breadcrumbs.find((crumb) => crumb.node_id !== null);
+  return rootCrumb?.node_id ?? null;
+});
+
+const busy = computed(() => (
+  loadingSession.value || loadingEntries.value || searching.value || mutating.value
+));
+
+const selectedEntries = computed(() => (
+  displayedEntries.value.filter((entry) => selectedIds.value.has(entry.node_id))
+));
+
+const canBulkDownload = computed(() => (
+  selectedEntries.value.length > 0
+  && selectedEntries.value.every((entry) => (
+    entry.is_dir
+      ? entry.permissions.download_archive
+      : entry.permissions.download_file
+  ))
+));
+
+const canBulkDelete = computed(() => (
+  selectedEntries.value.length > 0
+  && selectedEntries.value.every((entry) => entry.permissions.delete)
 ));
 
 function defaultSearchScope(kind: FileShareTreeCurrentKind | null | undefined): FileShareSearchScope {
@@ -360,6 +439,19 @@ function isSameUrlState(left: UrlState, right: UrlState): boolean {
     && left.segments.every((segment, index) => segment === right.segments[index]);
 }
 
+function setFlash(message: string) {
+  flashMessage.value = message;
+  if (flashTimer) {
+    clearTimeout(flashTimer);
+  }
+  if (!message) {
+    return;
+  }
+  flashTimer = setTimeout(() => {
+    flashMessage.value = '';
+  }, 1800);
+}
+
 async function loadTree(
   nodeId: string | null = null,
   options: {
@@ -388,6 +480,9 @@ async function loadTree(
       return;
     }
     tree.value = response;
+    if (response.current.kind === 'home') {
+      shareRoots.value = response.children.filter((entry) => entry.is_dir);
+    }
     syncSearchScope(response.current.kind, preserveSearch);
   } catch (error) {
     if (!request.isCurrent()) {
@@ -460,6 +555,7 @@ async function loadSession(
 
     if (clearViewOnFailure) {
       tree.value = null;
+      shareRoots.value = [];
       resetSearchState('home');
     }
 
@@ -475,6 +571,18 @@ async function loadSession(
     return false;
   } finally {
     request.finish();
+  }
+}
+
+async function ensureShareRootsCached() {
+  if (shareRoots.value.length > 0 || currentKind.value === 'home') {
+    return;
+  }
+  try {
+    const homeTree = await fileShareApi.getTree(null);
+    shareRoots.value = homeTree.children.filter((entry) => entry.is_dir);
+  } catch {
+    /* Sidebar may stay empty if home tree is unavailable. */
   }
 }
 
@@ -508,6 +616,8 @@ async function bootstrap(
     }
     pageError.value = getErrorMessage(error);
   }
+
+  void ensureShareRootsCached();
 }
 
 async function executeSearch(
@@ -727,6 +837,8 @@ async function applyUrlState(
   }
 
   replacePath(canonicalStateFromSegments(resolvedSegments));
+
+  void ensureShareRootsCached();
 }
 
 async function bootstrapFromUrl(state: UrlState) {
@@ -939,9 +1051,9 @@ async function submitUpload(files: File[]) {
       await fileShareApi.uploadDirectory(parentNodeId, files);
     }
     uploadOpen.value = false;
-    flashMessage.value = uploadMode.value === 'files'
+    setFlash(uploadMode.value === 'files'
       ? t('app.uploadFilesSuccess')
-      : t('app.uploadDirectorySuccess');
+      : t('app.uploadDirectorySuccess'));
     await refreshCurrentView();
   } catch (error) {
     await handleMutationError(error, uploadError);
@@ -970,7 +1082,7 @@ async function submitCreateDirectory(name: string) {
   try {
     await fileShareApi.createDirectory(parentNodeId, name.trim());
     createDirectoryOpen.value = false;
-    flashMessage.value = t('app.createDirectorySuccess');
+    setFlash(t('app.createDirectorySuccess'));
     await refreshCurrentView();
   } catch (error) {
     await handleMutationError(error, createDirectoryError);
@@ -991,7 +1103,7 @@ async function createText(payload: { name: string; content: string }) {
   try {
     await fileShareApi.createText(parentNodeId, payload.name, payload.content);
     newTextOpen.value = false;
-    flashMessage.value = t('app.createTextSuccess');
+    setFlash(t('app.createTextSuccess'));
     await refreshCurrentView();
   } catch (error) {
     await handleMutationError(error, textError);
@@ -1018,7 +1130,7 @@ async function submitRename(name: string) {
     await fileShareApi.rename(renameTarget.value.node_id, name.trim());
     renameOpen.value = false;
     renameTarget.value = null;
-    flashMessage.value = t('app.renameSuccess');
+    setFlash(t('app.renameSuccess'));
     await refreshCurrentView(currentNodeId.value, {
       preserveSearch: searchActive.value,
     });
@@ -1057,7 +1169,7 @@ async function submitDelete() {
     await fileShareApi.remove(target.node_id);
     deleteOpen.value = false;
     deleteTarget.value = null;
-    flashMessage.value = t('app.deleteSuccess');
+    setFlash(t('app.deleteSuccess'));
     await refreshCurrentView(fallbackNodeId, {
       preserveSearch: searchActive.value && fallbackNodeId !== null,
     });
@@ -1067,6 +1179,152 @@ async function submitDelete() {
     mutating.value = false;
   }
 }
+
+function toggleSelect(nodeId: string) {
+  const next = new Set(selectedIds.value);
+  if (next.has(nodeId)) {
+    next.delete(nodeId);
+  } else {
+    next.add(nodeId);
+  }
+  selectedIds.value = next;
+}
+
+function selectAll() {
+  const visible = displayedEntries.value;
+  if (visible.length === 0) {
+    return;
+  }
+  const allSelected = visible.every((entry) => selectedIds.value.has(entry.node_id));
+  selectedIds.value = allSelected
+    ? new Set()
+    : new Set(visible.map((entry) => entry.node_id));
+}
+
+function clearSelection() {
+  if (selectedIds.value.size === 0) {
+    return;
+  }
+  selectedIds.value = new Set();
+}
+
+function bulkDownload() {
+  const items = selectedEntries.value;
+  if (items.length === 0) {
+    return;
+  }
+  for (const entry of items) {
+    triggerDownload(entry);
+  }
+  setFlash(t('app.bulkDownloadStarted', { n: items.length }));
+  clearSelection();
+}
+
+async function bulkDelete() {
+  const items = selectedEntries.value;
+  if (items.length === 0) {
+    return;
+  }
+  const confirmed = typeof window === 'undefined'
+    ? false
+    : window.confirm(t('app.bulkDeleteConfirm', { n: items.length }));
+  if (!confirmed) {
+    return;
+  }
+
+  mutating.value = true;
+  pageError.value = '';
+  let succeeded = 0;
+  let lastError: unknown = null;
+
+  for (const entry of items) {
+    try {
+      await fileShareApi.remove(entry.node_id);
+      succeeded += 1;
+    } catch (error) {
+      lastError = error;
+      break;
+    }
+  }
+
+  mutating.value = false;
+
+  if (succeeded > 0) {
+    setFlash(t('app.bulkDeleteResult', { n: succeeded }));
+  }
+  clearSelection();
+  await refreshCurrentView(currentNodeId.value, {
+    preserveSearch: searchActive.value,
+  });
+
+  if (lastError) {
+    if (isUnauthorized(lastError)) {
+      loginOpen.value = true;
+    } else if (isForbidden(lastError)) {
+      pageError.value = t('app.permissionChanged');
+    } else {
+      pageError.value = getErrorMessage(lastError);
+    }
+  }
+}
+
+function handleDownloadAll() {
+  if (!tree.value || !currentNodeId.value) {
+    return;
+  }
+  const archiveTarget: FileShareNode = {
+    node_id: currentNodeId.value,
+    parent_id: null,
+    kind: currentKind.value === 'share_root' ? 'share_root' : 'directory',
+    name: currentName.value || 'archive',
+    root_id: '',
+    root_alias: '',
+    relative_path: '',
+    display_path: currentName.value || '',
+    is_dir: true,
+    size: null,
+    modified: null,
+    permissions: {
+      browse: true,
+      download_file: false,
+      download_archive: true,
+      upload_file: false,
+      upload_directory: false,
+      create_directory: false,
+      create_text: false,
+      rename: false,
+      delete: false,
+      preview_image: false,
+      search_current: false,
+      search_global: false,
+    },
+  };
+  triggerDownload(archiveTarget);
+  setFlash(t('app.downloadAllStarted'));
+}
+
+function setView(next: EntryViewMode) {
+  if (view.value === next) {
+    return;
+  }
+  view.value = next;
+  saveViewMode(next);
+}
+
+watch([currentNodeId, activeKeyword, activeSearchScope], () => {
+  clearSelection();
+});
+
+watch(currentNodeId, (next) => {
+  if (!next || currentKind.value === 'home') {
+    return;
+  }
+  const label = currentName.value || (breadcrumbs.value.at(-1)?.label ?? '');
+  if (!label) {
+    return;
+  }
+  recentPaths.value = recordRecentPath({ node_id: next, label });
+});
 
 onMounted(() => {
   unmounted = false;
@@ -1106,6 +1364,10 @@ onUnmounted(() => {
     clearInterval(sessionHeartbeatTimer);
     sessionHeartbeatTimer = null;
   }
+  if (flashTimer) {
+    clearTimeout(flashTimer);
+    flashTimer = null;
+  }
 });
 
 watchEffect(() => {
@@ -1114,58 +1376,107 @@ watchEffect(() => {
 </script>
 
 <template>
-  <div class="app-shell">
-    <div class="backdrop"></div>
+  <div class="app">
+    <TopBar
+      :session="session"
+      :busy="busy"
+      @refresh="refreshCurrentView()"
+      @session-action="handleSessionAction"
+    />
 
-    <main class="page">
-      <section class="panel">
+    <Sidebar
+      :share-roots="shareRoots"
+      :current-kind="currentKind"
+      :active-root-node-id="activeRootNodeId"
+      :recent="recentPaths"
+      :busy="busy"
+      @navigate="navigate"
+    />
+
+    <main class="main">
+      <Breadcrumbs :breadcrumbs="breadcrumbs" :busy="busy" @navigate="navigate" />
+
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">
+            {{ pageTitle }}
+            <span v-if="pageStatLabel" class="sub">{{ pageStatLabel }}</span>
+          </h1>
+          <div v-if="pageSubText" class="page-sub">{{ pageSubText }}</div>
+        </div>
         <ToolbarActions
-          :breadcrumbs="breadcrumbs"
           :current-kind="currentKind"
           :permissions="session?.permissions ?? null"
-          :session-text="session ? sessionChipText : ''"
-          :session-is-guest="Boolean(session?.is_guest)"
-          :session-action-label="sessionActionLabel"
-          :browse-only-hint="browseOnlyHint"
-          :busy="loadingEntries || mutating || loadingSession || searching"
-          @navigate="navigate"
+          :has-entries="displayedEntries.length > 0"
+          :busy="busy"
           @upload-files="openUpload('files')"
           @upload-directory="openUpload('directory')"
           @create-directory="openCreateDirectoryDialog"
           @create-text="newTextOpen = true"
-          @refresh="refreshCurrentView()"
-          @session-action="handleSessionAction"
+          @download-all="handleDownloadAll"
         />
+      </div>
 
-        <SearchBar
-          :keyword="keyword"
-          :scope="searchScope"
-          :can-search-current="canSearchCurrent"
-          :can-search-global="canSearchGlobal"
-          :busy="searching || loadingEntries || mutating || loadingSession"
-          @update:keyword="keyword = $event"
-          @update:scope="searchScope = $event"
-          @search="handleSearch"
-          @clear="clearSearch"
-        />
+      <div v-if="showGuestNotice" class="notice">
+        <span class="ico"><Icon name="info" /></span>
+        <span class="body">{{ t('app.guestModeNotice') }}</span>
+        <button type="button" class="close" :aria-label="t('app.dismissNotice')" @click="guestNoticeOpen = false">
+          {{ t('app.dismiss') }}
+        </button>
+      </div>
 
-        <p v-if="flashMessage" class="flash-banner">{{ flashMessage }}</p>
-        <p v-if="pageError" class="error-banner">{{ pageError }}</p>
+      <div v-if="pageError" class="notice danger">
+        <span class="ico"><Icon name="info" /></span>
+        <span class="body">{{ pageError }}</span>
+        <button type="button" class="close" :aria-label="t('app.dismissNotice')" @click="pageError = ''">
+          {{ t('app.dismiss') }}
+        </button>
+      </div>
 
-        <EntryTable
-          :entries="displayedEntries"
-          :session="session"
-          :loading="loadingEntries || searching || loadingSession"
-          :empty-text="emptyText"
-          :search-active="searchActive"
-          @open="openEntry"
-          @preview="openPreview"
-          @download="triggerDownload"
-          @rename="openRename"
-          @delete="openDelete"
-        />
-      </section>
+      <SearchBar
+        :keyword="keyword"
+        :scope="searchScope"
+        :view="view"
+        :can-search-current="canSearchCurrent"
+        :can-search-global="canSearchGlobal"
+        :busy="busy"
+        @update:keyword="keyword = $event"
+        @update:scope="searchScope = $event"
+        @update:view="setView"
+        @search="handleSearch"
+        @clear="clearSearch"
+      />
+
+      <EntryTable
+        :entries="displayedEntries"
+        :session="session"
+        :loading="loadingEntries || searching || loadingSession"
+        :empty-text="emptyText"
+        :search-active="searchActive"
+        :view="view"
+        :selected-ids="selectedIds"
+        @open="openEntry"
+        @preview="openPreview"
+        @download="triggerDownload"
+        @rename="openRename"
+        @delete="openDelete"
+        @toggle-select="toggleSelect"
+        @select-all="selectAll"
+      />
     </main>
+
+    <BulkActionBar
+      v-if="selectedIds.size > 0"
+      :count="selectedIds.size"
+      :can-download="canBulkDownload"
+      :can-delete="canBulkDelete"
+      :busy="busy"
+      @download-all="bulkDownload"
+      @delete-all="bulkDelete"
+      @clear="clearSelection"
+    />
+
+    <Flash :message="flashMessage" />
 
     <LoginDialog
       :open="loginOpen"
@@ -1227,70 +1538,3 @@ watchEffect(() => {
     />
   </div>
 </template>
-
-<style scoped>
-.app-shell {
-  position: relative;
-  min-height: 100vh;
-  overflow: hidden;
-  color: var(--fs-text);
-}
-
-.backdrop {
-  position: fixed;
-  inset: 0;
-  background:
-    radial-gradient(circle at 18% 18%, rgba(147, 197, 253, 0.22), transparent 0 30%),
-    radial-gradient(circle at 82% 14%, rgba(110, 231, 183, 0.16), transparent 0 32%);
-  pointer-events: none;
-}
-
-.page {
-  position: relative;
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 24px 18px 40px;
-}
-
-.panel {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 20px;
-  border-radius: 24px;
-  border: 1px solid var(--fs-panel-border);
-  background: var(--fs-panel);
-  backdrop-filter: blur(16px);
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.1);
-}
-
-.flash-banner,
-.error-banner {
-  margin: 0;
-  border-radius: 16px;
-  padding: 12px 14px;
-}
-
-.flash-banner {
-  border: 1px solid rgba(21, 128, 61, 0.2);
-  background: rgba(21, 128, 61, 0.07);
-  color: #14532d;
-}
-
-.error-banner {
-  border: 1px solid rgba(185, 28, 28, 0.22);
-  background: rgba(185, 28, 28, 0.07);
-  color: #7f1d1d;
-}
-
-@media (max-width: 880px) {
-  .page {
-    padding: 18px 14px 32px;
-  }
-
-  .panel {
-    padding: 18px;
-    border-radius: 22px;
-  }
-}
-</style>
