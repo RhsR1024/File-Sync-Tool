@@ -13,6 +13,7 @@ import {
 } from '@/lib/tauri';
 import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
 import { pushToast, type ToastTone } from '@/composables/useToast';
+import { resolveBatchTargets, type BatchEntryResolution } from '@/lib/manualCopyBatch';
 
 defineOptions({ name: 'ManualCopyModal' });
 
@@ -41,7 +42,7 @@ const isSubmitting = ref(false);
 const isLoadingConfig = ref(false);
 const config = ref<AppConfig | null>(null);
 const isSelectingTarget = ref(false);
-const sourceInputRef = ref<HTMLInputElement | null>(null);
+const sourceInputRef = ref<HTMLInputElement | HTMLTextAreaElement | null>(null);
 const modalRef = ref<HTMLElement | null>(null);
 const existingTargetPreview = ref<ManualCopyPreview | null>(null);
 const pendingSubmitRequest = ref<{ source: string; target: string } | null>(null);
@@ -49,6 +50,25 @@ const pendingSubmitRequest = ref<{ source: string; target: string } | null>(null
 // Filter selections: user picks which global extensions/keywords to apply (default: none selected = copy all)
 const selectedExtensions = ref<string[]>([]);
 const selectedKeywords = ref<string[]>([]);
+
+// --- Batch mode state ---
+// sourceLines: each trimmed non-empty line of the textarea = one batch entry.
+const sourceLines = computed(() =>
+  sourcePath.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+);
+const isBatchMode = computed(() => sourceLines.value.length >= 2);
+
+const batchResolutions = ref<BatchEntryResolution[]>([]);
+type BatchPreviewStatus =
+  | 'ok'
+  | 'target_exists'
+  | 'source_missing'
+  | 'duplicate_in_batch'
+  | 'invalid_path';
+const batchRowPreview = ref<Map<string, { status: BatchPreviewStatus; finalTarget: string; errored?: boolean }>>(new Map());
+const batchRowChecked = ref<Map<string, boolean>>(new Map());
+const batchPreviewOpen = ref(false);
+const batchSubmitting = ref(false);
 
 // Tracks the focused element before the modal opens so we can return focus to
 // it when the modal closes (a11y: keyboard users land back on the trigger).
@@ -61,7 +81,8 @@ function notify(message: string, tone: ToastTone = 'info', ttlMs?: number) {
 
 const canSubmit = computed(
   () =>
-    sourcePath.value.trim().length > 0
+    !isBatchMode.value
+    && sourcePath.value.trim().length > 0
     && targetRootPath.value.trim().length > 0
     && !isSubmitting.value
     && !existingTargetPreview.value,
@@ -330,6 +351,13 @@ watch([sourcePath, targetRootPath], () => {
   });
 });
 
+watch([sourcePath, targetRootPath], () => {
+  batchPreviewOpen.value = false;
+  batchResolutions.value = [];
+  batchRowPreview.value = new Map();
+  batchRowChecked.value = new Map();
+});
+
 onMounted(() => {
   restoreFormData();
   loadConfig();
@@ -416,14 +444,14 @@ watch(() => props.isOpen, (open) => {
                 <label for="manual-copy-source" class="block text-sm font-medium text-slate-700 mb-2">
                   {{ t('manualCopy.sourcePath') }}
                 </label>
-                <input
+                <textarea
                   id="manual-copy-source"
                   ref="sourceInputRef"
                   v-model="sourcePath"
-                  type="text"
-                  :disabled="isSubmitting || Boolean(existingTargetPreview)"
-                  class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all motion-reduce:transition-none disabled:cursor-not-allowed disabled:bg-slate-100"
-                  :placeholder="t('manualCopy.sourcePlaceholder')"
+                  rows="3"
+                  :disabled="isSubmitting || batchSubmitting || Boolean(existingTargetPreview)"
+                  class="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all motion-reduce:transition-none disabled:cursor-not-allowed disabled:bg-slate-100 font-mono text-sm resize-y min-h-[3.25rem] max-h-[12rem]"
+                  :placeholder="isBatchMode ? t('manualCopy.batch.placeholder') : t('manualCopy.sourcePlaceholder')"
                   :aria-invalid="Boolean(inlineError) || undefined"
                 />
               </div>
