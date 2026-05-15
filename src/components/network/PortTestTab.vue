@@ -12,9 +12,11 @@ import {
   type SinglePortResult,
 } from '../../lib/tauri';
 import {
+  buildOpenPortCards,
   buildPortGridCells,
   filterPortRows,
   parsePorts,
+  type OpenPortCard,
   type PortGridCell,
   type PortGridState,
   type PortTableFilter,
@@ -29,6 +31,7 @@ const { t } = useI18n();
 const STORAGE_KEY = 'networkTools.portPresets';
 const LARGE_SCAN_THRESHOLD = 1000;
 const LARGE_SCAN_TIMEOUT_MS = 500;
+const LARGE_SCAN_GRID_THRESHOLD = 1024;
 
 function loadPresetsFromLocalStorage(): PortPreset[] {
   try {
@@ -103,13 +106,16 @@ const resultSummary = computed(() => {
 const gridCells = computed(() => buildPortGridCells(requestedPorts.value, resultRows.value, isLoading.value));
 const showCellLabels = computed(() => totalPorts.value <= 1024);
 const gridStyle = computed(() => ({
-  gridTemplateColumns: `repeat(auto-fill, minmax(${showCellLabels.value ? '36px' : '10px'}, 1fr))`,
+  gridTemplateColumns: `repeat(auto-fill, minmax(${showCellLabels.value ? '56px' : '10px'}, 1fr))`,
+  gap: '6px',
 }));
 const gridCellBaseClass = computed(() =>
   showCellLabels.value
-    ? 'rounded flex aspect-square items-center justify-center text-[10px] font-mono font-medium cursor-default select-none transition-colors'
+    ? 'rounded-md flex aspect-square items-center justify-center text-xs font-mono font-medium cursor-default select-none transition-colors'
     : 'rounded-[2px] aspect-square min-h-2 cursor-default transition-colors',
 );
+const isLargeScan = computed(() => totalPorts.value > LARGE_SCAN_GRID_THRESHOLD);
+const openPortCards = computed<OpenPortCard[]>(() => buildOpenPortCards(resultRows.value));
 
 function applyPreset(ports: string): void {
   if (isLoading.value) return;
@@ -546,39 +552,71 @@ onUnmounted(() => {
       </div>
 
       <div v-if="viewMode === 'grid'" class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
-        <div class="max-h-[520px] overflow-auto pr-1">
-          <div class="grid gap-1" :style="gridStyle">
+        <template v-if="isLargeScan">
+          <div v-if="openPortCards.length > 0" class="max-h-[520px] overflow-auto pr-1">
             <div
-              v-for="cell in gridCells"
-              :key="cell.port"
-              :class="[gridCellBaseClass, portCellClass(cell.state)]"
-              :aria-label="`${cell.port} ${portStatusLabel(cell.state)}`"
-              @mouseenter="showTooltip(cell, $event)"
-              @mouseleave="hideTooltip"
+              class="grid gap-3"
+              :style="{ gridTemplateColumns: 'repeat(auto-fill, minmax(96px, 1fr))' }"
             >
-              <span v-if="showCellLabels">{{ cell.port }}</span>
+              <div
+                v-for="card in openPortCards"
+                :key="card.port"
+                class="flex flex-col items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 p-3"
+              >
+                <div class="font-mono text-lg font-bold leading-none text-emerald-700">{{ card.port }}</div>
+                <div class="w-full truncate text-center text-[11px] leading-tight text-slate-500">
+                  {{ card.name || '—' }}
+                </div>
+                <div class="text-[10px] tabular-nums text-slate-400">
+                  {{ card.latencyMs !== null ? `${card.latencyMs.toFixed(1)} ms` : '—' }}
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+          <Empty
+            v-else
+            :title="isLoading
+              ? t('networkTools.port.scanningNoOpenYet', { scanned: scannedCount, total: totalPorts })
+              : t('networkTools.port.completeNoOpen', { total: totalPorts })"
+            dashed
+          />
+        </template>
 
-        <div class="mt-3 flex flex-wrap gap-3 border-t border-slate-100 pt-3">
-          <span class="flex items-center gap-1.5 text-xs text-slate-500">
-            <span class="inline-block h-3 w-3 rounded bg-emerald-500"></span>
-            {{ t('networkTools.port.open') }}
-          </span>
-          <span class="flex items-center gap-1.5 text-xs text-slate-500">
-            <span class="inline-block h-3 w-3 rounded bg-slate-200"></span>
-            {{ t('networkTools.port.closed') }}
-          </span>
-          <span class="flex items-center gap-1.5 text-xs text-slate-500">
-            <span class="inline-block h-3 w-3 rounded bg-amber-400"></span>
-            {{ t('networkTools.port.scanning') }}
-          </span>
-          <span class="flex items-center gap-1.5 text-xs text-slate-500">
-            <span class="inline-block h-3 w-3 rounded bg-slate-700"></span>
-            {{ t('networkTools.port.waiting') }}
-          </span>
-        </div>
+        <template v-else>
+          <div class="max-h-[520px] overflow-auto pr-1">
+            <div class="grid" :style="gridStyle">
+              <div
+                v-for="cell in gridCells"
+                :key="cell.port"
+                :class="[gridCellBaseClass, portCellClass(cell.state)]"
+                :aria-label="`${cell.port} ${portStatusLabel(cell.state)}`"
+                @mouseenter="showTooltip(cell, $event)"
+                @mouseleave="hideTooltip"
+              >
+                <span v-if="showCellLabels">{{ cell.port }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-3 flex flex-wrap gap-3 border-t border-slate-100 pt-3">
+            <span class="flex items-center gap-1.5 text-xs text-slate-500">
+              <span class="inline-block h-3 w-3 rounded bg-emerald-500"></span>
+              {{ t('networkTools.port.open') }}
+            </span>
+            <span class="flex items-center gap-1.5 text-xs text-slate-500">
+              <span class="inline-block h-3 w-3 rounded bg-slate-200"></span>
+              {{ t('networkTools.port.closed') }}
+            </span>
+            <span class="flex items-center gap-1.5 text-xs text-slate-500">
+              <span class="inline-block h-3 w-3 rounded bg-amber-400"></span>
+              {{ t('networkTools.port.scanning') }}
+            </span>
+            <span class="flex items-center gap-1.5 text-xs text-slate-500">
+              <span class="inline-block h-3 w-3 rounded bg-slate-700"></span>
+              {{ t('networkTools.port.waiting') }}
+            </span>
+          </div>
+        </template>
       </div>
 
       <div v-else class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
