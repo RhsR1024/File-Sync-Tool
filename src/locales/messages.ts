@@ -1362,6 +1362,8 @@ export const messages = {
         tooManyPorts: 'Max 65535 ports allowed',
         emptyTitle: 'Pick a host and one or more ports to start',
         emptyDescription: 'Common presets can quickly seed web, SSH, or database ports.',
+        scanningNoOpenYet: 'Scanning... no open ports found yet ({scanned} / {total})',
+        completeNoOpen: 'Scan complete, no open ports found ({total} scanned)',
       },
       wol: {
         macAddress: 'MAC Address',
@@ -3208,6 +3210,8 @@ export const messages = {
         tooManyPorts: '最多支持 65535 个端口',
         emptyTitle: '先填写目标主机和端口范围',
         emptyDescription: '可先用预设快速填充 Web、SSH 或数据库端口。',
+        scanningNoOpenYet: '扫描中… 暂未发现开放的端口 ({scanned} / {total})',
+        completeNoOpen: '扫描完成，未发现开放的端口（共扫描 {total} 个）',
       },
       wol: {
         macAddress: 'MAC 地址',
