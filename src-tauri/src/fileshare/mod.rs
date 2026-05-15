@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
 pub mod auth;
@@ -90,6 +91,7 @@ struct FileShareRuntime {
 pub struct FileShareHandle {
     active: Arc<AtomicBool>,
     runtime: Mutex<Option<FileShareRuntime>>,
+    sessions: Arc<Mutex<auth::SessionStore>>,
     visitor_ips: Arc<Mutex<VisitorIpMap>>,
 }
 
@@ -98,6 +100,7 @@ impl FileShareHandle {
         Self {
             active: Arc::new(AtomicBool::new(false)),
             runtime: Mutex::new(None),
+            sessions: Arc::new(Mutex::new(auth::SessionStore::default())),
             visitor_ips: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -125,7 +128,7 @@ struct HttpState {
     saved_config_path: Option<PathBuf>,
     config: RuntimeFileShareConfig,
     roots: Vec<ops::ResolvedRoot>,
-    sessions: Mutex<auth::SessionStore>,
+    sessions: Arc<Mutex<auth::SessionStore>>,
     ip_rules: Vec<auth::IpRule>,
     upload_body_limit_bytes: usize,
     visitor_ips: Arc<Mutex<VisitorIpMap>>,
@@ -219,7 +222,7 @@ pub async fn file_share_start(
     let http_state = Arc::new(HttpState {
         saved_config_path: None,
         roots: runtime_roots(&runtime_config),
-        sessions: Mutex::new(auth::SessionStore::default()),
+        sessions: handle.sessions.clone(),
         ip_rules: parse_runtime_ip_rules(&runtime_config)?,
         upload_body_limit_bytes: http::UPLOAD_BODY_LIMIT_BYTES,
         config: runtime_config,
@@ -378,7 +381,7 @@ pub async fn file_share_start_saved(
     let http_state = Arc::new(HttpState {
         saved_config_path: Some(saved_config_path),
         roots: runtime_roots(&runtime_config),
-        sessions: Mutex::new(auth::SessionStore::default()),
+        sessions: handle.sessions.clone(),
         ip_rules: parse_runtime_ip_rules(&runtime_config)?,
         upload_body_limit_bytes: http::UPLOAD_BODY_LIMIT_BYTES,
         config: runtime_config.clone(),
@@ -611,16 +614,6 @@ async fn status_reporter(
 }
 
 const SESSION_COOKIE_NAME: &str = "fs_session";
-
-struct UploadedFilePayload {
-    relative_path: String,
-    contents: Vec<u8>,
-}
-
-struct UploadRequestPayload {
-    parent_node_id: String,
-    files: Vec<UploadedFilePayload>,
-}
 
 fn runtime_config_from_legacy(config: FileShareConfig) -> Result<RuntimeFileShareConfig, String> {
     if config.port < 1024 {
@@ -962,52 +955,85 @@ fn clear_cookie_header(name: &str) -> String {
     format!("{name}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax")
 }
 
-async fn read_upload_request(
-    mut multipart: Multipart,
-    max_total_bytes: usize,
-) -> Result<UploadRequestPayload, String> {
-    let mut parent_node_id = None;
-    let mut files = Vec::new();
-    let mut total_bytes = 0usize;
-
-    while let Some(mut field) = multipart.next_field().await.map_err(|e| e.to_string())? {
+async fn read_upload_parent_node_id(multipart: &mut Multipart) -> Result<String, String> {
+    while let Some(field) = multipart.next_field().await.map_err(|e| e.to_string())? {
         let field_name = field.name().unwrap_or_default().to_string();
-        if let Some(file_name) = field.file_name().map(|value| value.to_string()) {
-            let mut contents = Vec::new();
-            while let Some(chunk) = field.chunk().await.map_err(|e| e.to_string())? {
-                total_bytes = total_bytes
-                    .checked_add(chunk.len())
-                    .ok_or_else(|| "Upload Too Large".to_string())?;
-                if total_bytes > max_total_bytes {
-                    return Err("Upload Too Large".to_string());
-                }
-                contents.extend_from_slice(&chunk);
-            }
-            files.push(UploadedFilePayload {
-                relative_path: file_name.replace('\\', "/"),
-                contents,
-            });
-            continue;
+        if field.file_name().is_some() {
+            return Err("Parent node id is required before file data".to_string());
         }
 
         let text = field.text().await.map_err(|e| e.to_string())?;
         if field_name.as_str() == "parent_node_id" {
-            parent_node_id = Some(text);
+            let parent_node_id = text.trim();
+            if parent_node_id.is_empty() {
+                return Err("Parent node id is required".to_string());
+            }
+            return Ok(parent_node_id.to_string());
         }
     }
 
-    if files.is_empty() {
+    Err("Parent node id is required".to_string())
+}
+
+async fn write_upload_files_from_multipart(
+    multipart: &mut Multipart,
+    root: &ops::ResolvedRoot,
+    parent: &str,
+    create_parents: bool,
+    max_total_bytes: usize,
+) -> Result<(), String> {
+    let mut total_bytes = 0usize;
+    let mut file_count = 0usize;
+
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| e.to_string())? {
+        let Some(file_name) = field.file_name().map(|value| value.to_string()) else {
+            continue;
+        };
+        let relative_path = file_name.replace('\\', "/");
+        let target = ops::prepare_upload_target(root, parent, &relative_path, create_parents)?;
+        let mut output = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .await
+            .map_err(|e| format!("Failed to write uploaded file {}: {}", target.display(), e))?;
+
+        while let Some(chunk) = field.chunk().await.map_err(|e| e.to_string())? {
+            total_bytes = total_bytes
+                .checked_add(chunk.len())
+                .ok_or_else(|| "Upload Too Large".to_string())?;
+            if total_bytes > max_total_bytes {
+                drop(output);
+                let _ = tokio::fs::remove_file(&target).await;
+                return Err("Upload Too Large".to_string());
+            }
+            if let Err(error) = output.write_all(&chunk).await {
+                drop(output);
+                let _ = tokio::fs::remove_file(&target).await;
+                return Err(format!(
+                    "Failed to write uploaded file {}: {}",
+                    target.display(),
+                    error
+                ));
+            }
+        }
+        if let Err(error) = output.flush().await {
+            drop(output);
+            let _ = tokio::fs::remove_file(&target).await;
+            return Err(format!(
+                "Failed to write uploaded file {}: {}",
+                target.display(),
+                error
+            ));
+        }
+        file_count += 1;
+    }
+
+    if file_count == 0 {
         return Err("At least one file is required".to_string());
     }
 
-    let parent_node_id = parent_node_id
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "Parent node id is required".to_string())?;
-
-    Ok(UploadRequestPayload {
-        parent_node_id,
-        files,
-    })
+    Ok(())
 }
 
 fn remember_connected_ip(visitor_ips: &Arc<Mutex<VisitorIpMap>>, ip: impl Into<String>) {

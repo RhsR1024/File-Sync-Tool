@@ -12,6 +12,7 @@
 | [Disk Cache Cleanup](./disk-cache-cleanup.md) | Contracts for Linux local disk, Windows raw disk, IPSAN, and Redis cache-key operations | Active |
 | [Clipboard Preview Windows](./clipboard-preview-windows.md) | Contracts for non-activating Alt+C hover preview windows and no-overlap placement | Active |
 | [Error Code Lookup](./error-code-lookup.md) | Contracts for GitLab archive sync, on-disk cache, and Tauri query commands backing the error-code tool | Active |
+| [File Share](./file-share.md) | Contracts for large uploads, upload path validation, and restart-safe browser sessions | Active |
 | [Network Tools](./network-tools.md) | Contracts for streaming port scan events, cancellation, and full TCP port-range support | Active |
 | [Screen Share](./screen-share.md) | Contracts for capture startup fencing, stale worker invalidation, and recovery timing | Active |
 | [Update Checker](./update-checker.md) | Contracts for manifest fetch, verified update download/apply flow, updater events, and config migration | Active |

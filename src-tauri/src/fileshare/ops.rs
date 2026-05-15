@@ -155,6 +155,18 @@ pub fn write_uploaded_file(
     content: &[u8],
     create_parents: bool,
 ) -> Result<(), String> {
+    let target = prepare_upload_target(root, parent, relative_name, create_parents)?;
+
+    fs::write(&target, content)
+        .map_err(|e| format!("Failed to write uploaded file {}: {}", target.display(), e))
+}
+
+pub fn prepare_upload_target(
+    root: &ResolvedRoot,
+    parent: &str,
+    relative_name: &str,
+    create_parents: bool,
+) -> Result<PathBuf, String> {
     let parent_path = resolve_relative_path(root, parent)?;
     ensure_existing_directory(&parent_path)?;
 
@@ -193,8 +205,7 @@ pub fn write_uploaded_file(
         return Err(format!("Target already exists: {}", target.display()));
     }
 
-    fs::write(&target, content)
-        .map_err(|e| format!("Failed to write uploaded file {}: {}", target.display(), e))
+    Ok(target)
 }
 
 pub fn delete_entry(root: &ResolvedRoot, path: &str, mode: DeleteMode) -> Result<(), String> {

@@ -29,24 +29,9 @@ const { t } = useI18n();
 </template>
 
 <style scoped>
-.preview-mask {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: rgba(3, 8, 15, 0.82);
-  backdrop-filter: blur(8px);
-}
-
 .preview-card {
   width: min(100%, 1080px);
   max-height: 100%;
-  border-radius: 24px;
-  background: rgba(6, 12, 21, 0.96);
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  overflow: hidden;
 }
 
 .preview-top {
@@ -55,10 +40,20 @@ const { t } = useI18n();
   align-items: center;
   gap: 16px;
   padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
 }
 
 .preview-top h2 {
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .preview-body {
@@ -68,20 +63,15 @@ const { t } = useI18n();
   padding: 16px;
   overflow: auto;
   max-height: calc(100vh - 120px);
+  background: var(--surface-2);
 }
 
 .preview-body img {
   max-width: 100%;
   max-height: calc(100vh - 160px);
   object-fit: contain;
-  border-radius: 18px;
-}
-
-.close-button {
-  border: none;
-  border-radius: 999px;
-  background: rgba(148, 163, 184, 0.12);
-  color: #dbe7f3;
-  padding: 10px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
 }
 </style>

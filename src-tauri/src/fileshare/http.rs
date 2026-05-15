@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use axum::body::Body;
 use axum::extract::multipart::MultipartRejection;
-use axum::extract::{ConnectInfo, Multipart, Path as AxumPath, Query, State as AxumState};
+use axum::extract::{
+    ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, Query, State as AxumState,
+};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -15,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::oneshot;
 
-pub(super) const UPLOAD_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const UPLOAD_BODY_LIMIT_BYTES: usize = 16usize * 1024 * 1024 * 1024;
 
 pub(super) async fn run_http_server(
     listener: tokio::net::TcpListener,
@@ -58,6 +60,7 @@ fn build_router(state: Arc<HttpState>) -> Router {
         .route("/api/download/file", get(handler_node_file))
         .route("/api/download/archive", get(handler_node_archive))
         .route("/api/preview", get(handler_preview))
+        .layer(DefaultBodyLimit::disable())
         .with_state(state)
 }
 
@@ -742,41 +745,38 @@ async fn handler_upload_files(
         Err(response) => return response,
     };
 
-    let multipart = match multipart {
+    let mut multipart = match multipart {
         Ok(multipart) => multipart,
         Err(err) => return multipart_rejection_response(err),
     };
 
-    let request = match read_upload_request(multipart, state.upload_body_limit_bytes).await {
-        Ok(request) => request,
+    let parent_node_id = match read_upload_parent_node_id(&mut multipart).await {
+        Ok(parent_node_id) => parent_node_id,
         Err(message) => return upload_read_error_response(&message),
     };
-    let (root, parent) =
-        match resolve_parent_directory_node(&state, &principal, &request.parent_node_id) {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
+    let (root, parent) = match resolve_parent_directory_node(&state, &principal, &parent_node_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     if let Err(response) =
         require_root_permission(&principal, &root.id, model::FileSharePermission::UploadFile)
     {
         return response;
     }
-    let files = request.files;
-
-    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        for file in files {
-            ops::write_uploaded_file(&root, &parent, &file.relative_path, &file.contents, false)?;
-        }
-        Ok(())
-    })
-    .await;
-
-    match result {
-        Ok(Ok(())) => {
+    match write_upload_files_from_multipart(
+        &mut multipart,
+        &root,
+        &parent,
+        false,
+        state.upload_body_limit_bytes,
+    )
+    .await
+    {
+        Ok(()) => {
             remember_connected_ip(&state.visitor_ips, addr.ip().to_string());
             plain_response(StatusCode::CREATED, "Created")
         }
-        _ => plain_response(StatusCode::BAD_REQUEST, "Upload Failed"),
+        Err(message) => upload_read_error_response(&message),
     }
 }
 
@@ -797,20 +797,19 @@ async fn handler_upload_directory(
         Err(response) => return response,
     };
 
-    let multipart = match multipart {
+    let mut multipart = match multipart {
         Ok(multipart) => multipart,
         Err(err) => return multipart_rejection_response(err),
     };
 
-    let request = match read_upload_request(multipart, state.upload_body_limit_bytes).await {
-        Ok(request) => request,
+    let parent_node_id = match read_upload_parent_node_id(&mut multipart).await {
+        Ok(parent_node_id) => parent_node_id,
         Err(message) => return upload_read_error_response(&message),
     };
-    let (root, parent) =
-        match resolve_parent_directory_node(&state, &principal, &request.parent_node_id) {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
+    let (root, parent) = match resolve_parent_directory_node(&state, &principal, &parent_node_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     if let Err(response) = require_root_permission(
         &principal,
         &root.id,
@@ -818,22 +817,20 @@ async fn handler_upload_directory(
     ) {
         return response;
     }
-    let files = request.files;
-
-    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        for file in files {
-            ops::write_uploaded_file(&root, &parent, &file.relative_path, &file.contents, true)?;
-        }
-        Ok(())
-    })
-    .await;
-
-    match result {
-        Ok(Ok(())) => {
+    match write_upload_files_from_multipart(
+        &mut multipart,
+        &root,
+        &parent,
+        true,
+        state.upload_body_limit_bytes,
+    )
+    .await
+    {
+        Ok(()) => {
             remember_connected_ip(&state.visitor_ips, addr.ip().to_string());
             plain_response(StatusCode::CREATED, "Created")
         }
-        _ => plain_response(StatusCode::BAD_REQUEST, "Upload Failed"),
+        Err(message) => upload_read_error_response(&message),
     }
 }
 
@@ -1804,7 +1801,7 @@ mod tests {
                 delete_mode: model::DeleteMode::RecycleBin,
             },
             roots: resolved_roots,
-            sessions: Mutex::new(auth::SessionStore::default()),
+            sessions: Arc::new(Mutex::new(auth::SessionStore::default())),
             ip_rules: Vec::new(),
             upload_body_limit_bytes,
             visitor_ips: Arc::new(Mutex::new(HashMap::new())),
@@ -1828,7 +1825,26 @@ mod tests {
             saved_config_path: state.saved_config_path.clone(),
             config,
             roots: state.roots.clone(),
-            sessions: Mutex::new(auth::SessionStore::default()),
+            sessions: Arc::new(Mutex::new(auth::SessionStore::default())),
+            ip_rules: state.ip_rules.clone(),
+            upload_body_limit_bytes: state.upload_body_limit_bytes,
+            visitor_ips: state.visitor_ips.clone(),
+        })
+    }
+
+    fn test_state_with_accounts_and_sessions(
+        root_path: &Path,
+        upload_body_limit_bytes: usize,
+        accounts: Vec<model::PersistedFileShareUser>,
+        sessions: Arc<Mutex<auth::SessionStore>>,
+    ) -> Arc<HttpState> {
+        let state = test_state_with_accounts(root_path, upload_body_limit_bytes, accounts);
+
+        Arc::new(HttpState {
+            saved_config_path: state.saved_config_path.clone(),
+            config: state.config.clone(),
+            roots: state.roots.clone(),
+            sessions,
             ip_rules: state.ip_rules.clone(),
             upload_body_limit_bytes: state.upload_body_limit_bytes,
             visitor_ips: state.visitor_ips.clone(),
@@ -1886,7 +1902,7 @@ mod tests {
             saved_config_path: state.saved_config_path.clone(),
             config,
             roots: state.roots.clone(),
-            sessions: Mutex::new(auth::SessionStore::default()),
+            sessions: Arc::new(Mutex::new(auth::SessionStore::default())),
             ip_rules: state.ip_rules.clone(),
             upload_body_limit_bytes: state.upload_body_limit_bytes,
             visitor_ips: state.visitor_ips.clone(),
@@ -1959,7 +1975,7 @@ mod tests {
             saved_config_path: Some(config_path.to_path_buf()),
             config: runtime_config.clone(),
             roots: runtime_roots(&runtime_config),
-            sessions: Mutex::new(auth::SessionStore::default()),
+            sessions: Arc::new(Mutex::new(auth::SessionStore::default())),
             ip_rules: parse_runtime_ip_rules(&runtime_config).expect("ip rules should parse"),
             upload_body_limit_bytes,
             visitor_ips: Arc::new(Mutex::new(HashMap::new())),
@@ -1967,21 +1983,31 @@ mod tests {
     }
 
     fn multipart_body(file_size: usize) -> (String, Vec<u8>) {
+        multipart_body_for_parent(
+            &encode_node_id(&NodeLocator::ShareRoot {
+                root_id: "root-1".to_string(),
+            }),
+            "big.bin",
+            file_size,
+        )
+    }
+
+    fn multipart_body_for_parent(
+        parent_node_id: &str,
+        file_name: &str,
+        file_size: usize,
+    ) -> (String, Vec<u8>) {
         let boundary = "fst-boundary";
         let mut body = Vec::new();
         body.extend_from_slice(
             format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"root\"\r\n\r\nroot\r\n"
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"parent_node_id\"\r\n\r\n{parent_node_id}\r\n"
             )
             .as_bytes(),
         );
         body.extend_from_slice(
-            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"parent\"\r\n\r\n\r\n")
-                .as_bytes(),
-        );
-        body.extend_from_slice(
             format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
             )
             .as_bytes(),
         );
@@ -2057,6 +2083,48 @@ mod tests {
             StatusCode::PAYLOAD_TOO_LARGE,
             "unexpected upload response body: {}",
             String::from_utf8_lossy(&body)
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_routes_accept_payloads_above_axum_default_body_limit() {
+        let dir = TestDir::new("upload-large");
+        let app = build_router(test_state(dir.path(), 5 * 1024 * 1024));
+        let (content_type, body) = multipart_body_for_parent(
+            &encode_node_id(&NodeLocator::ShareRoot {
+                root_id: "root-1".to_string(),
+            }),
+            "large.bin",
+            3 * 1024 * 1024,
+        );
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/upload/files")
+                    .header(header::CONTENT_TYPE, content_type),
+                Body::from(body),
+            ))
+            .await
+            .expect("request should complete");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should be readable");
+
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "unexpected upload response body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(
+            fs::metadata(dir.path().join("large.bin"))
+                .expect("uploaded file should exist")
+                .len(),
+            3 * 1024 * 1024
         );
     }
 
@@ -2156,6 +2224,76 @@ mod tests {
             status,
             StatusCode::OK,
             "unexpected login body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(payload["username"], "admin");
+        assert_eq!(payload["is_guest"], false);
+    }
+
+    #[tokio::test]
+    async fn account_session_survives_rebuilt_http_state() {
+        let dir = TestDir::new("login-account-restart");
+        let sessions = Arc::new(Mutex::new(auth::SessionStore::default()));
+        let accounts = vec![test_account(
+            "admin",
+            "root-1",
+            Some(super::super::hash_password("secret-123")),
+        )];
+        let first_app = build_router(test_state_with_accounts_and_sessions(
+            dir.path(),
+            1024,
+            accounts.clone(),
+            sessions.clone(),
+        ));
+
+        let login_response = first_app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json"),
+                Body::from(r#"{"username":"admin","password":"secret-123"}"#),
+            ))
+            .await
+            .expect("login request should complete");
+        assert_eq!(login_response.status(), StatusCode::OK);
+        let cookie = login_response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("login should set a session cookie")
+            .split(';')
+            .next()
+            .expect("cookie header should include session pair")
+            .to_string();
+
+        let restarted_app = build_router(test_state_with_accounts_and_sessions(
+            dir.path(),
+            1024,
+            accounts,
+            sessions,
+        ));
+        let session_response = restarted_app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/session")
+                    .header(header::COOKIE, cookie),
+                Body::empty(),
+            ))
+            .await
+            .expect("session request should complete");
+        let status = session_response.status();
+        let body = to_bytes(session_response.into_body(), usize::MAX)
+            .await
+            .expect("session body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("session response should be json");
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected session body: {}",
             String::from_utf8_lossy(&body)
         );
         assert_eq!(payload["username"], "admin");

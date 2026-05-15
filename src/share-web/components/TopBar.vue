@@ -34,41 +34,43 @@ const sessionActionLabel = computed(() => {
 <template>
   <header class="topbar">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true">FS</div>
+      <div class="brand-mark" aria-hidden="true">
+        <Icon name="share" />
+      </div>
       <div>
         <div class="brand-name">{{ t('app.pageTitle') }}</div>
       </div>
     </div>
 
-    <div class="topbar-spacer" />
+    <div class="topbar-actions">
+      <button
+        type="button"
+        class="btn ghost"
+        :disabled="busy"
+        :title="t('toolbar.refresh')"
+        @click="emit('refresh')"
+      >
+        <Icon name="refresh" />
+        <span>{{ t('toolbar.refresh') }}</span>
+      </button>
 
-    <button
-      type="button"
-      class="btn ghost"
-      :disabled="busy"
-      :title="t('toolbar.refresh')"
-      @click="emit('refresh')"
-    >
-      <Icon name="refresh" />
-      <span>{{ t('toolbar.refresh') }}</span>
-    </button>
-
-    <div v-if="session" class="user-chip">
-      <div class="avatar">{{ userInitial }}</div>
-      <div class="who">
-        <div class="name">{{ session.username }}</div>
+      <div v-if="session" class="user-chip">
+        <div class="avatar">{{ userInitial }}</div>
+        <div class="who">
+          <div class="name">{{ session.username }}</div>
+        </div>
       </div>
-    </div>
 
-    <button
-      type="button"
-      class="btn"
-      :disabled="busy"
-      :title="sessionActionLabel"
-      @click="emit('session-action')"
-    >
-      <Icon name="switch" />
-      <span>{{ sessionActionLabel }}</span>
-    </button>
+      <button
+        type="button"
+        class="btn"
+        :disabled="busy"
+        :title="sessionActionLabel"
+        @click="emit('session-action')"
+      >
+        <Icon name="switch" />
+        <span>{{ sessionActionLabel }}</span>
+      </button>
+    </div>
   </header>
 </template>
