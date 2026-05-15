@@ -284,6 +284,111 @@ async function selectTargetDirectory() {
   }
 }
 
+async function previewBatch() {
+  inlineError.value = '';
+  batchSubmitting.value = false;
+
+  const target = targetRootPath.value.trim();
+  if (!target) {
+    inlineError.value = t('manualCopy.fillRequired');
+    return;
+  }
+
+  const sources = sourceLines.value;
+  if (sources.length === 0) {
+    inlineError.value = t('manualCopy.fillRequired');
+    return;
+  }
+
+  const resolutions = resolveBatchTargets(sources, target);
+  batchResolutions.value = resolutions;
+
+  const previewMap = new Map<string, { status: BatchPreviewStatus; finalTarget: string; errored?: boolean }>();
+  const checkedMap = new Map<string, boolean>();
+
+  await Promise.all(
+    resolutions.map(async (r) => {
+      if (r.status === 'invalid_path') {
+        previewMap.set(r.rawSource, { status: 'invalid_path', finalTarget: '' });
+        checkedMap.set(r.rawSource, false);
+        return;
+      }
+      if (r.status === 'duplicate_in_batch') {
+        previewMap.set(r.rawSource, { status: 'duplicate_in_batch', finalTarget: r.finalTarget });
+        checkedMap.set(r.rawSource, false);
+        return;
+      }
+      try {
+        const preview = await previewTemporaryCopy(r.rawSource, r.effectiveTargetRoot);
+        const status: BatchPreviewStatus = preview.target_exists ? 'target_exists' : 'ok';
+        previewMap.set(r.rawSource, { status, finalTarget: preview.resolved_target_path });
+        checkedMap.set(r.rawSource, status === 'ok');
+      } catch (error) {
+        previewMap.set(r.rawSource, { status: 'source_missing', finalTarget: r.finalTarget, errored: true });
+        checkedMap.set(r.rawSource, false);
+      }
+    }),
+  );
+
+  batchRowPreview.value = previewMap;
+  batchRowChecked.value = checkedMap;
+  batchPreviewOpen.value = true;
+}
+
+async function submitBatch() {
+  // Implemented in next commit (Task 7). Placeholder keeps typecheck green.
+}
+
+function backToBatchEdit() {
+  batchPreviewOpen.value = false;
+}
+
+function toggleAllBatchRows(checked: boolean) {
+  const next = new Map<string, boolean>();
+  for (const r of batchResolutions.value) {
+    if (r.status === 'invalid_path' || r.status === 'duplicate_in_batch') {
+      next.set(r.rawSource, false);
+      continue;
+    }
+    next.set(r.rawSource, checked);
+  }
+  batchRowChecked.value = next;
+}
+
+function toggleBatchRow(rawSource: string) {
+  const next = new Map(batchRowChecked.value);
+  next.set(rawSource, !next.get(rawSource));
+  batchRowChecked.value = next;
+}
+
+const checkedBatchCount = computed(() => {
+  let n = 0;
+  for (const checked of batchRowChecked.value.values()) if (checked) n++;
+  return n;
+});
+
+const allBatchRowsChecked = computed(() => {
+  // Selectable = anything except invalid_path (invalid rows have no
+  // resolvable target so they cannot be enqueued and stay disabled).
+  const selectable = batchResolutions.value.filter((r) => r.status !== 'invalid_path');
+  if (selectable.length === 0) return false;
+  return selectable.every((r) => batchRowChecked.value.get(r.rawSource) === true);
+});
+
+function batchStatusLabel(status: BatchPreviewStatus): string {
+  if (status === 'ok') return t('manualCopy.batch.statusOk');
+  if (status === 'target_exists') return t('manualCopy.batch.statusTargetExists');
+  if (status === 'source_missing') return t('manualCopy.batch.statusSourceMissing');
+  if (status === 'duplicate_in_batch') return t('manualCopy.batch.statusDuplicateInBatch');
+  return t('manualCopy.batch.statusInvalidPath');
+}
+
+function batchStatusClass(status: BatchPreviewStatus): string {
+  if (status === 'ok') return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+  if (status === 'target_exists') return 'bg-amber-100 text-amber-700 border-amber-200';
+  return 'bg-red-100 text-red-700 border-red-200';
+}
+
 async function submitCopy() {
   if (!canSubmit.value) {
     inlineError.value = t('manualCopy.fillRequired');
@@ -486,6 +591,87 @@ watch(() => props.isOpen, (open) => {
               </div>
             </div>
 
+            <!-- Batch mode preview (only when N >= 2 lines pasted) -->
+            <div
+              v-if="isBatchMode"
+              class="rounded-xl border border-blue-200 bg-blue-50/40 px-5 py-4 space-y-4"
+            >
+              <div class="flex items-center justify-between gap-3">
+                <span class="text-sm font-medium text-blue-700">
+                  {{ t('manualCopy.batch.filtersApplyAll', { count: sourceLines.length }) }}
+                </span>
+                <button
+                  v-if="!batchPreviewOpen"
+                  type="button"
+                  @click="previewBatch"
+                  :disabled="batchSubmitting || isSubmitting"
+                  class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  <Play class="w-4 h-4" aria-hidden="true" />
+                  {{ t('manualCopy.batch.previewButton', { count: sourceLines.length }) }}
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  @click="backToBatchEdit"
+                  class="text-sm text-slate-500 hover:text-slate-700"
+                >
+                  {{ t('manualCopy.batch.backToEdit') }}
+                </button>
+              </div>
+
+              <div v-if="batchPreviewOpen" class="space-y-2">
+                <table class="w-full text-sm border border-slate-200 rounded-lg overflow-hidden bg-white">
+                  <thead class="bg-slate-50 text-slate-600 text-xs uppercase tracking-wide">
+                    <tr>
+                      <th class="px-3 py-2 text-left w-10">
+                        <input
+                          type="checkbox"
+                          :checked="allBatchRowsChecked"
+                          @change="(e) => toggleAllBatchRows((e.target as HTMLInputElement).checked)"
+                          :aria-label="t('manualCopy.batch.selectAll')"
+                        />
+                      </th>
+                      <th class="px-3 py-2 text-left">{{ t('manualCopy.batch.colSource') }}</th>
+                      <th class="px-3 py-2 text-left">{{ t('manualCopy.batch.colTarget') }}</th>
+                      <th class="px-3 py-2 text-left w-32">{{ t('manualCopy.batch.colStatus') }}</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-100">
+                    <tr
+                      v-for="r in batchResolutions"
+                      :key="r.rawSource"
+                      class="hover:bg-slate-50"
+                    >
+                      <td class="px-3 py-2 align-top">
+                        <input
+                          type="checkbox"
+                          :checked="batchRowChecked.get(r.rawSource) === true"
+                          :disabled="batchRowPreview.get(r.rawSource)?.status === 'invalid_path'"
+                          @change="toggleBatchRow(r.rawSource)"
+                        />
+                      </td>
+                      <td class="px-3 py-2 font-mono text-xs break-all text-slate-700">{{ r.rawSource }}</td>
+                      <td class="px-3 py-2 font-mono text-xs break-all text-slate-600">
+                        {{ batchRowPreview.get(r.rawSource)?.finalTarget || r.finalTarget || '—' }}
+                      </td>
+                      <td class="px-3 py-2 align-top">
+                        <span
+                          class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border"
+                          :class="batchStatusClass(batchRowPreview.get(r.rawSource)?.status ?? r.status as BatchPreviewStatus)"
+                        >
+                          {{ batchStatusLabel(batchRowPreview.get(r.rawSource)?.status ?? r.status as BatchPreviewStatus) }}
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else class="text-xs text-slate-500">
+                {{ t('manualCopy.batch.emptyPreviewHint') }}
+              </div>
+            </div>
+
             <!-- Inline error message (form validation feedback). Toast-style
                  success/info notifications are pushed through useToast. -->
             <div
@@ -609,6 +795,7 @@ watch(() => props.isOpen, (open) => {
         <!-- Modal Footer -->
         <div class="sticky bottom-0 z-10 border-t border-slate-200 bg-white px-6 py-4 flex items-center justify-end gap-3">
           <button
+            v-if="!isBatchMode"
             @click="submitCopy"
             :disabled="!canSubmit"
             class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-white font-medium transition-colors motion-reduce:transition-none disabled:opacity-60 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 focus-visible:ring-offset-1"
@@ -616,6 +803,16 @@ watch(() => props.isOpen, (open) => {
             <Loader2 v-if="isSubmitting" class="w-4 h-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
             <Play v-else class="w-4 h-4" aria-hidden="true" />
             {{ isSubmitting ? t('manualCopy.submitting') : t('manualCopy.startCopy') }}
+          </button>
+          <button
+            v-else
+            @click="submitBatch"
+            :disabled="!batchPreviewOpen || checkedBatchCount === 0 || batchSubmitting"
+            class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-white font-medium transition-colors motion-reduce:transition-none disabled:opacity-60 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 focus-visible:ring-offset-1"
+          >
+            <Loader2 v-if="batchSubmitting" class="w-4 h-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            <Play v-else class="w-4 h-4" aria-hidden="true" />
+            {{ t('manualCopy.batch.submitButton', { count: checkedBatchCount }) }}
           </button>
         </div>
 
