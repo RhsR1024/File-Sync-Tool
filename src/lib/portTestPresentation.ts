@@ -71,6 +71,28 @@ export function filterPortRows(
     .sort((a, b) => a.port - b.port);
 }
 
+export interface OpenPortCard {
+  port: number;
+  name: string | null;
+  latencyMs: number | null;
+}
+
+export function buildOpenPortCards(
+  rows: ReadonlyMap<number, SinglePortResult>,
+): OpenPortCard[] {
+  const open: OpenPortCard[] = [];
+  for (const row of rows.values()) {
+    if (!row.open) continue;
+    open.push({
+      port: row.port,
+      name: row.name ? row.name : null,
+      latencyMs: row.latencyMs,
+    });
+  }
+  open.sort((a, b) => a.port - b.port);
+  return open;
+}
+
 function range(start: number, end: number): number[] {
   const values: number[] = [];
   for (let i = start; i <= end; i++) values.push(i);
