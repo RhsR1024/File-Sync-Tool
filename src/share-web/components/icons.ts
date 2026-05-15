@@ -145,6 +145,16 @@ const ICONS: Record<string, IconRender> = {
       'stroke-linejoin': 'round',
     }),
   },
+  arrowLeft: {
+    draw: () => h('path', {
+      d: 'M19 12H5m0 0 5-5m-5 5 5 5',
+      fill: 'none',
+      stroke: 'currentColor',
+      'stroke-width': 1.8,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+    }),
+  },
   sortAsc: {
     draw: () => h('path', {
       d: 'M7 4v16m0 0-3-3m3 3 3-3M13 7h7M13 12h5M13 17h3',

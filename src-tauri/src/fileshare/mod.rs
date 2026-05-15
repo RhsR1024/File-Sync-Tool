@@ -819,10 +819,11 @@ fn authenticate_account(
     let runtime = state.request_runtime();
     let (account, is_guest) = find_enabled_user(&runtime.config, username)
         .ok_or_else(|| "Account not found".to_string())?;
-    if let Some(expected_hash) = &account.password_hash {
-        if !verify_password_hash(expected_hash, password) {
-            return Err("Invalid credentials".to_string());
-        }
+    match &account.password_hash {
+        Some(expected_hash) if verify_password_hash(expected_hash, password) => {}
+        Some(_) => return Err("Invalid credentials".to_string()),
+        None if is_guest => {}
+        None => return Err("Account password is not set".to_string()),
     }
 
     let principal = principal_for_user(account, is_guest);

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { fileShareApi } from '../api';
+import { entryListHint } from '../lib/entry-display';
 import { getFileGlyphStyle, isCjk } from '../lib/file-glyph';
 import type { EntrySortDirection, EntrySortKey } from '../lib/sort-preference';
 import { timeAgo } from '../lib/time-ago';
@@ -132,13 +133,7 @@ function relativeTime(value: string | null | undefined): string {
 }
 
 function hintLine(entry: FileShareNode): string {
-  if (props.searchActive && entry.display_path && entry.display_path !== entry.name) {
-    return entry.display_path;
-  }
-  if (entry.is_dir) {
-    return entry.root_alias ? entry.root_alias : '';
-  }
-  return getFileGlyphStyle(entry.name).label;
+  return entryListHint(entry, Boolean(props.searchActive));
 }
 
 function isHintCjk(value: string): boolean {

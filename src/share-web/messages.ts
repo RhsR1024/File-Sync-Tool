@@ -64,6 +64,7 @@ export const messages = {
       createDirectory: 'New folder',
       createText: 'New text',
       downloadAll: 'Download all',
+      backToParent: 'Back',
     },
     search: {
       scopeLabel: 'Search scope',
@@ -211,6 +212,7 @@ export const messages = {
       createDirectory: '新建文件夹',
       createText: '新建文本',
       downloadAll: '下载全部',
+      backToParent: '返回上一层',
     },
     search: {
       scopeLabel: '搜索范围',

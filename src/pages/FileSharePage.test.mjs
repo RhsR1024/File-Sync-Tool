@@ -26,3 +26,10 @@ test('file share shared roots render the path as the primary single-line label',
   assert.doesNotMatch(pageSource, /displayRootName\(root\)/);
   assert.doesNotMatch(pageSource, /class="fs-root-path"/);
 });
+
+test('new shared roots grant read-only access to every account by default', () => {
+  assert.match(pageSource, /const readOnlyRootPermission = \(rootId: string\): FileShareUserRootPermissions =>/);
+  assert.match(pageSource, /const grantReadOnlyRootToAllUsers = \(rootId: string\) =>/);
+  assert.match(pageSource, /for \(const user of \[draft\.value\.guest_account, \.\.\.draft\.value\.accounts\]\)/);
+  assert.match(pageSource, /grantReadOnlyRootToAllUsers\(root\.id\)/);
+});

@@ -68,6 +68,24 @@ const cloneRootPerms = (entry: FileShareUserRootPermissions): FileShareUserRootP
   preset: entry.preset,
   permissions: clonePerms(entry.permissions),
 });
+const readOnlyRootPermission = (rootId: string): FileShareUserRootPermissions => ({
+  root_id: rootId,
+  preset: 'read_only',
+  permissions: {
+    browse: true,
+    download_file: true,
+    download_archive: true,
+    upload_file: false,
+    upload_directory: false,
+    create_directory: false,
+    create_text: false,
+    rename: false,
+    delete: false,
+    preview_image: true,
+    search_current: true,
+    search_global: true,
+  },
+});
 const nextDraftKey = () => `file-share-user-${draftKeySeed++}`;
 const guestView = (): FileShareUserView => ({
   username: t('tools.fileShare.defaultGuestUsername'),
@@ -203,6 +221,15 @@ const setQrCanvas = (url: string, el: unknown) => {
   qrCanvases.value[url] = (el as HTMLCanvasElement | null) ?? null;
 };
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
+
+const grantReadOnlyRootToAllUsers = (rootId: string) => {
+  for (const user of [draft.value.guest_account, ...draft.value.accounts]) {
+    if (user.root_permissions.some((entry) => entry.root_id === rootId)) {
+      continue;
+    }
+    user.root_permissions.push(readOnlyRootPermission(rootId));
+  }
+};
 
 const guest = computed(() => draft.value.guest_account);
 const customAccounts = computed(() => draft.value.accounts);
@@ -405,7 +432,9 @@ const addRoot = async (target?: FileShareRoot) => {
     let id = slug(alias, 'root');
     let n = 2;
     while (used.has(id)) id = `${slug(alias, 'root')}-${n++}`;
-    draft.value.roots.push({ id, alias, path: dir.path, enabled: true });
+    const root = { id, alias, path: dir.path, enabled: true };
+    draft.value.roots.push(root);
+    grantReadOnlyRootToAllUsers(root.id);
   } catch (e) {
     errorMsg.value = String(e);
   }

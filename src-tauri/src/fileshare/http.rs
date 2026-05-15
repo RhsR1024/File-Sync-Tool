@@ -1815,6 +1815,43 @@ mod tests {
         test_state_with_roots(&[("root", root_path)], upload_body_limit_bytes)
     }
 
+    fn test_state_with_accounts(
+        root_path: &Path,
+        upload_body_limit_bytes: usize,
+        accounts: Vec<model::PersistedFileShareUser>,
+    ) -> Arc<HttpState> {
+        let state = test_state(root_path, upload_body_limit_bytes);
+        let mut config = state.config.clone();
+        config.accounts = accounts;
+
+        Arc::new(HttpState {
+            saved_config_path: state.saved_config_path.clone(),
+            config,
+            roots: state.roots.clone(),
+            sessions: Mutex::new(auth::SessionStore::default()),
+            ip_rules: state.ip_rules.clone(),
+            upload_body_limit_bytes: state.upload_body_limit_bytes,
+            visitor_ips: state.visitor_ips.clone(),
+        })
+    }
+
+    fn test_account(
+        username: &str,
+        root_id: &str,
+        password_hash: Option<String>,
+    ) -> model::PersistedFileShareUser {
+        model::PersistedFileShareUser {
+            username: username.to_string(),
+            enabled: true,
+            root_permissions: vec![model::UserRootPermissions {
+                root_id: root_id.to_string(),
+                preset: model::PermissionPreset::ReadOnly,
+                permissions: model::FileSharePermissionSet::read_only(),
+            }],
+            password_hash,
+        }
+    }
+
     fn test_state_with_named_roots(
         roots: &[(&str, &Path)],
         upload_body_limit_bytes: usize,
@@ -2057,6 +2094,72 @@ mod tests {
         assert!(payload.get("account_id").is_none());
         assert!(payload.get("account_name").is_none());
         assert!(set_cookie.is_some());
+    }
+
+    #[tokio::test]
+    async fn login_rejects_regular_account_without_password_hash() {
+        let dir = TestDir::new("login-account-missing-password");
+        let state = test_state_with_accounts(
+            dir.path(),
+            1024,
+            vec![test_account("admin", "root-1", None)],
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json"),
+                Body::from(r#"{"username":"admin","password":"anything"}"#),
+            ))
+            .await
+            .expect("login request should complete");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn login_accepts_regular_account_with_matching_password() {
+        let dir = TestDir::new("login-account-valid-password");
+        let state = test_state_with_accounts(
+            dir.path(),
+            1024,
+            vec![test_account(
+                "admin",
+                "root-1",
+                Some(super::super::hash_password("secret-123")),
+            )],
+        );
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json"),
+                Body::from(r#"{"username":"admin","password":"secret-123"}"#),
+            ))
+            .await
+            .expect("login request should complete");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("login body should be readable");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("login response should be json");
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected login body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(payload["username"], "admin");
+        assert_eq!(payload["is_guest"], false);
     }
 
     #[tokio::test]

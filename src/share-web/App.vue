@@ -30,6 +30,8 @@ import {
   recordRecentPath,
   type RecentPathEntry,
 } from './lib/recent-paths';
+import { sortEntriesForExplorer } from './lib/entry-sort';
+import { parentNodeIdFromBreadcrumbs } from './lib/navigation';
 import {
   parseHash,
   pushPath,
@@ -123,6 +125,8 @@ const currentNodeId = computed(() => tree.value?.current.node_id ?? null);
 const currentKind = computed<FileShareTreeCurrentKind | null>(() => tree.value?.current.kind ?? null);
 const currentName = computed(() => tree.value?.current.name ?? '');
 const breadcrumbs = computed(() => tree.value?.breadcrumbs ?? []);
+const parentNodeId = computed(() => parentNodeIdFromBreadcrumbs(breadcrumbs.value));
+const canNavigateUp = computed(() => parentNodeId.value !== undefined);
 const searchActive = computed(() => activeKeyword.value.length > 0);
 const rawEntries = computed(() => (
   searchActive.value
@@ -130,35 +134,10 @@ const rawEntries = computed(() => (
     : tree.value?.children ?? []
 ));
 
-const displayedEntries = computed(() => {
-  const list = rawEntries.value.slice();
-  const dir = sortDirection.value === 'asc' ? 1 : -1;
-  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-
-  list.sort((a, b) => {
-    if (a.is_dir !== b.is_dir) {
-      return a.is_dir ? -1 : 1;
-    }
-    let cmp = 0;
-    if (sortKey.value === 'name') {
-      cmp = collator.compare(a.name, b.name);
-    } else if (sortKey.value === 'size') {
-      const aSize = a.is_dir ? -1 : (a.size ?? -1);
-      const bSize = b.is_dir ? -1 : (b.size ?? -1);
-      cmp = aSize - bSize;
-    } else {
-      const aTime = a.modified ? Date.parse(a.modified) : 0;
-      const bTime = b.modified ? Date.parse(b.modified) : 0;
-      cmp = (Number.isFinite(aTime) ? aTime : 0) - (Number.isFinite(bTime) ? bTime : 0);
-    }
-    if (cmp === 0) {
-      cmp = collator.compare(a.name, b.name);
-      return cmp;
-    }
-    return cmp * dir;
-  });
-  return list;
-});
+const displayedEntries = computed(() => sortEntriesForExplorer(rawEntries.value, {
+  key: sortKey.value,
+  direction: sortDirection.value,
+}));
 
 const folderCount = computed(() => displayedEntries.value.filter((entry) => entry.is_dir).length);
 const fileCount = computed(() => displayedEntries.value.length - folderCount.value);
@@ -1011,6 +990,13 @@ async function navigate(nodeId: string | null) {
   }
 }
 
+function navigateUp() {
+  if (parentNodeId.value === undefined) {
+    return;
+  }
+  void navigate(parentNodeId.value);
+}
+
 function currentParentNodeId(): string | null {
   return currentKind.value === 'home' ? null : currentNodeId.value;
 }
@@ -1427,12 +1413,26 @@ watchEffect(() => {
       <Breadcrumbs :breadcrumbs="breadcrumbs" :busy="busy" @navigate="navigate" />
 
       <div class="page-head">
-        <div>
-          <h1 class="page-title">
-            {{ pageTitle }}
-            <span v-if="pageStatLabel" class="sub">{{ pageStatLabel }}</span>
-          </h1>
-          <div v-if="pageSubText" class="page-sub">{{ pageSubText }}</div>
+        <div class="page-head-left">
+          <button
+            v-if="canNavigateUp"
+            type="button"
+            class="btn page-back"
+            :disabled="busy"
+            :title="t('toolbar.backToParent')"
+            :aria-label="t('toolbar.backToParent')"
+            @click="navigateUp"
+          >
+            <Icon name="arrowLeft" />
+            <span>{{ t('toolbar.backToParent') }}</span>
+          </button>
+          <div class="page-title-block">
+            <h1 class="page-title">
+              {{ pageTitle }}
+              <span v-if="pageStatLabel" class="sub">{{ pageStatLabel }}</span>
+            </h1>
+            <div v-if="pageSubText" class="page-sub">{{ pageSubText }}</div>
+          </div>
         </div>
         <ToolbarActions
           :current-kind="currentKind"
