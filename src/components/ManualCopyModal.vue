@@ -336,7 +336,59 @@ async function previewBatch() {
 }
 
 async function submitBatch() {
-  // Implemented in next commit (Task 7). Placeholder keeps typecheck green.
+  if (!batchPreviewOpen.value || checkedBatchCount.value === 0) return;
+  inlineError.value = '';
+  batchSubmitting.value = true;
+  const exts = [...selectedExtensions.value];
+  const kws = [...selectedKeywords.value];
+
+  const ordered = batchResolutions.value.filter(
+    (r) => batchRowChecked.value.get(r.rawSource) === true,
+  );
+
+  const total = ordered.length;
+  let ok = 0;
+  const failedRows: string[] = [];
+
+  for (const r of ordered) {
+    const preview = batchRowPreview.value.get(r.rawSource);
+    const overwrite = preview?.status === 'target_exists';
+    try {
+      await queueTemporaryCopy(r.rawSource, r.effectiveTargetRoot, overwrite, exts, kws);
+      ok++;
+    } catch (error) {
+      failedRows.push(r.rawSource);
+      const nextPreview = new Map(batchRowPreview.value);
+      nextPreview.set(r.rawSource, {
+        status: 'source_missing',
+        finalTarget: r.finalTarget,
+        errored: true,
+      });
+      batchRowPreview.value = nextPreview;
+      // Log to console only; toast summary is pushed below.
+      console.warn('queueTemporaryCopy failed for', r.rawSource, error);
+    }
+  }
+
+  batchSubmitting.value = false;
+
+  if (failedRows.length === 0) {
+    notify(t('manualCopy.batch.toastSuccessAll', { count: ok }), 'success');
+    // Reset and close like the single-source success flow.
+    sourcePath.value = '';
+    batchPreviewOpen.value = false;
+    batchResolutions.value = [];
+    batchRowPreview.value = new Map();
+    batchRowChecked.value = new Map();
+    emit('success');
+    emit('close');
+  } else {
+    notify(
+      t('manualCopy.batch.toastPartial', { ok, total }),
+      'error',
+    );
+    // Keep the modal open; failed rows remain visibly red for the user.
+  }
 }
 
 function backToBatchEdit() {
