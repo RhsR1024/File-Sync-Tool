@@ -253,14 +253,6 @@ const isLoadingScopes = computed(() =>
   scopePanels.value.some((panel) => panel.state.isLoading),
 );
 
-const scopeSummaryText = computed(() => {
-  if (mode.value === 'incremental') {
-    return [oldScopeSummaryLine.value, newScopeSummaryLine.value].join(' | ');
-  }
-
-  return projectScopeSummaryLine.value;
-});
-
 const oldScopeSummaryText = computed(() => getScopeSummaryText(oldScopeState));
 const newScopeSummaryText = computed(() => getScopeSummaryText(newScopeState));
 const projectScopeSummaryText = computed(() => getScopeSummaryText(projectScopeState));

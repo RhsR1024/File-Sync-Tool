@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/* eslint-disable vue/no-mutating-props -- This component edits the parent-owned file-share draft object in place. */
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { Sliders } from 'lucide-vue-next';

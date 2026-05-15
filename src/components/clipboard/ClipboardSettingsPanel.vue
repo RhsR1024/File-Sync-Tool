@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { emit } from '@tauri-apps/api/event';
-import { computed, nextTick, reactive, ref } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import AppFilterTab from '@/components/clipboard-settings/AppFilterTab.vue';

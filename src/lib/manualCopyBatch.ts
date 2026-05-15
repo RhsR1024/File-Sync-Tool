@@ -10,10 +10,10 @@ export interface BatchEntryResolution {
   status: BatchStatus;
 }
 
-const SEGMENT_SPLIT = /[\\\/]+/;
+const SEGMENT_SPLIT = /[\\/]+/;
 
 function normalizeSegments(raw: string): string[] {
-  const trimmed = raw.replace(/^\s+|\s+$/g, '').replace(/[\\\/]+$/g, '');
+  const trimmed = raw.replace(/^\s+|\s+$/g, '').replace(/[\\/]+$/g, '');
   if (!trimmed) return [];
   // Preserve UNC prefix `\\server\share` semantics: keep the first two
   // segments as-is. The split will already produce them as separate items.
@@ -74,7 +74,7 @@ export function resolveBatchTargets(
         const start = Math.max(0, segs.length - depth - 1);
         const disambig = segs.slice(start, segs.length - 1);
         const tail = segs[segs.length - 1];
-        const effRoot = joinWindowsPath([targetRoot.replace(/[\\\/]+$/g, ''), ...disambig]);
+        const effRoot = joinWindowsPath([targetRoot.replace(/[\\/]+$/g, ''), ...disambig]);
         resolutions[i].disambiguatorSegments = disambig;
         resolutions[i].effectiveTargetRoot = effRoot;
         resolutions[i].finalTarget = joinWindowsPath([effRoot, tail]);
@@ -104,7 +104,7 @@ export function resolveBatchTargets(
     const segs = normalized[i].segs;
     const disambig = segs.slice(0, segs.length - 1);
     const tail = segs[segs.length - 1];
-    const effRoot = joinWindowsPath([targetRoot.replace(/[\\\/]+$/g, ''), ...disambig]);
+    const effRoot = joinWindowsPath([targetRoot.replace(/[\\/]+$/g, ''), ...disambig]);
     resolutions[i].disambiguatorSegments = disambig;
     resolutions[i].effectiveTargetRoot = effRoot;
     resolutions[i].finalTarget = joinWindowsPath([effRoot, tail]);
