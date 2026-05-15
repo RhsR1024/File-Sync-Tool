@@ -73,11 +73,13 @@ const EXT_PALETTE: Record<string, ExtPalette> = {
 const FALLBACK_HUE = 240;
 
 function paletteFromHue(label: string, hue: number): FileGlyphStyle {
+  // HSL chosen instead of OKLCH because older Chromium builds (Edge < 111)
+  // do not parse oklch(), which leaves the glyph swatches uncolored.
   return {
     label,
-    color: `oklch(0.42 0.10 ${hue})`,
-    bg: `oklch(0.96 0.025 ${hue})`,
-    border: `oklch(0.88 0.05 ${hue})`,
+    color: `hsl(${hue} 38% 36%)`,
+    bg: `hsl(${hue} 55% 95%)`,
+    border: `hsl(${hue} 45% 82%)`,
   };
 }
 

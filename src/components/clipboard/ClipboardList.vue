@@ -13,6 +13,7 @@ import {
   formatClipboardTimeLabel,
   resolveClipboardSourceBadge,
 } from '@/lib/clipboardListPresentation';
+import { resolveClipboardItemHeight } from '@/lib/clipboardListLayout';
 import {
   createDefaultClipboardSettings,
   type ClipboardDisplaySettings,
@@ -105,28 +106,9 @@ function onRowKeydown(event: KeyboardEvent, id: number) {
 }
 
 function heightOf(item: ClipboardItem): number {
-  const densityAdjust = (() => {
-    switch (displaySettings.value.density) {
-      case 'compact':
-        return -8;
-      case 'spacious':
-        return 16;
-      case 'standard':
-      default:
-        return 0;
-    }
-  })();
-
-  if (item.kind === 'image') {
-    const fixedHeightAdjust = displaySettings.value.image_auto_height ? 0 : 18;
-    return (props.compact ? 148 : 168) + densityAdjust + fixedHeightAdjust;
-  }
-  if (item.kind === 'file') {
-    return (props.compact ? 80 : 96) + densityAdjust;
-  }
-
-  const lineAdjust = Math.max(0, previewLines.value - 2) * 18;
-  return (props.compact ? 72 : 88) + densityAdjust + lineAdjust;
+  return resolveClipboardItemHeight(item, displaySettings.value, {
+    compact: props.compact,
+  });
 }
 
 function displayIndex(index: number): number {

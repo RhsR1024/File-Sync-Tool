@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, X as XIcon } from 'lucide-vue-next';
-import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshResult, type ApplianceSshTarget } from '../lib/tauri';
+import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshApiVersion, type ApplianceSshResult, type ApplianceSshTarget, type ApplianceSshWhitelistScope } from '../lib/tauri';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
 import Empty from '../components/Empty.vue';
 import { pushToast } from '../composables/useToast';
@@ -20,6 +20,8 @@ const manualIpTags = ref<string[]>([]);
 const manualIpInput = ref<string>('');
 const ipInputRef = ref<HTMLInputElement | null>(null);
 const recentIps = ref<string[]>([]);
+const applianceVersion = ref<ApplianceSshApiVersion>('componentized');
+const whitelistScope = ref<ApplianceSshWhitelistScope>('allTcp');
 const sshUsername = ref<string>('root');
 const sshPassword = ref<string>('admin_123');
 const showSshPassword = ref(false);
@@ -281,6 +283,8 @@ const handleExecute = async () => {
 
     const response = await enableApplianceSsh({
       targets,
+      applianceVersion: applianceVersion.value,
+      whitelistScope: whitelistScope.value,
       sshUsername: sshUsername.value.trim(),
       sshPassword: sshPassword.value,
       addWhitelistRule: addWhitelistRule.value,
@@ -456,6 +460,21 @@ const enableStateClass = (value?: number) => {
                 <option v-for="ip in recentIps" :key="`appliance-ssh-recent-${ip}`" :value="ip" />
               </datalist>
               <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.manualIpHint') }}</p>
+              <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <label for="appliance-ssh-version" class="text-xs font-medium text-slate-600">{{ t('tools.applianceSsh.applianceVersion') }}</label>
+                  <p class="text-xs text-slate-400 mt-0.5">{{ t('tools.applianceSsh.applianceVersionHint') }}</p>
+                </div>
+                <select
+                  id="appliance-ssh-version"
+                  v-model="applianceVersion"
+                  :disabled="isLoading"
+                  class="w-full sm:w-48 px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed bg-white text-slate-700 transition-colors"
+                >
+                  <option value="componentized">{{ t('tools.applianceSsh.applianceVersionComponentized') }}</option>
+                  <option value="mainline">{{ t('tools.applianceSsh.applianceVersionMainline') }}</option>
+                </select>
+              </div>
               <div v-if="recentIps.length > 0" class="mt-3 space-y-2">
                 <div class="flex items-center justify-between gap-2">
                   <span class="text-xs font-medium text-slate-500">{{ t('tools.applianceSsh.recentIps') }}</span>
@@ -620,6 +639,34 @@ const enableStateClass = (value?: number) => {
                       {{ t(showSshPassword ? 'tools.applianceSsh.hidePassword' : 'tools.applianceSsh.showPassword') }}
                     </button>
                   </div>
+                </div>
+
+                <!-- Whitelist scope -->
+                <div class="mt-4 pt-4 border-t border-slate-100">
+                  <div class="text-xs font-medium text-slate-600 mb-2">{{ t('tools.applianceSsh.whitelistScopeLabel') }}</div>
+                  <div class="flex flex-wrap items-center gap-x-5 gap-y-2">
+                    <label class="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                      <input
+                        v-model="whitelistScope"
+                        type="radio"
+                        value="allTcp"
+                        :disabled="isLoading"
+                        class="text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                      />
+                      <span>{{ t('tools.applianceSsh.whitelistScopeAllTcp') }}</span>
+                    </label>
+                    <label class="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                      <input
+                        v-model="whitelistScope"
+                        type="radio"
+                        value="sshOnly"
+                        :disabled="isLoading"
+                        class="text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                      />
+                      <span>{{ t('tools.applianceSsh.whitelistScopeSshOnly') }}</span>
+                    </label>
+                  </div>
+                  <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.whitelistScopeHint') }}</p>
                 </div>
 
                 <!-- Whitelist source (local IP auto / custom CIDR) -->

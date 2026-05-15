@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n';
 
 import { fileShareApi } from '../api';
 import { getFileGlyphStyle, isCjk } from '../lib/file-glyph';
+import type { EntrySortDirection, EntrySortKey } from '../lib/sort-preference';
 import { timeAgo } from '../lib/time-ago';
 import type { EntryViewMode } from '../lib/view-mode';
 import {
@@ -24,6 +25,8 @@ const props = defineProps<{
   searchActive?: boolean;
   view?: EntryViewMode;
   selectedIds: Set<string>;
+  sortKey: EntrySortKey;
+  sortDirection: EntrySortDirection;
 }>();
 
 const emit = defineEmits<{
@@ -34,6 +37,7 @@ const emit = defineEmits<{
   delete: [entry: FileShareNode];
   'toggle-select': [nodeId: string];
   'select-all': [];
+  sort: [key: EntrySortKey];
 }>();
 
 const { t } = useI18n();
@@ -62,6 +66,35 @@ const headerCheckState = computed<'unchecked' | 'partial' | 'checked'>(() => {
   }
   return 'unchecked';
 });
+
+const sortLabel = computed(() => {
+  if (props.sortKey === 'name') {
+    return t('app.sortByName');
+  }
+  if (props.sortKey === 'size') {
+    return t('app.sortBySize');
+  }
+  return t('app.sortByModified');
+});
+
+const sortDirectionLabel = computed(() => (
+  props.sortDirection === 'asc' ? t('app.sortAscending') : t('app.sortDescending')
+));
+
+const sortSummary = computed(() => (
+  t('app.sortSummary', { label: sortLabel.value, dir: sortDirectionLabel.value })
+));
+
+function sortHeaderAria(label: string): string {
+  return t('app.sortByLabel', { label });
+}
+
+function sortAriaValue(key: EntrySortKey): 'ascending' | 'descending' | 'none' {
+  if (props.sortKey !== key) {
+    return 'none';
+  }
+  return props.sortDirection === 'asc' ? 'ascending' : 'descending';
+}
 
 const timeAgoFormatter = computed(() => ({
   justNow: t('app.timeAgoJustNow'),
@@ -133,8 +166,8 @@ function handleTileClick(entry: FileShareNode, event: MouseEvent) {
           {{ t('app.folderCount', { n: folderCount }) }} · {{ t('app.fileCount', { n: fileCount }) }}
         </span>
         <div class="sort">
-          <Icon name="sortAsc" />
-          <span>{{ t('app.sortByModified') }}</span>
+          <Icon :name="sortDirection === 'asc' ? 'sortAsc' : 'sortDesc'" />
+          <span>{{ sortSummary }}</span>
         </div>
       </div>
 
@@ -149,9 +182,48 @@ function handleTileClick(entry: FileShareNode, event: MouseEvent) {
         >
           <Icon name="check" />
         </button>
-        <span>{{ t('table.name') }}</span>
-        <span>{{ t('table.size') }}</span>
-        <span>{{ t('table.modified') }}</span>
+        <button
+          type="button"
+          class="col-sort"
+          :class="{ active: sortKey === 'name' }"
+          :aria-sort="sortAriaValue('name')"
+          :aria-label="sortHeaderAria(t('table.name'))"
+          @click="emit('sort', 'name')"
+        >
+          <span>{{ t('table.name') }}</span>
+          <Icon
+            v-if="sortKey === 'name'"
+            :name="sortDirection === 'asc' ? 'chevronUp' : 'chevronDown'"
+          />
+        </button>
+        <button
+          type="button"
+          class="col-sort"
+          :class="{ active: sortKey === 'size' }"
+          :aria-sort="sortAriaValue('size')"
+          :aria-label="sortHeaderAria(t('table.size'))"
+          @click="emit('sort', 'size')"
+        >
+          <span>{{ t('table.size') }}</span>
+          <Icon
+            v-if="sortKey === 'size'"
+            :name="sortDirection === 'asc' ? 'chevronUp' : 'chevronDown'"
+          />
+        </button>
+        <button
+          type="button"
+          class="col-sort"
+          :class="{ active: sortKey === 'modified' }"
+          :aria-sort="sortAriaValue('modified')"
+          :aria-label="sortHeaderAria(t('table.modified'))"
+          @click="emit('sort', 'modified')"
+        >
+          <span>{{ t('table.modified') }}</span>
+          <Icon
+            v-if="sortKey === 'modified'"
+            :name="sortDirection === 'asc' ? 'chevronUp' : 'chevronDown'"
+          />
+        </button>
         <span class="col-actions">{{ t('table.actions') }}</span>
       </div>
 

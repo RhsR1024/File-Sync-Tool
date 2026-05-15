@@ -40,7 +40,7 @@ function handleKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="toolbar">
+  <div class="toolbar" :class="{ 'has-search': keyword.trim().length > 0 }">
     <label class="search">
       <Icon name="search" />
       <input
@@ -55,7 +55,12 @@ function handleKeydown(event: KeyboardEvent) {
       <kbd>⌘K</kbd>
     </label>
 
-    <div class="scope-toggle" role="tablist" :aria-label="t('search.scopeLabel')">
+    <div
+      v-if="keyword.trim().length > 0"
+      class="scope-toggle"
+      role="tablist"
+      :aria-label="t('search.scopeLabel')"
+    >
       <button
         type="button"
         :class="{ active: scope === 'current' }"

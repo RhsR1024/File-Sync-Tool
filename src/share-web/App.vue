@@ -38,6 +38,12 @@ import {
   type UrlState,
 } from './lib/url-state';
 import { loadViewMode, saveViewMode, type EntryViewMode } from './lib/view-mode';
+import {
+  loadSortPreference,
+  saveSortPreference,
+  type EntrySortDirection,
+  type EntrySortKey,
+} from './lib/sort-preference';
 import { FILE_SHARE_WEB_SESSION_HEARTBEAT_INTERVAL_MS } from '../lib/lanShareStatus';
 import {
   canPreviewEntry,
@@ -72,6 +78,9 @@ const activeSearchScope = ref<FileShareSearchScope>('global');
 const searchResults = ref<FileShareNode[]>([]);
 
 const view = ref<EntryViewMode>(loadViewMode());
+const initialSort = loadSortPreference();
+const sortKey = ref<EntrySortKey>(initialSort.key);
+const sortDirection = ref<EntrySortDirection>(initialSort.direction);
 const selectedIds = ref<Set<string>>(new Set());
 
 const pageError = ref('');
@@ -115,11 +124,41 @@ const currentKind = computed<FileShareTreeCurrentKind | null>(() => tree.value?.
 const currentName = computed(() => tree.value?.current.name ?? '');
 const breadcrumbs = computed(() => tree.value?.breadcrumbs ?? []);
 const searchActive = computed(() => activeKeyword.value.length > 0);
-const displayedEntries = computed(() => (
+const rawEntries = computed(() => (
   searchActive.value
     ? searchResults.value
     : tree.value?.children ?? []
 ));
+
+const displayedEntries = computed(() => {
+  const list = rawEntries.value.slice();
+  const dir = sortDirection.value === 'asc' ? 1 : -1;
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+  list.sort((a, b) => {
+    if (a.is_dir !== b.is_dir) {
+      return a.is_dir ? -1 : 1;
+    }
+    let cmp = 0;
+    if (sortKey.value === 'name') {
+      cmp = collator.compare(a.name, b.name);
+    } else if (sortKey.value === 'size') {
+      const aSize = a.is_dir ? -1 : (a.size ?? -1);
+      const bSize = b.is_dir ? -1 : (b.size ?? -1);
+      cmp = aSize - bSize;
+    } else {
+      const aTime = a.modified ? Date.parse(a.modified) : 0;
+      const bTime = b.modified ? Date.parse(b.modified) : 0;
+      cmp = (Number.isFinite(aTime) ? aTime : 0) - (Number.isFinite(bTime) ? bTime : 0);
+    }
+    if (cmp === 0) {
+      cmp = collator.compare(a.name, b.name);
+      return cmp;
+    }
+    return cmp * dir;
+  });
+  return list;
+});
 
 const folderCount = computed(() => displayedEntries.value.filter((entry) => entry.is_dir).length);
 const fileCount = computed(() => displayedEntries.value.length - folderCount.value);
@@ -129,22 +168,6 @@ const canSearchCurrent = computed(() => (
   && Boolean(session.value?.permissions.search_current)
 ));
 const canSearchGlobal = computed(() => Boolean(session.value?.permissions.search_global));
-
-const browseOnlyHint = computed(() => {
-  const permissions = session.value?.permissions;
-  if (!permissions) {
-    return '';
-  }
-
-  return !permissions.upload_file
-    && !permissions.upload_directory
-    && !permissions.create_directory
-    && !permissions.create_text
-    && !permissions.rename
-    && !permissions.delete
-    ? t('app.browseOnlyHint')
-    : '';
-});
 
 const showGuestNotice = computed(() => (
   Boolean(session.value?.is_guest)
@@ -192,9 +215,6 @@ const pageSubText = computed(() => {
   }
   if (currentKind.value === 'home') {
     return t('app.homeSubtitle');
-  }
-  if (browseOnlyHint.value) {
-    return browseOnlyHint.value;
   }
   return '';
 });
@@ -1311,6 +1331,16 @@ function setView(next: EntryViewMode) {
   saveViewMode(next);
 }
 
+function handleSort(key: EntrySortKey) {
+  if (sortKey.value === key) {
+    sortDirection.value = sortDirection.value === 'asc' ? 'desc' : 'asc';
+  } else {
+    sortKey.value = key;
+    sortDirection.value = key === 'name' ? 'asc' : 'desc';
+  }
+  saveSortPreference({ key: sortKey.value, direction: sortDirection.value });
+}
+
 watch([currentNodeId, activeKeyword, activeSearchScope], () => {
   clearSelection();
 });
@@ -1455,6 +1485,8 @@ watchEffect(() => {
         :search-active="searchActive"
         :view="view"
         :selected-ids="selectedIds"
+        :sort-key="sortKey"
+        :sort-direction="sortDirection"
         @open="openEntry"
         @preview="openPreview"
         @download="triggerDownload"
@@ -1462,6 +1494,7 @@ watchEffect(() => {
         @delete="openDelete"
         @toggle-select="toggleSelect"
         @select-all="selectAll"
+        @sort="handleSort"
       />
     </main>
 

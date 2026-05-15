@@ -27,7 +27,7 @@ use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
 use ssh2::{ExtendedData, Session};
 use std::collections::{HashSet, VecDeque};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1822,6 +1822,10 @@ mod tests {
     use super::open_url_windows_with;
     use super::pick_directory_on_main_thread_with;
     use super::schedule_dialog_task;
+    use super::{
+        appliance_ssh_api_port, build_appliance_ssh_api_url, build_iptables_whitelist_rule,
+        ApplianceSshApiVersion, ApplianceSshWhitelistScope,
+    };
     #[cfg(target_os = "windows")]
     use std::cell::Cell;
 
@@ -1905,6 +1909,65 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "main thread unavailable");
     }
+
+    #[test]
+    fn appliance_ssh_api_version_defaults_to_componentized_port() {
+        assert_eq!(
+            appliance_ssh_api_port(ApplianceSshApiVersion::default()),
+            23006
+        );
+        assert_eq!(
+            appliance_ssh_api_port(ApplianceSshApiVersion::Componentized),
+            23006
+        );
+    }
+
+    #[test]
+    fn appliance_ssh_api_version_uses_mainline_port() {
+        assert_eq!(
+            appliance_ssh_api_port(ApplianceSshApiVersion::Mainline),
+            9007
+        );
+    }
+
+    #[test]
+    fn appliance_ssh_api_url_uses_selected_version_port() {
+        assert_eq!(
+            build_appliance_ssh_api_url(
+                "192.168.1.10",
+                ApplianceSshApiVersion::Componentized,
+                "get"
+            ),
+            "http://192.168.1.10:23006/openAPI/system/v1/network/SSH/get"
+        );
+        assert_eq!(
+            build_appliance_ssh_api_url("192.168.1.10", ApplianceSshApiVersion::Mainline, "set"),
+            "http://192.168.1.10:9007/openAPI/system/v1/network/SSH/set"
+        );
+    }
+
+    #[test]
+    fn appliance_ssh_all_tcp_whitelist_rule_omits_destination_port() {
+        let rule = build_iptables_whitelist_rule(
+            "192.115.1.15",
+            23333,
+            ApplianceSshWhitelistScope::AllTcp,
+        );
+
+        assert!(rule.contains("-p tcp -s 192.115.1.15 -j ACCEPT"));
+        assert!(!rule.contains("--dport"));
+    }
+
+    #[test]
+    fn appliance_ssh_ssh_only_whitelist_rule_targets_reported_ssh_port() {
+        let rule = build_iptables_whitelist_rule(
+            "192.115.1.15",
+            23333,
+            ApplianceSshWhitelistScope::SshOnly,
+        );
+
+        assert!(rule.contains("-p tcp -s 192.115.1.15 --dport 23333 -j ACCEPT"));
+    }
 }
 
 #[tauri::command]
@@ -1973,6 +2036,22 @@ pub struct ApplianceSshTarget {
     pub jump_host: Option<String>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ApplianceSshApiVersion {
+    #[default]
+    Componentized,
+    Mainline,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ApplianceSshWhitelistScope {
+    #[default]
+    SshOnly,
+    AllTcp,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplianceSshRequest {
@@ -1983,11 +2062,15 @@ pub struct ApplianceSshRequest {
     #[serde(default)]
     pub ips: Vec<String>,
     #[serde(default)]
+    pub appliance_version: ApplianceSshApiVersion,
+    #[serde(default)]
     pub ssh_username: String,
     #[serde(default)]
     pub ssh_password: String,
     #[serde(default)]
     pub add_whitelist_rule: bool,
+    #[serde(default)]
+    pub whitelist_scope: ApplianceSshWhitelistScope,
     /// When Some, use this CIDR (e.g., "10.0.0.0/24") as the whitelist source
     /// instead of auto-detecting the local IP.
     #[serde(default)]
@@ -2030,6 +2113,25 @@ struct ApplianceSshStatusResponse {
     data: Option<ApplianceSshStatusData>,
 }
 
+const APPLIANCE_SSH_COMPONENTIZED_API_PORT: u16 = 23006;
+const APPLIANCE_SSH_MAINLINE_API_PORT: u16 = 9007;
+
+fn appliance_ssh_api_port(version: ApplianceSshApiVersion) -> u16 {
+    match version {
+        ApplianceSshApiVersion::Componentized => APPLIANCE_SSH_COMPONENTIZED_API_PORT,
+        ApplianceSshApiVersion::Mainline => APPLIANCE_SSH_MAINLINE_API_PORT,
+    }
+}
+
+fn build_appliance_ssh_api_url(ip: &str, version: ApplianceSshApiVersion, action: &str) -> String {
+    format!(
+        "http://{}:{}/openAPI/system/v1/network/SSH/{}",
+        ip,
+        appliance_ssh_api_port(version),
+        action
+    )
+}
+
 // Helper function to validate IP address format
 fn validate_ip(ip: &str) -> bool {
     let parts: Vec<&str> = ip.split('.').collect();
@@ -2066,8 +2168,9 @@ fn build_device_http_client_with_timeout(
 async fn get_appliance_ssh_status(
     client: &reqwest::Client,
     ip: &str,
+    version: ApplianceSshApiVersion,
 ) -> Result<ApplianceSshStatusData, String> {
-    let request_url = format!("http://{}:23006/openAPI/system/v1/network/SSH/get", ip);
+    let request_url = build_appliance_ssh_api_url(ip, version, "get");
     let response = client
         .post(&request_url)
         .header("content-type", "application/json")
@@ -2104,8 +2207,12 @@ async fn get_appliance_ssh_status(
         .ok_or_else(|| "Response missing data".to_string())
 }
 
-async fn enable_appliance_ssh_via_api(client: &reqwest::Client, ip: &str) -> Result<(), String> {
-    let request_url = format!("http://{}:23006/openAPI/system/v1/network/SSH/set", ip);
+async fn enable_appliance_ssh_via_api(
+    client: &reqwest::Client,
+    ip: &str,
+    version: ApplianceSshApiVersion,
+) -> Result<(), String> {
+    let request_url = build_appliance_ssh_api_url(ip, version, "set");
     let request_body = json!({
         "ServiceSshdEnable": 1
     });
@@ -2151,31 +2258,33 @@ async fn enable_appliance_ssh_via_api(client: &reqwest::Client, ip: &str) -> Res
     Ok(())
 }
 
+#[derive(Debug)]
+enum WaitForEnableOutcome {
+    Enabled(ApplianceSshStatusData),
+    NotEnabled { last_status: ApplianceSshStatusData },
+    GetFailed { last_error: String },
+}
+
 async fn wait_for_appliance_ssh_enabled(
     client: &reqwest::Client,
     ip: &str,
+    version: ApplianceSshApiVersion,
     attempts: usize,
     delay: Duration,
-) -> Result<ApplianceSshStatusData, String> {
-    let mut last_error: Option<String> = None;
+) -> WaitForEnableOutcome {
+    let mut last_status: Option<ApplianceSshStatusData> = None;
+    let mut last_get_error: Option<String> = None;
 
     for attempt in 0..attempts {
-        match get_appliance_ssh_status(client, ip).await {
+        match get_appliance_ssh_status(client, ip, version).await {
             Ok(status) => {
                 if status.enable == Some(1) {
-                    return Ok(status);
+                    return WaitForEnableOutcome::Enabled(status);
                 }
-
-                last_error = Some(format!(
-                    "current enable state is {}",
-                    status
-                        .enable
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                ));
+                last_status = Some(status);
             }
             Err(e) => {
-                last_error = Some(e);
+                last_get_error = Some(e);
             }
         }
 
@@ -2184,10 +2293,16 @@ async fn wait_for_appliance_ssh_enabled(
         }
     }
 
-    Err(match last_error {
-        Some(error) => format!("SSH did not become enabled in time: {}", error),
-        None => "SSH did not become enabled in time".to_string(),
-    })
+    if let Some(status) = last_status {
+        WaitForEnableOutcome::NotEnabled {
+            last_status: status,
+        }
+    } else {
+        WaitForEnableOutcome::GetFailed {
+            last_error: last_get_error
+                .unwrap_or_else(|| "no GET attempts were made".to_string()),
+        }
+    }
 }
 
 fn detect_local_source_ip(ip: &str, port: u16) -> Result<String, String> {
@@ -2210,10 +2325,39 @@ fn detect_local_source_ip(ip: &str, port: u16) -> Result<String, String> {
     }
 }
 
-fn build_iptables_whitelist_command(source_ip: &str, port: u16) -> String {
-    format!(
-        "sh -lc 'iptables -C INPUT -p tcp -s {source_ip} --dport {port} -j ACCEPT || iptables -I INPUT 1 -p tcp -s {source_ip} --dport {port} -j ACCEPT'"
-    )
+fn build_iptables_whitelist_rule(
+    source_ip: &str,
+    port: u16,
+    scope: ApplianceSshWhitelistScope,
+) -> String {
+    match scope {
+        ApplianceSshWhitelistScope::AllTcp => {
+            format!(
+                "iptables -C INPUT -p tcp -s {source_ip} -j ACCEPT || iptables -I INPUT 1 -p tcp -s {source_ip} -j ACCEPT"
+            )
+        }
+        ApplianceSshWhitelistScope::SshOnly => {
+            format!(
+                "iptables -C INPUT -p tcp -s {source_ip} --dport {port} -j ACCEPT || iptables -I INPUT 1 -p tcp -s {source_ip} --dport {port} -j ACCEPT"
+            )
+        }
+    }
+}
+
+fn build_iptables_whitelist_command(
+    source_ip: &str,
+    port: u16,
+    scope: ApplianceSshWhitelistScope,
+) -> String {
+    let rule = build_iptables_whitelist_rule(source_ip, port, scope);
+    format!("sh -lc '{rule}'")
+}
+
+fn describe_whitelist_scope(scope: ApplianceSshWhitelistScope, port: u16) -> String {
+    match scope {
+        ApplianceSshWhitelistScope::AllTcp => "all TCP ports".to_string(),
+        ApplianceSshWhitelistScope::SshOnly => format!("SSH port {port}"),
+    }
 }
 
 /// Default SSH port assumed for targets reached via jump host (the REST API
@@ -2234,10 +2378,9 @@ fn build_nested_iptables_whitelist_command(
     target_port: u16,
     iptables_source: &str,
     iptables_port: u16,
+    scope: ApplianceSshWhitelistScope,
 ) -> String {
-    let rule = format!(
-        "iptables -C INPUT -p tcp -s {iptables_source} --dport {iptables_port} -j ACCEPT || iptables -I INPUT 1 -p tcp -s {iptables_source} --dport {iptables_port} -j ACCEPT"
-    );
+    let rule = build_iptables_whitelist_rule(iptables_source, iptables_port, scope);
     format!(
         "({rule}) && ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
 -p {target_port} {target_user}@{target_ip} '{rule}'"
@@ -2250,19 +2393,48 @@ fn run_remote_command_over_ssh(
     username: &str,
     password: &str,
     command: &str,
-) -> Result<String, String> {
+) -> Result<RemoteCommandResult, String> {
     // Some hardened appliances ship sshd with `ForceCommand` or a restricted
     // login shell that rejects non-interactive `exec` channels with messages
     // like "Remote command execution is not allowed.". Try plain exec first
     // (the standard, lower-overhead path); on a restriction-shaped failure,
-    // retry once with a PTY allocated, which often bypasses the gate.
+    // retry with a PTY and finally with a real interactive shell.
     match exec_over_ssh(ip, port, username, password, command, false) {
-        Ok(out) => Ok(out),
-        Err(e) if exec_restriction_hint(&e) => {
-            exec_over_ssh(ip, port, username, password, command, true)
+        Ok(output) => Ok(RemoteCommandResult {
+            output,
+            mode: "exec",
+        }),
+        Err(exec_error) if exec_restriction_hint(&exec_error) => {
+            match exec_over_ssh(ip, port, username, password, command, true) {
+                Ok(output) => Ok(RemoteCommandResult {
+                    output,
+                    mode: "exec+pty",
+                }),
+                Err(pty_error) if exec_restriction_hint(&pty_error) => {
+                    match exec_shell_over_ssh(ip, port, username, password, command) {
+                        Ok(output) => Ok(RemoteCommandResult {
+                            output,
+                            mode: "shell",
+                        }),
+                        Err(shell_error) => Err(format!(
+                            "exec failed: {}; exec+pty failed: {}; shell failed: {}",
+                            exec_error, pty_error, shell_error
+                        )),
+                    }
+                }
+                Err(pty_error) => Err(format!(
+                    "exec failed: {}; exec+pty failed: {}",
+                    exec_error, pty_error
+                )),
+            }
         }
         Err(e) => Err(e),
     }
+}
+
+struct RemoteCommandResult {
+    output: String,
+    mode: &'static str,
 }
 
 fn exec_restriction_hint(error: &str) -> bool {
@@ -2273,14 +2445,12 @@ fn exec_restriction_hint(error: &str) -> bool {
         || lower.contains("restricted")
 }
 
-fn exec_over_ssh(
+fn connect_ssh_session(
     ip: &str,
     port: u16,
     username: &str,
     password: &str,
-    command: &str,
-    request_pty: bool,
-) -> Result<String, String> {
+) -> Result<Session, String> {
     let socket_addr: SocketAddr = format!("{}:{}", ip, port)
         .parse()
         .map_err(|e| format!("Invalid SSH address: {}", e))?;
@@ -2300,6 +2470,18 @@ fn exec_over_ssh(
         return Err("SSH authentication failed".to_string());
     }
 
+    Ok(sess)
+}
+
+fn exec_over_ssh(
+    ip: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    command: &str,
+    request_pty: bool,
+) -> Result<String, String> {
+    let sess = connect_ssh_session(ip, port, username, password)?;
     let mut channel = sess
         .channel_session()
         .map_err(|e| format!("SSH channel init failed: {}", e))?;
@@ -2340,6 +2522,73 @@ fn exec_over_ssh(
     }
 
     Ok(output.trim().to_string())
+}
+
+fn exec_shell_over_ssh(
+    ip: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    command: &str,
+) -> Result<String, String> {
+    let sess = connect_ssh_session(ip, port, username, password)?;
+    let mut channel = sess
+        .channel_session()
+        .map_err(|e| format!("SSH channel init failed: {}", e))?;
+    channel
+        .request_pty("xterm", None, None)
+        .map_err(|e| format!("SSH PTY allocation failed: {}", e))?;
+    channel
+        .handle_extended_data(ExtendedData::Merge)
+        .map_err(|e| format!("SSH channel stderr merge failed: {}", e))?;
+    channel
+        .shell()
+        .map_err(|e| format!("SSH shell start failed: {}", e))?;
+
+    let wrapped = format!("{command}\nprintf '\\n__FST_EXIT__%s\\n' \"$?\"\nexit\n");
+    channel
+        .write_all(wrapped.as_bytes())
+        .map_err(|e| format!("Failed to write remote shell command: {}", e))?;
+    channel
+        .send_eof()
+        .map_err(|e| format!("Failed to close SSH shell stdin: {}", e))?;
+
+    let mut output = String::new();
+    channel
+        .read_to_string(&mut output)
+        .map_err(|e| format!("Failed to read remote shell output: {}", e))?;
+    channel
+        .wait_close()
+        .map_err(|e| format!("Failed to close SSH shell channel: {}", e))?;
+
+    let Some(marker_index) = output.rfind("__FST_EXIT__") else {
+        return Err(format!(
+            "Remote shell did not report command exit status: {}",
+            output.trim()
+        ));
+    };
+    let status_text = output[marker_index + "__FST_EXIT__".len()..]
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim();
+    let exit_code = status_text
+        .parse::<i32>()
+        .map_err(|_| format!("Remote shell reported invalid exit status: {}", status_text))?;
+    let command_output = output[..marker_index].trim().to_string();
+
+    if exit_code != 0 {
+        return Err(if command_output.is_empty() {
+            format!("Remote command exited with code {}", exit_code)
+        } else {
+            format!(
+                "Remote command exited with code {}: {}",
+                exit_code, command_output
+            )
+        });
+    }
+
+    Ok(command_output)
 }
 
 /// SHA-256 hash of the given text, returned as lowercase hex.
@@ -2550,11 +2799,14 @@ async fn change_framework_password(
 
 #[allow(clippy::too_many_arguments)]
 async fn enable_appliance_ssh_for_target(
+    app_handle: tauri::AppHandle,
     client: reqwest::Client,
     target: ApplianceSshTarget,
+    api_version: ApplianceSshApiVersion,
     ssh_username: String,
     ssh_password: String,
     add_whitelist_rule: bool,
+    whitelist_scope: ApplianceSshWhitelistScope,
     whitelist_cidr: Option<String>,
     jump_host_username: Option<String>,
     jump_host_password: Option<String>,
@@ -2596,30 +2848,94 @@ async fn enable_appliance_ssh_for_target(
     // API ip and SSH ip differ when a jump host is present: the REST API lives
     // on the jump host (A); the target (B) is reached via SSH through A.
     let api_ip = jump_host.as_deref().unwrap_or(&ip).to_string();
+    emit_runtime_log(
+        &app_handle,
+        format!(
+            "[appliance-access] target={} apiHost={} apiPort={} version={:?}",
+            ip,
+            api_ip,
+            appliance_ssh_api_port(api_version),
+            api_version
+        ),
+        "info",
+    );
 
-    let initial_status = match get_appliance_ssh_status(&client, &api_ip).await {
-        Ok(status) => status,
+    // Initial GET is best-effort: some appliances (especially under access-control
+    // hardening) reject the get endpoint while still accepting set. We log the
+    // failure and proceed to SET so the user's enable intent isn't blocked.
+    let initial_status = match get_appliance_ssh_status(&client, &api_ip, api_version).await {
+        Ok(status) => {
+            emit_runtime_log(
+                &app_handle,
+                format!(
+                    "[appliance-access] target={} initialStatus enable={:?} sshPort={:?}",
+                    ip, status.enable, status.port
+                ),
+                "info",
+            );
+            Some(status)
+        }
         Err(e) => {
-            result.message = format!("Failed to get SSH status: {}", e);
-            return Some(result);
+            emit_runtime_log(
+                &app_handle,
+                format!(
+                    "[appliance-access] target={} initial GET failed: {}; proceeding to SET",
+                    ip, e
+                ),
+                "warn",
+            );
+            None
         }
     };
 
-    result.previous_enable = initial_status.enable;
-    result.port = initial_status.port;
+    result.previous_enable = initial_status.as_ref().and_then(|s| s.enable);
+    result.port = initial_status.as_ref().and_then(|s| s.port);
 
-    let current_status = if initial_status.enable == Some(1) {
-        initial_status
+    let current_status = if initial_status.as_ref().and_then(|s| s.enable) == Some(1) {
+        initial_status.expect("checked enable==Some(1) above")
     } else {
-        if let Err(e) = enable_appliance_ssh_via_api(&client, &api_ip).await {
+        if let Err(e) = enable_appliance_ssh_via_api(&client, &api_ip, api_version).await {
             result.message = format!("Failed to enable SSH: {}", e);
             return Some(result);
         }
-        match wait_for_appliance_ssh_enabled(&client, &api_ip, 10, Duration::from_secs(1)).await {
-            Ok(status) => status,
-            Err(e) => {
-                result.message = format!("SSH status verification failed: {}", e);
+        match wait_for_appliance_ssh_enabled(
+            &client,
+            &api_ip,
+            api_version,
+            10,
+            Duration::from_secs(1),
+        )
+        .await
+        {
+            WaitForEnableOutcome::Enabled(status) => status,
+            WaitForEnableOutcome::NotEnabled { last_status } => {
+                let observed = last_status
+                    .enable
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                result.current_enable = last_status.enable;
+                result.port = last_status.port.or(result.port);
+                result.message = format!(
+                    "SSH status verification failed: current enable state is {}",
+                    observed
+                );
                 return Some(result);
+            }
+            WaitForEnableOutcome::GetFailed { last_error } => {
+                // SET succeeded but every GET (initial + verification) failed.
+                // Trust the SET success and treat the appliance as enabled.
+                emit_runtime_log(
+                    &app_handle,
+                    format!(
+                        "[appliance-access] target={} GET unavailable after SET ({}); treating SET success as enabled",
+                        ip, last_error
+                    ),
+                    "warn",
+                );
+                ApplianceSshStatusData {
+                    enable: Some(1),
+                    port: initial_status.as_ref().and_then(|s| s.port),
+                }
             }
         }
     };
@@ -2627,6 +2943,14 @@ async fn enable_appliance_ssh_for_target(
     result.current_enable = current_status.enable;
     result.port = current_status.port.or(result.port).or(Some(23333));
     let api_ssh_port = result.port.unwrap_or(23333);
+    emit_runtime_log(
+        &app_handle,
+        format!(
+            "[appliance-access] target={} currentStatus enable={:?} sshPort={}",
+            ip, current_status.enable, api_ssh_port
+        ),
+        "info",
+    );
 
     if add_whitelist_rule {
         // Resolve credentials for SSH to jump host (or direct target).
@@ -2679,6 +3003,7 @@ async fn enable_appliance_ssh_for_target(
             },
         };
         result.whitelist_source_ip = Some(source.clone());
+        let whitelist_scope_desc = describe_whitelist_scope(whitelist_scope, api_ssh_port);
 
         // Build the command that will run via SSH on `api_ip` (jump host or direct).
         let (ssh_host, command) = if jump_host.is_some() {
@@ -2694,13 +3019,22 @@ async fn enable_appliance_ssh_for_target(
                 target_port,
                 &source,
                 target_port,
+                whitelist_scope,
             );
             (api_ip.clone(), cmd)
         } else {
             // Direct: run iptables locally on the target.
-            let cmd = build_iptables_whitelist_command(&source, api_ssh_port);
+            let cmd = build_iptables_whitelist_command(&source, api_ssh_port, whitelist_scope);
             (api_ip.clone(), cmd)
         };
+        emit_runtime_log(
+            &app_handle,
+            format!(
+                "[appliance-access] target={} whitelist source={} scope={} sshExec={} command={}",
+                ip, source, whitelist_scope_desc, ssh_host, command
+            ),
+            "command",
+        );
 
         let host_owned = ssh_host.clone();
         let user_owned = ssh_user.clone();
@@ -2726,23 +3060,36 @@ async fn enable_appliance_ssh_for_target(
         };
 
         match whitelist_result {
-            Ok(_) => {
+            Ok(remote_result) => {
                 result.success = true;
                 result.whitelist_applied = Some(true);
+                emit_runtime_log(
+                    &app_handle,
+                    format!(
+                        "[appliance-access] target={} whitelist applied via {} output={}",
+                        ip, remote_result.mode, remote_result.output
+                    ),
+                    "success",
+                );
                 result.message = if jump_host.is_some() {
                     format!(
-                        "SSH is enabled on jump host {}. Added an iptables whitelist rule on {} for {}:{}",
-                        api_ip, ip, source, JUMP_HOST_DEFAULT_TARGET_SSH_PORT
+                        "SSH is enabled on jump host {}. Added an iptables whitelist rule on {} for {} ({})",
+                        api_ip, ip, source, whitelist_scope_desc
                     )
                 } else {
                     format!(
-                        "SSH is enabled. Added an iptables whitelist rule for {}:{}",
-                        source, api_ssh_port
+                        "SSH is enabled. Added an iptables whitelist rule for {} ({})",
+                        source, whitelist_scope_desc
                     )
                 };
             }
             Err(e) => {
                 result.whitelist_applied = Some(false);
+                emit_runtime_log(
+                    &app_handle,
+                    format!("[appliance-access] target={} whitelist failed: {}", ip, e),
+                    "error",
+                );
                 result.message = if jump_host.is_some() {
                     format!(
                         "SSH is enabled on jump host {}, but failed to apply the iptables rule on {}: {}",
@@ -2750,8 +3097,8 @@ async fn enable_appliance_ssh_for_target(
                     )
                 } else {
                     format!(
-                        "SSH is enabled, but failed to add the iptables whitelist rule for {}:{}: {}",
-                        source, api_ssh_port, e
+                        "SSH is enabled, but failed to add the iptables whitelist rule for {} ({}): {}",
+                        source, whitelist_scope_desc, e
                     )
                 };
             }
@@ -2776,6 +3123,7 @@ async fn enable_appliance_ssh_for_target(
 
 #[tauri::command]
 async fn enable_appliance_ssh(
+    app_handle: tauri::AppHandle,
     request: ApplianceSshRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ApplianceSshResult>, String> {
@@ -2794,7 +3142,9 @@ async fn enable_appliance_ssh(
     let ssh_username = request.ssh_username.trim().to_string();
     let ssh_password = request.ssh_password;
     let add_whitelist_rule = request.add_whitelist_rule;
+    let whitelist_scope = request.whitelist_scope;
     let whitelist_cidr = request.whitelist_cidr;
+    let api_version = request.appliance_version;
     let (jump_user, jump_pass) = if request.jump_host_use_separate_creds {
         (request.jump_host_username, request.jump_host_password)
     } else {
@@ -2805,6 +3155,7 @@ async fn enable_appliance_ssh(
         targets,
         DEVICE_BATCH_CONCURRENCY_LIMIT,
         move |target| {
+            let app_handle = app_handle.clone();
             let client = client.clone();
             let ssh_username = ssh_username.clone();
             let ssh_password = ssh_password.clone();
@@ -2813,11 +3164,14 @@ async fn enable_appliance_ssh(
             let jump_pass = jump_pass.clone();
             async move {
                 enable_appliance_ssh_for_target(
+                    app_handle,
                     client,
                     target,
+                    api_version,
                     ssh_username,
                     ssh_password,
                     add_whitelist_rule,
+                    whitelist_scope,
                     whitelist_cidr,
                     jump_user,
                     jump_pass,

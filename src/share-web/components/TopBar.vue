@@ -23,13 +23,6 @@ const userInitial = computed(() => {
   return name ? name.slice(0, 1).toUpperCase() : '?';
 });
 
-const roleLabel = computed(() => {
-  if (!props.session) {
-    return t('app.loggedOut');
-  }
-  return props.session.is_guest ? t('app.guestRoleLabel') : t('app.userRoleLabel');
-});
-
 const sessionActionLabel = computed(() => {
   if (!props.session) {
     return t('app.switchAccount');
@@ -44,7 +37,6 @@ const sessionActionLabel = computed(() => {
       <div class="brand-mark" aria-hidden="true">FS</div>
       <div>
         <div class="brand-name">{{ t('app.pageTitle') }}</div>
-        <div class="brand-sub">{{ t('app.brandTagline') }}</div>
       </div>
     </div>
 
@@ -65,7 +57,6 @@ const sessionActionLabel = computed(() => {
       <div class="avatar">{{ userInitial }}</div>
       <div class="who">
         <div class="name">{{ session.username }}</div>
-        <div class="role">{{ roleLabel }}</div>
       </div>
     </div>
 

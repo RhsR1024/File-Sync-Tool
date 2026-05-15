@@ -32,7 +32,6 @@ import {
   type AppConfig,
   type FileShareDeleteMode,
   type FileShareIpFilterMode,
-  type FileSharePermissionPreset,
   type FileSharePermissionSet,
   type FileShareRoot,
   type FileShareSettingsSaveRequest,
@@ -43,12 +42,12 @@ import {
   type FileShareUserView,
 } from '../lib/tauri';
 import { pushToast } from '../composables/useToast';
+import RootAccessList from '../components/file-share/RootAccessList.vue';
 
 defineOptions({ name: 'FileSharePage' });
 
 const MAX_SESSION_TTL_MINUTES = 7 * 24 * 60;
 const AUTO_REFRESH_SECONDS = Math.round(LAN_SHARE_STATUS_REFRESH_INTERVAL_MS / 1000);
-type PermKey = keyof FileSharePermissionSet;
 type EditUser = FileShareUserView & {
   draft_key: string;
   previous_username: string | null;
@@ -63,59 +62,12 @@ type Draft = Omit<FileShareSettingsView, 'guest_account' | 'accounts'> & {
 const { t } = useI18n();
 let draftKeySeed = 0;
 
-const permDefs: PermKey[] = [
-  'browse',
-  'download_file',
-  'download_archive',
-  'upload_file',
-  'upload_directory',
-  'create_directory',
-  'create_text',
-  'rename',
-  'delete',
-  'preview_image',
-  'search_current',
-  'search_global',
-];
-
-const readOnly = (): FileSharePermissionSet => ({
-  browse: true,
-  download_file: true,
-  download_archive: true,
-  upload_file: false,
-  upload_directory: false,
-  create_directory: false,
-  create_text: false,
-  rename: false,
-  delete: false,
-  preview_image: true,
-  search_current: true,
-  search_global: true,
-});
-
-const readWrite = (): FileSharePermissionSet => ({
-  browse: true,
-  download_file: true,
-  download_archive: true,
-  upload_file: true,
-  upload_directory: true,
-  create_directory: true,
-  create_text: true,
-  rename: true,
-  delete: true,
-  preview_image: true,
-  search_current: true,
-  search_global: true,
-});
-
 const clonePerms = (v: FileSharePermissionSet): FileSharePermissionSet => ({ ...v });
-const permsForPreset = (preset: FileSharePermissionPreset) => (preset === 'read_write' ? readWrite() : readOnly());
 const cloneRootPerms = (entry: FileShareUserRootPermissions): FileShareUserRootPermissions => ({
   root_id: entry.root_id,
   preset: entry.preset,
   permissions: clonePerms(entry.permissions),
 });
-const permissionLabel = (key: PermKey) => t(`tools.fileShare.permissions.${key}`);
 const nextDraftKey = () => `file-share-user-${draftKeySeed++}`;
 const guestView = (): FileShareUserView => ({
   username: t('tools.fileShare.defaultGuestUsername'),
@@ -131,46 +83,6 @@ const editUser = (a: FileShareUserView): EditUser => ({
   new_password: '',
   clear_password: false,
 });
-
-const findRootPerm = (user: EditUser, rootId: string): FileShareUserRootPermissions | undefined =>
-  user.root_permissions.find((p) => p.root_id === rootId);
-
-const rootAccessRows = (user: EditUser) =>
-  draft.value.roots.map((root) => ({
-    root,
-    entry: user.root_permissions.find((p) => p.root_id === root.id) ?? null,
-  }));
-
-const toggleRootAccess = (user: EditUser, rootId: string, grant: boolean) => {
-  const existing = findRootPerm(user, rootId);
-  if (grant) {
-    if (existing) return;
-    user.root_permissions.push({
-      root_id: rootId,
-      preset: 'read_only',
-      permissions: readOnly(),
-    });
-  } else if (existing) {
-    user.root_permissions = user.root_permissions.filter((p) => p.root_id !== rootId);
-  }
-};
-
-const onRootPreset = (entry: FileShareUserRootPermissions) => {
-  if (entry.preset !== 'custom') entry.permissions = permsForPreset(entry.preset);
-};
-
-const onRootAccessChange = (user: EditUser, rootId: string, ev: Event) => {
-  const target = ev.target as HTMLInputElement;
-  toggleRootAccess(user, rootId, target.checked);
-};
-
-const onRootPresetChange = (user: EditUser, rootId: string, ev: Event) => {
-  const entry = findRootPerm(user, rootId);
-  if (!entry) return;
-  const target = ev.target as HTMLSelectElement;
-  entry.preset = target.value as FileSharePermissionPreset;
-  onRootPreset(entry);
-};
 
 const blankStatus = (): FileShareStatus => ({
   is_active: false,
@@ -213,6 +125,27 @@ const toDraft = (view: FileShareSettingsView, cfg: AppConfig | null): Draft => {
     ip_rules: [...view.ip_rules],
     auto_start_with_windows: cfg?.launch_and_auto_start_file_share ?? view.auto_start_with_windows,
   };
+};
+
+const rootNameFromPath = (path: string) => {
+  const trimmed = path.trim().replace(/[\\/]+$/g, '');
+  if (!trimmed) return '';
+  const segments = trimmed.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] ?? trimmed;
+};
+
+const nextUniqueRootAlias = (path: string, roots: FileShareRoot[], currentId?: string) => {
+  const base = rootNameFromPath(path) || 'share';
+  const used = new Set(
+    roots
+      .filter((root) => root.id !== currentId)
+      .map((root) => root.alias.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  let alias = base;
+  let n = 2;
+  while (used.has(alias.toLowerCase())) alias = `${base} (${n++})`;
+  return alias;
 };
 
 const slug = (s: string, fallback: string) =>
@@ -293,11 +226,6 @@ const uptime = computed(() => {
   const sec = status.value.uptime_secs;
   return `${String(Math.floor(sec / 3600)).padStart(2, '0')}:${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
 });
-const presetOpts = computed(() => [
-  { value: 'read_only' as FileSharePermissionPreset, label: t('tools.fileShare.presetReadOnly') },
-  { value: 'read_write' as FileSharePermissionPreset, label: t('tools.fileShare.presetReadWrite') },
-  { value: 'custom' as FileSharePermissionPreset, label: t('tools.fileShare.presetCustom') },
-]);
 const ipOpts = computed(() => [
   { value: 'off' as FileShareIpFilterMode, label: t('tools.fileShare.ipFilterOff') },
   { value: 'whitelist' as FileShareIpFilterMode, label: t('tools.fileShare.ipFilterWhitelist') },
@@ -315,16 +243,11 @@ const errors = computed(() => {
     out.push(t('tools.fileShare.validation.sessionTtlRange', { max: MAX_SESSION_TTL_MINUTES }));
   }
   if (draft.value.ip_filter_mode !== 'off' && draft.value.ip_rules.length === 0) out.push(t('tools.fileShare.validation.ipRuleRequired'));
-  const rootAliases = new Set<string>();
   const rootPaths = new Set<string>();
   for (const root of draft.value.roots) {
-    if (!root.alias.trim()) out.push(t('tools.fileShare.validation.rootAliasRequired'));
     if (!root.path.trim()) out.push(t('tools.fileShare.validation.rootPathRequired'));
-    const ak = root.alias.trim().toLowerCase();
     const pk = root.path.trim().toLowerCase();
-    if (rootAliases.has(ak)) out.push(t('tools.fileShare.validation.duplicateRootAlias', { value: root.alias }));
     if (rootPaths.has(pk)) out.push(t('tools.fileShare.validation.duplicateRootPath', { value: root.path }));
-    rootAliases.add(ak);
     rootPaths.add(pk);
   }
   const usernames = new Set<string>();
@@ -474,14 +397,15 @@ const addRoot = async (target?: FileShareRoot) => {
     }
     if (target) {
       target.path = dir.path;
-      if (!target.alias.trim()) target.alias = dir.alias;
+      target.alias = nextUniqueRootAlias(dir.path, draft.value.roots, target.id);
       return;
     }
+    const alias = nextUniqueRootAlias(dir.path, draft.value.roots);
     const used = new Set(draft.value.roots.map((r) => r.id));
-    let id = slug(dir.alias, 'root');
+    let id = slug(alias, 'root');
     let n = 2;
-    while (used.has(id)) id = `${slug(dir.alias, 'root')}-${n++}`;
-    draft.value.roots.push({ id, alias: dir.alias, path: dir.path, enabled: true });
+    while (used.has(id)) id = `${slug(alias, 'root')}-${n++}`;
+    draft.value.roots.push({ id, alias, path: dir.path, enabled: true });
   } catch (e) {
     errorMsg.value = String(e);
   }
@@ -705,11 +629,9 @@ onUnmounted(() => {
             <div v-else class="fs-root-list">
               <div v-for="(root, index) in draft.roots" :key="root.id" class="fs-root-row">
                 <div class="fs-root-row-top">
-                  <div class="min-w-0">
-                    <label class="fs-label">{{ t('tools.fileShare.aliasLabel') }}</label>
-                    <input v-model="root.alias" :disabled="formDisabled" class="fs-input w-full" />
+                  <div class="fs-root-main" :title="root.path">
+                    {{ root.path }}
                   </div>
-
                   <div class="fs-root-actions">
                     <label class="fs-inline-toggle">
                       <span class="fs-toggle">
@@ -728,8 +650,6 @@ onUnmounted(() => {
                     </button>
                   </div>
                 </div>
-
-                <div class="fs-root-path" :title="root.path">{{ root.path }}</div>
               </div>
             </div>
           </div>
@@ -763,49 +683,12 @@ onUnmounted(() => {
               <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="guest.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(guest)" />{{ t('tools.fileShare.clearGuestPasswordOnSave') }}</label>
               <div class="mt-4">
                 <label class="fs-label">{{ t('tools.fileShare.rootAccess') }}</label>
-                <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-center text-sm text-slate-500">
-                  {{ t('tools.fileShare.noRootsForPermissions') }}
-                </div>
-                <div v-else class="space-y-3">
-                  <div v-for="row in rootAccessRows(guest)" :key="`guest-${row.root.id}`" class="rounded-xl border border-slate-200 bg-white p-3">
-                    <label class="flex items-center justify-between gap-3">
-                      <span class="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                        <input
-                          type="checkbox"
-                          :checked="!!row.entry"
-                          :disabled="formDisabled"
-                          class="rounded border-slate-300"
-                          @change="(e) => onRootAccessChange(guest, row.root.id, e)"
-                        />
-                        <span>{{ row.root.alias || row.root.id }}</span>
-                      </span>
-                    </label>
-                    <template v-if="row.entry">
-                      <div class="mt-3">
-                        <label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label>
-                        <select
-                          :value="row.entry.preset"
-                          :disabled="formDisabled"
-                          class="fs-select w-full"
-                          @change="(e) => onRootPresetChange(guest, row.root.id, e)"
-                        >
-                          <option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-                        </select>
-                      </div>
-                      <div v-if="row.entry.preset === 'custom'" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                        <label v-for="p in permDefs" :key="`guest-${row.root.id}-${p}`" class="fs-perm">
-                          <input
-                            v-model="row.entry.permissions[p]"
-                            type="checkbox"
-                            :disabled="formDisabled"
-                            class="rounded border-slate-300"
-                          />
-                          <span>{{ permissionLabel(p) }}</span>
-                        </label>
-                      </div>
-                    </template>
-                  </div>
-                </div>
+                <RootAccessList
+                  :user="guest"
+                  :roots="draft.roots"
+                  :disabled="formDisabled"
+                  :user-label="t('tools.fileShare.guestAccount')"
+                />
               </div>
             </div>
 
@@ -831,49 +714,12 @@ onUnmounted(() => {
                 <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="account.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(account)" />{{ t('tools.fileShare.clearAccountPasswordOnSave') }}</label>
                 <div class="mt-4">
                   <label class="fs-label">{{ t('tools.fileShare.rootAccess') }}</label>
-                  <div v-if="draft.roots.length === 0" class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-center text-sm text-slate-500">
-                    {{ t('tools.fileShare.noRootsForPermissions') }}
-                  </div>
-                  <div v-else class="space-y-3">
-                    <div v-for="row in rootAccessRows(account)" :key="`${account.draft_key}-${row.root.id}`" class="rounded-xl border border-slate-200 bg-white p-3">
-                      <label class="flex items-center justify-between gap-3">
-                        <span class="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                          <input
-                            type="checkbox"
-                            :checked="!!row.entry"
-                            :disabled="formDisabled"
-                            class="rounded border-slate-300"
-                            @change="(e) => onRootAccessChange(account, row.root.id, e)"
-                          />
-                          <span>{{ row.root.alias || row.root.id }}</span>
-                        </span>
-                      </label>
-                      <template v-if="row.entry">
-                        <div class="mt-3">
-                          <label class="fs-label">{{ t('tools.fileShare.permissionPreset') }}</label>
-                          <select
-                            :value="row.entry.preset"
-                            :disabled="formDisabled"
-                            class="fs-select w-full"
-                            @change="(e) => onRootPresetChange(account, row.root.id, e)"
-                          >
-                            <option v-for="opt in presetOpts" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-                          </select>
-                        </div>
-                        <div v-if="row.entry.preset === 'custom'" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                          <label v-for="p in permDefs" :key="`${account.draft_key}-${row.root.id}-${p}`" class="fs-perm">
-                            <input
-                              v-model="row.entry.permissions[p]"
-                              type="checkbox"
-                              :disabled="formDisabled"
-                              class="rounded border-slate-300"
-                            />
-                            <span>{{ permissionLabel(p) }}</span>
-                          </label>
-                        </div>
-                      </template>
-                    </div>
-                  </div>
+                  <RootAccessList
+                    :user="account"
+                    :roots="draft.roots"
+                    :disabled="formDisabled"
+                    :user-label="account.username || t('tools.fileShare.newAccountDefaultUsername')"
+                  />
                 </div>
               </div>
             </div>
@@ -974,11 +820,11 @@ onUnmounted(() => {
 .fs-card,.fs-stat{border:1px solid rgb(226 232 240 / .9);border-radius:.875rem;background:#fff;box-shadow:0 8px 24px rgb(15 23 42 / .05)}
 .fs-card{padding:1rem}.fs-stat{padding:.9rem}
 .fs-root-list{display:flex;flex-direction:column;gap:.75rem}
-.fs-root-row{border:1px solid rgb(226 232 240 / .9);border-radius:.875rem;background:linear-gradient(180deg,#fff 0%,rgb(248 250 252) 100%);padding:.9rem}
-.fs-root-row-top{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.75rem;align-items:end}
+.fs-root-row{border:1px solid rgb(226 232 240 / .9);border-radius:.875rem;background:linear-gradient(180deg,#fff 0%,rgb(248 250 252) 100%);padding:.8rem .9rem}
+.fs-root-row-top{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.75rem;align-items:center}
+.fs-root-main{min-width:0;font-size:.875rem;font-weight:600;color:rgb(15 23 42);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fs-root-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:.5rem}
 .fs-inline-toggle{display:inline-flex;align-items:center;gap:.6rem;min-height:2.5rem;padding:0 .75rem;border:1px solid rgb(226 232 240 / .85);border-radius:.75rem;background:#fff;font-size:.8125rem;font-weight:600;color:rgb(51 65 85);white-space:nowrap}
-.fs-root-path{margin-top:.75rem;min-height:2.5rem;display:flex;align-items:center;padding:.7rem .85rem;border:1px solid rgb(226 232 240 / .8);border-radius:.75rem;background:rgb(248 250 252);font-size:.8125rem;color:rgb(71 85 105);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fs-label-sm{margin-bottom:.75rem;font-size:.7rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:rgb(100 116 139)}
 .fs-label{display:block;margin-bottom:.4rem;font-size:.75rem;font-weight:600;color:rgb(71 85 105)}
 .fs-input,.fs-select{min-height:2.75rem;border:1px solid rgb(203 213 225);border-radius:.75rem;background:#fff;padding:.65rem .9rem;font-size:.875rem;line-height:1.5;color:rgb(15 23 42);outline:none;transition:border-color .15s ease,box-shadow .15s ease}

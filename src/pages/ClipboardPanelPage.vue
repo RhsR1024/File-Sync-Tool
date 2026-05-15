@@ -202,6 +202,7 @@ async function openSettings() {
 
 async function paste(id: number, plain: boolean) {
   debugClipboardSnapshot(`action:paste:start id=${id} plain=${plain}`);
+  preview.hideNow();
   try {
     if (plain) await clipboardApi.pastePlain(id);
     else await clipboardApi.paste(id);

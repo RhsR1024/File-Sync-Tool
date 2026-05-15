@@ -8,7 +8,7 @@ import Inspector from 'unplugin-vue-dev-locator/vite'
 // Consumed by `AboutPage.vue` as a fallback when the manifest lacks an entry
 // for the currently running build. Keep this in sync with the version label
 // rendered in `src/locales/messages.ts` (`sidebar.version`) on each release.
-const APP_RELEASE_DATE = '2026-04-27'
+const APP_RELEASE_DATE = '2026-05-15'
 
 // https://vite.dev/config/
 export default defineConfig({

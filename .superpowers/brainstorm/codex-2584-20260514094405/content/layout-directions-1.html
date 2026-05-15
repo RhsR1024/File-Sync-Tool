@@ -1,0 +1,348 @@
+<style>
+  .lead {
+    max-width: 880px;
+    color: var(--text-secondary);
+    margin-bottom: 1.4rem;
+  }
+
+  .layout-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 1rem;
+  }
+
+  .layout-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  }
+
+  .layout-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--accent);
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.1);
+  }
+
+  .layout-card.selected {
+    border: 2px solid var(--selected-border);
+    background: var(--selected-bg);
+  }
+
+  .layout-preview {
+    aspect-ratio: 16 / 12;
+    background: linear-gradient(180deg, #ffffff 0%, #f3f5f7 100%);
+    padding: 16px;
+  }
+
+  .layout-body {
+    padding: 1rem 1rem 1.1rem;
+  }
+
+  .layout-body p {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    margin-bottom: 0.8rem;
+  }
+
+  .layout-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+  }
+
+  .layout-tags span {
+    border-radius: 999px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    padding: 0.24rem 0.55rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    background: rgba(255,255,255,0.7);
+  }
+
+  .mock-shell {
+    width: 100%;
+    height: 100%;
+    border-radius: 16px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: rgba(255,255,255,0.98);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .mock-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.8rem 0.9rem;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+    background: rgba(255,255,255,0.92);
+  }
+
+  .mock-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+  }
+
+  .mock-logo {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: #111827;
+    flex-shrink: 0;
+  }
+
+  .mock-brand span {
+    font-size: 0.82rem;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mock-account {
+    height: 24px;
+    padding: 0 0.7rem;
+    border-radius: 999px;
+    background: #111827;
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .mock-main {
+    flex: 1;
+    padding: 0.85rem;
+    display: flex;
+    gap: 0.75rem;
+    background:
+      radial-gradient(circle at top right, rgba(148,163,184,0.08), transparent 30%),
+      linear-gradient(180deg, #ffffff 0%, #f7f8fa 100%);
+  }
+
+  .mock-main.column {
+    flex-direction: column;
+  }
+
+  .mock-block {
+    border-radius: 14px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: rgba(255,255,255,0.96);
+  }
+
+  .mock-sidebar {
+    width: 106px;
+    padding: 0.7rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  .mock-side-item {
+    height: 24px;
+    border-radius: 999px;
+    background: rgba(148,163,184,0.18);
+  }
+
+  .mock-side-item.active {
+    background: #111827;
+  }
+
+  .mock-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    min-width: 0;
+  }
+
+  .mock-breadcrumbs {
+    height: 34px;
+  }
+
+  .mock-toolbar {
+    display: flex;
+    gap: 0.5rem;
+    min-height: 42px;
+  }
+
+  .mock-search {
+    flex: 1;
+    border-radius: 999px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: #f8fafc;
+  }
+
+  .mock-btn {
+    width: 76px;
+    border-radius: 999px;
+    background: #111827;
+  }
+
+  .mock-btn.ghost {
+    width: 58px;
+    background: #f8fafc;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+  }
+
+  .mock-table {
+    flex: 1;
+    padding: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .mock-table-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.8fr) 0.6fr 0.8fr 0.6fr;
+    gap: 0.38rem;
+    align-items: center;
+    min-height: 26px;
+  }
+
+  .mock-table-row span {
+    display: block;
+    height: 10px;
+    border-radius: 999px;
+    background: rgba(148,163,184,0.22);
+  }
+
+  .mock-table-row.head span {
+    background: rgba(17,24,39,0.16);
+  }
+
+  .mock-status {
+    width: 92px;
+    padding: 0.7rem 0.55rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .mock-stat {
+    height: 42px;
+    border-radius: 12px;
+    background: rgba(148,163,184,0.16);
+  }
+
+  .mock-strip {
+    height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem;
+  }
+
+  .mock-strip-pill {
+    width: 68px;
+    height: 24px;
+    border-radius: 999px;
+    background: rgba(148,163,184,0.18);
+  }
+</style>
+
+<h2>Minimal Explorer 布局方向</h2>
+<p class="subtitle">现在只比较结构，不比较颜色细节。两版都基于你刚选的“高端网页工具”气质。</p>
+<p class="lead">核心差异是：要不要把“状态/身份/辅助信息”独立成侧栏，让主区域更像一个专注的文件工作台。</p>
+
+<div class="layout-grid">
+  <div class="layout-card" data-choice="L1" onclick="toggleSelect(this)">
+    <div class="layout-preview">
+      <div class="mock-shell">
+        <div class="mock-topbar">
+          <div class="mock-brand">
+            <span class="mock-logo"></span>
+            <span>File Share</span>
+          </div>
+          <span class="mock-account">admin</span>
+        </div>
+        <div class="mock-main column">
+          <div class="mock-block mock-breadcrumbs"></div>
+          <div class="mock-toolbar">
+            <div class="mock-search"></div>
+            <div class="mock-btn"></div>
+            <div class="mock-btn ghost"></div>
+            <div class="mock-btn ghost"></div>
+          </div>
+          <div class="mock-block mock-strip">
+            <div class="mock-strip-pill"></div>
+            <div class="mock-strip-pill" style="width:92px"></div>
+            <div class="mock-strip-pill" style="margin-left:auto;width:82px"></div>
+          </div>
+          <div class="mock-block mock-table">
+            <div class="mock-table-row head"><span></span><span></span><span></span><span></span></div>
+            <div class="mock-table-row"><span></span><span></span><span></span><span></span></div>
+            <div class="mock-table-row"><span></span><span></span><span></span><span></span></div>
+            <div class="mock-table-row"><span></span><span></span><span></span><span></span></div>
+            <div class="mock-table-row"><span></span><span></span><span></span><span></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="layout-body">
+      <h3>L1. Single Canvas</h3>
+      <p>所有内容都在一个主画布里，像一个非常克制的网页文件浏览器。优点是聚焦、轻盈、品牌感强。</p>
+      <div class="layout-tags">
+        <span>最纯粹</span>
+        <span>文件区最大</span>
+        <span>更像高端 Web App</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="layout-card" data-choice="L2" onclick="toggleSelect(this)">
+    <div class="layout-preview">
+      <div class="mock-shell">
+        <div class="mock-topbar">
+          <div class="mock-brand">
+            <span class="mock-logo"></span>
+            <span>File Share</span>
+          </div>
+          <span class="mock-account">admin</span>
+        </div>
+        <div class="mock-main">
+          <div class="mock-block mock-panel">
+            <div class="mock-breadcrumbs mock-block"></div>
+            <div class="mock-toolbar">
+              <div class="mock-search"></div>
+              <div class="mock-btn"></div>
+              <div class="mock-btn ghost"></div>
+            </div>
+            <div class="mock-block mock-table">
+              <div class="mock-table-row head"><span></span><span></span><span></span><span></span></div>
+              <div class="mock-table-row"><span></span><span></span><span></span><span></span></div>
+              <div class="mock-table-row"><span></span><span></span><span></span><span></span></div>
+              <div class="mock-table-row"><span></span><span></span><span></span><span></span></div>
+              <div class="mock-table-row"><span></span><span></span><span></span><span></span></div>
+            </div>
+          </div>
+          <div class="mock-block mock-status">
+            <div class="mock-stat"></div>
+            <div class="mock-stat"></div>
+            <div class="mock-stat"></div>
+            <div class="mock-stat"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="layout-body">
+      <h3>L2. Focus + Status Rail</h3>
+      <p>主文件区保持极简，但右侧给登录态、权限提示、上传状态、最近动作留一条很窄的状态栏，层次更丰富。</p>
+      <div class="layout-tags">
+        <span>更完整</span>
+        <span>状态信息更优雅</span>
+        <span>适合后续扩展</span>
+      </div>
+    </div>
+  </div>
+</div>

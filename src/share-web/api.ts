@@ -75,7 +75,8 @@ export const fileShareApi = {
     if (nodeId) {
       query.set('node_id', nodeId);
     }
-    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    const queryString = query.toString();
+    const suffix = queryString ? `?${queryString}` : '';
     return request<FileShareTreeResponse>(`/api/tree${suffix}`);
   },
   resolvePath(segments: string[]) {

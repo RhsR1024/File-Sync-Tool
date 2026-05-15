@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Action Gallery</title>
+  <link rel="stylesheet" href="./shared.css">
+  <style>
+    .action-layout {
+      display: grid;
+      gap: 18px;
+    }
+
+    .action-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .action-stage {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
+      gap: 18px;
+    }
+
+    .action-copy,
+    .action-panel {
+      padding: 20px;
+    }
+
+    .action-panel {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .action-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .action-grid .action-button {
+      justify-content: flex-start;
+    }
+
+    @media (max-width: 980px) {
+      .action-stage {
+        grid-template-columns: 1fr;
+      }
+
+      .action-header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+  </style>
+  <script src="./mock-data.js"></script>
+</head>
+<body>
+  <div class="preview-page">
+    <div id="app"></div>
+  </div>
+
+  <script>
+    const gallery = window.fileShareHomepageMock;
+    const data = gallery.data;
+
+    document.getElementById('app').innerHTML = `
+      <main class="canvas">
+        <div class="canvas-inner action-layout">
+          <header class="action-header">
+            <div>
+              <div class="eyebrow">Action Gallery</div>
+              <h1 class="section-title" style="margin-top:14px;max-width:720px;">在不失去克制感的前提下，把常用动作推到更前面</h1>
+            </div>
+            <div class="status-meta">
+              <span class="pill strong">${gallery.escapeHtml(data.session.name)}</span>
+              <span class="pill">${gallery.escapeHtml(data.session.syncTime)}</span>
+            </div>
+          </header>
+
+          <section class="panel" style="padding:16px 18px;">
+            <div class="breadcrumbs">${gallery.renderBreadcrumbs()}</div>
+          </section>
+
+          <section class="action-stage">
+            <div class="panel soft action-copy">
+              <div class="eyebrow">Fast Access</div>
+              <h2 class="section-title" style="margin-top:12px;">搜索仍然是首页第一入口，但上传和创建不再退到背景里</h2>
+              <p class="body-copy" style="margin-top:14px;max-width:640px;">
+                这版更强调“快速做事”。它把搜索、上传、创建目录和刷新放在更有操作感的位置上，
+                适合高频整理共享内容、临时补文件、快速回看目录状态的工作流。
+              </p>
+              <div style="margin-top:18px;">${gallery.renderSearch(false)}</div>
+            </div>
+
+            <aside class="panel action-panel">
+              <div class="meta-row" style="align-items:flex-start;">
+                <div>
+                  <div class="status-label">Quick Actions</div>
+                  <div class="status-value" style="font-size:18px;">高频操作</div>
+                </div>
+                <span class="pill accent">更偏效率</span>
+              </div>
+              <div class="action-grid">
+                ${gallery.renderActions({
+                  'upload-file': 'primary',
+                  'upload-folder': 'primary',
+                  'new-folder': 'secondary',
+                  'refresh': 'ghost',
+                })}
+              </div>
+              <p class="muted-copy">适合把“上传文件 / 上传目录”作为首页最常见动作来使用，同时保留相同的单画布与平衡密度。</p>
+            </aside>
+          </section>
+
+          ${gallery.renderFlashBanner()}
+          ${gallery.renderTable("共享目录概览", "7 项内容")}
+          ${gallery.renderFooter()}
+        </div>
+      </main>
+    `;
+  </script>
+</body>
+</html>

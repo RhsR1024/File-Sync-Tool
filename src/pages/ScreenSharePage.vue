@@ -28,6 +28,7 @@ import {
   screenShareGetStatus,
   type MonitorInfo,
   type NetworkInterfaceInfo,
+  type ScreenShareBackendMode,
   type ScreenShareConfig,
   type ScreenShareStatus,
 } from '../lib/tauri';
@@ -50,6 +51,7 @@ const password = ref('');
 const quality = ref(70);
 const fps = ref(15);
 const showCursor = ref(true);
+const backendMode = ref<ScreenShareBackendMode>('auto');
 const autoStart = ref(false);
 
 const isActive = ref(false);
@@ -149,6 +151,7 @@ interface SavedSettings {
   quality: number;
   fps: number;
   showCursor: boolean;
+  backendMode: ScreenShareBackendMode;
   selectedMonitor: number;
   selectedBindAddress: string;
   autoStart: boolean;
@@ -167,6 +170,7 @@ async function saveSettings() {
         quality: quality.value,
         fps: fps.value,
         showCursor: showCursor.value,
+        backendMode: backendMode.value,
         selectedMonitor: selectedMonitor.value,
         selectedBindAddress: selectedBindAddress.value,
         autoStart: autoStart.value,
@@ -191,6 +195,7 @@ async function loadSettings() {
     quality.value = saved.quality ?? 70;
     fps.value = saved.fps ?? 15;
     showCursor.value = saved.showCursor ?? true;
+    backendMode.value = saved.backendMode ?? 'auto';
     selectedMonitor.value = saved.selectedMonitor ?? 0;
     selectedBindAddress.value = saved.selectedBindAddress ?? '0.0.0.0';
     autoStart.value = saved.autoStart ?? false;
@@ -208,9 +213,28 @@ function buildScreenShareConfig(): ScreenShareConfig {
     quality: quality.value,
     fps: fps.value,
     show_cursor: showCursor.value,
+    capture_backend_mode: backendMode.value,
     bind_address: selectedBindAddress.value || '0.0.0.0',
   };
 }
+
+const backendModeOptions = computed(() => [
+  {
+    value: 'auto' as const,
+    label: t('tools.screenShare.backendModeAuto'),
+    description: t('tools.screenShare.backendModeAutoDesc'),
+  },
+  {
+    value: 'wgc' as const,
+    label: t('tools.screenShare.backendModeWgc'),
+    description: t('tools.screenShare.backendModeWgcDesc'),
+  },
+  {
+    value: 'dxgi' as const,
+    label: t('tools.screenShare.backendModeDxgi'),
+    description: t('tools.screenShare.backendModeDxgiDesc'),
+  },
+]);
 
 async function applyStartedShare(url: string) {
   serverUrl.value = url;
@@ -551,6 +575,33 @@ onUnmounted(() => {
                   :disabled="isActive"
                   class="ss-range w-full"
                 >
+              </div>
+              <div>
+                <div class="mb-2 flex items-center justify-between gap-3">
+                  <label class="ss-label">{{ t('tools.screenShare.backendMode') }}</label>
+                  <span class="text-[11px] text-slate-400">{{ t('tools.screenShare.backendModeHint') }}</span>
+                </div>
+                <div class="space-y-2">
+                  <label
+                    v-for="option in backendModeOptions"
+                    :key="option.value"
+                    class="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 transition hover:border-violet-200 hover:bg-violet-50/40"
+                    :class="backendMode === option.value ? 'border-violet-300 bg-violet-50' : ''"
+                  >
+                    <input
+                      v-model="backendMode"
+                      type="radio"
+                      name="screen-share-backend-mode"
+                      :value="option.value"
+                      :disabled="isActive"
+                      class="mt-0.5 h-4 w-4 accent-violet-600"
+                    >
+                    <span class="min-w-0">
+                      <span class="block text-sm font-medium text-slate-800">{{ option.label }}</span>
+                      <span class="mt-1 block text-xs leading-5 text-slate-500">{{ option.description }}</span>
+                    </span>
+                  </label>
+                </div>
               </div>
             </div>
           </div>

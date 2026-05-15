@@ -31,3 +31,14 @@ test('screen share stop action executes directly without a confirmation prompt',
   assert.match(pageSource, /@click="stopShare"/);
   assert.doesNotMatch(pageSource, /@click="confirmStopShare"/);
 });
+
+test('screen share exposes explicit capture backend modes with explanatory helper copy', () => {
+  assert.match(pageSource, /tools\.screenShare\.backendMode/);
+  assert.match(pageSource, /tools\.screenShare\.backendModeHint/);
+  assert.match(pageSource, /tools\.screenShare\.backendModeAuto/);
+  assert.match(pageSource, /tools\.screenShare\.backendModeWgc/);
+  assert.match(pageSource, /tools\.screenShare\.backendModeDxgi/);
+  assert.match(pageSource, /tools\.screenShare\.backendModeAutoDesc/);
+  assert.match(pageSource, /tools\.screenShare\.backendModeWgcDesc/);
+  assert.match(pageSource, /tools\.screenShare\.backendModeDxgiDesc/);
+});

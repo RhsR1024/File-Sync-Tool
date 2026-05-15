@@ -558,8 +558,13 @@ export interface ApplianceSshTarget {
   jumpHost?: string;
 }
 
+export type ApplianceSshApiVersion = 'componentized' | 'mainline';
+export type ApplianceSshWhitelistScope = 'allTcp' | 'sshOnly';
+
 export interface EnableApplianceSshRequest {
   targets: ApplianceSshTarget[];
+  applianceVersion: ApplianceSshApiVersion;
+  whitelistScope: ApplianceSshWhitelistScope;
   sshUsername?: string;
   sshPassword?: string;
   addWhitelistRule: boolean;
@@ -980,6 +985,8 @@ export async function sendWol(request: WolRequest): Promise<WolResult> {
 
 // ─── Screen Share ─────────────────────────────────────
 
+export type ScreenShareBackendMode = 'auto' | 'wgc' | 'dxgi';
+
 export interface ScreenShareConfig {
   port: number;
   username: string | null;
@@ -988,6 +995,7 @@ export interface ScreenShareConfig {
   quality: number;
   fps: number;
   show_cursor: boolean;
+  capture_backend_mode?: ScreenShareBackendMode;
   /** Bind address: "0.0.0.0" for all interfaces, or a specific IP. */
   bind_address?: string | null;
 }

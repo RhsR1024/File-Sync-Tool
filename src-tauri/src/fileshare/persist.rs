@@ -274,6 +274,26 @@ fn normalize_user_root_permissions(entry: UserRootPermissions) -> UserRootPermis
     }
 }
 
+fn normalize_root_aliases(
+    roots: Vec<super::model::FileShareRoot>,
+) -> Vec<super::model::FileShareRoot> {
+    let mut seen_aliases = HashSet::new();
+
+    roots.into_iter()
+        .map(|mut root| {
+            let base = super::make_alias(&root.path);
+            let mut alias = base.clone();
+            let mut n = 2;
+            while !seen_aliases.insert(alias.to_lowercase()) {
+                alias = format!("{base} ({n})");
+                n += 1;
+            }
+            root.alias = alias;
+            root
+        })
+        .collect()
+}
+
 fn permissions_for_preset(
     preset: PermissionPreset,
     permissions: FileSharePermissionSet,
@@ -301,24 +321,26 @@ fn normalize_persisted_file_share_config(
         .filter(|rule| !rule.is_empty())
         .collect();
 
-    config.roots = config
-        .roots
-        .into_iter()
-        .filter_map(|root| {
-            let id = root.id.trim().to_string();
-            let alias = root.alias.trim().to_string();
-            let path = root.path.trim().to_string();
-            if id.is_empty() || alias.is_empty() || path.is_empty() {
-                return None;
-            }
-            Some(super::model::FileShareRoot {
-                id,
-                alias,
-                path,
-                enabled: root.enabled,
+    config.roots = normalize_root_aliases(
+        config
+            .roots
+            .into_iter()
+            .filter_map(|root| {
+                let id = root.id.trim().to_string();
+                let alias = root.alias.trim().to_string();
+                let path = root.path.trim().to_string();
+                if id.is_empty() || alias.is_empty() || path.is_empty() {
+                    return None;
+                }
+                Some(super::model::FileShareRoot {
+                    id,
+                    alias,
+                    path,
+                    enabled: root.enabled,
+                })
             })
-        })
-        .collect();
+            .collect(),
+    );
 
     let mut seen_root_ids = HashSet::new();
     config
@@ -667,5 +689,26 @@ mod tests {
             .expect_err("guest and custom accounts should not share the same username");
 
         assert!(error.contains("Duplicate file share username"));
+    }
+
+    #[test]
+    fn load_normalizes_root_aliases_from_directory_names() {
+        let tempdir = TestDir::new("root-alias-normalize");
+        let saved = PersistedFileShareConfig {
+            roots: vec![crate::fileshare::model::FileShareRoot {
+                id: "root-1".to_string(),
+                alias: "1-3-9-p10".to_string(),
+                path: r"E:\UMS_TEMP\1.3.9.P10".to_string(),
+                enabled: true,
+            }],
+            ..default_persisted_file_share_config()
+        };
+
+        save_persisted_file_share_config_to_path(&tempdir.config_path(), &saved)
+            .expect("old config should be writable");
+        let loaded = load_persisted_file_share_config_from_path(&tempdir.config_path())
+            .expect("saved config should load");
+
+        assert_eq!(loaded.roots[0].alias, "1.3.9.P10");
     }
 }

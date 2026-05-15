@@ -1042,25 +1042,21 @@ fn snapshot_connected_ips_at(visitor_ips: &Arc<Mutex<VisitorIpMap>>, now: Instan
 }
 
 pub fn make_alias(path: &str) -> String {
-    let name = Path::new(path)
+    let trimmed = path.trim().trim_end_matches(|c| c == '\\' || c == '/');
+    if trimmed.is_empty() {
+        return "share".to_string();
+    }
+
+    let name = Path::new(trimmed)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("share");
-    let s: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = s.trim_matches('-').to_string();
-    if trimmed.is_empty() {
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(trimmed);
+    if name.is_empty() {
         "share".to_string()
     } else {
-        trimmed
+        name.to_string()
     }
 }
 
@@ -1141,9 +1137,10 @@ fn get_lan_ips() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        hash_password, legacy_hash_password, remember_connected_ip, remember_connected_ip_at,
-        snapshot_connected_ips, snapshot_connected_ips_at, verify_password_hash, FileShareHandle,
-        FileShareRuntime, FileShareRuntimeSnapshot, SharedDir, VISITOR_IP_TTL,
+        hash_password, legacy_hash_password, make_alias, remember_connected_ip,
+        remember_connected_ip_at, snapshot_connected_ips, snapshot_connected_ips_at,
+        verify_password_hash, FileShareHandle, FileShareRuntime, FileShareRuntimeSnapshot,
+        SharedDir, VISITOR_IP_TTL,
     };
     use crate::fileshare::ops::{validate_zip_source_with_limits, ZipSourceStats};
     use std::collections::HashMap;
@@ -1268,6 +1265,11 @@ mod tests {
 
         assert!(verify_password_hash(&legacy_hash, "secret-123"));
         assert!(!verify_password_hash(&legacy_hash, "wrong-password"));
+    }
+
+    #[test]
+    fn make_alias_preserves_directory_name_for_display() {
+        assert_eq!(make_alias(r"E:\UMS_TEMP\1.3.9.P10"), "1.3.9.P10");
     }
 
     #[test]

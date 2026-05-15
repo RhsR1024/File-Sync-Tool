@@ -4,6 +4,7 @@ import { Pin } from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
 
 import ClipboardList from '@/components/clipboard/ClipboardList.vue';
+import { resolveClipboardPinnedSectionHeight } from '@/lib/clipboardListLayout';
 import {
   createDefaultClipboardSettings,
   type ClipboardDisplaySettings,
@@ -45,9 +46,12 @@ const displaySettings = computed(
 );
 const highlightKeywords = computed(() => props.highlightKeywords ?? []);
 const listHeight = computed(() => {
-  const rowHeight = props.compact ? 98 : 124;
-  const visibleRows = Math.min(props.items.length, props.compact ? 2 : 3);
-  return `${Math.max(rowHeight, visibleRows * rowHeight)}px`;
+  const height = resolveClipboardPinnedSectionHeight(
+    props.items,
+    displaySettings.value,
+    { compact: props.compact },
+  );
+  return `${height}px`;
 });
 </script>
 

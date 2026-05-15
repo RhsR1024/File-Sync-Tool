@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Editorial Workspace</title>
+  <link rel="stylesheet" href="./shared.css">
+  <style>
+    .editorial-layout {
+      display: grid;
+      gap: 18px;
+    }
+
+    .editorial-hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .editorial-copy {
+      display: grid;
+      gap: 16px;
+      padding: 8px 2px 6px;
+    }
+
+    .editorial-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 16px 18px;
+    }
+
+    @media (max-width: 920px) {
+      .editorial-hero {
+        grid-template-columns: 1fr;
+      }
+
+      .editorial-toolbar {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+  </style>
+  <script src="./mock-data.js"></script>
+</head>
+<body>
+  <div class="preview-page">
+    <div id="app"></div>
+  </div>
+
+  <script>
+    const editorial = window.fileShareHomepageMock;
+    const data = editorial.data;
+
+    document.getElementById('app').innerHTML = `
+      <main class="canvas">
+        <div class="canvas-inner editorial-layout">
+          <header class="editorial-hero">
+            <div class="editorial-copy">
+              <div class="eyebrow">Editorial Workspace</div>
+              <h1 class="display-title">${editorial.escapeHtml(data.title)}</h1>
+              <p class="body-copy" style="max-width: 680px;">${editorial.escapeHtml(data.subtitle)}</p>
+              <div class="meta-group">${editorial.renderSummaryChips()}</div>
+            </div>
+
+            <aside class="status-tile panel soft">
+              <div class="status-top">
+                <div>
+                  <div class="status-label">Session</div>
+                  <div class="status-value">${editorial.escapeHtml(data.session.name)}</div>
+                </div>
+                <span class="pill accent">Premium</span>
+              </div>
+              <div class="body-copy" style="font-size:14px;line-height:1.65;">${editorial.escapeHtml(data.session.status)}</div>
+              <div class="status-meta">
+                <span class="pill">${editorial.escapeHtml(data.session.syncTime)}</span>
+                <span class="pill">当前目录 · 可上传</span>
+              </div>
+            </aside>
+          </header>
+
+          <section class="panel editorial-toolbar">
+            <div class="breadcrumbs">${editorial.renderBreadcrumbs()}</div>
+            <div class="meta-group">
+              <span class="chip">首页浏览体验稿</span>
+              <span class="chip accent">更重视搜索层级</span>
+            </div>
+          </section>
+
+          ${editorial.renderSearch(true)}
+          ${editorial.renderFlashBanner()}
+          ${editorial.renderTable("发布会目录内容", "7 项内容")}
+          ${editorial.renderFooter()}
+        </div>
+      </main>
+    `;
+  </script>
+</body>
+</html>

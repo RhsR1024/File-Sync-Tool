@@ -1,0 +1,50 @@
+{
+  "id": "port-test-ux-polish",
+  "name": "port-test-ux-polish",
+  "title": "network tools: port test UX polish (large scan + open-only views)",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "priority": "P2",
+  "creator": "codex-agent",
+  "assignee": "codex-agent",
+  "createdAt": "2026-05-14",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "current_phase": 0,
+  "next_action": [
+    {
+      "phase": 1,
+      "action": "implement"
+    },
+    {
+      "phase": 2,
+      "action": "check"
+    },
+    {
+      "phase": 3,
+      "action": "finish"
+    },
+    {
+      "phase": 4,
+      "action": "create-pr"
+    }
+  ],
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "docs/superpowers/specs/2026-05-14-port-test-ux-polish-design.md",
+    "src/components/network/PortTestTab.vue",
+    "src/lib/portTestPresentation.ts",
+    "src/lib/__tests__/portTestPresentation.test.ts",
+    "src/locales/messages.ts"
+  ],
+  "notes": "Implementation lands directly on main (small UX tweak, per user preference). Backend untouched.",
+  "meta": {}
+}

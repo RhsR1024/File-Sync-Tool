@@ -155,6 +155,36 @@ const ICONS: Record<string, IconRender> = {
       'stroke-linejoin': 'round',
     }),
   },
+  sortDesc: {
+    draw: () => h('path', {
+      d: 'M7 4v16m0 0 3-3m-3 3-3-3M13 7h3M13 12h5M13 17h7',
+      fill: 'none',
+      stroke: 'currentColor',
+      'stroke-width': 1.8,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+    }),
+  },
+  chevronUp: {
+    draw: () => h('path', {
+      d: 'm6 14 6-6 6 6',
+      fill: 'none',
+      stroke: 'currentColor',
+      'stroke-width': 2,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+    }),
+  },
+  chevronDown: {
+    draw: () => h('path', {
+      d: 'm6 10 6 6 6-6',
+      fill: 'none',
+      stroke: 'currentColor',
+      'stroke-width': 2,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+    }),
+  },
   clock: {
     draw: () => h('g', { fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round' }, [
       h('circle', { cx: 12, cy: 12, r: 8 }),

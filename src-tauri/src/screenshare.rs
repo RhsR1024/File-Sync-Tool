@@ -2,9 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 use std::{mem, process::Command};
@@ -15,17 +16,55 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{body::Body, Form, Json, Router};
 use bytes::{Bytes, BytesMut};
-use scrap::{Capturer, Display};
+use scrap::{Capturer, Display, Frame};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{broadcast, oneshot};
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
+use windows::core::{factory, Error as WindowsError, IInspectable, Interface, HRESULT};
+#[cfg(target_os = "windows")]
+use windows::Foundation::{EventRegistrationToken, TypedEventHandler};
+#[cfg(target_os = "windows")]
+use windows::Graphics::Capture::{
+    Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
+};
+#[cfg(target_os = "windows")]
+use windows::Graphics::DirectX::Direct3D11::{IDirect3DDevice, IDirect3DSurface};
+#[cfg(target_os = "windows")]
+use windows::Graphics::DirectX::DirectXPixelFormat;
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{CloseHandle, BOOL, HMODULE, HWND, LPARAM, RECT};
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::System::WinRT::Direct3D11::{
+    CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
@@ -37,7 +76,52 @@ const TOOL_NAME: &str = "屏幕共享";
 
 const VIEWER_IP_TTL: Duration = Duration::from_secs(12);
 const CAPTURE_CREATE_RETRY_DELAYS_MS: [u64; 8] = [0, 200, 400, 800, 1500, 2500, 4000, 6000];
+const CAPTURE_AUTO_DXGI_RETRY_DELAYS_MS: [u64; 3] = [0, 200, 400];
+const CAPTURE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const CAPTURE_RETRY_CANCEL_POLL_MS: u64 = 100;
 type ViewerIpMap = HashMap<String, Instant>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureBackendKind {
+    Dxgi,
+    Wgc,
+}
+
+impl CaptureBackendKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dxgi => "DXGI",
+            Self::Wgc => "WGC",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenShareBackendMode {
+    #[default]
+    Auto,
+    Wgc,
+    Dxgi,
+}
+
+impl ScreenShareBackendMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Wgc => "wgc",
+            Self::Dxgi => "dxgi",
+        }
+    }
+}
+
+fn capture_retry_delays_for_mode(mode: ScreenShareBackendMode) -> &'static [u64] {
+    match mode {
+        ScreenShareBackendMode::Auto => &CAPTURE_AUTO_DXGI_RETRY_DELAYS_MS,
+        ScreenShareBackendMode::Dxgi => &CAPTURE_CREATE_RETRY_DELAYS_MS,
+        ScreenShareBackendMode::Wgc => &[],
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenShareConfig {
@@ -48,6 +132,8 @@ pub struct ScreenShareConfig {
     pub quality: u8,
     pub fps: u8,
     pub show_cursor: bool,
+    #[serde(default)]
+    pub capture_backend_mode: ScreenShareBackendMode,
     /// Bind address: "0.0.0.0" for all interfaces, or a specific IP like "192.168.1.100".
     /// When None, defaults to "0.0.0.0".
     #[serde(default)]
@@ -111,7 +197,9 @@ struct ScreenCaptureConflictPolicy {
 
 pub struct ScreenShareHandle {
     active: Arc<AtomicBool>,
+    starting: AtomicBool,
     cancel: Arc<AtomicBool>,
+    session_id: AtomicU64,
     viewer_count: Arc<AtomicU32>,
     fps_counter: Arc<AtomicU32>,
     bytes_sent: Arc<AtomicU64>,
@@ -126,7 +214,9 @@ impl ScreenShareHandle {
     pub fn new() -> Self {
         Self {
             active: Arc::new(AtomicBool::new(false)),
+            starting: AtomicBool::new(false),
             cancel: Arc::new(AtomicBool::new(false)),
+            session_id: AtomicU64::new(0),
             viewer_count: Arc::new(AtomicU32::new(0)),
             fps_counter: Arc::new(AtomicU32::new(0)),
             bytes_sent: Arc::new(AtomicU64::new(0)),
@@ -135,6 +225,34 @@ impl ScreenShareHandle {
             all_urls: Mutex::new(Vec::new()),
             start_time: Mutex::new(None),
             viewer_ips: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+struct ScreenShareStartGuard {
+    handle: Arc<ScreenShareHandle>,
+    session_id: u64,
+    completed: bool,
+}
+
+impl ScreenShareStartGuard {
+    fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    fn mark_active(mut self) {
+        if is_current_session(&self.handle, self.session_id) {
+            self.handle.active.store(true, Ordering::SeqCst);
+            self.handle.starting.store(false, Ordering::SeqCst);
+        }
+        self.completed = true;
+    }
+}
+
+impl Drop for ScreenShareStartGuard {
+    fn drop(&mut self) {
+        if !self.completed && is_current_session(&self.handle, self.session_id) {
+            reset_runtime_state(&self.handle);
         }
     }
 }
@@ -168,12 +286,47 @@ fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
     }
 }
 
-fn prepare_runtime_state_for_start(handle: &ScreenShareHandle) {
+fn prepare_runtime_state_for_start(handle: &ScreenShareHandle) -> u64 {
     clear_runtime_state(handle, false);
+    handle.session_id.fetch_add(1, Ordering::SeqCst) + 1
 }
 
 fn reset_runtime_state(handle: &ScreenShareHandle) {
     clear_runtime_state(handle, true);
+    handle.starting.store(false, Ordering::SeqCst);
+    handle.session_id.fetch_add(1, Ordering::SeqCst);
+}
+
+fn begin_screen_share_start(
+    handle: &Arc<ScreenShareHandle>,
+) -> Result<ScreenShareStartGuard, String> {
+    if handle.active.load(Ordering::SeqCst) {
+        return Err("Screen share is already active".into());
+    }
+
+    if handle
+        .starting
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Screen share is already starting".into());
+    }
+
+    if handle.active.load(Ordering::SeqCst) {
+        handle.starting.store(false, Ordering::SeqCst);
+        return Err("Screen share is already active".into());
+    }
+
+    let session_id = prepare_runtime_state_for_start(handle);
+    Ok(ScreenShareStartGuard {
+        handle: handle.clone(),
+        session_id,
+        completed: false,
+    })
+}
+
+fn is_current_session(handle: &ScreenShareHandle, session_id: u64) -> bool {
+    handle.session_id.load(Ordering::SeqCst) == session_id
 }
 
 fn record_viewer_ip(viewer_ips: &Arc<Mutex<ViewerIpMap>>, ip: impl Into<String>) {
@@ -215,8 +368,18 @@ fn emit_inactive_status(app_handle: &AppHandle) {
 fn shutdown_after_capture_failure(
     app_handle: &AppHandle,
     handle: &ScreenShareHandle,
+    session_id: u64,
     detail: &str,
 ) {
+    if !is_current_session(handle, session_id) {
+        log::info!(
+            "Ignoring stale screen capture failure for session {}: {}",
+            session_id,
+            detail
+        );
+        return;
+    }
+
     handle.cancel.store(true, Ordering::SeqCst);
     if let Some(tx) = handle.shutdown_tx.lock().unwrap().take() {
         let _ = tx.send(());
@@ -345,10 +508,6 @@ pub async fn screen_share_start(
 ) -> Result<String, String> {
     let handle = &state.screen_share;
 
-    if handle.active.load(Ordering::SeqCst) {
-        return Err("Screen share is already active".into());
-    }
-
     // Validate
     if config.port < 1024 {
         return Err("Port must be >= 1024".into());
@@ -359,6 +518,9 @@ pub async fn screen_share_start(
     if config.fps < 1 || config.fps > 30 {
         return Err("FPS must be 1-30".into());
     }
+
+    let start_guard = begin_screen_share_start(handle)?;
+    let session_id = start_guard.session_id();
 
     // Verify monitor exists (in a block so displays is dropped before any .await)
     {
@@ -404,8 +566,6 @@ pub async fn screen_share_start(
     })?;
     log::info!("Screen share HTTP server listening on {}", addr);
 
-    prepare_runtime_state_for_start(handle);
-
     // Broadcast channel for JPEG frames
     let (broadcast_tx, _) = broadcast::channel::<Arc<Bytes>>(8);
 
@@ -424,6 +584,7 @@ pub async fn screen_share_start(
     let quality = config.quality;
     let fps = config.fps;
     let show_cursor = config.show_cursor;
+    let backend_mode = config.capture_backend_mode;
     let capture_tx = broadcast_tx.clone();
     let capture_app = app_handle.clone();
     let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
@@ -436,11 +597,13 @@ pub async fn screen_share_start(
                 quality,
                 fps,
                 show_cursor,
+                backend_mode,
                 capture_tx,
                 capture_cancel,
                 capture_fps,
                 capture_viewers,
                 capture_handle,
+                session_id,
                 Some(startup_tx),
                 capture_app,
             );
@@ -457,7 +620,7 @@ pub async fn screen_share_start(
         return Err(msg);
     }
 
-    let startup_detail = match tokio::time::timeout(Duration::from_secs(4), startup_rx).await {
+    let startup_detail = match tokio::time::timeout(CAPTURE_STARTUP_TIMEOUT, startup_rx).await {
         Ok(Ok(Ok(()))) => None,
         Ok(Ok(Err(detail))) => Some(detail),
         Ok(Err(_)) => Some("Screen capture thread exited before reporting startup status".into()),
@@ -475,10 +638,14 @@ pub async fn screen_share_start(
         return Err(detail);
     }
 
+    if handle.cancel.load(Ordering::SeqCst) || !is_current_session(handle, session_id) {
+        return Err("Screen share startup was cancelled".into());
+    }
+
     *handle.server_url.lock().unwrap() = server_url.clone();
     *handle.all_urls.lock().unwrap() = all_urls.clone();
     *handle.start_time.lock().unwrap() = Some(Instant::now());
-    handle.active.store(true, Ordering::SeqCst);
+    start_guard.mark_active();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     *handle.shutdown_tx.lock().unwrap() = Some(shutdown_tx);
@@ -498,6 +665,7 @@ pub async fn screen_share_start(
     let ss_server_active = handle.active.clone();
     let ss_server_app = app_handle.clone();
     let ss_runtime_handle = handle.clone();
+    let ss_session_id = session_id;
     let server_join = tokio::spawn(async move {
         run_http_server(listener, server_state, shutdown_rx).await;
     });
@@ -519,7 +687,9 @@ pub async fn screen_share_start(
             }
         }
 
-        if ss_server_active.swap(false, Ordering::SeqCst) {
+        if is_current_session(&ss_runtime_handle, ss_session_id)
+            && ss_server_active.swap(false, Ordering::SeqCst)
+        {
             reset_runtime_state(&ss_runtime_handle);
             crate::scanner::emit_tool_log(&ss_server_app, TOOL_NAME, "已停止", "info");
             let _ = ss_server_app.emit(
@@ -540,6 +710,8 @@ pub async fn screen_share_start(
     let reporter_all_urls = all_urls.clone();
     let reporter_start = Instant::now();
     let reporter_ips = handle.viewer_ips.clone();
+    let reporter_runtime_handle = handle.clone();
+    let reporter_session_id = session_id;
 
     tokio::spawn(async move {
         status_reporter(
@@ -552,6 +724,8 @@ pub async fn screen_share_start(
             reporter_all_urls,
             reporter_start,
             reporter_ips,
+            reporter_runtime_handle,
+            reporter_session_id,
         )
         .await;
     });
@@ -583,7 +757,7 @@ pub async fn screen_share_stop(
 ) -> Result<(), String> {
     let handle = &state.screen_share;
 
-    if !handle.active.load(Ordering::SeqCst) {
+    if !handle.active.load(Ordering::SeqCst) && !handle.starting.load(Ordering::SeqCst) {
         return Err("Screen share is not active".into());
     }
 
@@ -809,6 +983,103 @@ fn scan_screen_share_conflicts() -> Result<Vec<ScreenShareConflictProcess>, Stri
 #[cfg(not(target_os = "windows"))]
 fn scan_screen_share_conflicts() -> Result<Vec<ScreenShareConflictProcess>, String> {
     Ok(Vec::new())
+}
+
+fn blocking_capture_conflicts(
+    conflicts: &[ScreenShareConflictProcess],
+) -> Vec<&ScreenShareConflictProcess> {
+    conflicts
+        .iter()
+        .filter(|conflict| conflict.can_force_close && !conflict.window_title.trim().is_empty())
+        .collect()
+}
+
+fn format_capture_conflict_summary(conflicts: &[&ScreenShareConflictProcess]) -> String {
+    conflicts
+        .iter()
+        .take(5)
+        .map(|conflict| {
+            let title = sanitize_log_field(conflict.window_title.trim());
+            format!(
+                "{}(pid={}, title={})",
+                conflict.process_name, conflict.pid, title
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn capture_blocking_conflict_error(conflicts: &[ScreenShareConflictProcess]) -> Option<String> {
+    let blocking = blocking_capture_conflicts(conflicts);
+    if blocking.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "detected blocking screen-capture app(s): {}; close them and retry",
+        format_capture_conflict_summary(&blocking)
+    ))
+}
+
+fn sanitize_log_field(value: &str) -> String {
+    let sanitized = value
+        .trim()
+        .replace([';', '\r', '\n', '\t'], " ")
+        .replace("  ", " ");
+    if sanitized.is_empty() {
+        "-".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn format_capture_conflict_diagnostics(conflicts: &[ScreenShareConflictProcess]) -> String {
+    let blocking = blocking_capture_conflicts(&conflicts);
+    let blocking_summary = if blocking.is_empty() {
+        "none".to_string()
+    } else {
+        format_capture_conflict_summary(&blocking)
+    };
+    let top_processes = conflicts
+        .iter()
+        .take(8)
+        .map(|conflict| {
+            format!(
+                "{}(pid={}, title={}, can_force_close={}, risk={})",
+                conflict.process_name,
+                conflict.pid,
+                sanitize_log_field(&conflict.window_title),
+                conflict.can_force_close,
+                sanitize_log_field(&conflict.risk_level)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let top_processes = if top_processes.is_empty() {
+        "none".to_string()
+    } else {
+        top_processes
+    };
+
+    format!(
+        "conflict_scan=ok,total={},blocking_count={},blocking={},top={}",
+        conflicts.len(),
+        blocking.len(),
+        blocking_summary,
+        top_processes
+    )
+}
+
+fn capture_conflict_diagnostics_snapshot() -> String {
+    match scan_screen_share_conflicts() {
+        Ok(conflicts) => format_capture_conflict_diagnostics(&conflicts),
+        Err(error) => format!("conflict_scan=error,error={}", sanitize_log_field(&error)),
+    }
+}
+
+fn capture_blocking_conflict_error_snapshot() -> Option<String> {
+    let conflicts = scan_screen_share_conflicts().ok()?;
+    capture_blocking_conflict_error(&conflicts)
 }
 
 #[tauri::command]
@@ -1197,21 +1468,97 @@ mod cursor_overlay {
 
 // ─── Screen Capture Loop ────────────────────────────────────
 
+enum CapturedFrame<'a> {
+    Dxgi(Frame<'a>, usize),
+    Borrowed { pixels: &'a [u8], stride: usize },
+}
+
+impl CapturedFrame<'_> {
+    fn pixels(&self) -> &[u8] {
+        match self {
+            Self::Dxgi(frame, _) => frame,
+            Self::Borrowed { pixels, .. } => pixels,
+        }
+    }
+
+    fn stride(&self) -> usize {
+        match self {
+            Self::Dxgi(_, stride) => *stride,
+            Self::Borrowed { stride, .. } => *stride,
+        }
+    }
+}
+
+enum CaptureSource {
+    Dxgi(Capturer),
+    #[cfg(target_os = "windows")]
+    Wgc(WgcCapturer),
+}
+
+impl CaptureSource {
+    fn backend_kind(&self) -> CaptureBackendKind {
+        match self {
+            Self::Dxgi(_) => CaptureBackendKind::Dxgi,
+            #[cfg(target_os = "windows")]
+            Self::Wgc(_) => CaptureBackendKind::Wgc,
+        }
+    }
+
+    fn width(&self) -> usize {
+        match self {
+            Self::Dxgi(capturer) => capturer.width(),
+            #[cfg(target_os = "windows")]
+            Self::Wgc(capturer) => capturer.width(),
+        }
+    }
+
+    fn height(&self) -> usize {
+        match self {
+            Self::Dxgi(capturer) => capturer.height(),
+            #[cfg(target_os = "windows")]
+            Self::Wgc(capturer) => capturer.height(),
+        }
+    }
+
+    fn frame(&mut self) -> io::Result<CapturedFrame<'_>> {
+        match self {
+            Self::Dxgi(capturer) => {
+                let height = capturer.height();
+                let frame: Frame<'_> = capturer.frame()?;
+                let stride = frame.len() / height;
+                Ok(CapturedFrame::Dxgi(frame, stride))
+            }
+            #[cfg(target_os = "windows")]
+            Self::Wgc(capturer) => capturer.frame(),
+        }
+    }
+}
+
 fn capture_loop(
     monitor_index: usize,
     quality: u8,
     fps: u8,
     show_cursor: bool,
+    backend_mode: ScreenShareBackendMode,
     tx: broadcast::Sender<Arc<Bytes>>,
     cancel: Arc<AtomicBool>,
     fps_counter: Arc<AtomicU32>,
     viewer_count: Arc<AtomicU32>,
     runtime_handle: Arc<ScreenShareHandle>,
+    session_id: u64,
     startup_tx: Option<oneshot::Sender<Result<(), String>>>,
     app_handle: AppHandle,
 ) {
     let mut startup_tx = startup_tx;
-    let mut capturer = match create_capturer(monitor_index) {
+    let mut source = match create_capture_source(
+        monitor_index,
+        show_cursor,
+        backend_mode,
+        &cancel,
+        &runtime_handle,
+        session_id,
+        &app_handle,
+    ) {
         Ok(c) => c,
         Err(err) => {
             let detail = format!(
@@ -1223,7 +1570,7 @@ fn capture_loop(
             if let Some(tx) = startup_tx.take() {
                 let _ = tx.send(Err(detail));
             } else {
-                shutdown_after_capture_failure(&app_handle, &runtime_handle, &detail);
+                shutdown_after_capture_failure(&app_handle, &runtime_handle, session_id, &detail);
             }
             return;
         }
@@ -1233,8 +1580,8 @@ fn capture_loop(
         let _ = tx.send(Ok(()));
     }
 
-    let width = capturer.width();
-    let height = capturer.height();
+    let width = source.width();
+    let height = source.height();
     let frame_interval = Duration::from_millis(1000 / fps.max(1) as u64);
     let mut first_real_frame = false;
 
@@ -1274,42 +1621,45 @@ fn capture_loop(
     let mut jpeg_buf: Vec<u8> = Vec::with_capacity(width * height / 4);
 
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || !is_current_session(&runtime_handle, session_id) {
             break;
         }
 
         let tick_start = Instant::now();
 
-        match capturer.frame() {
+        let current_backend = source.backend_kind();
+        match source.frame() {
             Ok(frame) => {
-                let stride = frame.len() / height;
+                let stride = frame.stride();
+                let frame_pixels = frame.pixels();
 
                 #[cfg(target_os = "windows")]
-                let source_pixels: &[u8] = if show_cursor {
-                    if let Some(ref mon_rect) = monitor_rect {
-                        // Copy frame into persistent scratch buffer (avoids per-frame reallocation)
-                        if frame_scratch.len() != frame.len() {
-                            frame_scratch.resize(frame.len(), 0);
+                let source_pixels: &[u8] =
+                    if show_cursor && current_backend == CaptureBackendKind::Dxgi {
+                        if let Some(ref mon_rect) = monitor_rect {
+                            // Copy frame into persistent scratch buffer (avoids per-frame reallocation)
+                            if frame_scratch.len() != frame_pixels.len() {
+                                frame_scratch.resize(frame_pixels.len(), 0);
+                            }
+                            frame_scratch.copy_from_slice(frame_pixels);
+                            cursor_overlay::draw_cursor(
+                                &mut frame_scratch,
+                                width,
+                                height,
+                                stride,
+                                mon_rect,
+                                &mut cursor_cache,
+                            );
+                            &frame_scratch
+                        } else {
+                            frame_pixels
                         }
-                        frame_scratch.copy_from_slice(&frame);
-                        cursor_overlay::draw_cursor(
-                            &mut frame_scratch,
-                            width,
-                            height,
-                            stride,
-                            mon_rect,
-                            &mut cursor_cache,
-                        );
-                        &frame_scratch
                     } else {
-                        &frame
-                    }
-                } else {
-                    &frame
-                };
+                        frame_pixels
+                    };
 
                 #[cfg(not(target_os = "windows"))]
-                let source_pixels: &[u8] = &frame;
+                let source_pixels: &[u8] = frame_pixels;
 
                 let jpeg = encode_jpeg_reuse(
                     source_pixels,
@@ -1331,7 +1681,14 @@ fn capture_loop(
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if !first_real_frame {
                     // Still warming up DXGI — send placeholder every 500ms to keep stream alive
-                    std::thread::sleep(Duration::from_millis(500));
+                    if !wait_for_capture_retry_delay(
+                        Duration::from_millis(500),
+                        &cancel,
+                        &runtime_handle,
+                        session_id,
+                    ) {
+                        break;
+                    }
                     let placeholder = make_placeholder_jpeg();
                     let _ = tx.send(Arc::new(Bytes::from(placeholder)));
                 } else {
@@ -1362,10 +1719,25 @@ fn capture_loop(
                     "screen-share-log",
                     serde_json::json!({ "level": "error", "message": capture_error_detail }),
                 );
-                std::thread::sleep(Duration::from_millis(500));
-                // Try to recreate capturer
-                drop(capturer);
-                match create_capturer(monitor_index) {
+                if !wait_for_capture_retry_delay(
+                    Duration::from_millis(500),
+                    &cancel,
+                    &runtime_handle,
+                    session_id,
+                ) {
+                    break;
+                }
+                // Try to recreate capture source. On Windows this may fall back from DXGI to WGC.
+                drop(source);
+                match create_capture_source(
+                    monitor_index,
+                    show_cursor,
+                    backend_mode,
+                    &cancel,
+                    &runtime_handle,
+                    session_id,
+                    &app_handle,
+                ) {
                     Ok(c) => {
                         let recreated_msg = format!(
                             "屏幕捕获器重建成功: attempt={}, monitor_index={}, viewers={}",
@@ -1384,7 +1756,7 @@ fn capture_loop(
                             "screen-share-log",
                             serde_json::json!({ "level": "info", "message": recreated_msg }),
                         );
-                        capturer = c;
+                        source = c;
                     }
                     Err(err) => {
                         let recreate_failed_msg = format!(
@@ -1398,6 +1770,7 @@ fn capture_loop(
                         shutdown_after_capture_failure(
                             &app_handle,
                             &runtime_handle,
+                            session_id,
                             &recreate_failed_msg,
                         );
                         break;
@@ -1451,18 +1824,860 @@ fn capture_creation_hint(error_kind: std::io::ErrorKind) -> Option<&'static str>
     }
 }
 
-fn create_capturer(monitor_index: usize) -> Result<Capturer, String> {
-    let mut last_error = None;
+#[cfg(test)]
+fn capture_create_retry_window() -> Duration {
+    CAPTURE_CREATE_RETRY_DELAYS_MS
+        .iter()
+        .fold(Duration::from_millis(0), |total, delay_ms| {
+            total + Duration::from_millis(*delay_ms)
+        })
+}
 
-    for (attempt_index, delay_ms) in CAPTURE_CREATE_RETRY_DELAYS_MS.iter().enumerate() {
-        if *delay_ms > 0 {
-            std::thread::sleep(Duration::from_millis(*delay_ms));
+#[cfg(test)]
+fn capture_create_retry_window_for_mode(mode: ScreenShareBackendMode) -> Duration {
+    capture_retry_delays_for_mode(mode)
+        .iter()
+        .fold(Duration::from_millis(0), |total, delay_ms| {
+            total + Duration::from_millis(*delay_ms)
+        })
+}
+
+fn wait_for_capture_retry_delay(
+    delay: Duration,
+    cancel: &AtomicBool,
+    runtime_handle: &ScreenShareHandle,
+    session_id: u64,
+) -> bool {
+    if cancel.load(Ordering::Relaxed) || !is_current_session(runtime_handle, session_id) {
+        return false;
+    }
+
+    let started_at = Instant::now();
+    while started_at.elapsed() < delay {
+        if cancel.load(Ordering::Relaxed) || !is_current_session(runtime_handle, session_id) {
+            return false;
+        }
+
+        let remaining = delay.saturating_sub(started_at.elapsed());
+        let sleep_for = remaining.min(Duration::from_millis(CAPTURE_RETRY_CANCEL_POLL_MS));
+        if sleep_for.is_zero() {
+            break;
+        }
+        std::thread::sleep(sleep_for);
+    }
+
+    !(cancel.load(Ordering::Relaxed) || !is_current_session(runtime_handle, session_id))
+}
+
+fn capture_runtime_state_summary(runtime_handle: &ScreenShareHandle, session_id: u64) -> String {
+    format!(
+        "state={{active={},starting={},cancel={},session_id={},current_session_id={},is_current={}}}",
+        runtime_handle.active.load(Ordering::SeqCst),
+        runtime_handle.starting.load(Ordering::SeqCst),
+        runtime_handle.cancel.load(Ordering::SeqCst),
+        session_id,
+        runtime_handle.session_id.load(Ordering::SeqCst),
+        is_current_session(runtime_handle, session_id)
+    )
+}
+
+fn emit_capture_create_diagnostic(app_handle: &AppHandle, level: &str, message: String) {
+    match level {
+        "error" => log::error!("{}", message),
+        "warn" => log::warn!("{}", message),
+        "success" => log::info!("{}", message),
+        _ => log::info!("{}", message),
+    }
+    crate::scanner::emit_tool_log(app_handle, TOOL_NAME, &message, level);
+    let _ = app_handle.emit(
+        "screen-share-log",
+        serde_json::json!({ "level": level, "message": message }),
+    );
+}
+
+fn format_capture_backend_fallback_message(
+    from: CaptureBackendKind,
+    to: CaptureBackendKind,
+    session_id: u64,
+    monitor_index: usize,
+    cause: &str,
+) -> String {
+    format!(
+        "{} capture backend failed, switching to {}: session_id={}, monitor_index={}, cause={}",
+        from.label(),
+        to.label(),
+        session_id,
+        monitor_index,
+        sanitize_log_field(cause)
+    )
+}
+
+fn format_capture_backend_failure_message(
+    backend: CaptureBackendKind,
+    session_id: u64,
+    monitor_index: usize,
+    cause: &str,
+) -> String {
+    format!(
+        "{} capture backend failed: session_id={}, monitor_index={}, cause={}",
+        backend.label(),
+        session_id,
+        monitor_index,
+        sanitize_log_field(cause)
+    )
+}
+
+fn format_capture_backend_selected_message(
+    backend: CaptureBackendKind,
+    session_id: u64,
+    monitor_index: usize,
+    width: usize,
+    height: usize,
+) -> String {
+    format!(
+        "using screen capture backend: backend={}, session_id={}, monitor_index={}, size={}x{}",
+        backend.label(),
+        session_id,
+        monitor_index,
+        width,
+        height
+    )
+}
+
+fn create_capture_source(
+    monitor_index: usize,
+    show_cursor: bool,
+    backend_mode: ScreenShareBackendMode,
+    cancel: &AtomicBool,
+    runtime_handle: &ScreenShareHandle,
+    session_id: u64,
+    app_handle: &AppHandle,
+) -> Result<CaptureSource, String> {
+    match backend_mode {
+        ScreenShareBackendMode::Dxgi => {
+            let capturer = create_capturer(
+                monitor_index,
+                ScreenShareBackendMode::Dxgi,
+                cancel,
+                runtime_handle,
+                session_id,
+                app_handle,
+            )?;
+            let source = CaptureSource::Dxgi(capturer);
+            emit_capture_create_diagnostic(
+                app_handle,
+                "success",
+                format_capture_backend_selected_message(
+                    source.backend_kind(),
+                    session_id,
+                    monitor_index,
+                    source.width(),
+                    source.height(),
+                ),
+            );
+            Ok(source)
+        }
+        ScreenShareBackendMode::Wgc => {
+            #[cfg(target_os = "windows")]
+            {
+                match create_wgc_capturer(monitor_index, show_cursor, session_id, app_handle) {
+                    Ok(wgc_capturer) => {
+                        let source = CaptureSource::Wgc(wgc_capturer);
+                        emit_capture_create_diagnostic(
+                            app_handle,
+                            "success",
+                            format_capture_backend_selected_message(
+                                source.backend_kind(),
+                                session_id,
+                                monitor_index,
+                                source.width(),
+                                source.height(),
+                            ),
+                        );
+                        Ok(source)
+                    }
+                    Err(wgc_error) => {
+                        emit_capture_create_diagnostic(
+                            app_handle,
+                            "error",
+                            format_capture_backend_failure_message(
+                                CaptureBackendKind::Wgc,
+                                session_id,
+                                monitor_index,
+                                &wgc_error,
+                            ),
+                        );
+                        Err(format!("WGC capture backend failed: {}", wgc_error))
+                    }
+                }
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = show_cursor;
+                Err("WGC capture backend is only available on Windows".to_string())
+            }
+        }
+        ScreenShareBackendMode::Auto => match create_capturer(
+            monitor_index,
+            ScreenShareBackendMode::Auto,
+            cancel,
+            runtime_handle,
+            session_id,
+            app_handle,
+        ) {
+            Ok(capturer) => {
+                let source = CaptureSource::Dxgi(capturer);
+                emit_capture_create_diagnostic(
+                    app_handle,
+                    "success",
+                    format_capture_backend_selected_message(
+                        source.backend_kind(),
+                        session_id,
+                        monitor_index,
+                        source.width(),
+                        source.height(),
+                    ),
+                );
+                Ok(source)
+            }
+            Err(dxgi_error) => {
+                #[cfg(target_os = "windows")]
+                {
+                    emit_capture_create_diagnostic(
+                        app_handle,
+                        "warn",
+                        format_capture_backend_fallback_message(
+                            CaptureBackendKind::Dxgi,
+                            CaptureBackendKind::Wgc,
+                            session_id,
+                            monitor_index,
+                            &dxgi_error,
+                        ),
+                    );
+
+                    match create_wgc_capturer(monitor_index, show_cursor, session_id, app_handle) {
+                        Ok(wgc_capturer) => {
+                            let source = CaptureSource::Wgc(wgc_capturer);
+                            emit_capture_create_diagnostic(
+                                app_handle,
+                                "success",
+                                format_capture_backend_selected_message(
+                                    source.backend_kind(),
+                                    session_id,
+                                    monitor_index,
+                                    source.width(),
+                                    source.height(),
+                                ),
+                            );
+                            Ok(source)
+                        }
+                        Err(wgc_error) => {
+                            emit_capture_create_diagnostic(
+                                app_handle,
+                                "error",
+                                format_capture_backend_failure_message(
+                                    CaptureBackendKind::Wgc,
+                                    session_id,
+                                    monitor_index,
+                                    &wgc_error,
+                                ),
+                            );
+                            Err(format!(
+                                "DXGI capture backend failed: {}; WGC capture backend failed: {}",
+                                dxgi_error, wgc_error
+                            ))
+                        }
+                    }
+                }
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = show_cursor;
+                    Err(dxgi_error)
+                }
+            }
+        },
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WgcCapturer {
+    _item: GraphicsCaptureItem,
+    _d3d_device: ID3D11Device,
+    _winrt_device: IDirect3DDevice,
+    context: ID3D11DeviceContext,
+    frame_pool: Direct3D11CaptureFramePool,
+    session: GraphicsCaptureSession,
+    _frame_arrived_handler: TypedEventHandler<Direct3D11CaptureFramePool, IInspectable>,
+    frame_arrived_token: EventRegistrationToken,
+    frame_rx: mpsc::Receiver<()>,
+    staging: Option<ID3D11Texture2D>,
+    frame_buf: Vec<u8>,
+    stride: usize,
+    width: usize,
+    height: usize,
+}
+
+#[cfg(target_os = "windows")]
+impl WgcCapturer {
+    fn new(monitor_index: usize, show_cursor: bool) -> Result<Self, String> {
+        initialize_winrt_for_wgc()?;
+        if !GraphicsCaptureSession::IsSupported()
+            .map_err(|error| format_windows_error("GraphicsCaptureSession::IsSupported", &error))?
+        {
+            return Err("Windows Graphics Capture is not supported on this device".to_string());
+        }
+
+        let hmonitor = wgc_monitor_for_index(monitor_index)?;
+        let item = create_graphics_capture_item_for_monitor(hmonitor)?;
+        let size = item
+            .Size()
+            .map_err(|error| format_windows_error("GraphicsCaptureItem::Size", &error))?;
+        if size.Width <= 0 || size.Height <= 0 {
+            return Err(format!(
+                "GraphicsCaptureItem returned invalid size {}x{}",
+                size.Width, size.Height
+            ));
+        }
+
+        let (d3d_device, context, winrt_device) = create_wgc_d3d_device()?;
+        let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            &winrt_device,
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            2,
+            size,
+        )
+        .map_err(|error| {
+            format_windows_error("Direct3D11CaptureFramePool::CreateFreeThreaded", &error)
+        })?;
+        let session = frame_pool.CreateCaptureSession(&item).map_err(|error| {
+            format_windows_error("Direct3D11CaptureFramePool::CreateCaptureSession", &error)
+        })?;
+        let _ = session.SetIsCursorCaptureEnabled(show_cursor);
+
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<()>(2);
+        let frame_arrived_handler =
+            TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(move |_, _| {
+                let _ = frame_tx.try_send(());
+                Ok(())
+            });
+        let frame_arrived_token =
+            frame_pool
+                .FrameArrived(&frame_arrived_handler)
+                .map_err(|error| {
+                    format_windows_error("Direct3D11CaptureFramePool::FrameArrived", &error)
+                })?;
+
+        session.StartCapture().map_err(|error| {
+            format_windows_error("GraphicsCaptureSession::StartCapture", &error)
+        })?;
+
+        let width = size.Width as usize;
+        let height = size.Height as usize;
+        let mut capturer = Self {
+            _item: item,
+            _d3d_device: d3d_device,
+            _winrt_device: winrt_device,
+            context,
+            frame_pool,
+            session,
+            _frame_arrived_handler: frame_arrived_handler,
+            frame_arrived_token,
+            frame_rx,
+            staging: None,
+            frame_buf: Vec::with_capacity(width * height * 4),
+            stride: width * 4,
+            width,
+            height,
+        };
+        capturer.ensure_staging(width as u32, height as u32, DXGI_FORMAT_B8G8R8A8_UNORM)?;
+        Ok(capturer)
+    }
+
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    fn frame(&mut self) -> io::Result<CapturedFrame<'_>> {
+        match self.frame_rx.recv_timeout(Duration::from_millis(16)) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "WGC frame not ready",
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "WGC frame signal disconnected",
+                ));
+            }
+        }
+        while self.frame_rx.try_recv().is_ok() {}
+
+        let frame = self.frame_pool.TryGetNextFrame().map_err(|error| {
+            windows_error_to_io("Direct3D11CaptureFramePool::TryGetNextFrame", error)
+        })?;
+        let content_size = frame
+            .ContentSize()
+            .map_err(|error| windows_error_to_io("Direct3D11CaptureFrame::ContentSize", error))?;
+        if content_size.Width <= 0 || content_size.Height <= 0 {
+            let _ = frame.Close();
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "WGC frame returned invalid content size {}x{}",
+                    content_size.Width, content_size.Height
+                ),
+            ));
+        }
+
+        let surface = frame
+            .Surface()
+            .map_err(|error| windows_error_to_io("Direct3D11CaptureFrame::Surface", error))?;
+        self.copy_surface_to_frame_buffer(&surface)
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        let _ = frame.Close();
+
+        Ok(CapturedFrame::Borrowed {
+            pixels: &self.frame_buf,
+            stride: self.stride,
+        })
+    }
+
+    fn ensure_staging(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: DXGI_FORMAT,
+    ) -> Result<(), String> {
+        let needs_recreate = self.staging.is_none()
+            || self.width != width as usize
+            || self.height != height as usize
+            || self.stride != width as usize * 4;
+        if !needs_recreate {
+            return Ok(());
+        }
+
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut staging = None;
+        unsafe {
+            self._d3d_device
+                .CreateTexture2D(&desc, None, Some(&mut staging))
+                .map_err(|error| format_windows_error("ID3D11Device::CreateTexture2D", &error))?;
+        }
+
+        self.width = width as usize;
+        self.height = height as usize;
+        self.stride = self.width * 4;
+        self.frame_buf.resize(self.stride * self.height, 0);
+        self.staging = Some(staging.ok_or_else(|| {
+            "ID3D11Device::CreateTexture2D returned no staging texture".to_string()
+        })?);
+        Ok(())
+    }
+
+    fn copy_surface_to_frame_buffer(&mut self, surface: &IDirect3DSurface) -> Result<(), String> {
+        let access: IDirect3DDxgiInterfaceAccess = surface
+            .cast()
+            .map_err(|error| format_windows_error("IDirect3DSurface::cast", &error))?;
+        let texture: ID3D11Texture2D = unsafe {
+            access.GetInterface().map_err(|error| {
+                format_windows_error("IDirect3DDxgiInterfaceAccess::GetInterface", &error)
+            })?
+        };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe {
+            texture.GetDesc(&mut desc);
+        }
+
+        self.ensure_staging(desc.Width, desc.Height, desc.Format)?;
+        let staging = self
+            .staging
+            .as_ref()
+            .ok_or_else(|| "WGC staging texture missing after creation".to_string())?;
+        let src_resource: ID3D11Resource = texture
+            .cast()
+            .map_err(|error| format_windows_error("ID3D11Texture2D::cast source", &error))?;
+        let dst_resource: ID3D11Resource = staging
+            .cast()
+            .map_err(|error| format_windows_error("ID3D11Texture2D::cast staging", &error))?;
+
+        unsafe {
+            self.context.CopyResource(&dst_resource, &src_resource);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context
+                .Map(&dst_resource, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(|error| format_windows_error("ID3D11DeviceContext::Map", &error))?;
+
+            let mapped_result = copy_mapped_bgra_to_buffer(
+                &mapped,
+                self.width,
+                self.height,
+                self.stride,
+                &mut self.frame_buf,
+            );
+            self.context.Unmap(&dst_resource, 0);
+            mapped_result
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WgcCapturer {
+    fn drop(&mut self) {
+        let _ = self.frame_pool.RemoveFrameArrived(self.frame_arrived_token);
+        let _ = self.session.Close();
+        let _ = self.frame_pool.Close();
+        let _ = self._winrt_device.Close();
+    }
+}
+
+#[cfg(target_os = "windows")]
+const RPC_E_CHANGED_MODE: HRESULT = HRESULT(0x80010106u32 as i32);
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct WgcMonitorHandle {
+    handle: HMONITOR,
+    is_primary: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn initialize_winrt_for_wgc() -> Result<(), String> {
+    match unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == RPC_E_CHANGED_MODE => Ok(()),
+        Err(error) => Err(format_windows_error("RoInitialize", &error)),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn format_windows_error(stage: &str, error: &WindowsError) -> String {
+    format!(
+        "{} failed: hresult=0x{:08X}, error={}",
+        stage,
+        error.code().0 as u32,
+        sanitize_log_field(&error.message())
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn windows_error_to_io(stage: &str, error: WindowsError) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, format_windows_error(stage, &error))
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn enum_wgc_monitor_proc(
+    monitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    data: LPARAM,
+) -> BOOL {
+    const MONITORINFOF_PRIMARY: u32 = 1;
+    let monitors = &mut *(data.0 as *mut Vec<WgcMonitorHandle>);
+    let mut info = MONITORINFO {
+        cbSize: mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let is_primary = if GetMonitorInfoW(monitor, &mut info).0 != 0 {
+        info.dwFlags & MONITORINFOF_PRIMARY != 0
+    } else {
+        false
+    };
+    monitors.push(WgcMonitorHandle {
+        handle: monitor,
+        is_primary,
+    });
+    BOOL(1)
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_wgc_monitors_primary_first() -> Result<Vec<WgcMonitorHandle>, String> {
+    let mut monitors = Vec::<WgcMonitorHandle>::new();
+    let ok = unsafe {
+        EnumDisplayMonitors(
+            HDC::default(),
+            None,
+            Some(enum_wgc_monitor_proc),
+            LPARAM(&mut monitors as *mut _ as isize),
+        )
+    };
+    if ok.0 == 0 {
+        return Err(format_windows_error(
+            "EnumDisplayMonitors",
+            &WindowsError::from_win32(),
+        ));
+    }
+
+    monitors.sort_by_key(|monitor| if monitor.is_primary { 0 } else { 1 });
+    Ok(monitors)
+}
+
+#[cfg(target_os = "windows")]
+fn wgc_monitor_for_index(monitor_index: usize) -> Result<HMONITOR, String> {
+    let monitors = enumerate_wgc_monitors_primary_first()?;
+    monitors
+        .get(monitor_index)
+        .map(|monitor| monitor.handle)
+        .ok_or_else(|| {
+            format!(
+                "WGC monitor index {} is unavailable; detected {} monitor(s)",
+                monitor_index,
+                monitors.len()
+            )
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn create_graphics_capture_item_for_monitor(
+    monitor: HMONITOR,
+) -> Result<GraphicsCaptureItem, String> {
+    let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+        .map_err(|error| format_windows_error("GraphicsCaptureItem activation factory", &error))?;
+    unsafe {
+        interop.CreateForMonitor(monitor).map_err(|error| {
+            format_windows_error("IGraphicsCaptureItemInterop::CreateForMonitor", &error)
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn create_wgc_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice), String> {
+    let mut d3d_device = None;
+    let mut d3d_context = None;
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut d3d_device),
+            None,
+            Some(&mut d3d_context),
+        )
+        .map_err(|error| format_windows_error("D3D11CreateDevice", &error))?;
+    }
+
+    let d3d_device =
+        d3d_device.ok_or_else(|| "D3D11CreateDevice returned no device".to_string())?;
+    let d3d_context =
+        d3d_context.ok_or_else(|| "D3D11CreateDevice returned no immediate context".to_string())?;
+    let dxgi_device: IDXGIDevice = d3d_device
+        .cast()
+        .map_err(|error| format_windows_error("ID3D11Device::cast IDXGIDevice", &error))?;
+    let inspectable = unsafe {
+        CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device)
+            .map_err(|error| format_windows_error("CreateDirect3D11DeviceFromDXGIDevice", &error))?
+    };
+    let winrt_device: IDirect3DDevice = inspectable
+        .cast()
+        .map_err(|error| format_windows_error("IInspectable::cast IDirect3DDevice", &error))?;
+    Ok((d3d_device, d3d_context, winrt_device))
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn copy_mapped_bgra_to_buffer(
+    mapped: &D3D11_MAPPED_SUBRESOURCE,
+    width: usize,
+    height: usize,
+    dst_stride: usize,
+    dst: &mut Vec<u8>,
+) -> Result<(), String> {
+    if mapped.pData.is_null() {
+        return Err("ID3D11DeviceContext::Map returned null data pointer".to_string());
+    }
+    let src_stride = mapped.RowPitch as usize;
+    if src_stride < dst_stride {
+        return Err(format!(
+            "mapped row pitch {} is smaller than expected stride {}",
+            src_stride, dst_stride
+        ));
+    }
+
+    let required_len = dst_stride
+        .checked_mul(height)
+        .ok_or_else(|| "WGC frame buffer size overflow".to_string())?;
+    if dst.len() != required_len {
+        dst.resize(required_len, 0);
+    }
+
+    let src_len = src_stride
+        .checked_mul(height)
+        .ok_or_else(|| "WGC mapped source size overflow".to_string())?;
+    let src = std::slice::from_raw_parts(mapped.pData as *const u8, src_len);
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| "WGC row byte count overflow".to_string())?;
+    for y in 0..height {
+        let src_offset = y * src_stride;
+        let dst_offset = y * dst_stride;
+        dst[dst_offset..dst_offset + row_bytes]
+            .copy_from_slice(&src[src_offset..src_offset + row_bytes]);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn create_wgc_capturer(
+    monitor_index: usize,
+    show_cursor: bool,
+    session_id: u64,
+    app_handle: &AppHandle,
+) -> Result<WgcCapturer, String> {
+    emit_capture_create_diagnostic(
+        app_handle,
+        "info",
+        format!(
+            "WGC capture backend create start: session_id={}, monitor_index={}, cursor={}",
+            session_id, monitor_index, show_cursor
+        ),
+    );
+    WgcCapturer::new(monitor_index, show_cursor)
+}
+
+fn create_capturer(
+    monitor_index: usize,
+    backend_mode: ScreenShareBackendMode,
+    cancel: &AtomicBool,
+    runtime_handle: &ScreenShareHandle,
+    session_id: u64,
+    app_handle: &AppHandle,
+) -> Result<Capturer, String> {
+    let mut last_error = None;
+    let started_at = Instant::now();
+    let retry_delays = capture_retry_delays_for_mode(backend_mode);
+    let total_attempts = retry_delays.len();
+
+    emit_capture_create_diagnostic(
+        app_handle,
+        "info",
+        format!(
+            "屏幕捕获器创建开始: session_id={}, monitor_index={}, attempts={}, retry_delays_ms={:?}, startup_timeout_ms={}, {}, {}",
+            session_id,
+            monitor_index,
+            total_attempts,
+            retry_delays,
+            CAPTURE_STARTUP_TIMEOUT.as_millis(),
+            capture_runtime_state_summary(runtime_handle, session_id),
+            capture_conflict_diagnostics_snapshot()
+        ),
+    );
+
+    for (attempt_index, delay_ms) in retry_delays.iter().enumerate() {
+        if !wait_for_capture_retry_delay(
+            Duration::from_millis(*delay_ms),
+            cancel,
+            runtime_handle,
+            session_id,
+        ) {
+            emit_capture_create_diagnostic(
+                app_handle,
+                "info",
+                format!(
+                    "屏幕捕获器创建已取消: session_id={}, attempt={}/{}, delay_ms={}, elapsed_ms={}, monitor_index={}, {}",
+                    session_id,
+                    attempt_index + 1,
+                    total_attempts,
+                    delay_ms,
+                    started_at.elapsed().as_millis(),
+                    monitor_index,
+                    capture_runtime_state_summary(runtime_handle, session_id)
+                ),
+            );
+            return Err("screen capture init cancelled".to_string());
         }
 
         match create_capturer_once(monitor_index) {
-            Ok(capturer) => return Ok(capturer),
+            Ok(capturer) => {
+                if cancel.load(Ordering::Relaxed) || !is_current_session(runtime_handle, session_id)
+                {
+                    emit_capture_create_diagnostic(
+                        app_handle,
+                        "info",
+                        format!(
+                            "屏幕捕获器创建成功后已过期: session_id={}, attempt={}/{}, elapsed_ms={}, monitor_index={}, {}",
+                            session_id,
+                            attempt_index + 1,
+                            total_attempts,
+                            started_at.elapsed().as_millis(),
+                            monitor_index,
+                            capture_runtime_state_summary(runtime_handle, session_id)
+                        ),
+                    );
+                    return Err("screen capture init cancelled".to_string());
+                }
+                emit_capture_create_diagnostic(
+                    app_handle,
+                    "success",
+                    format!(
+                        "屏幕捕获器创建成功: session_id={}, attempt={}/{}, elapsed_ms={}, monitor_index={}, {}",
+                        session_id,
+                        attempt_index + 1,
+                        total_attempts,
+                        started_at.elapsed().as_millis(),
+                        monitor_index,
+                        capture_runtime_state_summary(runtime_handle, session_id)
+                    ),
+                );
+                return Ok(capturer);
+            }
             Err(error) => {
-                let is_last_attempt = attempt_index + 1 == CAPTURE_CREATE_RETRY_DELAYS_MS.len();
+                let is_last_attempt = attempt_index + 1 == retry_delays.len();
+                let retryable = error.retryable();
+                let conflicts = capture_conflict_diagnostics_snapshot();
+                emit_capture_create_diagnostic(
+                    app_handle,
+                    if is_last_attempt || !retryable {
+                        "error"
+                    } else {
+                        "warn"
+                    },
+                    format!(
+                        "屏幕捕获器创建失败: session_id={}, attempt={}/{}, next_delay_ms={}, elapsed_ms={}, monitor_index={}, retryable={}, error_kind={:?}, cause={}, {}, {}",
+                        session_id,
+                        attempt_index + 1,
+                        total_attempts,
+                        retry_delays
+                            .get(attempt_index + 1)
+                            .copied()
+                            .unwrap_or(0),
+                        started_at.elapsed().as_millis(),
+                        monitor_index,
+                        retryable,
+                        error.kind,
+                        error.detail,
+                        capture_runtime_state_summary(runtime_handle, session_id),
+                        conflicts
+                    ),
+                );
+                if retryable {
+                    if let Some(conflict_error) = capture_blocking_conflict_error_snapshot() {
+                        return Err(format!("{}; {}", error.detail, conflict_error));
+                    }
+                }
                 if !error.retryable() || is_last_attempt {
                     let attempts = attempt_index + 1;
                     return Err(match last_error.take() {
@@ -1810,6 +3025,8 @@ async fn status_reporter(
     all_urls: Vec<String>,
     start_time: Instant,
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
+    runtime_handle: Arc<ScreenShareHandle>,
+    session_id: u64,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut last_bytes: u64 = 0;
@@ -1817,7 +3034,7 @@ async fn status_reporter(
     loop {
         interval.tick().await;
 
-        if !active.load(Ordering::Relaxed) {
+        if !active.load(Ordering::Relaxed) || !is_current_session(&runtime_handle, session_id) {
             break;
         }
 
@@ -1913,6 +3130,7 @@ fn viewer_html() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Screen Share</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2' y='4' width='20' height='14' rx='2'/%3E%3Cpath d='M12 18v4'/%3E%3Cpath d='M8 22h8'/%3E%3Cpath d='M12 14V8'/%3E%3Cpath d='m8 12 4-4 4 4'/%3E%3C/svg%3E">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;background:#060911;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}
@@ -2228,6 +3446,7 @@ fn login_html(has_error: bool, need_username: bool) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Screen Share</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2' y='4' width='20' height='14' rx='2'/%3E%3Cpath d='M12 18v4'/%3E%3Cpath d='M8 22h8'/%3E%3Cpath d='M12 14V8'/%3E%3Cpath d='m8 12 4-4 4 4'/%3E%3C/svg%3E">
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 html,body{{height:100%;background:#060911;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}
@@ -2269,6 +3488,17 @@ button:active{{transform:scale(.99)}}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_share_embedded_pages_include_svg_favicon() {
+        let viewer = viewer_html();
+        let login = login_html(false, false);
+
+        for html in [viewer, login] {
+            assert!(html.contains(r#"<link rel="icon" type="image/svg+xml""#));
+            assert!(html.contains("data:image/svg+xml"));
+        }
+    }
 
     #[test]
     fn prepare_runtime_state_for_start_clears_stale_runtime_state() {
@@ -2324,6 +3554,232 @@ mod tests {
         assert!(handle.all_urls.lock().unwrap().is_empty());
         assert!(handle.start_time.lock().unwrap().is_none());
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn begin_start_rejects_second_start_until_guard_is_released() {
+        let handle = Arc::new(ScreenShareHandle::new());
+
+        let first = begin_screen_share_start(&handle).expect("first start should reserve runtime");
+        let second = begin_screen_share_start(&handle);
+        let second_error = match second {
+            Ok(_) => panic!("second start should be rejected while startup is reserved"),
+            Err(error) => error,
+        };
+
+        assert!(second_error.contains("starting"));
+        assert!(handle.starting.load(Ordering::SeqCst));
+        assert!(!handle.active.load(Ordering::SeqCst));
+
+        drop(first);
+
+        assert!(!handle.starting.load(Ordering::SeqCst));
+        assert!(handle.cancel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn reset_runtime_state_invalidates_reserved_capture_session() {
+        let handle = Arc::new(ScreenShareHandle::new());
+        let start = begin_screen_share_start(&handle).expect("start should reserve a session");
+        let session_id = start.session_id();
+
+        assert!(is_current_session(&handle, session_id));
+
+        reset_runtime_state(&handle);
+
+        assert!(!is_current_session(&handle, session_id));
+        assert!(!handle.starting.load(Ordering::SeqCst));
+        assert!(handle.cancel.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn capture_retry_delay_exits_immediately_when_cancelled_or_stale() {
+        let handle = Arc::new(ScreenShareHandle::new());
+        let start = begin_screen_share_start(&handle).expect("start should reserve a session");
+        let session_id = start.session_id();
+
+        handle.cancel.store(true, Ordering::SeqCst);
+        let cancelled_at = Instant::now();
+        assert!(!wait_for_capture_retry_delay(
+            Duration::from_secs(5),
+            &handle.cancel,
+            &handle,
+            session_id,
+        ));
+        assert!(cancelled_at.elapsed() < Duration::from_millis(250));
+
+        handle.cancel.store(false, Ordering::SeqCst);
+        reset_runtime_state(&handle);
+        let stale_at = Instant::now();
+        assert!(!wait_for_capture_retry_delay(
+            Duration::from_secs(5),
+            &handle.cancel,
+            &handle,
+            session_id,
+        ));
+        assert!(stale_at.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
+    fn capture_startup_timeout_covers_full_retry_window() {
+        assert!(CAPTURE_STARTUP_TIMEOUT >= capture_create_retry_window() + Duration::from_secs(2));
+    }
+
+    #[test]
+    fn capture_startup_timeout_leaves_room_for_wgc_fallback_startup() {
+        assert!(CAPTURE_STARTUP_TIMEOUT >= capture_create_retry_window() + Duration::from_secs(10));
+    }
+
+    #[test]
+    fn blocking_capture_conflicts_selects_visible_force_close_processes() {
+        let conflicts = vec![
+            ScreenShareConflictProcess {
+                pid: 12400,
+                process_name: "DingTalk.exe".to_string(),
+                window_title: "钉钉".to_string(),
+                reason: "meeting app".to_string(),
+                risk_level: "high".to_string(),
+                can_force_close: true,
+            },
+            ScreenShareConflictProcess {
+                pid: 5392,
+                process_name: "msedgewebview2.exe".to_string(),
+                window_title: String::new(),
+                reason: "browser".to_string(),
+                risk_level: "medium".to_string(),
+                can_force_close: false,
+            },
+            ScreenShareConflictProcess {
+                pid: 7160,
+                process_name: "QQPCTray.exe".to_string(),
+                window_title: String::new(),
+                reason: "background tool".to_string(),
+                risk_level: "high".to_string(),
+                can_force_close: true,
+            },
+        ];
+
+        let blocking = blocking_capture_conflicts(&conflicts);
+
+        assert_eq!(blocking.len(), 1);
+        assert_eq!(blocking[0].process_name, "DingTalk.exe");
+    }
+
+    #[test]
+    fn capture_conflict_summary_includes_actionable_process_details() {
+        let conflicts = vec![ScreenShareConflictProcess {
+            pid: 12400,
+            process_name: "DingTalk.exe".to_string(),
+            window_title: "钉钉".to_string(),
+            reason: "meeting app".to_string(),
+            risk_level: "high".to_string(),
+            can_force_close: true,
+        }];
+        let blocking = blocking_capture_conflicts(&conflicts);
+
+        let summary = format_capture_conflict_summary(&blocking);
+
+        assert!(summary.contains("DingTalk.exe"));
+        assert!(summary.contains("pid=12400"));
+        assert!(summary.contains("钉钉"));
+    }
+
+    #[test]
+    fn capture_blocking_conflict_error_includes_close_and_retry_action() {
+        let conflicts = vec![ScreenShareConflictProcess {
+            pid: 12416,
+            process_name: "ScreenTask.exe".to_string(),
+            window_title: "Screen Task v1.2".to_string(),
+            reason: "capture app".to_string(),
+            risk_level: "high".to_string(),
+            can_force_close: true,
+        }];
+
+        let message = capture_blocking_conflict_error(&conflicts)
+            .expect("visible force-close conflict should produce an error");
+
+        assert!(message.contains("ScreenTask.exe"));
+        assert!(message.contains("pid=12416"));
+        assert!(message.contains("close"));
+        assert!(message.contains("retry"));
+    }
+
+    #[test]
+    fn dxgi_failure_fallback_message_names_wgc_target_backend() {
+        let message = format_capture_backend_fallback_message(
+            CaptureBackendKind::Dxgi,
+            CaptureBackendKind::Wgc,
+            7,
+            0,
+            "Capturer::new failed",
+        );
+
+        assert!(message.contains("DXGI"));
+        assert!(message.contains("WGC"));
+        assert!(message.contains("session_id=7"));
+        assert!(message.contains("monitor_index=0"));
+        assert!(message.contains("Capturer::new failed"));
+    }
+
+    #[test]
+    fn capture_backend_failure_message_includes_backend_and_cause() {
+        let message = format_capture_backend_failure_message(
+            CaptureBackendKind::Wgc,
+            2,
+            1,
+            "CreateForMonitor failed",
+        );
+
+        assert!(message.contains("WGC"));
+        assert!(message.contains("session_id=2"));
+        assert!(message.contains("monitor_index=1"));
+        assert!(message.contains("CreateForMonitor failed"));
+    }
+
+    #[test]
+    fn screen_share_backend_modes_serialize_as_expected_labels() {
+        assert_eq!(ScreenShareBackendMode::Auto.label(), "auto");
+        assert_eq!(ScreenShareBackendMode::Wgc.label(), "wgc");
+        assert_eq!(ScreenShareBackendMode::Dxgi.label(), "dxgi");
+        assert_eq!(ScreenShareBackendMode::default(), ScreenShareBackendMode::Auto);
+    }
+
+    #[test]
+    fn automatic_backend_mode_uses_shorter_dxgi_retry_window_than_dxgi_only() {
+        assert!(capture_create_retry_window_for_mode(ScreenShareBackendMode::Auto) < capture_create_retry_window_for_mode(ScreenShareBackendMode::Dxgi));
+        assert_eq!(
+            capture_create_retry_window_for_mode(ScreenShareBackendMode::Auto),
+            Duration::from_millis(600)
+        );
+    }
+
+    #[test]
+    fn capture_conflict_diagnostics_reports_target_machine_snapshot() {
+        let conflicts = vec![
+            ScreenShareConflictProcess {
+                pid: 12400,
+                process_name: "DingTalk.exe".to_string(),
+                window_title: "钉钉".to_string(),
+                reason: "meeting app".to_string(),
+                risk_level: "high".to_string(),
+                can_force_close: true,
+            },
+            ScreenShareConflictProcess {
+                pid: 5392,
+                process_name: "msedgewebview2.exe".to_string(),
+                window_title: String::new(),
+                reason: "browser".to_string(),
+                risk_level: "medium".to_string(),
+                can_force_close: false,
+            },
+        ];
+
+        let diagnostics = format_capture_conflict_diagnostics(&conflicts);
+
+        assert!(diagnostics.contains("total=2"));
+        assert!(diagnostics.contains("blocking_count=1"));
+        assert!(diagnostics.contains("DingTalk.exe"));
+        assert!(diagnostics.contains("msedgewebview2.exe"));
     }
 
     #[test]

@@ -195,6 +195,42 @@ describe('resolvePath', () => {
     vi.unstubAllGlobals();
   });
 
+  it('keeps the tree node query when URLSearchParams.size is unavailable', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      current: {
+        node_id: 'root.c29mdA',
+        name: 'soft',
+        kind: 'share_root',
+      },
+      breadcrumbs: [],
+      children: [],
+    }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    }));
+    const originalSize = Object.getOwnPropertyDescriptor(URLSearchParams.prototype, 'size');
+
+    vi.stubGlobal('fetch', fetchMock);
+    Object.defineProperty(URLSearchParams.prototype, 'size', {
+      configurable: true,
+      get: () => undefined,
+    });
+
+    try {
+      await fileShareApi.getTree('root.c29mdA');
+    } finally {
+      if (originalSize) {
+        Object.defineProperty(URLSearchParams.prototype, 'size', originalSize);
+      }
+    }
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/tree?node_id=root.c29mdA', expect.objectContaining({
+      credentials: 'include',
+    }));
+  });
+
   it('omits the query string for empty segments', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       node_id: null,

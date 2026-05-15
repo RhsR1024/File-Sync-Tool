@@ -60,6 +60,25 @@ test('clipboard pinned section forwards hover-leave from its nested list', () =>
   assert.match(pinnedSource, /@hover-leave="emit\('hoverLeave'\)"/);
 });
 
+test('clipboard pinned section uses the same item height model as the main list', () => {
+  assert.match(listSource, /resolveClipboardItemHeight/);
+  assert.match(pinnedSource, /resolveClipboardPinnedSectionHeight/);
+  assert.doesNotMatch(pinnedSource, /props\.compact\s*\?\s*98\s*:\s*124/);
+  assert.doesNotMatch(pinnedSource, /visibleRows \* rowHeight/);
+});
+
+test('clipboard paste clears pending hover previews before invoking the backend paste', () => {
+  const pasteFunction = pageSource.match(
+    /async function paste\(id: number, plain: boolean\) \{[\s\S]*?\n\}/,
+  );
+
+  assert.ok(pasteFunction);
+  assert.match(
+    pasteFunction[0],
+    /preview\.hideNow\(\)[\s\S]*clipboardApi\.paste/,
+  );
+});
+
 test('clipboard panel does not auto-focus the search box when shown', () => {
   const shownHandler = pageSource.match(
     /unlistenShown = await listen\('clipboard-panel-shown', async \(\) => \{[\s\S]*?\n  \}\);/,
