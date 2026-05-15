@@ -9,6 +9,7 @@ const DISK_LIST_PATH: &str = "/openAPI/system/v1/disk/list";
 const RAW_DISK_LIST_PATH: &str = "/openAPI/system/v1/raw-disk/list";
 const IPSAN_LIST_PATH: &str = "/openAPI/system/v1/IPSAN/list";
 const IPSAN_RESOURCE_GROUP_LIST_PATH: &str = "/openAPI/system/v1/IPSAN/resourceGroup/list";
+const MAINLINE_STATUS_PATH: &str = "/distapi/status";
 const REDIS_PORT: u16 = 6379;
 const REDIS_PASSWORD: &str = "ums@redis_service";
 const REDIS_OP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -190,6 +191,30 @@ struct ApiEnvelope<T> {
 }
 
 #[derive(Debug, Deserialize)]
+struct MainlineStatusEnvelope {
+    #[serde(rename = "ErrCode")]
+    err_code: i32,
+    #[serde(rename = "ErrMsg")]
+    err_msg: Option<String>,
+    #[serde(rename = "Status", default)]
+    status: Vec<MainlineStatusItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MainlineStatusItem {
+    #[serde(rename = "HostName", default)]
+    host_name: String,
+    #[serde(rename = "IP", default)]
+    ip: String,
+    #[serde(rename = "Role", default)]
+    role: String,
+    #[serde(rename = "Serial", default)]
+    serial: String,
+    #[serde(rename = "Status", default)]
+    status: i32,
+}
+
+#[derive(Debug, Deserialize)]
 struct ServerListData {
     #[serde(rename = "serverList", default)]
     server_list: Vec<DiskServerItem>,
@@ -288,6 +313,65 @@ fn legacy_present_keys_to_storage_ids(present_keys: Vec<String>) -> Vec<String> 
 
 fn build_disk_cleanup_url(host: &str, path: &str) -> String {
     format!("http://{}:23011{}", host, path)
+}
+
+fn build_mainline_url(host: &str, path: &str) -> String {
+    format!("http://{}{}", host, path)
+}
+
+fn strip_ip_port(ip: &str) -> String {
+    let trimmed = ip.trim();
+    match trimmed.split_once(':') {
+        Some((host, _port)) => host.trim().to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+fn convert_mainline_status_to_server_item(item: MainlineStatusItem) -> DiskServerItem {
+    let server_ip = strip_ip_port(&item.ip);
+    DiskServerItem {
+        server_name: item.host_name,
+        server_ip,
+        role: item.role,
+        serial: item.serial,
+        ha_type: 0,
+        server_code: item.status,
+    }
+}
+
+fn parse_mainline_status_payload(
+    status: reqwest::StatusCode,
+    response_text: &str,
+) -> Result<Vec<DiskServerItem>, String> {
+    let trimmed_text = response_text.trim();
+
+    if !status.is_success() {
+        return Err(if trimmed_text.is_empty() {
+            format!("HTTP {}", status.as_u16())
+        } else {
+            format!("HTTP {}: {}", status.as_u16(), trimmed_text)
+        });
+    }
+
+    if trimmed_text.is_empty() {
+        return Err("主线接口返回空响应".to_string());
+    }
+
+    let parsed = serde_json::from_str::<MainlineStatusEnvelope>(trimmed_text)
+        .map_err(|e| format!("主线接口响应解析失败: {}", e))?;
+
+    if parsed.err_code != 0 {
+        return Err(parsed
+            .err_msg
+            .filter(|msg| !msg.is_empty())
+            .unwrap_or_else(|| format!("主线接口返回错误码 {}", parsed.err_code)));
+    }
+
+    Ok(parsed
+        .status
+        .into_iter()
+        .map(convert_mainline_status_to_server_item)
+        .collect())
 }
 
 fn build_storage_key(storage_id: &str) -> String {
@@ -540,6 +624,29 @@ pub async fn disk_cleanup_list_linux_servers(
     let url = build_disk_cleanup_url(&host, DISK_SERVER_LIST_PATH);
     let data: ServerListData = post_json(&client, &url, serde_json::json!({})).await?;
     Ok(data.server_list)
+}
+
+#[tauri::command]
+pub async fn disk_cleanup_list_mainline_servers(
+    host: String,
+    timeout_secs: u32,
+) -> Result<Vec<DiskServerItem>, String> {
+    let host = normalize_host(&host)?;
+    let client = build_http_client(timeout_secs)?;
+    let url = build_mainline_url(&host, MAINLINE_STATUS_PATH);
+    let response = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("主线接口请求失败: {}", e))?;
+    let status = response.status();
+    let response_text = response
+        .text()
+        .await
+        .map_err(|e| format!("读取主线响应体失败: {}", e))?;
+    parse_mainline_status_payload(status, &response_text)
 }
 
 #[tauri::command]
@@ -861,10 +968,11 @@ pub async fn disk_cleanup_delete_cache(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_disk_cleanup_url, build_storage_key, legacy_present_keys_to_storage_ids,
-        legacy_storage_ids_to_cache_keys, normalize_cache_keys, normalize_storage_ids,
-        parse_api_payload, DiskListData, IpsanListData, IpsanResourceGroupListData,
-        WindowsRawDiskListData, DISK_LIST_PATH,
+        build_disk_cleanup_url, build_mainline_url, build_storage_key,
+        legacy_present_keys_to_storage_ids, legacy_storage_ids_to_cache_keys, normalize_cache_keys,
+        normalize_storage_ids, parse_api_payload, parse_mainline_status_payload, strip_ip_port,
+        DiskListData, IpsanListData, IpsanResourceGroupListData, WindowsRawDiskListData,
+        DISK_LIST_PATH, MAINLINE_STATUS_PATH,
     };
     use reqwest::StatusCode;
 
@@ -1078,6 +1186,89 @@ mod tests {
 
         let error = parse_api_payload::<DiskListData>(StatusCode::OK, body).unwrap_err();
         assert_eq!(error, "接口返回错误码 5001");
+    }
+
+    #[test]
+    fn build_mainline_url_omits_port_and_uses_distapi_path() {
+        assert_eq!(
+            build_mainline_url("192.115.1.55", MAINLINE_STATUS_PATH),
+            "http://192.115.1.55/distapi/status"
+        );
+    }
+
+    #[test]
+    fn strip_ip_port_removes_trailing_port() {
+        assert_eq!(strip_ip_port("192.115.1.157:21003"), "192.115.1.157");
+        assert_eq!(strip_ip_port("192.115.1.55"), "192.115.1.55");
+        assert_eq!(strip_ip_port("  192.115.1.55  "), "192.115.1.55");
+    }
+
+    #[test]
+    fn parse_mainline_status_payload_maps_to_server_items_and_strips_replica_port() {
+        let body = r#"{
+            "ErrCode": 0,
+            "ErrMsg": "Succeed",
+            "Status": [
+                {
+                    "Status": 1,
+                    "HostName": "VMS-U500-H16",
+                    "IP": "192.115.1.55",
+                    "Role": "primary",
+                    "Serial": "210235C8R8324B000006"
+                },
+                {
+                    "Status": 1,
+                    "HostName": "VMS-U500-H16-Replica",
+                    "IP": "192.115.1.157:21003",
+                    "Role": "replica",
+                    "Serial": "210235C8X60000000001"
+                }
+            ]
+        }"#;
+
+        let parsed = parse_mainline_status_payload(StatusCode::OK, body).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].server_ip, "192.115.1.55");
+        assert_eq!(parsed[0].server_name, "VMS-U500-H16");
+        assert_eq!(parsed[0].role, "primary");
+        assert_eq!(parsed[0].server_code, 1);
+        assert_eq!(parsed[1].server_ip, "192.115.1.157");
+        assert_eq!(parsed[1].role, "replica");
+        assert_eq!(parsed[1].serial, "210235C8X60000000001");
+    }
+
+    #[test]
+    fn parse_mainline_status_payload_rejects_non_zero_errcode() {
+        let body = r#"{
+            "ErrCode": 5001,
+            "ErrMsg": "device busy",
+            "Status": []
+        }"#;
+
+        let error = parse_mainline_status_payload(StatusCode::OK, body).unwrap_err();
+        assert_eq!(error, "device busy");
+    }
+
+    #[test]
+    fn parse_mainline_status_payload_falls_back_when_errmsg_missing() {
+        let body = r#"{
+            "ErrCode": 5001,
+            "Status": []
+        }"#;
+
+        let error = parse_mainline_status_payload(StatusCode::OK, body).unwrap_err();
+        assert_eq!(error, "主线接口返回错误码 5001");
+    }
+
+    #[test]
+    fn parse_mainline_status_payload_returns_empty_list_when_status_missing() {
+        let body = r#"{
+            "ErrCode": 0,
+            "ErrMsg": "Succeed"
+        }"#;
+
+        let parsed = parse_mainline_status_payload(StatusCode::OK, body).unwrap();
+        assert!(parsed.is_empty());
     }
 
     #[test]

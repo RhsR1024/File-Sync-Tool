@@ -41,6 +41,14 @@ pub struct LocalScriptBinding {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum DiskCleanupLinuxMode {
+    #[default]
+    Componentized,
+    Mainline,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum PostCopyExecutionOrder {
     #[default]
     LocalFirst,
@@ -168,6 +176,12 @@ pub struct AppConfig {
     #[serde(default = "default_disk_cleanup_http_timeout_secs")]
     pub disk_cleanup_http_timeout_secs: u64,
 
+    /// Which Linux disk source to use in the cache cleanup tool.
+    /// Default: `Componentized` (current `/openAPI/system/v1/disk/server/list` flow).
+    /// `Mainline` calls `http://<host>/distapi/status` to enumerate primary/replica nodes.
+    #[serde(default)]
+    pub disk_cleanup_linux_mode: DiskCleanupLinuxMode,
+
     #[serde(default = "default_update_server_url")]
     pub update_server_url: String,
 
@@ -268,6 +282,7 @@ impl Default for AppConfig {
             appliance_ssh_api_timeout_secs: 5,
             framework_password_api_timeout_secs: 5,
             disk_cleanup_http_timeout_secs: 5,
+            disk_cleanup_linux_mode: DiskCleanupLinuxMode::Componentized,
             update_server_url: default_update_server_url(),
             notify_on_new_version: false,
             last_update_check_at: None,

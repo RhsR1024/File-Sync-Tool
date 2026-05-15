@@ -3490,6 +3490,7 @@ fn main() {
             disk_cleanup::disk_cleanup_check_redis,
             disk_cleanup::disk_cleanup_delete_cache,
             disk_cleanup::disk_cleanup_list_linux_servers,
+            disk_cleanup::disk_cleanup_list_mainline_servers,
             disk_cleanup::disk_cleanup_list_linux_disks,
             disk_cleanup::disk_cleanup_list_windows_disks,
             disk_cleanup::disk_cleanup_list_ipsans,

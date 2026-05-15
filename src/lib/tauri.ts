@@ -65,6 +65,8 @@ export interface MatchRule {
   value: string;
 }
 
+export type DiskCleanupLinuxMode = 'componentized' | 'mainline';
+
 export interface ScanTask {
   id: string;
   enabled: boolean;
@@ -128,6 +130,9 @@ export interface AppConfig {
 
   /** HTTP request timeout in seconds for disk cache cleanup API. Default: 5. */
   disk_cleanup_http_timeout_secs: number;
+
+  /** Linux disk source mode in the cache cleanup tool. Default: "componentized". */
+  disk_cleanup_linux_mode: DiskCleanupLinuxMode;
 
   /** Update server URL used by the in-app updater. */
   update_server_url: string;
@@ -817,6 +822,16 @@ export async function diskCleanupListLinuxServers(
   timeoutSecs: number,
 ): Promise<DiskServerItem[]> {
   return await invoke<DiskServerItem[]>('disk_cleanup_list_linux_servers', {
+    host,
+    timeoutSecs,
+  });
+}
+
+export async function diskCleanupListMainlineServers(
+  host: string,
+  timeoutSecs: number,
+): Promise<DiskServerItem[]> {
+  return await invoke<DiskServerItem[]>('disk_cleanup_list_mainline_servers', {
     host,
     timeoutSecs,
   });
