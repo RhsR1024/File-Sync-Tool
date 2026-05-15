@@ -44,6 +44,7 @@ const config = ref<AppConfig>({
   appliance_ssh_api_timeout_secs: 5,
   framework_password_api_timeout_secs: 5,
   disk_cleanup_http_timeout_secs: 5,
+  disk_cleanup_linux_mode: 'componentized',
   update_server_url: 'http://192.115.1.3:8080',
   notify_on_new_version: false,
   last_update_check_at: null,

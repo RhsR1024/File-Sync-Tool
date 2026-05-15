@@ -23,11 +23,13 @@ import {
   diskCleanupListIpsanResourceGroups,
   diskCleanupListLinuxDisks,
   diskCleanupListLinuxServers,
+  diskCleanupListMainlineServers,
   diskCleanupListWindowsDisks,
   getConfig,
   saveConfig,
   type AppConfig,
   type CacheKeyContentEntry,
+  type DiskCleanupLinuxMode,
   type DiskInfoItem,
   type DiskServerItem,
   type IpsanItem,
@@ -83,6 +85,9 @@ const ipsanDevicesTabRef = ref<HTMLButtonElement | null>(null);
 const ipsanResourceGroupsTabRef = ref<HTMLButtonElement | null>(null);
 const legendOpen = ref(false);
 
+const linuxMode = ref<DiskCleanupLinuxMode>('componentized');
+const linuxModeComponentizedRef = ref<HTMLButtonElement | null>(null);
+const linuxModeMainlineRef = ref<HTMLButtonElement | null>(null);
 const linuxServerList = ref<DiskServerItem[]>([]);
 const selectedLinuxServerIp = ref('');
 const linuxDisks = ref<DiskInfoItem[]>([]);
@@ -514,7 +519,9 @@ async function fetchLinuxLocalRegion() {
   windowsDisks.value = [];
 
   try {
-    const servers = await diskCleanupListLinuxServers(host, timeoutSecs.value);
+    const servers = linuxMode.value === 'mainline'
+      ? await diskCleanupListMainlineServers(host, timeoutSecs.value)
+      : await diskCleanupListLinuxServers(host, timeoutSecs.value);
     if (requestSeq !== localRequestSeq) return;
 
     linuxServerList.value = servers;
@@ -1113,6 +1120,60 @@ function onModalKeydown(event: KeyboardEvent) {
   }
 }
 
+function onLinuxModeKeydown(event: KeyboardEvent, currentMode: DiskCleanupLinuxMode) {
+  const order: DiskCleanupLinuxMode[] = ['componentized', 'mainline'];
+  const currentIndex = order.indexOf(currentMode);
+  let nextIndex = currentIndex;
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+    nextIndex = (currentIndex + 1) % order.length;
+  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+    nextIndex = (currentIndex - 1 + order.length) % order.length;
+  } else if (event.key === 'Home') {
+    nextIndex = 0;
+  } else if (event.key === 'End') {
+    nextIndex = order.length - 1;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  const nextMode = order[nextIndex];
+  selectLinuxMode(nextMode);
+  nextTick(() => {
+    const nextRef = nextMode === 'componentized'
+      ? linuxModeComponentizedRef.value
+      : linuxModeMainlineRef.value;
+    nextRef?.focus();
+  });
+}
+
+async function selectLinuxMode(nextMode: DiskCleanupLinuxMode) {
+  if (linuxMode.value === nextMode) return;
+
+  linuxMode.value = nextMode;
+
+  // Reset server selection so the previous mode's IP doesn't leak across endpoints.
+  selectedLinuxServerIp.value = '';
+  linuxServerList.value = [];
+  linuxDisks.value = [];
+  resetLocalCacheState();
+
+  if (config.value) {
+    config.value.disk_cleanup_linux_mode = nextMode;
+    try {
+      await saveConfig(config.value);
+    } catch (error) {
+      localError.value = t('diskCacheCleanup.errors.localHttp', {
+        reason: formatError(error),
+      });
+    }
+  }
+
+  cancelLocalBatchConfirm();
+  if (hasFetchedLocal.value && hostIp.value.trim() && localDiskTab.value === 'linux') {
+    await fetchLocalRegion();
+  }
+}
+
 async function saveTimeout() {
   if (!config.value) return;
 
@@ -1151,6 +1212,9 @@ onMounted(async () => {
     const loaded = await getConfig();
     config.value = loaded;
     timeoutSecs.value = Number(config.value.disk_cleanup_http_timeout_secs ?? 5);
+    linuxMode.value = config.value.disk_cleanup_linux_mode === 'mainline'
+      ? 'mainline'
+      : 'componentized';
   } catch (error) {
     localError.value = t('diskCacheCleanup.errors.localHttp', {
       reason: formatError(error),
@@ -1473,6 +1537,58 @@ onBeforeUnmount(() => {
             <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
             <span>{{ localRedisError }}</span>
           </div>
+
+          <section
+            v-if="localDiskTab === 'linux'"
+            class="rounded-[20px] border border-slate-200 bg-slate-50/70 px-4 py-3"
+          >
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div class="space-y-1">
+                <p class="text-sm font-semibold text-slate-800">
+                  {{ t('diskCacheCleanup.linuxMode.title') }}
+                </p>
+                <p class="text-xs text-slate-500">
+                  {{ linuxMode === 'componentized'
+                    ? t('diskCacheCleanup.linuxMode.descriptions.componentized')
+                    : t('diskCacheCleanup.linuxMode.descriptions.mainline') }}
+                </p>
+              </div>
+              <div
+                class="inline-flex rounded-full border border-slate-200 bg-white p-1 shadow-sm"
+                role="tablist"
+                :aria-label="t('diskCacheCleanup.linuxMode.title')"
+              >
+                <button
+                  ref="linuxModeComponentizedRef"
+                  type="button"
+                  role="tab"
+                  :aria-selected="linuxMode === 'componentized'"
+                  :tabindex="linuxMode === 'componentized' ? 0 : -1"
+                  :disabled="localLoading"
+                  class="rounded-full px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                  :class="linuxMode === 'componentized' ? 'bg-sky-600 text-white shadow' : 'text-slate-600 hover:text-slate-900'"
+                  @click="selectLinuxMode('componentized')"
+                  @keydown="onLinuxModeKeydown($event, 'componentized')"
+                >
+                  {{ t('diskCacheCleanup.linuxMode.componentized') }}
+                </button>
+                <button
+                  ref="linuxModeMainlineRef"
+                  type="button"
+                  role="tab"
+                  :aria-selected="linuxMode === 'mainline'"
+                  :tabindex="linuxMode === 'mainline' ? 0 : -1"
+                  :disabled="localLoading"
+                  class="rounded-full px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                  :class="linuxMode === 'mainline' ? 'bg-sky-600 text-white shadow' : 'text-slate-600 hover:text-slate-900'"
+                  @click="selectLinuxMode('mainline')"
+                  @keydown="onLinuxModeKeydown($event, 'mainline')"
+                >
+                  {{ t('diskCacheCleanup.linuxMode.mainline') }}
+                </button>
+              </div>
+            </div>
+          </section>
 
           <section
             v-if="localDiskTab === 'linux' && (hasFetchedLocal || linuxServerList.length > 0)"

@@ -21,6 +21,12 @@ async fn disk_cleanup_list_linux_servers(
 ) -> Result<Vec<LinuxServerItem>, String>;
 
 #[tauri::command]
+async fn disk_cleanup_list_mainline_servers(
+    host: String,
+    timeout_secs: u32,
+) -> Result<Vec<LinuxServerItem>, String>;
+
+#[tauri::command]
 async fn disk_cleanup_list_linux_disks(
     host: String,
     server_ip: String,
@@ -72,10 +78,23 @@ pub struct CacheKeyDeleteResult {
 
 ### 3.1 Source APIs
 
-Linux local disk:
+Linux local disk supports two modes selected by `AppConfig.disk_cleanup_linux_mode`
+(`"componentized"` default, or `"mainline"`):
 
-- `POST /openAPI/system/v1/disk/server/list`
-- `POST /openAPI/system/v1/disk/list`
+- Componentized (default):
+  - `POST http://{host}:23011/openAPI/system/v1/disk/server/list` returns `serverList[].serverIp`
+  - `POST http://{host}:23011/openAPI/system/v1/disk/list` returns disk rows for the selected `serverIp`
+- Mainline:
+  - `POST http://{host}/distapi/status` (no port suffix → port 80), body `{}`
+  - Response envelope is `{ "ErrCode": 0, "ErrMsg": "Succeed", "Status": [...] }`
+  - Each `Status[]` row maps to a `DiskServerItem`:
+    - `HostName` → `serverName`
+    - `IP` (e.g. `192.115.1.157:21003`) → `serverIp` with the trailing `:port` stripped
+    - `Role` → `role`
+    - `Serial` → `serial`
+    - `Status` → `serverCode`
+  - After the server is picked, the same `POST http://{host}:23011/openAPI/system/v1/disk/list`
+    is used; do not invent a separate mainline disk-listing endpoint.
 
 Windows local disk:
 
@@ -168,6 +187,8 @@ The Redis commands should accept normalized full keys so the Redis layer stays r
 - API envelope parsing tests:
   - `raw-disk/list`
   - `IPSAN/list`
+  - `distapi/status` envelope with `ErrCode`/`ErrMsg`/`Status` shape
+  - Mainline replica IP `192.115.1.157:21003` is exposed to the frontend as `192.115.1.157`
 - Validation tests:
   - reject empty host
   - reject Linux disk listing without `server_ip`

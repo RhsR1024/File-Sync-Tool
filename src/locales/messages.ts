@@ -949,6 +949,15 @@ export const messages = {
           cleanAll: 'Clean All ({count})',
         },
       },
+      linuxMode: {
+        title: 'Linux Source',
+        componentized: 'Componentized',
+        mainline: 'Mainline',
+        descriptions: {
+          componentized: 'Use /openAPI/system/v1/disk/server/list (port 23011) for primary/replica enumeration.',
+          mainline: 'Use /distapi/status (port 80) for primary/replica enumeration; replica IP port suffix is stripped.',
+        },
+      },
       ipsan: {
         title: 'IPSAN',
         description: 'Inspect IPSAN rows, check Redis Storage:{IPSANId} keys, and clean stale cache entries one by one or in bulk.',
@@ -2828,6 +2837,15 @@ export const messages = {
         actions: {
           refresh: '刷新',
           cleanAll: '清理全部 ({count})',
+        },
+      },
+      linuxMode: {
+        title: 'Linux 来源',
+        componentized: '组件化',
+        mainline: '主线',
+        descriptions: {
+          componentized: '使用 /openAPI/system/v1/disk/server/list（端口 23011）枚举主备机。',
+          mainline: '使用 /distapi/status（端口 80）枚举主备机；副机 IP 上的 :端口 将被自动去除。',
         },
       },
       ipsan: {
