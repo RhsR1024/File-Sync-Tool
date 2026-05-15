@@ -61,7 +61,7 @@ const resolvedIp = ref<string | null>(null);
 const requestedPorts = ref<number[]>([]);
 const resultRows = ref(new Map<number, SinglePortResult>());
 const viewMode = ref<'grid' | 'table'>('grid');
-const tableFilter = ref<PortTableFilter>('all');
+const tableFilter = ref<PortTableFilter>('open');
 const customPresets = ref<PortPreset[]>(loadPresetsFromLocalStorage());
 
 const showPresetForm = ref(false);
@@ -225,7 +225,7 @@ async function startTest(): Promise<void> {
   requestedPorts.value = ports;
   resultRows.value = new Map();
   pendingRows.clear();
-  tableFilter.value = 'all';
+  tableFilter.value = 'open';
   isLoading.value = true;
 
   try {
