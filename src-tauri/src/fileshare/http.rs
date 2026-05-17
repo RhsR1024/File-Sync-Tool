@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use axum::body::Body;
 use axum::extract::multipart::MultipartRejection;
 use axum::extract::{
-    ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, Query, State as AxumState,
+    ConnectInfo, DefaultBodyLimit, Multipart, Path as AxumPath, Query, RawQuery, State as AxumState,
 };
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -59,6 +59,10 @@ fn build_router(state: Arc<HttpState>) -> Router {
         .route("/api/upload/directory", post(handler_upload_directory))
         .route("/api/download/file", get(handler_node_file))
         .route("/api/download/archive", get(handler_node_archive))
+        .route(
+            "/api/download/selection-archive",
+            get(handler_selection_archive),
+        )
         .route("/api/preview", get(handler_preview))
         .layer(DefaultBodyLimit::disable())
         .with_state(state)
@@ -1063,6 +1067,134 @@ async fn handler_node_archive(
         .unwrap()
 }
 
+async fn handler_selection_archive(
+    AxumState(state): AxumState<Arc<HttpState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    let node_ids = parse_selection_archive_node_ids(raw_query.as_deref());
+    if node_ids.is_empty() {
+        return plain_response(StatusCode::BAD_REQUEST, "Selection Archive Requires Nodes");
+    }
+
+    let principal = match resolve_request_principal(&state, &headers, addr.ip()).map_err(|status| {
+        plain_response(
+            status,
+            if status == StatusCode::FORBIDDEN {
+                "Forbidden"
+            } else {
+                "Unauthorized"
+            },
+        )
+    }) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+
+    let mut entries = Vec::with_capacity(node_ids.len());
+    for node_id in node_ids {
+        let node = match resolve_node(&state, &principal, &node_id) {
+            Ok(node) => node,
+            Err(response) => return response,
+        };
+        let permission = if node.kind == ResolvedNodeKind::File {
+            model::FileSharePermission::DownloadFile
+        } else {
+            model::FileSharePermission::DownloadArchive
+        };
+        if let Err(response) = require_root_permission(&principal, &node.root.id, permission) {
+            return response;
+        }
+        let archive_path = selection_archive_entry_name(&node);
+        entries.push(ops::ZipSelectionEntry {
+            path: node.path,
+            archive_path,
+        });
+    }
+
+    let limit_entries = entries.clone();
+    match tokio::task::spawn_blocking(move || ops::validate_zip_selection(&limit_entries)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(message)) => {
+            return Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .body(Body::from(message))
+                .unwrap();
+        }
+        Err(_) => {
+            return plain_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to inspect selection",
+            )
+        }
+    }
+
+    let zip_name = if entries.len() == 1 {
+        format!("{}.zip", entries[0].archive_path.trim_matches('/'))
+    } else {
+        "selection.zip".to_string()
+    };
+    let disposition = format!("attachment; filename*=UTF-8''{}", url_encode(&zip_name));
+    remember_connected_ip(&state.visitor_ips, addr.ip().to_string());
+
+    let (writer_half, reader_half) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        if let Err(err) = ops::stream_zip_selection(entries, writer_half).await {
+            log::warn!("File share selection archive streaming failed: {}", err);
+        }
+    });
+
+    let stream = tokio_util::io::ReaderStream::new(reader_half);
+
+    Response::builder()
+        .header("Content-Type", "application/zip")
+        .header("Content-Disposition", disposition)
+        .header("Cache-Control", "no-cache")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+fn parse_selection_archive_node_ids(raw_query: Option<&str>) -> Vec<String> {
+    raw_query
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            if key == "node_id" && !value.trim().is_empty() {
+                Some(value.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn selection_archive_entry_name(node: &ResolvedNode) -> String {
+    let name = match node.kind {
+        ResolvedNodeKind::ShareRoot => node.root.alias.as_str(),
+        ResolvedNodeKind::Directory | ResolvedNodeKind::File => node
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("selection"),
+    };
+    sanitize_archive_entry_name(name)
+}
+
+fn sanitize_archive_entry_name(name: &str) -> String {
+    let normalized = name
+        .trim()
+        .replace(['/', '\\', '\0'], "_")
+        .trim_matches('.')
+        .to_string();
+    if normalized.is_empty() {
+        "selection".to_string()
+    } else {
+        normalized
+    }
+}
+
 async fn handler_web_root(
     AxumState(state): AxumState<Arc<HttpState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -1790,6 +1922,7 @@ mod tests {
                     username: model::DEFAULT_GUEST_USERNAME.to_string(),
                     enabled: true,
                     root_permissions: guest_root_perms,
+                    password_plain: None,
                     password_hash: None,
                 },
                 accounts: Vec::new(),
@@ -1864,6 +1997,7 @@ mod tests {
                 preset: model::PermissionPreset::ReadOnly,
                 permissions: model::FileSharePermissionSet::read_only(),
             }],
+            password_plain: None,
             password_hash,
         }
     }
@@ -1942,6 +2076,7 @@ mod tests {
                 username: model::DEFAULT_GUEST_USERNAME.to_string(),
                 enabled: true,
                 root_permissions: guest_root_perms,
+                password_plain: None,
                 password_hash: None,
             },
             accounts: Vec::new(),
@@ -2876,6 +3011,65 @@ mod tests {
                 .get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
             Some("application/zip")
+        );
+    }
+
+    #[tokio::test]
+    async fn selection_archive_download_streams_multiple_files_as_one_zip() {
+        let soft = TestDir::new("selection-archive-soft");
+        fs::write(soft.path().join("a.txt"), b"a").expect("first file should exist");
+        fs::write(soft.path().join("b.txt"), b"b").expect("second file should exist");
+        let app = build_router(test_state_with_named_roots(&[("soft", soft.path())], 1024));
+
+        let root_node_id = encode_node_id(&NodeLocator::ShareRoot {
+            root_id: "root-1".to_string(),
+        });
+        let tree_response = app
+            .clone()
+            .oneshot(request_with_connect_info(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/tree?node_id={root_node_id}")),
+                Body::empty(),
+            ))
+            .await
+            .expect("root tree should load");
+        let tree_body = to_bytes(tree_response.into_body(), usize::MAX)
+            .await
+            .expect("root tree body should be readable");
+        let tree_payload: serde_json::Value =
+            serde_json::from_slice(&tree_body).expect("root tree should be json");
+        let first_file_id = tree_payload["children"][0]["node_id"]
+            .as_str()
+            .expect("first file node id should exist");
+        let second_file_id = tree_payload["children"][1]["node_id"]
+            .as_str()
+            .expect("second file node id should exist");
+
+        let response = app
+            .oneshot(request_with_connect_info(
+                Request::builder().method("GET").uri(format!(
+                    "/api/download/selection-archive?node_id={first_file_id}&node_id={second_file_id}"
+                )),
+                Body::empty(),
+            ))
+            .await
+            .expect("selection archive request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/zip")
+        );
+        let archive_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("selection archive body should be readable");
+        assert!(
+            archive_body.starts_with(b"PK"),
+            "selection archive should stream ZIP bytes"
         );
     }
 

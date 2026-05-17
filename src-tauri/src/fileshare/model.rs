@@ -185,6 +185,8 @@ pub struct PersistedFileShareUser {
     pub enabled: bool,
     #[serde(default)]
     pub root_permissions: Vec<UserRootPermissions>,
+    #[serde(default)]
+    pub password_plain: Option<String>,
     pub password_hash: Option<String>,
 }
 
@@ -214,6 +216,7 @@ pub struct FileShareUserView {
     pub enabled: bool,
     pub root_permissions: Vec<UserRootPermissions>,
     pub password_set: bool,
+    pub password_plain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -252,6 +255,7 @@ impl From<&PersistedFileShareConfig> for FileShareSettingsView {
                 enabled: value.guest_account.enabled,
                 root_permissions: value.guest_account.root_permissions.clone(),
                 password_set: value.guest_account.password_hash.is_some(),
+                password_plain: value.guest_account.password_plain.clone(),
             },
             accounts: value
                 .accounts
@@ -261,6 +265,7 @@ impl From<&PersistedFileShareConfig> for FileShareSettingsView {
                     enabled: account.enabled,
                     root_permissions: account.root_permissions.clone(),
                     password_set: account.password_hash.is_some(),
+                    password_plain: account.password_plain.clone(),
                 })
                 .collect(),
             session_ttl_minutes: value.session_ttl_minutes,
@@ -314,6 +319,7 @@ pub fn default_guest_account() -> PersistedFileShareUser {
         username: DEFAULT_GUEST_USERNAME.to_string(),
         enabled: true,
         root_permissions: Vec::new(),
+        password_plain: None,
         password_hash: None,
     }
 }

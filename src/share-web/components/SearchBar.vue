@@ -41,6 +41,8 @@ function handleKeydown(event: KeyboardEvent) {
 
 <template>
   <div class="toolbar" :class="{ 'has-search': keyword.trim().length > 0 }">
+    <slot name="leading" />
+
     <label class="search">
       <Icon name="search" />
       <input
@@ -100,5 +102,7 @@ function handleKeydown(event: KeyboardEvent) {
         <Icon name="grid" />
       </button>
     </div>
+
+    <slot name="actions" />
   </div>
 </template>

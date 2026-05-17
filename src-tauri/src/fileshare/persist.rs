@@ -243,13 +243,21 @@ fn build_persisted_user(
         return Err("File share username is required".to_string());
     }
 
-    let previous_hash = existing.and_then(|value| value.password_hash);
-    let password_hash = if account.clear_password {
-        None
-    } else if let Some(new_password) = normalize_optional_secret(account.new_password.as_deref()) {
-        Some(super::hash_password(&new_password))
+    let existing = existing.map(normalize_persisted_file_share_user_password);
+    let previous_hash = existing
+        .as_ref()
+        .and_then(|value| value.password_hash.clone());
+    let previous_plain = existing.and_then(|value| value.password_plain);
+    let new_password = normalize_optional_secret(account.new_password.as_deref());
+    let (password_hash, password_plain) = if account.clear_password {
+        (None, None)
+    } else if let Some(new_password) = new_password {
+        (
+            Some(super::hash_password(&new_password)),
+            Some(new_password),
+        )
     } else {
-        previous_hash
+        (previous_hash, previous_plain)
     };
 
     let root_permissions = account
@@ -262,6 +270,7 @@ fn build_persisted_user(
         username,
         enabled: account.enabled,
         root_permissions,
+        password_plain,
         password_hash,
     })
 }
@@ -279,7 +288,8 @@ fn normalize_root_aliases(
 ) -> Vec<super::model::FileShareRoot> {
     let mut seen_aliases = HashSet::new();
 
-    roots.into_iter()
+    roots
+        .into_iter()
         .map(|mut root| {
             let base = super::make_alias(&root.path);
             let mut alias = base.clone();
@@ -431,7 +441,19 @@ fn normalize_persisted_user(
         .map(normalize_user_root_permissions)
         .filter(|entry| !entry.root_id.is_empty())
         .collect();
-    Some(user)
+    Some(normalize_persisted_file_share_user_password(user))
+}
+
+fn normalize_persisted_file_share_user_password(
+    mut user: PersistedFileShareUser,
+) -> PersistedFileShareUser {
+    user.password_plain = normalize_optional_secret(user.password_plain.as_deref());
+    if user.password_hash.is_none() {
+        if let Some(password_plain) = user.password_plain.as_deref() {
+            user.password_hash = Some(super::hash_password(password_plain));
+        }
+    }
+    user
 }
 
 fn username_key(username: &str) -> String {
@@ -472,7 +494,9 @@ mod tests {
 
     use super::*;
     use crate::config::AppConfig;
-    use crate::fileshare::model::{FileShareSettingsSaveRequest, MAX_SESSION_TTL_MINUTES};
+    use crate::fileshare::model::{
+        FileShareSettingsSaveRequest, FileShareSettingsView, MAX_SESSION_TTL_MINUTES,
+    };
 
     struct TestDir(PathBuf);
 
@@ -574,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn save_request_hashes_passwords_without_exposing_plaintext() {
+    fn save_request_hashes_and_retains_plaintext_for_settings_ui() {
         let mut request_value = test_settings_request_value();
         request_value["guest_account"]["new_password"] = json!("secret-123");
 
@@ -584,13 +608,20 @@ mod tests {
                 .expect("single-username request with password should deserialize"),
         )
         .unwrap();
-        let serialized = serde_json::to_value(saved).expect("saved config should serialize");
+        let serialized = serde_json::to_value(&saved).expect("saved config should serialize");
         let password_hash = serialized["guest_account"]["password_hash"]
             .as_str()
             .expect("guest password hash should be present");
 
         assert_ne!(password_hash, "secret-123");
         assert!(password_hash.starts_with("$argon2"));
+        assert_eq!(serialized["guest_account"]["password_plain"], "secret-123");
+
+        let view = FileShareSettingsView::from(&saved);
+        assert_eq!(
+            view.guest_account.password_plain.as_deref(),
+            Some("secret-123")
+        );
     }
 
     #[test]

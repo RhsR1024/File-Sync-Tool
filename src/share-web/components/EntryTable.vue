@@ -249,7 +249,12 @@ function handleTileClick(entry: FileShareNode, event: MouseEvent) {
           <Icon name="check" />
         </button>
 
-        <button type="button" class="name-cell" @click="emit('open', entry)">
+        <button
+          v-if="entry.is_dir"
+          type="button"
+          class="name-cell interactive"
+          @click="emit('open', entry)"
+        >
           <span
             v-if="canShowThumbnail(entry)"
             class="glyph"
@@ -290,6 +295,40 @@ function handleTileClick(entry: FileShareNode, event: MouseEvent) {
             >{{ hintLine(entry) }}</span>
           </span>
         </button>
+        <div v-else class="name-cell">
+          <span
+            v-if="canShowThumbnail(entry)"
+            class="glyph"
+            aria-hidden="true"
+          >
+            <img
+              :src="fileShareApi.previewUrl(entry.node_id)"
+              alt=""
+              loading="lazy"
+              @error="markThumbnailFailed(entry.node_id)"
+            >
+          </span>
+          <span
+            v-else
+            class="glyph ext"
+            :style="{
+              color: getFileGlyphStyle(entry.name).color,
+              background: getFileGlyphStyle(entry.name).bg,
+              borderColor: getFileGlyphStyle(entry.name).border,
+            }"
+            aria-hidden="true"
+          >
+            {{ getFileGlyphStyle(entry.name).label }}
+          </span>
+          <span class="name-text">
+            <span class="n">{{ entry.name }}</span>
+            <span
+              v-if="hintLine(entry)"
+              class="hint"
+              :class="{ cn: isHintCjk(hintLine(entry)) }"
+            >{{ hintLine(entry) }}</span>
+          </span>
+        </div>
 
         <span class="cell-size">
           {{ entry.is_dir ? '-' : formatFileSize(entry.size) }}

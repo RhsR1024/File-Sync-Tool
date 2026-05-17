@@ -9,7 +9,6 @@ import {
   isNotFound,
   isUnauthorized,
 } from './api';
-import Breadcrumbs from './components/Breadcrumbs.vue';
 import BulkActionBar from './components/BulkActionBar.vue';
 import CreateDirectoryDialog from './components/CreateDirectoryDialog.vue';
 import DeleteConfirmDialog from './components/DeleteConfirmDialog.vue';
@@ -185,17 +184,6 @@ const pageStatLabel = computed(() => {
     return '';
   }
   return `${t('app.folderCount', { n: folderCount.value })} · ${t('app.fileCount', { n: fileCount.value })}`;
-});
-
-const pageSubText = computed(() => {
-  if (searchActive.value) {
-    const scopeLabel = activeSearchScope.value === 'global' ? t('search.global') : t('search.current');
-    return t('app.searchSummary', { query: activeKeyword.value, scope: scopeLabel });
-  }
-  if (currentKind.value === 'home') {
-    return t('app.homeSubtitle');
-  }
-  return '';
 });
 
 const activeRootNodeId = computed<string | null>(() => {
@@ -920,10 +908,14 @@ function triggerDownload(node: FileShareNode) {
   const href = node.is_dir
     ? fileShareApi.downloadArchiveUrl(node.node_id)
     : fileShareApi.downloadFileUrl(node.node_id);
+  triggerDownloadUrl(href, node.is_dir ? `${node.name}.zip` : node.name);
+}
+
+function triggerDownloadUrl(href: string, filename: string) {
   const link = document.createElement('a');
   link.href = href;
   link.rel = 'noopener';
-  link.download = node.is_dir ? `${node.name}.zip` : node.name;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -1219,9 +1211,9 @@ function bulkDownload() {
   if (items.length === 0) {
     return;
   }
-  for (const entry of items) {
-    triggerDownload(entry);
-  }
+  const href = fileShareApi.downloadSelectionArchiveUrl(items.map((entry) => entry.node_id));
+  const name = currentName.value || 'selected';
+  triggerDownloadUrl(href, `${name}.zip`);
   setFlash(t('app.bulkDownloadStarted', { n: items.length }));
   clearSelection();
 }
@@ -1395,8 +1387,10 @@ watchEffect(() => {
   <div class="app">
     <TopBar
       :session="session"
+      :breadcrumbs="breadcrumbs"
       :busy="busy"
       @refresh="refreshCurrentView()"
+      @navigate="navigate"
       @session-action="handleSessionAction"
     />
 
@@ -1410,43 +1404,6 @@ watchEffect(() => {
     />
 
     <main class="main">
-      <Breadcrumbs :breadcrumbs="breadcrumbs" :busy="busy" @navigate="navigate" />
-
-      <div class="page-head">
-        <div class="page-head-left">
-          <button
-            v-if="canNavigateUp"
-            type="button"
-            class="btn page-back"
-            :disabled="busy"
-            :title="t('toolbar.backToParent')"
-            :aria-label="t('toolbar.backToParent')"
-            @click="navigateUp"
-          >
-            <Icon name="arrowLeft" />
-            <span>{{ t('toolbar.backToParent') }}</span>
-          </button>
-          <div class="page-title-block">
-            <h1 class="page-title">
-              {{ pageTitle }}
-              <span v-if="pageStatLabel" class="sub">{{ pageStatLabel }}</span>
-            </h1>
-            <div v-if="pageSubText" class="page-sub">{{ pageSubText }}</div>
-          </div>
-        </div>
-        <ToolbarActions
-          :current-kind="currentKind"
-          :permissions="session?.permissions ?? null"
-          :has-entries="displayedEntries.length > 0"
-          :busy="busy"
-          @upload-files="openUpload('files')"
-          @upload-directory="openUpload('directory')"
-          @create-directory="openCreateDirectoryDialog"
-          @create-text="newTextOpen = true"
-          @download-all="handleDownloadAll"
-        />
-      </div>
-
       <div v-if="showGuestNotice" class="notice">
         <span class="ico"><Icon name="info" /></span>
         <span class="body">{{ t('app.guestModeNotice') }}</span>
@@ -1475,7 +1432,42 @@ watchEffect(() => {
         @update:view="setView"
         @search="handleSearch"
         @clear="clearSearch"
-      />
+      >
+        <template #leading>
+          <div class="toolbar-context-row">
+            <button
+              v-if="canNavigateUp"
+              type="button"
+              class="btn toolbar-back"
+              :disabled="busy"
+              :title="t('toolbar.backToParent')"
+              :aria-label="t('toolbar.backToParent')"
+              @click="navigateUp"
+            >
+              <Icon name="arrowLeft" />
+              <span>{{ t('toolbar.backToParent') }}</span>
+            </button>
+            <h1 class="toolbar-title">
+              {{ pageTitle }}
+              <span v-if="pageStatLabel" class="sub">{{ pageStatLabel }}</span>
+            </h1>
+          </div>
+        </template>
+
+        <template #actions>
+          <ToolbarActions
+            :current-kind="currentKind"
+            :permissions="session?.permissions ?? null"
+            :has-entries="displayedEntries.length > 0"
+            :busy="busy"
+            @upload-files="openUpload('files')"
+            @upload-directory="openUpload('directory')"
+            @create-directory="openCreateDirectoryDialog"
+            @create-text="newTextOpen = true"
+            @download-all="handleDownloadAll"
+          />
+        </template>
+      </SearchBar>
 
       <EntryTable
         :entries="displayedEntries"

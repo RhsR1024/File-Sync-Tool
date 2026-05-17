@@ -36,10 +36,6 @@ const canCreateText = computed(() => showWriteActions.value && Boolean(props.per
 const showDownloadAll = computed(() => (
   showWriteActions.value
   && props.hasEntries
-  && !canUploadFiles.value
-  && !canUploadDirectory.value
-  && !canCreateDirectory.value
-  && !canCreateText.value
   && Boolean(props.permissions?.download_archive)
 ));
 </script>

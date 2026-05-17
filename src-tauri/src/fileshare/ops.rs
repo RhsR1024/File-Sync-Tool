@@ -20,6 +20,12 @@ pub struct ResolvedRoot {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipSelectionEntry {
+    pub path: PathBuf,
+    pub archive_path: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveNodeKind {
     Home,
@@ -437,6 +443,45 @@ pub fn validate_zip_source(path: &Path) -> Result<ZipSourceStats, String> {
     validate_zip_source_with_limits(path, ZIP_DOWNLOAD_MAX_BYTES, ZIP_DOWNLOAD_MAX_FILES)
 }
 
+pub fn validate_zip_selection(entries: &[ZipSelectionEntry]) -> Result<ZipSourceStats, String> {
+    if entries.is_empty() {
+        return Err("No entries selected for ZIP download".to_string());
+    }
+    let mut stats = ZipSourceStats {
+        file_count: 0,
+        total_bytes: 0,
+    };
+    for entry in entries {
+        let metadata = fs::metadata(&entry.path)
+            .map_err(|e| format!("Failed to inspect {}: {}", entry.path.display(), e))?;
+        if metadata.is_dir() {
+            collect_zip_source_stats(
+                &entry.path,
+                0,
+                &mut stats,
+                ZIP_DOWNLOAD_MAX_BYTES,
+                ZIP_DOWNLOAD_MAX_FILES,
+            )?;
+        } else if metadata.is_file() {
+            stats.file_count += 1;
+            stats.total_bytes = stats.total_bytes.saturating_add(metadata.len());
+            if stats.file_count > ZIP_DOWNLOAD_MAX_FILES {
+                return Err(format!(
+                    "Directory contains too many files to download as ZIP (limit: {})",
+                    ZIP_DOWNLOAD_MAX_FILES
+                ));
+            }
+            if stats.total_bytes > ZIP_DOWNLOAD_MAX_BYTES {
+                return Err(format!(
+                    "Directory is too large to download as ZIP (limit: {})",
+                    format_byte_limit(ZIP_DOWNLOAD_MAX_BYTES)
+                ));
+            }
+        }
+    }
+    Ok(stats)
+}
+
 pub fn validate_zip_source_with_limits(
     path: &Path,
     max_total_bytes: u64,
@@ -542,6 +587,158 @@ pub async fn stream_zip_dir(root: &Path, writer: tokio::io::DuplexStream) -> Res
         .await
         .map_err(|e| format!("Failed to close ZIP: {}", e))?;
     Ok(())
+}
+
+pub async fn stream_zip_selection(
+    entries: Vec<ZipSelectionEntry>,
+    writer: tokio::io::DuplexStream,
+) -> Result<(), String> {
+    use async_zip::base::write::ZipFileWriter;
+    use tokio_util::compat::TokioAsyncWriteCompatExt;
+
+    let compat = writer.compat_write();
+    let mut zip_writer = ZipFileWriter::new(compat).force_zip64();
+
+    for entry in entries {
+        let archive_path = normalize_zip_entry_path(&entry.archive_path);
+        let metadata = tokio::fs::metadata(&entry.path)
+            .await
+            .map_err(|e| format!("Failed to inspect {}: {}", entry.path.display(), e))?;
+
+        if metadata.is_dir() {
+            write_zip_directory_entry(&mut zip_writer, &archive_path).await?;
+            let mut stack: Vec<(PathBuf, PathBuf, String, usize)> =
+                vec![(entry.path.clone(), entry.path.clone(), archive_path, 0)];
+            while let Some((current, root, prefix, depth)) = stack.pop() {
+                if depth > ZIP_MAX_DEPTH {
+                    return Err(format!(
+                        "Directory nesting too deep (>{ZIP_MAX_DEPTH} levels)"
+                    ));
+                }
+
+                let mut dir = tokio::fs::read_dir(&current)
+                    .await
+                    .map_err(|e| format!("Failed to read {}: {}", current.display(), e))?;
+                while let Some(child) = dir
+                    .next_entry()
+                    .await
+                    .map_err(|e| format!("Failed to iterate {}: {}", current.display(), e))?
+                {
+                    let path = child.path();
+                    let metadata = child
+                        .metadata()
+                        .await
+                        .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+                    let relative = path
+                        .strip_prefix(&root)
+                        .map_err(|e| format!("Failed to build ZIP entry path: {}", e))?;
+                    let child_archive_path =
+                        format!("{}/{}", prefix, path_to_relative_string(relative));
+
+                    if metadata.is_dir() {
+                        write_zip_directory_entry(&mut zip_writer, &child_archive_path).await?;
+                        stack.push((path, root.clone(), prefix.clone(), depth + 1));
+                    } else if metadata.is_file() {
+                        write_zip_file_entry(&mut zip_writer, &path, &child_archive_path).await?;
+                    }
+                }
+            }
+        } else if metadata.is_file() {
+            write_zip_file_entry(&mut zip_writer, &entry.path, &archive_path).await?;
+        }
+    }
+
+    zip_writer
+        .close()
+        .await
+        .map_err(|e| format!("Failed to close ZIP: {}", e))?;
+    Ok(())
+}
+
+async fn write_zip_directory_entry<W>(
+    zip_writer: &mut async_zip::base::write::ZipFileWriter<W>,
+    archive_path: &str,
+) -> Result<(), String>
+where
+    W: futures_lite::io::AsyncWrite + Unpin,
+{
+    use async_zip::{Compression, ZipEntryBuilder};
+
+    let directory_path = format!("{}/", normalize_zip_entry_path(archive_path));
+    let opts = ZipEntryBuilder::new(directory_path.into(), Compression::Stored).build();
+    let entry_writer = zip_writer
+        .write_entry_stream(opts)
+        .await
+        .map_err(|e| format!("Failed to add directory entry: {}", e))?;
+    entry_writer
+        .close()
+        .await
+        .map_err(|e| format!("Failed to close directory entry: {}", e))?;
+    Ok(())
+}
+
+async fn write_zip_file_entry<W>(
+    zip_writer: &mut async_zip::base::write::ZipFileWriter<W>,
+    path: &Path,
+    archive_path: &str,
+) -> Result<(), String>
+where
+    W: futures_lite::io::AsyncWrite + Unpin,
+{
+    use async_zip::{Compression, ZipEntryBuilder};
+    use futures_lite::io::AsyncWriteExt;
+    use tokio::io::AsyncReadExt;
+
+    let normalized_path = normalize_zip_entry_path(archive_path);
+    let opts = ZipEntryBuilder::new(normalized_path.clone().into(), Compression::Stored).build();
+    let mut entry_writer = zip_writer
+        .write_entry_stream(opts)
+        .await
+        .map_err(|e| format!("Failed to start file entry {}: {}", normalized_path, e))?;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("Failed to open {} for ZIP: {}", path.display(), e))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("Failed reading {} for ZIP: {}", path.display(), e))?;
+        if n == 0 {
+            break;
+        }
+        entry_writer
+            .write_all(&buf[..n])
+            .await
+            .map_err(|e| format!("Failed writing {} into ZIP: {}", path.display(), e))?;
+    }
+    entry_writer
+        .close()
+        .await
+        .map_err(|e| format!("Failed to close file entry {}: {}", normalized_path, e))?;
+    Ok(())
+}
+
+fn normalize_zip_entry_path(value: &str) -> String {
+    let normalized = value
+        .trim()
+        .replace('\\', "/")
+        .split('/')
+        .filter_map(|segment| {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                None
+            } else {
+                Some(segment.replace('\0', "_"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    if normalized.is_empty() {
+        "selection".to_string()
+    } else {
+        normalized
+    }
 }
 
 fn rename_entry_within_root(root: &ResolvedRoot, from: &str, to: &str) -> Result<(), String> {

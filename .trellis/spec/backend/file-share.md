@@ -90,3 +90,138 @@ write_upload_files_from_multipart(&mut multipart, &root, &parent, false, limit).
 ```
 
 This resolves the parent and permission boundary before streaming the remaining file fields.
+
+---
+
+## Scenario: Multi-Selection Archive Downloads
+
+### 1. Scope / Trigger
+- Trigger: changes to `src/share-web/App.vue`, `src/share-web/api.ts`, `src/share-web/components/ToolbarActions.vue`, `src-tauri/src/fileshare/http.rs`, or ZIP streaming helpers in `ops.rs`.
+- Goal: browser bulk download must produce one ZIP response for the selected nodes, not one browser download per selected file. Writable accounts must still see `Download all` when archive download is allowed.
+
+### 2. Signatures
+```ts
+fileShareApi.downloadSelectionArchiveUrl(nodeIds: string[]): string
+```
+
+```rust
+GET /api/download/selection-archive?node_id=<id>&node_id=<id>
+
+pub struct ZipSelectionEntry {
+    pub path: PathBuf,
+    pub archive_path: String,
+}
+
+pub fn validate_zip_selection(entries: &[ZipSelectionEntry]) -> Result<ZipSourceStats, String>;
+pub async fn stream_zip_selection(
+    entries: Vec<ZipSelectionEntry>,
+    writer: tokio::io::DuplexStream,
+) -> Result<(), String>;
+```
+
+### 3. Contracts
+- `ToolbarActions` shows `Download all` whenever the current view is not home, entries exist, and `permissions.download_archive` is true. Upload/create permissions must not hide it.
+- Bulk selection download calls `downloadSelectionArchiveUrl(selectedNodeIds)` once and triggers a single browser download.
+- Selection archive query accepts repeated `node_id` parameters. Node IDs are the existing URL-safe node identifiers produced by `encode_node_id`.
+- Each selected file requires root `download_file`; each selected directory or share root requires root `download_archive`.
+- The ZIP stream must include selected files at the archive root and selected directories under their directory name. The server must still apply existing ZIP file-count/depth limits before streaming.
+
+### 4. Validation & Error Matrix
+| Case | Response / UI |
+|------|---------------|
+| Writable directory with archive permission | `Download all` is visible with upload/create buttons |
+| Bulk selected files | One `/api/download/selection-archive` request |
+| Missing selection node IDs | `400 Selection Archive Requires Nodes` |
+| Selected file lacks `download_file` | `403 Forbidden` |
+| Selected directory lacks `download_archive` | `403 Forbidden` |
+| Selection exceeds ZIP limits | `413 Payload Too Large` |
+| Valid selection | `200 application/zip` |
+
+### 5. Good/Base/Bad Cases
+- Good: selecting 15 images downloads one ZIP stream, not 15 separate image responses.
+- Good: a read/write account sees both write actions and `Download all`.
+- Base: selecting one file still uses the selection archive route when invoked from the bulk action bar.
+- Bad: looping over `selectedEntries` and calling `triggerDownload(entry)` causes browser download fan-out.
+- Bad: tying `Download all` visibility to `!canUploadFiles && !canCreateText` makes writable accounts lose archive access.
+
+### 6. Tests Required
+- `src/share-web/api.test.ts`
+  - Asserts repeated `node_id` query parameters are generated for one selection archive URL.
+- `src/share-web/bulk-download.test.mjs`
+  - Asserts `bulkDownload()` calls `downloadSelectionArchiveUrl(items.map((entry) => entry.node_id))`.
+- `src/share-web/components/toolbar-actions.test.mjs`
+  - Asserts writable permissions do not suppress `Download all`.
+- `fileshare::http::tests::selection_archive_download_streams_multiple_files_as_one_zip`
+  - Asserts the new endpoint returns `200 application/zip` and streams ZIP bytes.
+
+### 7. Wrong vs Correct
+#### Wrong
+```ts
+for (const entry of selectedEntries.value) {
+  triggerDownload(entry);
+}
+```
+
+#### Correct
+```ts
+const href = fileShareApi.downloadSelectionArchiveUrl(
+  selectedEntries.value.map((entry) => entry.node_id),
+);
+triggerDownloadUrl(href, `${currentName.value || 'selected'}.zip`);
+```
+
+---
+
+## Scenario: Settings Password Plaintext Echo
+
+### 1. Scope / Trigger
+- Trigger: changes to `src-tauri/src/fileshare/model.rs`, `persist.rs`, settings commands, or `src/pages/FileSharePage.vue` account-password editing.
+- Goal: the local settings panel may show saved account passwords after restart. Security is intentionally relaxed for this LAN-only tool surface, while HTTP login must continue to validate against hashes.
+
+### 2. Signatures
+```rust
+pub struct PersistedFileShareUser {
+    pub password_plain: Option<String>,
+    pub password_hash: Option<String>,
+}
+
+pub struct FileShareUserView {
+    pub password_set: bool,
+    pub password_plain: Option<String>,
+}
+
+pub struct FileShareUserSaveRequest {
+    pub new_password: Option<String>,
+    pub clear_password: bool,
+}
+```
+
+```ts
+export interface FileShareUserView {
+  password_set: boolean;
+  password_plain: string | null;
+}
+```
+
+### 3. Contracts
+- Saving a non-empty `new_password` must store both `password_hash` and `password_plain`.
+- Loading settings must return `FileShareUserView.password_plain` when a saved plaintext exists so the UI can prefill the account password field after app restart.
+- `clear_password = true` must remove both `password_hash` and `password_plain`.
+- Existing hash-only configs cannot recover the old password. They must keep `password_hash`, return `password_plain = null`, and keep the password field blank until the user enters and saves a new password.
+- Normalization must trim empty plaintext values to `None`. If a config contains only `password_plain`, normalization must derive `password_hash` so HTTP login remains hash-based.
+
+### 4. Validation & Error Matrix
+| Case | Result |
+|------|--------|
+| Save with non-empty `new_password` | Stores Argon2 hash and plaintext |
+| Reload settings after restart | Password field receives plaintext |
+| Save with blank `new_password` and existing hash/plain | Preserves existing password |
+| Save with `clear_password = true` | Removes hash and plaintext |
+| Legacy hash-only config | Keeps login working, returns `password_plain = null` |
+
+### 5. Tests Required
+- `fileshare::persist::tests::save_request_hashes_and_retains_plaintext_for_settings_ui`
+  - Asserts saved plaintext differs from the hash and is exposed in `FileShareSettingsView`.
+- `src/pages/FileSharePage.test.mjs`
+  - Asserts the TS contract includes `password_plain` and edit fields initialize from it.
+  - Asserts account password inputs are visible text fields rather than masked password inputs.

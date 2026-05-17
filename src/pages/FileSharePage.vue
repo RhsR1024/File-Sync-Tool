@@ -92,13 +92,14 @@ const guestView = (): FileShareUserView => ({
   enabled: true,
   root_permissions: [],
   password_set: false,
+  password_plain: null,
 });
 const editUser = (a: FileShareUserView): EditUser => ({
   ...a,
   draft_key: nextDraftKey(),
   previous_username: a.username,
   root_permissions: a.root_permissions.map(cloneRootPerms),
-  new_password: '',
+  new_password: a.password_plain ?? '',
   clear_password: false,
 });
 
@@ -454,6 +455,7 @@ const addAccount = () => {
     enabled: true,
     root_permissions: [],
     password_set: false,
+    password_plain: null,
   }));
   draft.value.accounts[draft.value.accounts.length - 1].previous_username = null;
 };
@@ -706,7 +708,7 @@ onUnmounted(() => {
                 <div><label class="fs-label">{{ t('tools.fileShare.username') }}</label><input v-model="guest.username" :disabled="formDisabled" class="fs-input w-full" /></div>
                 <div>
                   <label class="fs-label">{{ t('tools.fileShare.guestPassword') }}</label>
-                  <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="guest.new_password" type="password" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(guest)" /></div>
+                  <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="guest.new_password" type="text" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(guest)" /></div>
                 </div>
               </div>
               <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="guest.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(guest)" />{{ t('tools.fileShare.clearGuestPasswordOnSave') }}</label>
@@ -737,7 +739,7 @@ onUnmounted(() => {
                   <div><label class="fs-label">{{ t('tools.fileShare.username') }}</label><input v-model="account.username" :disabled="formDisabled" class="fs-input w-full" /></div>
                   <div>
                     <label class="fs-label">{{ t('tools.fileShare.accountPassword') }}</label>
-                    <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="account.new_password" type="password" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(account)" /></div>
+                    <div class="relative"><KeyRound class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input v-model="account.new_password" type="text" :disabled="formDisabled" class="fs-input fs-input-with-icon w-full" :placeholder="t('tools.fileShare.keepPasswordPlaceholder')" @input="onPassword(account)" /></div>
                   </div>
                 </div>
                 <label class="mt-2 inline-flex items-center gap-2 text-xs text-slate-500"><input v-model="account.clear_password" type="checkbox" :disabled="formDisabled" class="rounded border-slate-300" @change="onClear(account)" />{{ t('tools.fileShare.clearAccountPasswordOnSave') }}</label>
@@ -768,7 +770,7 @@ onUnmounted(() => {
               {{ t('tools.fileShare.lockoutWarning') }}
             </div>
             <div class="grid grid-cols-1 gap-3">
-              <button type="button" :disabled="isActive ? !canStart : !canSave" @click="isActive ? startShare(true, true) : saveSettings()" class="fs-btn fs-btn-main w-full"><component :is="isActive ? RefreshCw : Save" class="h-4 w-4" />{{ isActive && isApplying ? t('tools.fileShare.restarting') : !isActive && isSaving ? t('tools.fileShare.saving') : t('tools.fileShare.saveSettings') }}</button>
+              <button type="button" :disabled="isActive ? !canStart : !canSave" @click="isActive ? startShare(true, true) : saveSettings()" class="fs-btn fs-btn-main w-full"><component :is="isActive ? RefreshCw : Save" class="h-4 w-4" />{{ isActive && isApplying ? t('tools.fileShare.restarting') : !isActive && isSaving ? t('tools.fileShare.saving') : isActive ? t('tools.fileShare.saveAndRestart') : t('tools.fileShare.saveSettings') }}</button>
               <button v-if="!isActive" type="button" :disabled="!canStart" @click="startShare(false, true)" class="fs-btn fs-btn-start w-full"><Play class="h-4 w-4" />{{ isApplying ? t('tools.fileShare.starting') : t('tools.fileShare.startShare') }}</button>
               <button v-if="isActive" type="button" :disabled="isApplying" @click="stopShare" class="fs-btn fs-btn-danger w-full"><Power class="h-4 w-4" />{{ t('tools.fileShare.stopShare') }}</button>
             </div>

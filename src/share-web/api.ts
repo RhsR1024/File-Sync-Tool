@@ -171,6 +171,13 @@ export const fileShareApi = {
     });
     return `/api/download/archive?${query.toString()}`;
   },
+  downloadSelectionArchiveUrl(nodeIds: string[]) {
+    const query = new URLSearchParams();
+    for (const nodeId of nodeIds) {
+      query.append('node_id', nodeId);
+    }
+    return `/api/download/selection-archive?${query.toString()}`;
+  },
 };
 
 export function isUnauthorized(error: unknown): boolean {

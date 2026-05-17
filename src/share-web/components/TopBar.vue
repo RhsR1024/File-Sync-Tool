@@ -2,17 +2,23 @@
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
-import type { FileShareSession } from '../types';
+import type {
+  FileShareBreadcrumb,
+  FileShareSession,
+} from '../types';
 
+import Breadcrumbs from './Breadcrumbs.vue';
 import { Icon } from './icons';
 
 const props = defineProps<{
   session: FileShareSession | null;
+  breadcrumbs: FileShareBreadcrumb[];
   busy?: boolean;
 }>();
 
 const emit = defineEmits<{
   refresh: [];
+  navigate: [nodeId: string | null];
   'session-action': [];
 }>();
 
@@ -40,6 +46,15 @@ const sessionActionLabel = computed(() => {
       <div>
         <div class="brand-name">{{ t('app.pageTitle') }}</div>
       </div>
+    </div>
+
+    <div class="topbar-context">
+      <Breadcrumbs
+        v-if="breadcrumbs.length > 0"
+        :breadcrumbs="breadcrumbs"
+        :busy="busy"
+        @navigate="emit('navigate', $event)"
+      />
     </div>
 
     <div class="topbar-actions">

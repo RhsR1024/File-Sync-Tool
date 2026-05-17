@@ -1132,6 +1132,7 @@ export interface FileShareUserView {
   enabled: boolean;
   root_permissions: FileShareUserRootPermissions[];
   password_set: boolean;
+  password_plain: string | null;
 }
 
 export interface FileShareUserSaveRequest {
