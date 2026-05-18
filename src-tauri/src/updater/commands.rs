@@ -10,9 +10,9 @@ use tokio::sync::watch;
 
 use crate::config::AppConfig;
 use crate::updater::{
-    download, installer, manifest, pending, DownloadCompletePayload, DownloadProgress, Manifest,
-    ManifestVersion, PendingUpdate, SharedUpdaterState, TestServerResult, UpdateCheckResult,
-    UpdateState, UpdaterError, CURRENT_VERSION,
+    download, installer, manifest, pending, self_heal, DownloadCompletePayload, DownloadProgress,
+    Manifest, ManifestVersion, PendingUpdate, SharedUpdaterState, TestServerResult,
+    UpdateCheckResult, UpdateState, UpdaterError, CURRENT_VERSION,
 };
 use crate::{config, AppState};
 
@@ -97,7 +97,7 @@ pub async fn start_update_download(
     let version = latest.version.clone();
     let url = latest.url.clone();
     let sha256 = latest.sha256.clone();
-    let dest = temp_download_path(&version, &target_file_name);
+    let (download_part_path, final_path) = resolve_download_paths(&version, &target_file_name);
 
     tauri::async_runtime::spawn(async move {
         run_download_task(
@@ -108,7 +108,8 @@ pub async fn start_update_download(
             url,
             sha256,
             target_file_name,
-            dest,
+            download_part_path,
+            final_path,
             cancel_rx,
         )
         .await;
@@ -264,13 +265,19 @@ pub fn initialize_on_startup(app_handle: AppHandle, state: &AppState) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(AUTO_CHECK_DELAY).await;
 
-        if should_skip_auto_check(&config_state) {
+        if should_skip_auto_check(&config_state, &updater_state) {
             log::info!("[updater] skip startup auto-check because the throttle is active");
             return;
         }
 
         match perform_check(&app_handle, config_state.clone(), updater_state.clone()).await {
             Ok(result) => {
+                if matches!(
+                    self_heal::check_and_repair_filename(&app_handle, &updater_state),
+                    self_heal::HealOutcome::Spawned
+                ) {
+                    return;
+                }
                 let notify = config_state
                     .lock()
                     .map(|config| config.notify_on_new_version)
@@ -384,13 +391,25 @@ fn restore_pending_update(
     }
 }
 
-fn should_skip_auto_check(config_state: &SharedConfig) -> bool {
+fn should_skip_auto_check(
+    config_state: &SharedConfig,
+    updater_state: &SharedUpdaterState,
+) -> bool {
     let config = match config_state.lock() {
         Ok(config) => config.clone(),
         Err(_) => return true,
     };
     if config.update_server_url.trim().is_empty() {
         return true;
+    }
+
+    let manifest_loaded = updater_state
+        .manifest
+        .lock()
+        .map(|manifest| manifest.is_some())
+        .unwrap_or(false);
+    if !manifest_loaded {
+        return false;
     }
 
     let Some(last_checked_at) = config.last_update_check_at.as_deref() else {
@@ -471,7 +490,8 @@ async fn run_download_task(
     url: String,
     sha256: String,
     target_file_name: String,
-    dest: PathBuf,
+    download_part_path: PathBuf,
+    final_path: PathBuf,
     cancel_rx: watch::Receiver<bool>,
 ) {
     let started_at = Instant::now();
@@ -480,8 +500,12 @@ async fn run_download_task(
         .unwrap_or_else(Instant::now);
     let app_handle_for_progress = app_handle.clone();
 
-    let result =
-        download::download_to_file(&url, &dest, &sha256, cancel_rx, move |downloaded, total| {
+    let result = download::download_to_file(
+        &url,
+        &download_part_path,
+        &sha256,
+        cancel_rx,
+        move |downloaded, total| {
             let now = Instant::now();
             if now.duration_since(last_emit_at) < PROGRESS_EVENT_INTERVAL {
                 return;
@@ -500,18 +524,21 @@ async fn run_download_task(
                 speed_bps,
             };
             let _ = app_handle_for_progress.emit(EVENT_DOWNLOAD_PROGRESS, payload);
-        })
-        .await;
+        },
+    )
+    .await;
+
+    let finalize_result = result.and_then(|()| finalize_part_file(&download_part_path, &final_path));
 
     finish_download_task(
         &app_handle,
         &config_state,
         &updater_state,
-        result,
+        finalize_result,
         version,
         sha256,
         target_file_name,
-        dest,
+        final_path,
     );
 }
 
@@ -648,14 +675,61 @@ fn resolve_apply_target_path(current_exe: &Path, target_file_name: &str) -> Resu
     Ok(parent.join(file_name))
 }
 
-fn temp_download_path(version: &str, target_file_name: &str) -> PathBuf {
-    let sanitized = version.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_");
+/// Returns `(part_path, final_path)`. Prefer the running exe's directory so the
+/// downloaded binary lands next to the program; if that directory is not
+/// writable, fall back to a unique path under %TEMP%.
+fn resolve_download_paths(version: &str, target_file_name: &str) -> (PathBuf, PathBuf) {
     let safe_name = target_file_name.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_");
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            if is_dir_writable(parent) {
+                let final_path = parent.join(&safe_name);
+                let part_path = parent.join(format!("{safe_name}.part"));
+                return (part_path, final_path);
+            }
+        }
+    }
+
+    let sanitized_version = version.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_");
     let timestamp = Utc::now().format("%Y%m%d%H%M%S");
-    std::env::temp_dir().join(format!(
-        "file-sync-tool-update-{sanitized}-{timestamp}-{}-{safe_name}",
+    let final_name = format!(
+        "file-sync-tool-update-{sanitized_version}-{timestamp}-{}-{safe_name}",
         std::process::id(),
-    ))
+    );
+    let final_path = std::env::temp_dir().join(&final_name);
+    let part_path = std::env::temp_dir().join(format!("{final_name}.part"));
+    (part_path, final_path)
+}
+
+fn is_dir_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(
+        ".fst-write-probe-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Move the verified `.part` file to its final name. If `final_path` already
+/// exists (e.g. from a previous download attempt) it is removed first so the
+/// rename succeeds on Windows.
+fn finalize_part_file(part_path: &Path, final_path: &Path) -> Result<(), UpdaterError> {
+    if part_path == final_path {
+        return Ok(());
+    }
+    if final_path.exists() {
+        if let Err(error) = std::fs::remove_file(final_path) {
+            return Err(UpdaterError::Io(error.to_string()));
+        }
+    }
+    std::fs::rename(part_path, final_path).map_err(|error| UpdaterError::Io(error.to_string()))
 }
 
 #[cfg(test)]
@@ -688,11 +762,77 @@ mod tests {
     }
 
     #[test]
-    fn temp_download_path_keeps_target_file_name_suffix() {
-        let path = temp_download_path("1.1.0", "file-sync-tool-1.1.0-202604271707.exe");
-        let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+    fn resolve_download_paths_returns_part_and_final_paths_together() {
+        let (part, final_path) =
+            resolve_download_paths("1.1.1", "file-sync-tool-1.1.1-202605181737.exe");
 
-        assert!(file_name.contains("file-sync-tool-1.1.0-202604271707.exe"));
-        assert!(file_name.contains("1.1.0"));
+        let part_name = part.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let final_name = final_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
+        assert!(
+            final_name.contains("file-sync-tool-1.1.1-202605181737.exe"),
+            "final path keeps the target file name: {final_name}"
+        );
+        assert_eq!(
+            part_name,
+            format!("{final_name}.part"),
+            "part path is the final name + .part suffix"
+        );
+        assert_eq!(part.parent(), final_path.parent());
+    }
+
+    #[test]
+    fn finalize_part_file_renames_into_final_path_and_replaces_existing() {
+        let tmp = std::env::temp_dir();
+        let part = tmp.join(format!("fst-finalize-part-{}.tmp", std::process::id()));
+        let final_path = tmp.join(format!("fst-finalize-final-{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(&final_path);
+
+        std::fs::write(&part, b"new payload").expect("write part");
+        std::fs::write(&final_path, b"stale payload").expect("write existing final");
+
+        finalize_part_file(&part, &final_path).expect("finalize succeeds");
+        let written = std::fs::read(&final_path).expect("read final");
+        assert_eq!(written, b"new payload");
+        assert!(!part.exists(), "part is consumed");
+
+        let _ = std::fs::remove_file(&final_path);
+    }
+
+    #[test]
+    fn finalize_part_file_is_noop_when_part_equals_final() {
+        let path = std::env::temp_dir().join(format!("fst-finalize-same-{}.tmp", std::process::id()));
+        std::fs::write(&path, b"identical").expect("write");
+        finalize_part_file(&path, &path).expect("noop");
+        assert!(path.exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn startup_auto_check_runs_when_throttled_but_manifest_is_not_loaded() {
+        let mut config = AppConfig::default();
+        config.last_update_check_at = Some(Utc::now().to_rfc3339());
+        let config_state = Arc::new(Mutex::new(config));
+        let updater_state = Arc::new(crate::updater::UpdaterState::new());
+
+        assert!(!should_skip_auto_check(&config_state, &updater_state));
+    }
+
+    #[test]
+    fn startup_auto_check_skips_when_recent_manifest_is_loaded() {
+        let mut config = AppConfig::default();
+        config.last_update_check_at = Some(Utc::now().to_rfc3339());
+        let config_state = Arc::new(Mutex::new(config));
+        let updater_state = Arc::new(crate::updater::UpdaterState::new());
+        *updater_state.manifest.lock().expect("manifest lock") = Some(Manifest {
+            latest: CURRENT_VERSION.to_string(),
+            versions: vec![],
+        });
+
+        assert!(should_skip_auto_check(&config_state, &updater_state));
     }
 }

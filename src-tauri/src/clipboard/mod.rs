@@ -38,6 +38,9 @@ pub struct ClipboardState {
     /// the lock-window toolbar button on the panel.
     pub panel_pinned: AtomicBool,
     pub settings: Arc<RwLock<ClipboardSettings>>,
+    /// Current custom group selected in the clipboard panel. `None` is the
+    /// default ungrouped bucket; new captures are stored into this group.
+    pub active_group_id: Mutex<Option<i64>>,
     pub pending_self_write: Mutex<Option<(String, std::time::Instant)>>,
     pub watcher_handle: Mutex<Option<watcher::WatcherHandle>>,
     pub hotkey_handle: Mutex<Option<hotkey::HotkeyHandle>>,
@@ -69,6 +72,7 @@ impl ClipboardState {
             is_enabled: std::sync::atomic::AtomicBool::new(settings.enabled),
             panel_pinned: std::sync::atomic::AtomicBool::new(false),
             settings: std::sync::Arc::new(parking_lot::RwLock::new(settings)),
+            active_group_id: parking_lot::Mutex::new(None),
             pending_self_write: parking_lot::Mutex::new(None),
             watcher_handle: parking_lot::Mutex::new(None),
             hotkey_handle: parking_lot::Mutex::new(None),

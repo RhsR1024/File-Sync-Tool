@@ -365,6 +365,7 @@ pub struct ClipboardGroup {
     pub name: String,
     pub sort_index: i64,
     pub created_at: i64,
+    pub item_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

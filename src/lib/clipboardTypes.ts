@@ -301,6 +301,7 @@ export interface ClipboardGroup {
   name: string;
   sort_index: number;
   created_at: number;
+  item_count: number;
 }
 
 export interface FilePathStatus {

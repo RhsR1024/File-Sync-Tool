@@ -734,7 +734,7 @@ export const messages = {
         changePath: 'Change Path',
         emptyPlaceholder: 'Add at least one directory to start sharing',
         generalSettingsTitle: 'General Settings',
-        sessionTtlMinutes: 'Session TTL (minutes)',
+        sessionTtlMinutes: 'Account login session duration (minutes)',
         deleteMode: 'Delete Mode',
         ipFilter: 'IP Filter',
         guestAccess: 'Guest Access',
@@ -826,7 +826,7 @@ export const messages = {
         },
         validation: {
           portRange: 'Port must be between 1024 and 65535.',
-          sessionTtlRange: 'Session TTL must be between 1 and {max} minutes.',
+          sessionTtlRange: 'Account login session duration must be between 1 and {max} minutes.',
           ipRuleRequired: 'Add at least one rule when IP filtering is enabled.',
           rootAliasRequired: 'Shared root alias cannot be empty.',
           rootPathRequired: 'Shared root path cannot be empty.',
@@ -1612,7 +1612,7 @@ export const messages = {
         rename: 'Rename',
         save: 'Save',
         newPlaceholder: 'New group name',
-        deleteConfirm: 'Delete group "{name}"? Items will stay in history.',
+        deleteConfirm: 'Delete group "{name}"? Items in this group will be deleted.',
       },
       pinnedSection: {
         title: 'Pinned',
@@ -2635,7 +2635,7 @@ export const messages = {
         changePath: '更换路径',
         emptyPlaceholder: '请先添加至少一个目录',
         generalSettingsTitle: '基础设置',
-        sessionTtlMinutes: '会话时长（分钟）',
+        sessionTtlMinutes: '账户登录会话时长（分钟）',
         deleteMode: '删除模式',
         ipFilter: 'IP 过滤',
         guestAccess: '访客访问',
@@ -2725,7 +2725,7 @@ export const messages = {
         },
         validation: {
           portRange: '端口必须在 1024-65535 之间。',
-          sessionTtlRange: '会话时长必须在 1 到 {max} 分钟之间。',
+          sessionTtlRange: '账户登录会话时长必须在 1 到 {max} 分钟之间。',
           ipRuleRequired: '启用 IP 过滤时至少添加一条规则。',
           rootAliasRequired: '共享目录别名不能为空。',
           rootPathRequired: '共享目录路径不能为空。',
@@ -3510,7 +3510,7 @@ export const messages = {
         rename: '重命名',
         save: '保存',
         newPlaceholder: '新分组名称',
-        deleteConfirm: '删除分组“{name}”？项目会保留在历史记录中。',
+        deleteConfirm: '删除分组“{name}”？该分组中的项目会被删除。',
       },
       pinnedSection: {
         title: '置顶',

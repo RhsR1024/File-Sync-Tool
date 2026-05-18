@@ -135,7 +135,7 @@ async function clearClipboardHistory() {
 
   pending.value = 'clear';
   try {
-    await clipboardApi.clear(false);
+    await clipboardApi.clearAll(false);
     feedback.value = t('clipboard.transfer.clearHistorySuccess');
     error.value = null;
     await refreshStatsAndPaths();

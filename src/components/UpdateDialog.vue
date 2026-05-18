@@ -235,7 +235,7 @@ onBeforeUnmount(() => {
         aria-modal="true"
         :aria-labelledby="TITLE_ID"
         tabindex="-1"
-        class="relative w-full max-w-xl overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.36)] focus:outline-none"
+        class="relative max-h-[calc(100vh-2rem)] w-full max-w-xl flex flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.36)] focus:outline-none"
       >
         <div class="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-cyan-400 via-sky-500 to-indigo-500"></div>
         <button
@@ -249,9 +249,9 @@ onBeforeUnmount(() => {
           <X class="h-4 w-4" aria-hidden="true" />
         </button>
 
-        <div class="space-y-6 px-6 py-7">
+        <div class="flex min-h-0 flex-1 flex-col gap-6 px-6 py-7">
           <template v-if="dialogState === 'found' && latestEntry">
-            <div class="space-y-2">
+            <div class="shrink-0 space-y-2">
               <p class="text-xs font-semibold uppercase tracking-[0.24em] text-sky-500">
                 {{ t('about.title') }}
               </p>
@@ -270,7 +270,7 @@ onBeforeUnmount(() => {
               </p>
             </div>
 
-            <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+            <div class="rounded-2xl min-h-0 flex-1 overflow-y-auto border border-slate-200 bg-slate-50/80 p-4 pr-3">
               <div class="flex items-center justify-between gap-3">
                 <div>
                   <div class="text-lg font-semibold text-slate-900">{{ latestEntry.version }}</div>
@@ -296,7 +296,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div class="flex justify-end gap-3">
+            <div class="shrink-0 flex justify-end gap-3">
               <button
                 type="button"
                 class="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
@@ -316,7 +316,7 @@ onBeforeUnmount(() => {
           </template>
 
           <template v-else-if="dialogState === 'downloading'">
-            <div class="space-y-2">
+            <div class="shrink-0 space-y-2">
               <p class="text-xs font-semibold uppercase tracking-[0.24em] text-sky-500">
                 {{ t('about.title') }}
               </p>
@@ -328,7 +328,7 @@ onBeforeUnmount(() => {
               </p>
             </div>
 
-            <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+            <div class="shrink-0 rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
               <div
                 role="progressbar"
                 :aria-label="t('updater.dialog.aria.progress')"
@@ -362,7 +362,7 @@ onBeforeUnmount(() => {
               </p>
             </div>
 
-            <div class="flex justify-end">
+            <div class="shrink-0 flex justify-end">
               <button
                 type="button"
                 class="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
@@ -374,7 +374,7 @@ onBeforeUnmount(() => {
           </template>
 
           <template v-else-if="dialogState === 'ready' || dialogState === 'resume'">
-            <div class="space-y-2">
+            <div class="shrink-0 space-y-2">
               <p class="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-500">
                 {{ t('about.title') }}
               </p>
@@ -395,14 +395,14 @@ onBeforeUnmount(() => {
               </p>
             </div>
 
-            <div class="rounded-2xl border border-emerald-200 bg-emerald-50/80 p-4 text-sm text-emerald-800">
+            <div class="shrink-0 rounded-2xl border border-emerald-200 bg-emerald-50/80 p-4 text-sm text-emerald-800">
               <div class="font-medium">{{ pendingEntry?.target_file_name || pendingEntry?.target_version || latestEntry?.version }}</div>
               <div class="mt-1 break-all text-xs text-emerald-700/80">
                 {{ pendingEntry?.temp_path }}
               </div>
             </div>
 
-            <div class="flex justify-end gap-3">
+            <div class="shrink-0 flex justify-end gap-3">
               <button
                 type="button"
                 class="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
@@ -422,7 +422,7 @@ onBeforeUnmount(() => {
           </template>
 
           <template v-else>
-            <div class="space-y-2">
+            <div class="shrink-0 space-y-2">
               <p class="text-xs font-semibold uppercase tracking-[0.24em] text-rose-500">
                 {{ t('about.title') }}
               </p>
@@ -443,11 +443,11 @@ onBeforeUnmount(() => {
               </p>
             </div>
 
-            <div v-if="dialogError" class="rounded-2xl border border-rose-200 bg-rose-50/80 p-4 text-sm text-rose-700">
+            <div v-if="dialogError" class="shrink-0 rounded-2xl border border-rose-200 bg-rose-50/80 p-4 text-sm text-rose-700">
               {{ dialogError }}
             </div>
 
-            <div class="flex justify-end gap-3">
+            <div class="shrink-0 flex justify-end gap-3">
               <button
                 type="button"
                 class="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"

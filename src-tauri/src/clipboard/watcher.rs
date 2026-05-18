@@ -241,7 +241,8 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
         item.from_self = true;
     }
 
-    upsert_item(state, item)?;
+    let group_id = *state.active_group_id.lock();
+    upsert_item(state, item, group_id)?;
     notify_added(app);
     Ok(())
 }
@@ -472,14 +473,18 @@ fn strip_html_to_text(html: &str) -> String {
         .join(" ")
 }
 
-fn upsert_item(state: &ClipboardState, item: NewItem) -> Result<(), String> {
+fn upsert_item(
+    state: &ClipboardState,
+    item: NewItem,
+    group_id: Option<i64>,
+) -> Result<(), String> {
     let settings = state.settings.read().clone();
     let needs_asset_cleanup = {
         let conn = state.write_db.lock();
         let duplicate_asset_candidate = (item.image_path.is_some()
             || item.source_app_icon.is_some())
             && db::item_exists_by_hash(&conn, &item.hash).map_err(|err| err.to_string())?;
-        db::upsert_item_with_dedup(&conn, &item, settings.dedup_strategy.clone())
+        db::upsert_item_with_dedup_in_group(&conn, &item, settings.dedup_strategy.clone(), group_id)
             .map_err(|err| err.to_string())?;
         let cleanup_stats = crate::clipboard::retention::run_cleanup(&conn, &settings)
             .map_err(|err| err.to_string())?;
@@ -711,6 +716,7 @@ mod tests {
                 "same-hash".to_string(),
                 &old_source,
             ),
+            None,
         )
         .unwrap();
         upsert_item(
@@ -720,6 +726,7 @@ mod tests {
                 "same-hash".to_string(),
                 &new_source,
             ),
+            None,
         )
         .unwrap();
 

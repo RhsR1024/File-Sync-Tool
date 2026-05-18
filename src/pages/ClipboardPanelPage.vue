@@ -175,7 +175,7 @@ async function onConfirmClear() {
   debugClipboardSnapshot('action:clear-confirm:start');
   preview.hideNow();
   try {
-    await clipboardApi.clear(true);
+    await clipboardApi.clear(true, store.selectedGroupId.value);
     clearDialogOpen.value = false;
     selectedIndex.value = 0;
     await store.reload();
@@ -262,9 +262,9 @@ function setFilter(filter: ClipboardFilter) {
   void store.reload();
 }
 
-function setGroup(groupId: number | null) {
+async function setGroup(groupId: number | null) {
   preview.hideNow();
-  store.selectGroup(groupId);
+  await store.selectGroup(groupId);
   store.clearSelection();
   selectedIndex.value = 0;
   void store.reload();

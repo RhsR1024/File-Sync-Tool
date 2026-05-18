@@ -121,6 +121,7 @@ export const clipboardGroupContract: ClipboardGroup = {
   name: 'Work',
   sort_index: 0,
   created_at: 0,
+  item_count: 3,
 };
 
 export const filePathStatusContract: FilePathStatus = {

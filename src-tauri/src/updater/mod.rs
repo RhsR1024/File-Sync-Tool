@@ -7,6 +7,7 @@ pub mod download;
 pub mod installer;
 pub mod manifest;
 pub mod pending;
+pub mod self_heal;
 
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -138,6 +139,9 @@ pub type SharedUpdaterState = Arc<UpdaterState>;
 
 /// Static helper.bat content. Written to `%TEMP%` on demand.
 pub const HELPER_BAT: &str = include_str!("./updater.bat");
+
+/// Self-heal helper.bat for filename rename + relaunch.
+pub const HELPER_RENAME_BAT: &str = include_str!("./self_heal.bat");
 
 /// Build version string read from Cargo.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");

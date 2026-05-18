@@ -1305,8 +1305,10 @@ export const clipboardApi = {
   get: (id: number) => invoke<ClipboardItem>('cb_get', { id }),
   delete: (id: number) => invoke<void>('cb_delete', { id }),
   deleteBatch: (ids: number[]) => invoke<void>('cb_delete_batch', { ids }),
-  clear: (keepFavorites: boolean) =>
-    invoke<number>('cb_clear', { keepFavorites }),
+  clear: (keepFavorites: boolean, groupId: number | null) =>
+    invoke<number>('cb_clear', { keepFavorites, groupId }),
+  clearAll: (keepFavorites: boolean) =>
+    invoke<number>('cb_clear_all', { keepFavorites }),
   toggleFavorite: (id: number) =>
     invoke<ClipboardItem>('cb_toggle_favorite', { id }),
   togglePin: (id: number) => invoke<ClipboardItem>('cb_toggle_pin', { id }),
@@ -1317,6 +1319,8 @@ export const clipboardApi = {
   deleteGroup: (id: number) => invoke<void>('cb_groups_delete', { id }),
   moveToGroup: (itemId: number, groupId: number | null) =>
     invoke<ClipboardItem>('cb_move_to_group', { itemId, groupId }),
+  setActiveGroup: (groupId: number | null) =>
+    invoke<void>('cb_set_active_group', { groupId }),
   reorderFavorites: (ids: number[]) => invoke<void>('cb_reorder_favorites', { ids }),
   paste: (id: number) => invoke<void>('cb_paste', { id }),
   pastePlain: (id: number) => invoke<void>('cb_paste_plain', { id }),

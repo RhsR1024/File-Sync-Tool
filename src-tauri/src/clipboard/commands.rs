@@ -252,7 +252,20 @@ pub fn cb_delete_batch(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), 
 }
 
 #[tauri::command]
-pub fn cb_clear(state: State<'_, AppState>, keep_favorites: bool) -> Result<u64, String> {
+pub fn cb_clear(
+    state: State<'_, AppState>,
+    keep_favorites: bool,
+    group_id: Option<i64>,
+) -> Result<u64, String> {
+    let result = {
+        let conn = state.clipboard.db.lock();
+        db::clear_group(&conn, keep_favorites, group_id).map_err(|e| e.to_string())
+    };
+    cleanup_assets_after_mutation(state.clipboard.as_ref(), result)
+}
+
+#[tauri::command]
+pub fn cb_clear_all(state: State<'_, AppState>, keep_favorites: bool) -> Result<u64, String> {
     let result = {
         let conn = state.clipboard.db.lock();
         db::clear_all(&conn, keep_favorites).map_err(|e| e.to_string())
@@ -315,26 +328,40 @@ pub fn cb_groups_rename(
 
 #[tauri::command]
 pub fn cb_groups_delete(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
-    let groups = {
+    let result = {
         let conn = state.clipboard.write_db.lock();
         let deleted = db::delete_group(&conn, id).map_err(|e| e.to_string())?;
         if !deleted {
             return Err(format!("clipboard group not found: {id}"));
         }
-        crate::clipboard::groups::list_groups_snapshot(&conn)?
+        if *state.clipboard.active_group_id.lock() == Some(id) {
+            *state.clipboard.active_group_id.lock() = None;
+        }
+        crate::clipboard::groups::list_groups_snapshot(&conn)
     };
+    let groups = cleanup_assets_after_mutation(state.clipboard.as_ref(), result)?;
     crate::clipboard::groups::emit_groups_changed(&app, &groups);
     Ok(())
 }
 
 #[tauri::command]
 pub fn cb_move_to_group(
+    app: AppHandle,
     state: State<'_, AppState>,
     item_id: i64,
     group_id: Option<i64>,
 ) -> Result<ClipboardItem, String> {
     let conn = state.clipboard.write_db.lock();
-    db::move_item_to_group(&conn, item_id, group_id).map_err(|e| e.to_string())
+    let item = db::move_item_to_group(&conn, item_id, group_id).map_err(|e| e.to_string())?;
+    let groups = crate::clipboard::groups::list_groups_snapshot(&conn)?;
+    crate::clipboard::groups::emit_groups_changed(&app, &groups);
+    Ok(item)
+}
+
+#[tauri::command]
+pub fn cb_set_active_group(state: State<'_, AppState>, group_id: Option<i64>) -> Result<(), String> {
+    *state.clipboard.active_group_id.lock() = group_id;
+    Ok(())
 }
 
 pub fn cb_toggle_panel_internal(app: AppHandle) -> Result<(), String> {

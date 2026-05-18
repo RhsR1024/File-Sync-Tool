@@ -9,6 +9,7 @@
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [Appliance SSH](./appliance-ssh.md) | Contracts for appliance SSH API version port selection, status polling, and enable calls | Active |
+| [Clipboard Manager](./clipboard-manager.md) | Contracts for group-scoped clipboard history, active capture targets, and deletion semantics | Active |
 | [Disk Cache Cleanup](./disk-cache-cleanup.md) | Contracts for Linux local disk, Windows raw disk, IPSAN, and Redis cache-key operations | Active |
 | [Clipboard Preview Windows](./clipboard-preview-windows.md) | Contracts for non-activating Alt+C hover preview windows and no-overlap placement | Active |
 | [Error Code Lookup](./error-code-lookup.md) | Contracts for GitLab archive sync, on-disk cache, and Tauri query commands backing the error-code tool | Active |

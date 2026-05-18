@@ -48,14 +48,14 @@ test('partitionClipboardItemsForDisplay keeps pinned items in a dedicated sectio
 test('resolveActiveClipboardGroupId falls back to all groups when the selected group no longer exists', () => {
   assert.equal(
     resolveActiveClipboardGroupId(
-      [{ id: 3, name: 'Work', sort_index: 0, created_at: 0 }],
+      [{ id: 3, name: 'Work', sort_index: 0, created_at: 0, item_count: 0 }],
       3,
     ),
     3,
   );
   assert.equal(
     resolveActiveClipboardGroupId(
-      [{ id: 3, name: 'Work', sort_index: 0, created_at: 0 }],
+      [{ id: 3, name: 'Work', sort_index: 0, created_at: 0, item_count: 0 }],
       9,
     ),
     null,

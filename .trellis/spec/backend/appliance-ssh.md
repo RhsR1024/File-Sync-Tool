@@ -55,6 +55,19 @@ pub struct ApplianceSshRequest {
 }
 ```
 
+```jsonc
+// Device status API: POST /openAPI/system/v1/network/SSH/get
+{}
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "enable": 0,
+    "port": 23333
+  }
+}
+```
+
 ### 3. Contracts
 
 - Frontend sends `applianceVersion` on every new `enableApplianceSsh()` call.
@@ -73,6 +86,8 @@ pub struct ApplianceSshRequest {
 - The initial `SSH/get` call is best-effort: if it fails (HTTP/network/protocol error), the flow logs a `warn` and proceeds to call `SSH/set` anyway with `previous_enable=None`. This handles appliances whose access-control mode rejects `get` while still accepting `set`.
 - After `SSH/set` returns success, the flow polls `SSH/get` to confirm `enable==1`. The poll has three outcomes: `Enabled` (use the returned status), `NotEnabled` (return an error with the last observed enable value), and `GetFailed` (every poll attempt errored — trust the `set` success, synthesize `enable=Some(1)`, fall back to `port=23333` if no port has ever been observed).
 
+- Status API `data.enable` uses `0` for disabled/off and `1` for enabled/on; Vue result chips must render `0` as disabled, not unknown.
+
 ### 4. Validation & Error Matrix
 
 | Case | Layer | Behavior |
@@ -90,16 +105,19 @@ pub struct ApplianceSshRequest {
 | Initial `SSH/get` fails | Rust target worker | Log warn, set `previous_enable=None`, still call `SSH/set` |
 | `SSH/set` succeeds, every verification `SSH/get` fails | Rust target worker | Log warn, treat as success with synthesized `enable=Some(1)`; do NOT return error |
 | `SSH/set` succeeds, verification `SSH/get` returns `enable!=1` | Rust target worker | Return error "current enable state is ..." (real failure, not a transport failure) |
+| Device status `enable=0` | Vue result presentation | Display disabled/off (`stateDisabled`), not unknown |
 
 ### 5. Good/Base/Bad Cases
 
 - Good: choose `mainline`, enter `192.168.1.10`, backend calls `http://192.168.1.10:9007/openAPI/system/v1/network/SSH/get` and then `set` on `9007` when needed.
 - Good: choose default `allTcp`, resolved source `192.115.1.15`, backend inserts `ACCEPT tcp -- 192.115.1.15 0.0.0.0/0` before existing per-port `DROP` / `REJECT` rules.
 - Good: appliance access control rejects `SSH/get` but accepts `SSH/set`; backend logs warn, runs `set`, verification GET keeps failing, result is marked success with `port=23333` (default) and `current_enable=1`.
+- Good: status response `{"data":{"enable":0,"port":23333}}` is returned as `previousEnable: 0` and rendered as disabled/off in the result chip.
 - Base: choose default `componentized`, backend behavior remains the historical `23006` path.
 - Bad: update only the `set` call to `9007` while leaving `get` on `23006`; status polling will report the wrong device version.
 - Bad: use `--dport 23333` while the user selected `allTcp`; only SSH is opened and management ports like `20012` / `5432` remain blocked.
 - Bad: abort the enable flow when the initial `SSH/get` returns HTTP 403 / network error; the user explicitly asked to "treat set success as success" when the device's get endpoint is gated.
+- Bad: render only `enable=1` as enabled and `enable=2` as disabled; the real off value is `0`, so the UI would show unknown before every enable run.
 
 ### 6. Tests Required
 
@@ -108,6 +126,7 @@ pub struct ApplianceSshRequest {
 - Backend unit test: API URL builder uses the selected version port for both `get` and `set` paths.
 - Backend unit test: `allTcp` whitelist rule omits `--dport`.
 - Backend unit test: `sshOnly` whitelist rule includes the reported SSH port.
+- Frontend unit test: `getApplianceSshEnableState(0)` returns `disabled`, `1` returns `enabled`, and missing values return `unknown`.
 - Type/build check: `pnpm check` after adding or renaming the frontend request field.
 - Rust test check: `cargo test --manifest-path src-tauri/Cargo.toml appliance_ssh`.
 
@@ -130,6 +149,26 @@ let set_url = build_appliance_ssh_api_url(ip, api_version, "set");
 ```
 
 One selected version controls all management API calls in the run.
+
+#### Wrong
+
+```typescript
+if (value === 1) return t('tools.applianceSsh.stateEnabled');
+if (value === 2) return t('tools.applianceSsh.stateDisabled');
+return t('tools.applianceSsh.stateUnknown');
+```
+
+This treats the device's real disabled value (`0`) as unknown.
+
+#### Correct
+
+```typescript
+if (value === 1) return 'enabled';
+if (value === 0) return 'disabled';
+return 'unknown';
+```
+
+The UI maps the API contract first, then translates `enabled` / `disabled` / `unknown` for display.
 
 #### Wrong
 

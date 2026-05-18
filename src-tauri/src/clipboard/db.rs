@@ -9,7 +9,7 @@ use crate::clipboard::models::{
     ClipboardListResult, ContentKind,
 };
 
-const CLIPBOARD_SCHEMA_VERSION: i64 = 3;
+const CLIPBOARD_SCHEMA_VERSION: i64 = 4;
 const WRITE_CACHE_SIZE_KIB: i64 = -65_536;
 const READ_CACHE_SIZE_KIB: i64 = -32_768;
 const MMAP_SIZE_BYTES: i64 = 268_435_456;
@@ -112,6 +112,8 @@ fn ensure_clipboard_indexes(conn: &Connection) -> SqlResult<()> {
         CREATE INDEX IF NOT EXISTS idx_cb_favorite   ON clipboard_items(is_favorite) WHERE is_favorite = 1;
         CREATE INDEX IF NOT EXISTS idx_cb_pinned     ON clipboard_items(is_pinned) WHERE is_pinned = 1;
         CREATE INDEX IF NOT EXISTS idx_cb_group      ON clipboard_items(group_id) WHERE group_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_cb_hash_default ON clipboard_items(hash) WHERE group_id IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_cb_hash_group ON clipboard_items(group_id, hash) WHERE group_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_cb_created_at ON clipboard_items(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_cb_fav_sort   ON clipboard_items(favorite_sort_index) WHERE is_favorite = 1;
         "#,
@@ -159,21 +161,21 @@ fn clipboard_items_needs_rebuild(conn: &Connection) -> SqlResult<bool> {
         }
     }
 
-    if !clipboard_items_has_group_fk_set_null(conn)? {
+    if !clipboard_items_has_group_fk_cascade(conn)? {
         return Ok(true);
     }
 
     Ok(false)
 }
 
-fn clipboard_items_has_group_fk_set_null(conn: &Connection) -> SqlResult<bool> {
+fn clipboard_items_has_group_fk_cascade(conn: &Connection) -> SqlResult<bool> {
     let count: i64 = conn.query_row(
         r#"
         SELECT COUNT(*)
         FROM pragma_foreign_key_list('clipboard_items')
         WHERE "table" = 'clipboard_groups'
           AND "from" = 'group_id'
-          AND on_delete = 'SET NULL'
+          AND on_delete = 'CASCADE'
         "#,
         [],
         |r| r.get(0),
@@ -203,11 +205,11 @@ fn create_clipboard_items_table(conn: &Connection) -> SqlResult<()> {
             file_paths_json     TEXT,
             byte_size           INTEGER NOT NULL DEFAULT 0,
             char_count          INTEGER NOT NULL DEFAULT 0,
-            hash                TEXT NOT NULL UNIQUE,
+            hash                TEXT NOT NULL,
             source_app          TEXT,
             source_app_icon     TEXT,
             from_self           INTEGER NOT NULL DEFAULT 0,
-            group_id            INTEGER REFERENCES clipboard_groups(id) ON DELETE SET NULL,
+            group_id            INTEGER REFERENCES clipboard_groups(id) ON DELETE CASCADE,
             is_favorite         INTEGER NOT NULL DEFAULT 0,
             is_pinned           INTEGER NOT NULL DEFAULT 0,
             favorite_sort_index INTEGER,
@@ -285,11 +287,11 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
             file_paths_json     TEXT,
             byte_size           INTEGER NOT NULL DEFAULT 0,
             char_count          INTEGER NOT NULL DEFAULT 0,
-            hash                TEXT NOT NULL UNIQUE,
+            hash                TEXT NOT NULL,
             source_app          TEXT,
             source_app_icon     TEXT,
             from_self           INTEGER NOT NULL DEFAULT 0,
-            group_id            INTEGER REFERENCES clipboard_groups(id) ON DELETE SET NULL,
+            group_id            INTEGER REFERENCES clipboard_groups(id) ON DELETE CASCADE,
             is_favorite         INTEGER NOT NULL DEFAULT 0,
             is_pinned           INTEGER NOT NULL DEFAULT 0,
             favorite_sort_index INTEGER,
@@ -340,7 +342,12 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-fn insert_item_with_hash(conn: &Connection, item: &NewItem, stored_hash: &str) -> SqlResult<i64> {
+fn insert_item_with_hash(
+    conn: &Connection,
+    item: &NewItem,
+    stored_hash: &str,
+    group_id: Option<i64>,
+) -> SqlResult<i64> {
     let now = now_ms();
     let paths_json = item
         .file_paths
@@ -357,7 +364,7 @@ fn insert_item_with_hash(conn: &Connection, item: &NewItem, stored_hash: &str) -
           (kind, content_preview, content_full, rtf_content, html, image_path, image_width, image_height,
            file_paths_json, byte_size, char_count, hash, source_app, source_app_icon, from_self,
            group_id, is_favorite, is_pinned, favorite_sort_index, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,NULL,0,0,NULL,?16,?16)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,0,NULL,?17,?17)",
         params![
             item.kind.as_sql(),
             item.content_preview,
@@ -374,6 +381,7 @@ fn insert_item_with_hash(conn: &Connection, item: &NewItem, stored_hash: &str) -
             item.source_app,
             item.source_app_icon,
             item.from_self,
+            group_id,
             now,
         ],
     )?;
@@ -381,7 +389,15 @@ fn insert_item_with_hash(conn: &Connection, item: &NewItem, stored_hash: &str) -
 }
 
 pub fn insert_item(conn: &Connection, item: &NewItem) -> SqlResult<i64> {
-    insert_item_with_hash(conn, item, &item.hash)
+    insert_item_with_hash(conn, item, &item.hash, None)
+}
+
+pub fn insert_item_in_group(
+    conn: &Connection,
+    item: &NewItem,
+    group_id: Option<i64>,
+) -> SqlResult<i64> {
+    insert_item_with_hash(conn, item, &item.hash, group_id)
 }
 
 pub fn item_exists_by_hash(conn: &Connection, hash: &str) -> SqlResult<bool> {
@@ -394,32 +410,42 @@ fn refresh_duplicate_item_by_hash(
     conn: &Connection,
     item: &NewItem,
     touch_updated_at: bool,
+    group_id: Option<i64>,
 ) -> SqlResult<bool> {
+    let (group_sql, group_params): (&str, Vec<&dyn ToSql>) = match group_id {
+        Some(ref id) => ("group_id = ?", vec![id]),
+        None => ("group_id IS NULL", vec![]),
+    };
     let affected = if touch_updated_at {
-        conn.execute(
+        let now = now_ms();
+        let sql = format!(
             "UPDATE clipboard_items
              SET updated_at = ?1, source_app = ?2, source_app_icon = ?3, from_self = ?4
-             WHERE hash = ?5",
-            params![
-                now_ms(),
-                item.source_app,
-                item.source_app_icon,
-                item.from_self,
-                item.hash
-            ],
-        )?
+             WHERE hash = ?5 AND {group_sql}"
+        );
+        let mut params: Vec<&dyn ToSql> = vec![
+            &now,
+            &item.source_app,
+            &item.source_app_icon,
+            &item.from_self,
+            &item.hash,
+        ];
+        params.extend(group_params);
+        conn.execute(&sql, params_from_iter(params))?
     } else {
-        conn.execute(
+        let sql = format!(
             "UPDATE clipboard_items
              SET source_app = ?1, source_app_icon = ?2, from_self = ?3
-             WHERE hash = ?4",
-            params![
-                item.source_app,
-                item.source_app_icon,
-                item.from_self,
-                item.hash
-            ],
-        )?
+             WHERE hash = ?4 AND {group_sql}"
+        );
+        let mut params: Vec<&dyn ToSql> = vec![
+            &item.source_app,
+            &item.source_app_icon,
+            &item.from_self,
+            &item.hash,
+        ];
+        params.extend(group_params);
+        conn.execute(&sql, params_from_iter(params))?
     };
     Ok(affected > 0)
 }
@@ -503,10 +529,13 @@ fn build_where(q: &ClipboardListQuery) -> (String, Vec<Box<dyn ToSql>>) {
         ClipboardFilter::Pinned => clauses.push("is_pinned=1".into()),
     }
 
-    if let Some(group_id) = q.group_id {
-        let p = values.len() + 1;
-        clauses.push(format!("group_id = ?{p}"));
-        values.push(Box::new(group_id));
+    match q.group_id {
+        Some(group_id) => {
+            let p = values.len() + 1;
+            clauses.push(format!("group_id = ?{p}"));
+            values.push(Box::new(group_id));
+        }
+        None => clauses.push("group_id IS NULL".into()),
     }
     if q.pinned_only {
         clauses.push("is_pinned=1".into());
@@ -695,19 +724,37 @@ pub fn get_item(conn: &Connection, id: i64) -> SqlResult<ClipboardItem> {
     )
 }
 
-fn get_item_by_hash(conn: &Connection, hash: &str) -> SqlResult<ClipboardItem> {
-    conn.query_row(
-        "SELECT id, kind, content_preview, content_full, rtf_content, html, image_path, image_width,
-                image_height, file_paths_json, byte_size, char_count, hash, source_app,
-                source_app_icon, from_self, group_id, is_favorite, is_pinned, favorite_sort_index,
-                created_at, updated_at
-         FROM clipboard_items
-         WHERE hash = ?1
-         ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
-         LIMIT 1",
-        params![hash],
-        row_to_item,
-    )
+fn get_item_by_hash(
+    conn: &Connection,
+    hash: &str,
+    group_id: Option<i64>,
+) -> SqlResult<ClipboardItem> {
+    match group_id {
+        Some(group_id) => conn.query_row(
+            "SELECT id, kind, content_preview, content_full, rtf_content, html, image_path, image_width,
+                    image_height, file_paths_json, byte_size, char_count, hash, source_app,
+                    source_app_icon, from_self, group_id, is_favorite, is_pinned, favorite_sort_index,
+                    created_at, updated_at
+             FROM clipboard_items
+             WHERE hash = ?1 AND group_id = ?2
+             ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+             LIMIT 1",
+            params![hash, group_id],
+            row_to_item,
+        ),
+        None => conn.query_row(
+            "SELECT id, kind, content_preview, content_full, rtf_content, html, image_path, image_width,
+                    image_height, file_paths_json, byte_size, char_count, hash, source_app,
+                    source_app_icon, from_self, group_id, is_favorite, is_pinned, favorite_sort_index,
+                    created_at, updated_at
+             FROM clipboard_items
+             WHERE hash = ?1 AND group_id IS NULL
+             ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+             LIMIT 1",
+            params![hash],
+            row_to_item,
+        ),
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -729,23 +776,33 @@ pub fn upsert_item_with_dedup(
     item: &NewItem,
     strategy: ClipboardDedupStrategy,
 ) -> SqlResult<ClipboardItem> {
+    upsert_item_with_dedup_in_group(conn, item, strategy, None)
+}
+
+pub fn upsert_item_with_dedup_in_group(
+    conn: &Connection,
+    item: &NewItem,
+    strategy: ClipboardDedupStrategy,
+    group_id: Option<i64>,
+) -> SqlResult<ClipboardItem> {
     match strategy {
         ClipboardDedupStrategy::MoveToTop => {
-            if refresh_duplicate_item_by_hash(conn, item, true)? {
-                return get_item_by_hash(conn, &item.hash);
+            if refresh_duplicate_item_by_hash(conn, item, true, group_id)? {
+                return get_item_by_hash(conn, &item.hash, group_id);
             }
-            let id = insert_item(conn, item)?;
+            let id = insert_item_in_group(conn, item, group_id)?;
             get_item(conn, id)
         }
         ClipboardDedupStrategy::Ignore => {
-            if refresh_duplicate_item_by_hash(conn, item, false)? {
-                return get_item_by_hash(conn, &item.hash);
+            if refresh_duplicate_item_by_hash(conn, item, false, group_id)? {
+                return get_item_by_hash(conn, &item.hash, group_id);
             }
-            let id = insert_item(conn, item)?;
+            let id = insert_item_in_group(conn, item, group_id)?;
             get_item(conn, id)
         }
         ClipboardDedupStrategy::AlwaysNew => {
-            let id = insert_item_with_hash(conn, item, &make_always_new_hash(&item.hash))?;
+            let id =
+                insert_item_with_hash(conn, item, &make_always_new_hash(&item.hash), group_id)?;
             get_item(conn, id)
         }
     }
@@ -763,6 +820,25 @@ pub fn delete_batch(conn: &mut Connection, ids: &[i64]) -> SqlResult<()> {
     }
     tx.commit()?;
     Ok(())
+}
+
+pub fn clear_group(
+    conn: &Connection,
+    keep_favorites: bool,
+    group_id: Option<i64>,
+) -> SqlResult<u64> {
+    let favorite_clause = if keep_favorites { "is_favorite=0 AND " } else { "" };
+    let affected = match group_id {
+        Some(group_id) => conn.execute(
+            &format!("DELETE FROM clipboard_items WHERE {favorite_clause}group_id=?1"),
+            params![group_id],
+        )?,
+        None => conn.execute(
+            &format!("DELETE FROM clipboard_items WHERE {favorite_clause}group_id IS NULL"),
+            [],
+        )?,
+    };
+    Ok(affected as u64)
 }
 
 pub fn clear_all(conn: &Connection, keep_favorites: bool) -> SqlResult<u64> {
@@ -824,7 +900,11 @@ pub fn update_text_content(conn: &Connection, id: i64, new_text: &str) -> SqlRes
 
 fn get_group(conn: &Connection, id: i64) -> SqlResult<ClipboardGroup> {
     conn.query_row(
-        "SELECT id, name, sort_index, created_at FROM clipboard_groups WHERE id=?1",
+        "SELECT g.id, g.name, g.sort_index, g.created_at, COUNT(i.id) AS item_count
+         FROM clipboard_groups g
+         LEFT JOIN clipboard_items i ON i.group_id = g.id
+         WHERE g.id=?1
+         GROUP BY g.id",
         params![id],
         |r| {
             Ok(ClipboardGroup {
@@ -832,6 +912,7 @@ fn get_group(conn: &Connection, id: i64) -> SqlResult<ClipboardGroup> {
                 name: r.get(1)?,
                 sort_index: r.get(2)?,
                 created_at: r.get(3)?,
+                item_count: r.get(4)?,
             })
         },
     )
@@ -839,9 +920,11 @@ fn get_group(conn: &Connection, id: i64) -> SqlResult<ClipboardGroup> {
 
 pub fn list_groups(conn: &Connection) -> SqlResult<Vec<ClipboardGroup>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, sort_index, created_at
-         FROM clipboard_groups
-         ORDER BY sort_index ASC, created_at ASC, id ASC",
+        "SELECT g.id, g.name, g.sort_index, g.created_at, COUNT(i.id) AS item_count
+         FROM clipboard_groups g
+         LEFT JOIN clipboard_items i ON i.group_id = g.id
+         GROUP BY g.id
+         ORDER BY g.sort_index ASC, g.created_at ASC, g.id ASC",
     )?;
     let groups = stmt
         .query_map([], |r| {
@@ -850,6 +933,7 @@ pub fn list_groups(conn: &Connection) -> SqlResult<Vec<ClipboardGroup>> {
                 name: r.get(1)?,
                 sort_index: r.get(2)?,
                 created_at: r.get(3)?,
+                item_count: r.get(4)?,
             })
         })?
         .collect::<SqlResult<Vec<_>>>()?;
@@ -981,7 +1065,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v, "3");
+        assert_eq!(v, "4");
 
         let group_tables: i64 = conn
             .query_row(
@@ -1042,7 +1126,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
 
         let has_rtf_column: i64 = conn
             .query_row(
@@ -1249,8 +1333,10 @@ mod tests {
         migrate(&conn).expect("version-2 schema without FK should repair");
 
         assert!(delete_group(&conn, 1).unwrap());
-        let item = get_item_by_hash(&conn, "legacy_group_hash").unwrap();
-        assert_eq!(item.group_id, None);
+        assert!(matches!(
+            get_item_by_hash(&conn, "legacy_group_hash", Some(1)),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
     }
 
     #[test]
@@ -1264,7 +1350,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 8);
+        assert_eq!(count, 10);
     }
 
     #[test]
@@ -1462,6 +1548,52 @@ mod tests {
     }
 
     #[test]
+    fn default_group_filter_returns_only_ungrouped_items() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let group = create_group(&conn, "Work").unwrap();
+        let grouped_id = insert_item(&conn, &sample_text_item("grouped-hash", "grouped")).unwrap();
+        move_item_to_group(&conn, grouped_id, Some(group.id)).unwrap();
+        insert_item(&conn, &sample_text_item("default-hash", "default")).unwrap();
+
+        let q = ClipboardListQuery {
+            filter: ClipboardFilter::All,
+            search: String::new(),
+            search_payload: None,
+            group_id: None,
+            pinned_only: false,
+            op_type: None,
+            op_from_ms: None,
+            op_to_ms: None,
+            op_app: None,
+            op_fav_only: false,
+            op_size_gt: None,
+            op_size_lt: None,
+            offset: 0,
+            limit: 10,
+        };
+        let result = list_items(&conn, &q).unwrap();
+
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].content_preview, "default");
+        assert_eq!(result.items[0].group_id, None);
+    }
+
+    #[test]
+    fn duplicate_hashes_are_allowed_across_groups() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let group = create_group(&conn, "Work").unwrap();
+        let grouped_id = insert_item(&conn, &sample_text_item("shared-hash", "grouped")).unwrap();
+        move_item_to_group(&conn, grouped_id, Some(group.id)).unwrap();
+
+        let default_id = insert_item(&conn, &sample_text_item("shared-hash", "default")).unwrap();
+
+        assert_eq!(get_item(&conn, grouped_id).unwrap().group_id, Some(group.id));
+        assert_eq!(get_item(&conn, default_id).unwrap().group_id, None);
+    }
+
+    #[test]
     fn toggle_pin_flips_flag() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
@@ -1538,8 +1670,10 @@ mod tests {
         assert_eq!(moved_again.group_id, Some(renamed.id));
 
         assert!(delete_group(&conn, renamed.id).unwrap());
-        let after_delete = get_item(&conn, item_id).unwrap();
-        assert_eq!(after_delete.group_id, None);
+        assert!(matches!(
+            get_item(&conn, item_id),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
 
         assert!(delete_group(&conn, work.id).unwrap());
         let remaining = list_groups(&conn).unwrap();

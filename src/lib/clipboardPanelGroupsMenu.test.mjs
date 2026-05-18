@@ -17,6 +17,7 @@ function createGroup(id, name) {
     name,
     sort_index: id,
     created_at: 0,
+    item_count: 0,
   };
 }
 

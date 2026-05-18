@@ -76,8 +76,14 @@ export function useClipboardStore() {
     selectionAnchorId.value = visibleIds.at(-1) ?? null;
   }
 
-  function selectGroup(groupId: number | null) {
+  async function selectGroup(groupId: number | null) {
     selectedGroupId.value = groupId;
+    try {
+      await clipboardApi.setActiveGroup(groupId);
+    } catch (e) {
+      console.error('[clipboard] setActiveGroup failed:', e);
+      error.value = `${t('clipboard.errors.saveFailed')} - ${e}`;
+    }
   }
 
   async function reload() {
@@ -124,7 +130,7 @@ export function useClipboardStore() {
     try {
       const next = await clipboardApi.listGroups();
       groups.value = next;
-      selectedGroupId.value = resolveActiveClipboardGroupId(next, selectedGroupId.value);
+      await selectGroup(resolveActiveClipboardGroupId(next, selectedGroupId.value));
     } catch (e) {
       console.error('[clipboard] reload groups failed:', e);
       error.value = `${t('clipboard.errors.loadFailed')} - ${e}`;
@@ -174,7 +180,7 @@ export function useClipboardStore() {
     try {
       const group = await clipboardApi.createGroup(name);
       await reloadGroups();
-      selectedGroupId.value = group.id;
+      await selectGroup(group.id);
       await reload();
     } catch (e) {
       console.error('[clipboard] createGroup failed:', e);
@@ -196,7 +202,7 @@ export function useClipboardStore() {
     try {
       await clipboardApi.deleteGroup(id);
       if (selectedGroupId.value === id) {
-        selectedGroupId.value = null;
+        await selectGroup(null);
       }
       await reloadGroups();
       await reload();
@@ -224,10 +230,10 @@ export function useClipboardStore() {
       'clipboard-groups-changed',
       (event) => {
         groups.value = event.payload;
-        selectedGroupId.value = resolveActiveClipboardGroupId(
+        void selectGroup(resolveActiveClipboardGroupId(
           event.payload,
           selectedGroupId.value,
-        );
+        ));
         void reload();
       },
     );

@@ -4,6 +4,7 @@ import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, X as XIcon } from 'lucide-vue-next';
 import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshApiVersion, type ApplianceSshResult, type ApplianceSshTarget, type ApplianceSshWhitelistScope } from '../lib/tauri';
+import { getApplianceSshEnableState } from '../lib/applianceSshPresentation';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
 import Empty from '../components/Empty.vue';
 import { pushToast } from '../composables/useToast';
@@ -328,18 +329,20 @@ const successCount = computed(() => results.value.filter(r => r.success).length)
 const failureCount = computed(() => results.value.filter(r => !r.success).length);
 
 const formatEnableState = (value?: number) => {
-  if (value === 1) {
+  const state = getApplianceSshEnableState(value);
+  if (state === 'enabled') {
     return t('tools.applianceSsh.stateEnabled');
   }
-  if (value === 2) {
+  if (state === 'disabled') {
     return t('tools.applianceSsh.stateDisabled');
   }
   return t('tools.applianceSsh.stateUnknown');
 };
 
 const enableStateClass = (value?: number) => {
-  if (value === 1) return 'bg-emerald-50 text-emerald-700 border-emerald-200';
-  if (value === 2) return 'bg-amber-50 text-amber-700 border-amber-200';
+  const state = getApplianceSshEnableState(value);
+  if (state === 'enabled') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+  if (state === 'disabled') return 'bg-amber-50 text-amber-700 border-amber-200';
   return 'bg-slate-100 text-slate-600 border-slate-200';
 };
 </script>

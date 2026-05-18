@@ -56,8 +56,8 @@ test('buildClipboardMenuItems adds pin and move-to-group actions when groups are
       group_id: 3,
     }),
     groups: [
-      { id: 3, name: 'Work', sort_index: 0, created_at: 0 },
-      { id: 4, name: 'Personal', sort_index: 1, created_at: 1 },
+      { id: 3, name: 'Work', sort_index: 0, created_at: 0, item_count: 1 },
+      { id: 4, name: 'Personal', sort_index: 1, created_at: 1, item_count: 0 },
     ],
   });
 
