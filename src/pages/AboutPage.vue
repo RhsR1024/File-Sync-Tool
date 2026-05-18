@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { ArrowLeft, Globe, Minus, Plus, RefreshCw, ShieldCheck } from 'lucide-vue-next';
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronUp,
+  Globe,
+  Minus,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  ShieldCheck,
+} from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 
@@ -18,6 +28,7 @@ const { state, dialogOpen, dialogState, dialogError } = useUpdater();
 const { pushToast } = useToast();
 
 const expandedVersion = ref<string | null>(null);
+const showLatestChangelog = ref(false);
 const isChecking = ref(false);
 const isTesting = ref(false);
 
@@ -40,6 +51,14 @@ const latestEntry = computed(() => {
   }
   return manifest.versions.find((entry) => entry.version === manifest.latest) ?? manifest.versions[0] ?? null;
 });
+const latestChangelogTotal = computed(() => latestEntry.value?.changelog.length ?? 0);
+const latestPreviewChangelog = computed(() => latestEntry.value?.changelog.slice(0, 3) ?? []);
+const latestHiddenChangelogCount = computed(() =>
+  Math.max(0, latestChangelogTotal.value - latestPreviewChangelog.value.length),
+);
+const visibleLatestChangelog = computed(() =>
+  showLatestChangelog.value ? (latestEntry.value?.changelog ?? []) : latestPreviewChangelog.value,
+);
 
 const currentEntry = computed(() => {
   const currentVersion = state.value?.current ?? '';
@@ -56,6 +75,13 @@ watch(
     }
   },
   { immediate: true },
+);
+
+watch(
+  () => latestEntry.value?.version,
+  () => {
+    showLatestChangelog.value = false;
+  },
 );
 
 async function checkNow() {
@@ -112,6 +138,10 @@ function toggleExpanded(version: string) {
   expandedVersion.value = expandedVersion.value === version ? null : version;
 }
 
+function toggleLatestChangelog() {
+  showLatestChangelog.value = !showLatestChangelog.value;
+}
+
 // Vue transition hooks for the changelog accordion. We measure scrollHeight
 // at runtime so each entry expands to its own intrinsic height. The
 // `prefers-reduced-motion` rule in <style> drops the height tween and falls
@@ -157,39 +187,23 @@ function onExpandLeave(el: Element) {
       </div>
 
       <section class="overflow-hidden rounded-[30px] border border-slate-200 bg-white shadow-[0_24px_80px_rgba(15,23,42,0.12)]">
-        <div class="grid gap-0 lg:grid-cols-[1.2fr_0.8fr]">
-          <div class="space-y-5 border-b border-slate-200 bg-white px-6 py-7 lg:border-b-0 lg:border-r">
+        <div class="space-y-6 px-6 py-7">
+          <div class="flex flex-wrap items-start justify-between gap-5">
             <div class="flex items-start gap-4">
               <div class="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-lg shadow-sky-200">
                 <ShieldCheck class="h-7 w-7" />
               </div>
-              <div class="space-y-2">
+              <div class="space-y-1.5">
                 <p class="text-xs font-semibold uppercase tracking-[0.24em] text-sky-500">
                   File Sync Tool
                 </p>
                 <h1 class="text-3xl font-semibold tracking-tight text-slate-950">
                   {{ t('about.title') }}
                 </h1>
-                <p class="text-sm leading-6 text-slate-500">
-                  {{ t('about.currentVersion', { version: state?.current ?? '1.1.1' }) }}
-                </p>
-                <p class="text-sm leading-6 text-slate-500">
-                  {{ t('about.releasedOn', { date: formatReleaseDate(currentReleaseDate) }) }}
-                </p>
               </div>
             </div>
 
-            <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
-              <div class="flex items-center gap-2 text-sm font-medium text-slate-700">
-                <Globe class="h-4 w-4 text-slate-400" aria-hidden="true" />
-                <span>{{ t('about.serverLabel') }}</span>
-              </div>
-              <div class="mt-2 break-all text-sm text-slate-500">
-                {{ state?.server_url || t('about.serverEmpty') }}
-              </div>
-            </div>
-
-            <div class="flex flex-wrap gap-3">
+            <div class="flex flex-wrap items-center gap-3">
               <button
                 type="button"
                 class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
@@ -211,32 +225,134 @@ function onExpandLeave(el: Element) {
             </div>
           </div>
 
-          <div class="bg-slate-950 px-6 py-7 text-white">
-            <p class="text-xs font-semibold uppercase tracking-[0.24em] text-sky-300/80">
-              {{ t('about.history') }}
-            </p>
-            <div v-if="latestEntry && state?.has_update" class="mt-4 rounded-3xl border border-sky-400/20 bg-sky-500/10 p-5">
-              <p class="text-lg font-semibold text-white">
-                {{ t('about.bannerTitle', { version: latestEntry.version }) }}
-              </p>
-              <p class="mt-1 text-sm text-sky-100/80">
-                {{ t('about.bannerReleasedOn', { date: formatReleaseDate(latestEntry.released_at) }) }}
-              </p>
-              <ul class="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-200">
-                <li v-for="(line, index) in latestEntry.changelog" :key="index">{{ line }}</li>
-              </ul>
-              <button
-                type="button"
-                class="mt-4 inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
-                @click="openUpgradeDialog"
-              >
-                {{ t('about.upgradeCta') }}
-              </button>
-            </div>
-            <div v-else class="mt-4 rounded-3xl border border-white/10 bg-white/5 p-5 text-sm leading-6 text-slate-300">
-              {{ state?.server_url ? t('updater.toast.upToDate') : t('about.serverNotConfigured') }}
+          <div class="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3">
+            <div class="flex flex-wrap items-center gap-3">
+              <div class="flex items-center gap-2 text-sm font-medium text-slate-700">
+                <Globe class="h-4 w-4 text-slate-400" aria-hidden="true" />
+                <span>{{ t('about.serverLabel') }}</span>
+              </div>
+              <div class="min-w-0 flex-1 break-all text-sm text-slate-500">
+                {{ state?.server_url || t('about.serverEmpty') }}
+              </div>
             </div>
           </div>
+
+          <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div class="rounded-2xl border border-slate-200 bg-white px-5 py-4">
+              <div class="flex items-center justify-between gap-3">
+                <p class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  {{ t('about.currentVersionLabel') }}
+                </p>
+                <span class="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                  {{ t('about.currentTag') }}
+                </span>
+              </div>
+              <p class="mt-3 text-3xl font-semibold tracking-tight text-slate-950">
+                {{ state?.current ?? '1.1.1' }}
+              </p>
+              <p class="mt-1 text-sm text-slate-500">
+                {{ formatReleaseDate(currentReleaseDate) || '—' }}
+              </p>
+            </div>
+
+            <div
+              v-if="latestEntry && state?.has_update"
+              class="relative overflow-hidden rounded-2xl bg-slate-950 px-5 py-4 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+            >
+              <div class="flex items-center justify-between gap-3">
+                <p class="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.18em] text-sky-300/85">
+                  <Sparkles class="h-3.5 w-3.5" aria-hidden="true" />
+                  {{ t('about.newVersionLabel') }}
+                </p>
+                <span class="rounded-full border border-sky-300/20 bg-sky-300/10 px-2.5 py-0.5 text-[11px] font-semibold text-sky-100">
+                  {{ latestChangelogTotal }} {{ t('about.changelogCount') }}
+                </span>
+              </div>
+              <p class="mt-3 text-3xl font-semibold tracking-tight text-white">
+                {{ latestEntry.version }}
+              </p>
+              <div class="mt-1 flex flex-wrap items-center justify-between gap-3">
+                <p class="text-sm text-sky-100/75">
+                  {{ formatReleaseDate(latestEntry.released_at) }}
+                </p>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-2 rounded-full bg-white px-4 py-1.5 text-sm font-semibold text-slate-900 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
+                  @click="openUpgradeDialog"
+                >
+                  {{ t('about.upgradeCta') }}
+                </button>
+              </div>
+            </div>
+
+            <div
+              v-else
+              class="flex items-center rounded-2xl border border-slate-200 bg-slate-50/80 px-5 py-4 text-sm text-slate-500"
+            >
+              {{
+                !state?.server_url
+                  ? t('about.serverNotConfigured')
+                  : t('about.noUpdateAvailable')
+              }}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section
+        v-if="latestEntry && state?.has_update"
+        class="rounded-[30px] border border-slate-200 bg-white px-6 py-6 shadow-[0_18px_60px_rgba(15,23,42,0.08)]"
+      >
+        <div class="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
+              {{ t('about.changelogSummary') }}
+            </p>
+            <h2 class="mt-2 text-2xl font-semibold tracking-tight text-slate-950">
+              {{ t('about.changelogFor', { version: latestEntry.version }) }}
+            </h2>
+          </div>
+          <p class="text-sm text-slate-500">
+            {{ latestChangelogTotal }} {{ t('about.changelogCount') }} · {{ formatReleaseDate(latestEntry.released_at) }}
+          </p>
+        </div>
+
+        <div id="changelog-latest" class="relative mt-5">
+          <ul
+            v-if="visibleLatestChangelog.length > 0"
+            class="list-disc space-y-2.5 pl-6 text-[15px] leading-7 text-slate-700 marker:text-sky-500"
+          >
+            <li v-for="(line, index) in visibleLatestChangelog" :key="index">{{ line }}</li>
+          </ul>
+          <div v-else class="text-sm leading-6 text-slate-400">
+            {{ t('about.changelogEmpty') }}
+          </div>
+
+          <div
+            v-if="!showLatestChangelog && latestHiddenChangelogCount > 0"
+            class="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-white via-white/85 to-transparent"
+            aria-hidden="true"
+          />
+        </div>
+
+        <div v-if="latestHiddenChangelogCount > 0" class="mt-4 flex justify-center">
+          <button
+            type="button"
+            class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+            :aria-expanded="showLatestChangelog"
+            aria-controls="changelog-latest"
+            @click="toggleLatestChangelog"
+          >
+            <span>
+              {{
+                showLatestChangelog
+                  ? t('about.hideChangelog')
+                  : t('about.showAllChangelog', { count: latestHiddenChangelogCount })
+              }}
+            </span>
+            <ChevronUp v-if="showLatestChangelog" class="h-4 w-4" aria-hidden="true" />
+            <ChevronDown v-else class="h-4 w-4" aria-hidden="true" />
+          </button>
         </div>
       </section>
 
