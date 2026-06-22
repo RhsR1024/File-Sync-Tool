@@ -2210,6 +2210,12 @@ async fn temporary_copy_file<R: tauri::Runtime>(
         "info",
     );
 
+    // Transition the run from Pending to Running so the UI shows "copying"
+    // (with progress / stability-wait) instead of staying stuck at "queued".
+    if let Some(handle) = task_handle.as_ref() {
+        let _ = task_manager.mark_copy_started(&handle.task_group_id, &handle.run_id);
+    }
+
     // Ensure target directory exists
     if let Err(e) = fs::create_dir_all(&target_root_path).await {
         let message = format!(
