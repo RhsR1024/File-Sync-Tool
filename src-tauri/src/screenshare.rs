@@ -1727,12 +1727,21 @@ fn capture_loop(
                 ) {
                     break;
                 }
+                // Prefer the backend that was actually working before this failure. Once WGC is
+                // active we pin WGC on recreate so a transient ACCESS_LOST does not re-probe DXGI
+                // every time — re-probing is slow and re-triggers the DXGI conflict with apps like
+                // DingTalk that keep the desktop-duplication session busy. While DXGI is still the
+                // active backend we keep the configured mode so Auto can fall back to WGC as usual.
+                let recreate_mode = match current_backend {
+                    CaptureBackendKind::Wgc => ScreenShareBackendMode::Wgc,
+                    CaptureBackendKind::Dxgi => backend_mode,
+                };
                 // Try to recreate capture source. On Windows this may fall back from DXGI to WGC.
                 drop(source);
                 match create_capture_source(
                     monitor_index,
                     show_cursor,
-                    backend_mode,
+                    recreate_mode,
                     &cancel,
                     &runtime_handle,
                     session_id,
@@ -2938,8 +2947,13 @@ async fn handler_stream(
                 break;
             }
 
-            match rx.recv().await {
-                Ok(frame) => {
+            // Poll with a timeout instead of an unbounded `recv().await` so that a stop
+            // (which sets `cancel` but produces no further frames) wakes this stream within
+            // ~250ms. Otherwise the long-lived MJPEG response would block axum's graceful
+            // shutdown indefinitely, keeping the listener — and the bound port — alive and
+            // causing the next start to fail with "address already in use" (os error 10048).
+            match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
+                Ok(Ok(frame)) => {
                     let frame_len = frame.len();
                     let mut buf = BytesMut::with_capacity(frame_len + 128);
                     buf.extend_from_slice(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ");
@@ -2950,12 +2964,17 @@ async fn handler_stream(
                     bytes_sent.fetch_add(buf.len() as u64, Ordering::Relaxed);
                     yield Ok::<_, Infallible>(buf.freeze());
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
                     // Slow viewer: skip to latest frame
                     continue;
                 }
-                Err(broadcast::error::RecvError::Closed) => {
+                Ok(Err(broadcast::error::RecvError::Closed)) => {
                     break;
+                }
+                Err(_) => {
+                    // No frame within the poll window; loop back to re-check `cancel` so
+                    // graceful shutdown can complete promptly after a stop.
+                    continue;
                 }
             }
         }
