@@ -561,7 +561,7 @@ watch(() => props.isOpen, (open) => {
       <!-- Modal Container -->
       <div
         ref="modalRef"
-        class="relative bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto focus:outline-none"
+        class="relative bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden focus:outline-none"
         role="dialog"
         aria-modal="true"
         aria-labelledby="manual-copy-title"
@@ -569,7 +569,7 @@ watch(() => props.isOpen, (open) => {
         tabindex="-1"
       >
         <!-- Modal Header -->
-        <div class="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
+        <div class="shrink-0 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
           <div>
             <h3 id="manual-copy-title" class="text-lg font-bold text-slate-800">{{ t('manualCopy.title') }}</h3>
             <p id="manual-copy-desc" class="text-sm text-slate-500 mt-1">{{ t('manualCopy.subtitle') }}</p>
@@ -585,7 +585,7 @@ watch(() => props.isOpen, (open) => {
         </div>
 
         <!-- Modal Content -->
-        <div class="p-6 space-y-6">
+        <div class="flex-1 overflow-y-auto p-6 space-y-6">
           <!-- Loading skeleton during config load -->
           <div v-if="isLoadingConfig && !config" class="space-y-3" role="status" aria-live="polite">
             <LoadingSkeleton variant="text-line" :lines="2" />
@@ -845,7 +845,7 @@ watch(() => props.isOpen, (open) => {
         </div>
 
         <!-- Modal Footer -->
-        <div class="sticky bottom-0 z-10 border-t border-slate-200 bg-white px-6 py-4 flex items-center justify-end gap-3">
+        <div class="shrink-0 border-t border-slate-200 bg-white px-6 py-4 flex items-center justify-end gap-3">
           <button
             v-if="!isBatchMode"
             @click="submitCopy"

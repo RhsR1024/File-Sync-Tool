@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { AlertCircle, CheckCircle2, Eye, EyeOff, Globe, KeyRound, Loader, Server, X as XIcon } from 'lucide-vue-next';
+import { AlertCircle, Check, CheckCircle2, Eye, EyeOff, Globe, KeyRound, Loader, Server, Trash2 } from 'lucide-vue-next';
 import { changeFrameworkPassword, getConfig, saveConfig, type AppConfig, type FrameworkPasswordResult } from '../lib/tauri';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
 import Empty from '../components/Empty.vue';
@@ -60,12 +60,15 @@ const removeManualIpTag = (ip: string) => {
   if (idx > -1) manualIpTags.value.splice(idx, 1);
 };
 
-const restoreOrRemoveTag = (ip: string) => {
-  removeManualIpTag(ip);
-  if (!isValidIp(ip)) {
-    manualIpInput.value = ip;
-    nextTick(() => fpIpInputRef.value?.focus());
+// Clicking a tag's text moves it back into the input so a single character can
+// be edited (e.g. 192.115.2.30 → 192.115.2.130) instead of deleting it whole.
+const editManualIpTag = (ip: string) => {
+  if (manualIpInput.value.trim()) {
+    addManualIpTag(manualIpInput.value);
   }
+  removeManualIpTag(ip);
+  manualIpInput.value = ip;
+  nextTick(() => fpIpInputRef.value?.focus());
 };
 
 const handleIpKeydown = (e: KeyboardEvent) => {
@@ -77,7 +80,11 @@ const handleIpKeydown = (e: KeyboardEvent) => {
       manualIpInput.value = '';
     }
   } else if (e.key === 'Backspace' && !raw && manualIpTags.value.length > 0) {
-    manualIpTags.value.pop();
+    // Move the last tag back into the input for editing rather than deleting it.
+    const last = manualIpTags.value.pop();
+    if (last !== undefined) {
+      manualIpInput.value = last;
+    }
   }
 };
 
@@ -375,13 +382,19 @@ const frameworkResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-
                   : 'bg-red-100 text-red-700 border border-red-200'"
                 :title="isValidIp(ip) ? undefined : t('tools.frameworkPassword.invalidIp', { ip })"
               >
-                {{ ip }}
+                <button
+                  type="button"
+                  :disabled="isLoading"
+                  class="disabled:cursor-not-allowed leading-none font-mono"
+                  :title="t('tools.frameworkPassword.editTag')"
+                  @click.stop="editManualIpTag(ip)"
+                >{{ ip }}</button>
                 <button
                   type="button"
                   :disabled="isLoading"
                   class="disabled:cursor-not-allowed leading-none"
                   :class="isValidIp(ip) ? 'text-blue-500 hover:text-blue-700' : 'text-red-400 hover:text-red-600'"
-                  @click.stop="restoreOrRemoveTag(ip)"
+                  @click.stop="removeManualIpTag(ip)"
                 >×</button>
               </span>
               <input
@@ -426,9 +439,10 @@ const frameworkResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-
                   <button
                     type="button"
                     :disabled="isLoading"
-                    class="px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed"
+                    class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed"
                     @click="applyRecentIp(ip)"
                   >
+                    <Check v-if="isRecentIpSelected(ip)" class="h-3 w-3" />
                     <span class="font-mono">{{ ip }}</span>
                   </button>
                   <button
@@ -438,7 +452,7 @@ const frameworkResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-
                     :title="t('tools.frameworkPassword.removeRecentIp')"
                     @click.stop="removeRecentIp(ip)"
                   >
-                    <XIcon class="h-3.5 w-3.5" />
+                    <Trash2 class="h-3.5 w-3.5" />
                   </button>
                 </span>
               </div>

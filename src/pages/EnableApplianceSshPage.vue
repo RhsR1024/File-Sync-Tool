@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, X as XIcon } from 'lucide-vue-next';
+import { AlertCircle, Check, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, Trash2, X as XIcon } from 'lucide-vue-next';
 import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshApiVersion, type ApplianceSshResult, type ApplianceSshTarget, type ApplianceSshWhitelistScope } from '../lib/tauri';
 import { getApplianceSshEnableState } from '../lib/applianceSshPresentation';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
@@ -41,10 +41,10 @@ interface JumpHostPair {
 }
 const jumpHostPairs = ref<JumpHostPair[]>([]);
 
-// Whitelist source: 'local' auto-detects the local IP; 'cidr' uses a
-// user-provided network range (replaces local IP, not additive).
-const whitelistSourceMode = ref<'local' | 'cidr'>('local');
-const whitelistCidr = ref<string>('');
+// Whitelist source: 'local' auto-detects the local IP; 'all' whitelists every
+// IP (0.0.0.0/0) with no address input required.
+const whitelistSourceMode = ref<'local' | 'all'>('local');
+const WHITELIST_ALL_CIDR = '0.0.0.0/0';
 
 // When at least one jump-host pair is configured, allow using separate SSH
 // credentials for the jump host (common credentials by default).
@@ -54,6 +54,11 @@ const jumpHostPassword = ref<string>('');
 const showJumpHostPassword = ref(false);
 const RECENT_IPS_KEY = 'applianceSsh.recentIps';
 const RECENT_IPS_LIMIT = 10;
+// Recent jump-host → target pairs, serialized as "jump=>target".
+const recentJumpHostPairs = ref<string[]>([]);
+const RECENT_JUMP_HOST_KEY = 'applianceSsh.recentJumpHostPairs';
+const RECENT_JUMP_HOST_LIMIT = 5;
+const JUMP_HOST_PAIR_SEP = '=>';
 
 const serverOptions = computed(() => {
   if (!config.value) return [];
@@ -74,15 +79,6 @@ const isValidIp = (ip: string): boolean => {
   return parts.every(p => /^\d+$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
 };
 
-const isValidCidr = (cidr: string): boolean => {
-  const [addr, prefix] = cidr.split('/');
-  if (!addr || prefix === undefined) return false;
-  if (!isValidIp(addr)) return false;
-  if (!/^\d+$/.test(prefix)) return false;
-  const p = Number(prefix);
-  return p >= 0 && p <= 32;
-};
-
 const addManualIpTag = (raw: string) => {
   const parts = raw.split(SEPARATORS).map(s => s.trim()).filter(Boolean);
   for (const ip of parts) {
@@ -97,12 +93,15 @@ const removeManualIpTag = (ip: string) => {
   if (idx > -1) manualIpTags.value.splice(idx, 1);
 };
 
-const restoreOrRemoveTag = (ip: string) => {
-  removeManualIpTag(ip);
-  if (!isValidIp(ip)) {
-    manualIpInput.value = ip;
-    nextTick(() => ipInputRef.value?.focus());
+// Clicking a tag's text moves it back into the input so a single character can
+// be edited (e.g. 192.115.2.30 → 192.115.2.130) instead of deleting it whole.
+const editManualIpTag = (ip: string) => {
+  if (manualIpInput.value.trim()) {
+    addManualIpTag(manualIpInput.value);
   }
+  removeManualIpTag(ip);
+  manualIpInput.value = ip;
+  nextTick(() => ipInputRef.value?.focus());
 };
 
 const handleIpKeydown = (e: KeyboardEvent) => {
@@ -115,7 +114,11 @@ const handleIpKeydown = (e: KeyboardEvent) => {
       manualIpInput.value = '';
     }
   } else if (e.key === 'Backspace' && !raw && manualIpTags.value.length > 0) {
-    manualIpTags.value.pop();
+    // Move the last tag back into the input for editing rather than deleting it.
+    const last = manualIpTags.value.pop();
+    if (last !== undefined) {
+      manualIpInput.value = last;
+    }
   }
 };
 
@@ -180,7 +183,6 @@ const needsSshCredentials = computed(() => addWhitelistRule.value);
 const hasWhitelistConfigError = computed(() => {
   if (!needsSshCredentials.value) return false;
   if (!sshUsername.value.trim() || !sshPassword.value) return true;
-  if (whitelistSourceMode.value === 'cidr' && !isValidCidr(whitelistCidr.value.trim())) return true;
   if (hasAnyJumpHost.value && useSeparateJumpHostCreds.value) {
     if (!jumpHostUsername.value.trim() || !jumpHostPassword.value) return true;
   }
@@ -202,6 +204,32 @@ const addJumpHostPair = () => {
 };
 const removeJumpHostPair = (index: number) => {
   jumpHostPairs.value.splice(index, 1);
+};
+
+const recentJumpHostPairsParsed = computed(() =>
+  recentJumpHostPairs.value
+    .map(raw => {
+      const [jump, target] = raw.split(JUMP_HOST_PAIR_SEP);
+      return { jump: (jump ?? '').trim(), target: (target ?? '').trim(), key: raw };
+    })
+    .filter(p => p.jump && p.target)
+);
+
+const isRecentJumpHostSelected = (pair: { jump: string; target: string }) =>
+  validJumpHostPairs.value.some(p => p.jump === pair.jump && p.target === pair.target);
+
+const applyRecentJumpHostPair = (pair: { jump: string; target: string }) => {
+  if (isLoading.value || isRecentJumpHostSelected(pair)) {
+    return;
+  }
+  // Reuse an empty row if the user just added one, otherwise append.
+  const emptyRow = jumpHostPairs.value.find(p => !p.jump.trim() && !p.target.trim());
+  if (emptyRow) {
+    emptyRow.jump = pair.jump;
+    emptyRow.target = pair.target;
+  } else {
+    jumpHostPairs.value.push({ jump: pair.jump, target: pair.target });
+  }
 };
 
 const storeRecentIps = async (items: readonly string[]) => {
@@ -232,6 +260,35 @@ const clearRecentIps = async () => {
   await storeRecentIps([]);
 };
 
+const storeRecentJumpHostPairs = async (items: readonly string[]) => {
+  const normalized = normalizeRecentItems(items, RECENT_JUMP_HOST_LIMIT);
+  recentJumpHostPairs.value = normalized;
+  try {
+    await invoke('save_kv', {
+      key: RECENT_JUMP_HOST_KEY,
+      value: normalized,
+    });
+  } catch {
+    // Recent history is best-effort only.
+  }
+};
+
+const rememberRecentJumpHostPairs = async (pairs: readonly { jump: string; target: string }[]) => {
+  const items = pairs.map(p => `${p.jump}${JUMP_HOST_PAIR_SEP}${p.target}`);
+  if (items.length === 0) {
+    return;
+  }
+  await storeRecentJumpHostPairs(mergeRecentItems(recentJumpHostPairs.value, items, RECENT_JUMP_HOST_LIMIT));
+};
+
+const removeRecentJumpHostPair = async (key: string) => {
+  await storeRecentJumpHostPairs(removeRecentItems(recentJumpHostPairs.value, key, RECENT_JUMP_HOST_LIMIT));
+};
+
+const clearRecentJumpHostPairs = async () => {
+  await storeRecentJumpHostPairs([]);
+};
+
 onMounted(async () => {
   try {
     config.value = await getConfig();
@@ -243,6 +300,13 @@ onMounted(async () => {
   try {
     const saved = await invoke<string[] | null>('load_kv', { key: RECENT_IPS_KEY });
     recentIps.value = normalizeRecentItems(saved, RECENT_IPS_LIMIT);
+  } catch {
+    // Ignore malformed recent history from older builds.
+  }
+
+  try {
+    const savedPairs = await invoke<string[] | null>('load_kv', { key: RECENT_JUMP_HOST_KEY });
+    recentJumpHostPairs.value = normalizeRecentItems(savedPairs, RECENT_JUMP_HOST_LIMIT);
   } catch {
     // Ignore malformed recent history from older builds.
   }
@@ -281,6 +345,7 @@ const handleExecute = async () => {
   try {
     currentProgress.value = { current: 0, total: targets.length };
     await rememberRecentIps(recentValidIps);
+    await rememberRecentJumpHostPairs(validJumpHostPairs.value);
 
     const response = await enableApplianceSsh({
       targets,
@@ -289,8 +354,8 @@ const handleExecute = async () => {
       sshUsername: sshUsername.value.trim(),
       sshPassword: sshPassword.value,
       addWhitelistRule: addWhitelistRule.value,
-      whitelistCidr: whitelistSourceMode.value === 'cidr'
-        ? whitelistCidr.value.trim()
+      whitelistCidr: whitelistSourceMode.value === 'all'
+        ? WHITELIST_ALL_CIDR
         : undefined,
       jumpHostUseSeparateCreds: hasAnyJumpHost.value && useSeparateJumpHostCreds.value,
       jumpHostUsername: useSeparateJumpHostCreds.value ? jumpHostUsername.value.trim() : undefined,
@@ -436,13 +501,19 @@ const enableStateClass = (value?: number) => {
                     : 'bg-red-100 text-red-700 border border-red-200'"
                   :title="isValidIp(ip) ? undefined : t('tools.applianceSsh.invalidIp', { ip })"
                 >
-                  {{ ip }}
+                  <button
+                    type="button"
+                    :disabled="isLoading"
+                    class="disabled:cursor-not-allowed leading-none font-mono"
+                    :title="t('tools.applianceSsh.editTag')"
+                    @click.stop="editManualIpTag(ip)"
+                  >{{ ip }}</button>
                   <button
                     type="button"
                     :disabled="isLoading"
                     class="disabled:cursor-not-allowed leading-none"
                     :class="isValidIp(ip) ? 'text-blue-500 hover:text-blue-700' : 'text-red-400 hover:text-red-600'"
-                    @click.stop="restoreOrRemoveTag(ip)"
+                    @click.stop="removeManualIpTag(ip)"
                   >×</button>
                 </span>
                 <input
@@ -502,9 +573,10 @@ const enableStateClass = (value?: number) => {
                     <button
                       type="button"
                       :disabled="isLoading"
-                      class="px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed"
                       @click="applyRecentIp(ip)"
                     >
+                      <Check v-if="isRecentIpSelected(ip)" class="h-3 w-3" />
                       <span class="font-mono">{{ ip }}</span>
                     </button>
                     <button
@@ -514,7 +586,7 @@ const enableStateClass = (value?: number) => {
                       :title="t('tools.applianceSsh.removeRecentIp')"
                       @click.stop="removeRecentIp(ip)"
                     >
-                      <XIcon class="h-3.5 w-3.5" />
+                      <Trash2 class="h-3.5 w-3.5" />
                     </button>
                   </span>
                 </div>
@@ -577,6 +649,52 @@ const enableStateClass = (value?: number) => {
                 </button>
               </div>
               <p class="text-xs text-slate-400 mt-2">{{ t('tools.applianceSsh.jumpHostRowHint') }}</p>
+            </div>
+
+            <!-- Recent jump-host → target pairs (max 5) -->
+            <div v-if="recentJumpHostPairsParsed.length > 0" class="px-5 pb-4 pt-0 space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs font-medium text-slate-500">{{ t('tools.applianceSsh.jumpHostRecent') }}</span>
+                <button
+                  type="button"
+                  :disabled="isLoading"
+                  class="text-xs font-medium text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  @click="clearRecentJumpHostPairs"
+                >
+                  {{ t('tools.applianceSsh.clearRecentJumpHost') }}
+                </button>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span
+                  v-for="pair in recentJumpHostPairsParsed"
+                  :key="`appliance-ssh-jh-history-${pair.key}`"
+                  class="inline-flex items-stretch overflow-hidden rounded-full border transition-colors"
+                  :class="isRecentJumpHostSelected(pair)
+                    ? 'border-blue-600 bg-blue-600 text-white'
+                    : 'border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50'"
+                >
+                  <button
+                    type="button"
+                    :disabled="isLoading"
+                    class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium font-mono disabled:cursor-not-allowed"
+                    @click="applyRecentJumpHostPair(pair)"
+                  >
+                    <Check v-if="isRecentJumpHostSelected(pair)" class="h-3 w-3" />
+                    <span>{{ pair.jump }}</span>
+                    <span class="opacity-60">→</span>
+                    <span>{{ pair.target }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="isLoading"
+                    class="inline-flex items-center border-l border-current/10 px-2 text-current/70 transition hover:text-current disabled:cursor-not-allowed"
+                    :title="t('tools.applianceSsh.removeRecentJumpHost')"
+                    @click.stop="removeRecentJumpHostPair(pair.key)"
+                  >
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </button>
+                </span>
+              </div>
             </div>
           </div>
 
@@ -672,7 +790,7 @@ const enableStateClass = (value?: number) => {
                   <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.whitelistScopeHint') }}</p>
                 </div>
 
-                <!-- Whitelist source (local IP auto / custom CIDR) -->
+                <!-- Whitelist source (local IP auto / allow all) -->
                 <div class="mt-4 pt-4 border-t border-slate-100">
                   <div class="text-xs font-medium text-slate-600 mb-2">{{ t('tools.applianceSsh.whitelistSourceLabel') }}</div>
                   <div class="flex flex-wrap items-center gap-x-5 gap-y-2">
@@ -690,35 +808,14 @@ const enableStateClass = (value?: number) => {
                       <input
                         v-model="whitelistSourceMode"
                         type="radio"
-                        value="cidr"
+                        value="all"
                         :disabled="isLoading"
                         class="text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                       />
-                      <span>{{ t('tools.applianceSsh.whitelistSourceCidr') }}</span>
+                      <span>{{ t('tools.applianceSsh.whitelistSourceAll') }}</span>
                     </label>
                   </div>
-                  <Transition
-                    enter-active-class="transition-all duration-200 ease-out"
-                    enter-from-class="opacity-0 -translate-y-1 max-h-0"
-                    enter-to-class="opacity-100 translate-y-0 max-h-32"
-                    leave-active-class="transition-all duration-150 ease-in"
-                    leave-from-class="opacity-100 translate-y-0 max-h-32"
-                    leave-to-class="opacity-0 -translate-y-1 max-h-0"
-                  >
-                    <div v-if="whitelistSourceMode === 'cidr'" class="overflow-hidden">
-                      <div class="mt-2">
-                        <input
-                          v-model="whitelistCidr"
-                          type="text"
-                          :placeholder="t('tools.applianceSsh.whitelistCidrPlaceholder')"
-                          :disabled="isLoading"
-                          class="w-full sm:w-64 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
-                          :class="whitelistCidr.trim() && !isValidCidr(whitelistCidr.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
-                        />
-                        <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.whitelistCidrHint') }}</p>
-                      </div>
-                    </div>
-                  </Transition>
+                  <p v-if="whitelistSourceMode === 'all'" class="text-xs text-amber-600 mt-1.5">{{ t('tools.applianceSsh.whitelistSourceAllHint') }}</p>
                 </div>
 
                 <!-- Jump-host credentials (only when any jump-host pair is configured) -->
@@ -920,7 +1017,64 @@ const enableStateClass = (value?: number) => {
                     <div class="space-y-2">
                       <p class="leading-relaxed">{{ result.message }}</p>
 
-                      <div class="flex flex-wrap gap-1.5">
+                      <!-- For jump-host runs the SSH enable state/port belong to the jump
+                           host (where the management API lives), while the whitelist is
+                           applied on the target via SSH. Group them so the two machines'
+                           statuses aren't mistaken for one. -->
+                      <template v-if="result.jumpHost">
+                        <div class="space-y-2">
+                          <div>
+                            <div class="text-[11px] font-medium text-slate-500 mb-1">{{ t('tools.applianceSsh.jumpHostGroupLabel', { ip: result.jumpHost }) }}</div>
+                            <div class="flex flex-wrap gap-1.5">
+                              <span
+                                v-if="result.previousEnable !== undefined"
+                                class="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium"
+                                :class="enableStateClass(result.previousEnable)"
+                              >
+                                {{ t('tools.applianceSsh.beforeState') }}: {{ formatEnableState(result.previousEnable) }}
+                              </span>
+                              <span
+                                v-if="result.currentEnable !== undefined"
+                                class="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium"
+                                :class="enableStateClass(result.currentEnable)"
+                              >
+                                {{ t('tools.applianceSsh.afterState') }}: {{ formatEnableState(result.currentEnable) }}
+                              </span>
+                              <span
+                                v-if="result.port !== undefined"
+                                class="inline-flex items-center rounded-md bg-slate-50 border border-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600"
+                              >
+                                {{ t('tools.applianceSsh.portLabel') }}: {{ result.port }}
+                              </span>
+                            </div>
+                          </div>
+                          <div>
+                            <div class="text-[11px] font-medium text-slate-500 mb-1">{{ t('tools.applianceSsh.targetGroupLabel', { ip: result.ip }) }}</div>
+                            <div class="flex flex-wrap gap-1.5">
+                              <span
+                                v-if="result.whitelistSourceIp"
+                                class="inline-flex items-center rounded-md bg-blue-50 border border-blue-200 px-2 py-0.5 text-xs font-medium text-blue-700"
+                              >
+                                {{ t('tools.applianceSsh.whitelistSourceIp') }}: {{ result.whitelistSourceIp }}
+                              </span>
+                              <span
+                                v-if="result.whitelistApplied === true || result.whitelistApplied === false"
+                                :class="result.whitelistApplied
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : 'bg-red-50 text-red-600 border-red-200'"
+                                class="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium"
+                              >
+                                {{ result.whitelistApplied ? t('tools.applianceSsh.whitelistAdded') : t('tools.applianceSsh.whitelistFailed') }}
+                              </span>
+                              <span
+                                v-if="!result.whitelistSourceIp && result.whitelistApplied === undefined"
+                                class="text-xs text-slate-400"
+                              >—</span>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                      <div v-else class="flex flex-wrap gap-1.5">
                         <span
                           v-if="result.previousEnable !== undefined"
                           class="inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium"
