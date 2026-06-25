@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { X, Play, FolderOpen, ShieldCheck, AlertTriangle, RefreshCw, FilePlus2, Info, Loader2 } from 'lucide-vue-next';
+import { X, Play, FolderOpen, ShieldCheck, AlertTriangle, RefreshCw, FilePlus2, Info, Loader2, Clock, Zap } from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
 import { updateManualCopyForm, getManualCopyForm } from '@/lib/store';
 import {
@@ -45,7 +45,18 @@ const isSelectingTarget = ref(false);
 const sourceInputRef = ref<HTMLInputElement | HTMLTextAreaElement | null>(null);
 const modalRef = ref<HTMLElement | null>(null);
 const existingTargetPreview = ref<ManualCopyPreview | null>(null);
-const pendingSubmitRequest = ref<{ source: string; target: string } | null>(null);
+const pendingSubmitRequest = ref<{ source: string; target: string; skipStability: boolean } | null>(null);
+
+// --- Recently-modified ("just generated") confirmation prompt ---
+// When the source file was modified within the stability guard window, the
+// backend would otherwise hold it in a stability wait. We surface a 10s
+// countdown prompt so the user can choose to copy immediately. No choice (or
+// timeout) defaults to waiting (the safe behavior).
+const RECENCY_PROMPT_SECONDS = 10;
+const recencyPrompt = ref<{ secsAgo: number } | null>(null);
+const recencyCountdown = ref(RECENCY_PROMPT_SECONDS);
+let recencyResolve: ((choice: 'immediate' | 'wait') => void) | null = null;
+let recencyTimer: ReturnType<typeof setInterval> | null = null;
 
 // Filter selections: user picks which global extensions/keywords to apply (default: none selected = copy all)
 const selectedExtensions = ref<string[]>([]);
@@ -194,6 +205,53 @@ function clearExistingTargetDecision() {
   pendingSubmitRequest.value = null;
 }
 
+// True when the source is a freshly-modified single file that the backend would
+// hold in the stability wait. Mirrors the backend condition: stability check
+// enabled AND modified within recent_file_guard_mins.
+function isRecentSource(preview: ManualCopyPreview): boolean {
+  if (preview.source_kind !== 'file') return false;
+  const secs = preview.source_modified_secs_ago;
+  if (secs === null || secs === undefined) return false;
+  const cfg = config.value;
+  if (!cfg || cfg.stability_check_secs <= 0) return false;
+  return secs < cfg.recent_file_guard_mins * 60;
+}
+
+// Shows the countdown prompt and resolves with the user's choice. Resolves to
+// 'wait' automatically after RECENCY_PROMPT_SECONDS or if dismissed.
+function confirmRecency(secsAgo: number): Promise<'immediate' | 'wait'> {
+  return new Promise((resolve) => {
+    recencyResolve = resolve;
+    recencyPrompt.value = { secsAgo };
+    recencyCountdown.value = RECENCY_PROMPT_SECONDS;
+    recencyTimer = setInterval(() => {
+      recencyCountdown.value -= 1;
+      if (recencyCountdown.value <= 0) {
+        resolveRecency('wait');
+      }
+    }, 1000);
+  });
+}
+
+function resolveRecency(choice: 'immediate' | 'wait') {
+  if (recencyTimer !== null) {
+    clearInterval(recencyTimer);
+    recencyTimer = null;
+  }
+  recencyPrompt.value = null;
+  const resolve = recencyResolve;
+  recencyResolve = null;
+  resolve?.(choice);
+}
+
+// Human-readable "modified N seconds/minutes ago" for the prompt.
+function formatModifiedAgo(secsAgo: number): string {
+  if (secsAgo < 60) {
+    return t('manualCopy.recency.secsAgo', { secs: secsAgo });
+  }
+  return t('manualCopy.recency.minsAgo', { mins: Math.floor(secsAgo / 60) });
+}
+
 function existingTargetSummary(preview: ManualCopyPreview): string {
   if (preview.source_kind === 'file') {
     return t('manualCopy.targetExistsFileDecision', { path: preview.resolved_target_path });
@@ -215,10 +273,15 @@ function skipActionHint(preview: ManualCopyPreview): string {
   return t('manualCopy.skipDirectoryHint');
 }
 
-async function enqueueCopy(source: string, target: string, overwriteExisting: boolean) {
+async function enqueueCopy(
+  source: string,
+  target: string,
+  overwriteExisting: boolean,
+  skipStability = false,
+) {
   const exts = [...selectedExtensions.value];
   const kws = [...selectedKeywords.value];
-  const ack = await queueTemporaryCopy(source, target, overwriteExisting, exts, kws);
+  const ack = await queueTemporaryCopy(source, target, overwriteExisting, exts, kws, skipStability);
 
   notify(
     ack.queued_ahead > 0
@@ -249,6 +312,7 @@ async function confirmExistingTarget(overwriteExisting: boolean) {
       pendingSubmitRequest.value.source,
       pendingSubmitRequest.value.target,
       overwriteExisting,
+      pendingSubmitRequest.value.skipStability,
     );
   } catch (error) {
     inlineError.value = formatManualCopyError(error);
@@ -455,13 +519,21 @@ async function submitCopy() {
     const target = targetRootPath.value.trim();
     const preview = await previewTemporaryCopy(source, target);
 
+    // Gate on a freshly-generated source file first (independent of any target
+    // conflict) so only one prompt is shown at a time.
+    let skipStability = false;
+    if (isRecentSource(preview)) {
+      const choice = await confirmRecency(preview.source_modified_secs_ago as number);
+      skipStability = choice === 'immediate';
+    }
+
     if (preview.target_exists) {
       existingTargetPreview.value = preview;
-      pendingSubmitRequest.value = { source, target };
+      pendingSubmitRequest.value = { source, target, skipStability };
       return;
     }
 
-    await enqueueCopy(source, target, false);
+    await enqueueCopy(source, target, false, skipStability);
   } catch (error) {
     inlineError.value = formatManualCopyError(error);
     notify(inlineError.value, 'error');
@@ -525,6 +597,11 @@ onBeforeUnmount(() => {
   // leaves a focus-trap listener behind otherwise.
   if (typeof document !== 'undefined' && previouslyFocused) {
     previouslyFocused = null;
+  }
+  // Drop any pending recency countdown timer so it cannot fire after teardown.
+  if (recencyTimer !== null) {
+    clearInterval(recencyTimer);
+    recencyTimer = null;
   }
 });
 
@@ -950,6 +1027,89 @@ watch(() => props.isOpen, (open) => {
                   >
                     {{ t('manualCopy.cancelConflictDecision') }}
                   </button>
+                </div>
+              </div>
+            </div>
+          </Transition>
+        </Teleport>
+
+        <!-- Recently-modified ("just generated") confirmation prompt -->
+        <Teleport to="body">
+          <Transition name="confirm-fade">
+            <div
+              v-if="recencyPrompt"
+              class="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 backdrop-blur-sm px-4"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="manual-copy-recency-title"
+              @click="resolveRecency('wait')"
+            >
+              <div
+                class="w-full max-w-lg rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-400/20 overflow-hidden"
+                @click.stop
+              >
+                <!-- Header -->
+                <div class="flex items-start gap-4 px-6 pt-6 pb-5 border-b border-slate-100">
+                  <div class="flex-shrink-0 w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center">
+                    <Clock class="w-5 h-5 text-amber-600" aria-hidden="true" />
+                  </div>
+                  <div class="min-w-0 pt-0.5">
+                    <div id="manual-copy-recency-title" class="text-base font-semibold text-slate-800">
+                      {{ t('manualCopy.recency.title') }}
+                    </div>
+                    <p class="text-sm leading-6 text-slate-500 mt-1.5">
+                      {{ t('manualCopy.recency.body', {
+                        ago: formatModifiedAgo(recencyPrompt.secsAgo),
+                        secs: config?.stability_check_secs ?? 0,
+                      }) }}
+                    </p>
+                  </div>
+                </div>
+
+                <!-- Option cards -->
+                <div class="p-4 space-y-2.5">
+                  <!-- Copy immediately (skip wait) -->
+                  <button
+                    @click="resolveRecency('immediate')"
+                    class="w-full flex items-start gap-3.5 rounded-xl border border-blue-300 bg-blue-50 px-4 py-3.5 text-left transition-all motion-reduce:transition-none hover:border-blue-400 hover:bg-blue-100 hover:shadow-sm active:scale-[0.99] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 focus-visible:ring-offset-2"
+                    :aria-label="t('manualCopy.recency.copyNow')"
+                  >
+                    <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center mt-0.5">
+                      <Zap class="w-3.5 h-3.5 text-white" aria-hidden="true" />
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <div class="text-sm font-semibold text-blue-800">
+                        {{ t('manualCopy.recency.copyNow') }}
+                      </div>
+                      <div class="text-xs text-slate-600 mt-1 leading-5 break-words">
+                        {{ t('manualCopy.recency.copyNowHint') }}
+                      </div>
+                    </div>
+                  </button>
+
+                  <!-- Wait for stability (default) -->
+                  <button
+                    @click="resolveRecency('wait')"
+                    class="w-full flex items-start gap-3.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3.5 text-left transition-all motion-reduce:transition-none hover:border-emerald-300 hover:bg-emerald-100 hover:shadow-sm active:scale-[0.99] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 focus-visible:ring-offset-2"
+                    :aria-label="t('manualCopy.recency.waitNow')"
+                  >
+                    <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center mt-0.5">
+                      <ShieldCheck class="w-3.5 h-3.5 text-white" aria-hidden="true" />
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <div class="text-sm font-semibold text-emerald-800">
+                        {{ t('manualCopy.recency.waitNow') }}
+                      </div>
+                      <div class="text-xs text-slate-600 mt-1 leading-5 break-words">
+                        {{ t('manualCopy.recency.waitNowHint') }}
+                      </div>
+                    </div>
+                  </button>
+                </div>
+
+                <!-- Countdown footer -->
+                <div class="px-6 pb-4 pt-1 text-center text-xs text-slate-500">
+                  {{ t('manualCopy.recency.countdown', { secs: recencyCountdown }) }}
                 </div>
               </div>
             </div>

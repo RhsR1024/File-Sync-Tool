@@ -3,8 +3,8 @@
   "versions": [
     {
       "version": "1.1.1",
-      "url": "file-sync-tool-1.1.1-202606251409.exe",
-      "sha256": "461574c600304c90607f0a0b1de705c7ba79c5aa8bedb484c63d143340ed4997",
+      "url": "file-sync-tool-1.1.1-202606251712.exe",
+      "sha256": "075d951f7dbf564f614c5b1869d5e1fdd0e1f54c02687b153ed07237a5f4d6f4",
       "released_at": "2026-06-25",
       "changelog": [
         "硬盘缓存清理 Linux 来源新增组件化/主线切换。",

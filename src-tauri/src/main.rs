@@ -34,6 +34,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::SystemTime;
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -81,6 +82,10 @@ struct ManualCopyQueueItem {
     overwrite_existing: bool,
     file_extensions: Vec<String>,
     filename_includes: Vec<String>,
+    // When true, the worker skips the recently-modified stability wait for this
+    // task (user explicitly confirmed "copy immediately" in the manual-copy
+    // recency prompt).
+    skip_stability_check: bool,
     task_handle: Option<task_manager::TaskRunHandle>,
     trigger_source: task_domain::TaskTriggerSource,
 }
@@ -95,6 +100,8 @@ struct StartManualCopyTaskRequest {
     file_extensions: Vec<String>,
     #[serde(default)]
     filename_includes: Vec<String>,
+    #[serde(default)]
+    skip_stability_check: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -133,6 +140,10 @@ struct ManualCopyPreview {
     resolved_target_path: String,
     source_kind: String,
     target_exists: bool,
+    // Seconds since the source file was last modified. None for directories or
+    // when the modification time cannot be read. Used by the frontend to decide
+    // whether to show the "file just generated" recency confirmation prompt.
+    source_modified_secs_ago: Option<u64>,
 }
 
 struct ExecutorReservation {
@@ -630,6 +641,7 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     is_paused.clone(),
                     task.file_extensions.clone(),
                     task.filename_includes.clone(),
+                    task.skip_stability_check,
                 )
                 .await;
                 let _ = task_runtime.clear(&run_handle.task_group_id, &run_handle.run_id);
@@ -1395,6 +1407,7 @@ async fn temporary_copy(
         is_paused,
         file_extensions,
         filename_includes,
+        false,
     )
     .await;
 
@@ -1463,6 +1476,7 @@ async fn start_manual_copy_task(
             overwrite_existing: request.overwrite_existing,
             file_extensions: request.file_extensions,
             filename_includes: request.filename_includes,
+            skip_stability_check: request.skip_stability_check,
             task_handle: Some(run_handle.clone()),
             trigger_source: task_domain::TaskTriggerSource::Manual,
         });
@@ -1496,6 +1510,7 @@ async fn queue_temporary_copy(
     overwrite_existing: bool,
     file_extensions: Vec<String>,
     filename_includes: Vec<String>,
+    skip_stability_check: bool,
 ) -> Result<ManualCopyQueueAck, String> {
     let source_path = PathBuf::from(source_path.trim());
     let target_root_path = PathBuf::from(target_root_path.trim());
@@ -1547,6 +1562,7 @@ async fn queue_temporary_copy(
             overwrite_existing,
             file_extensions,
             filename_includes,
+            skip_stability_check,
             task_handle: Some(run_handle),
             trigger_source: task_domain::TaskTriggerSource::Manual,
         });
@@ -1586,6 +1602,19 @@ async fn preview_temporary_copy(
     let (folder_name, local_path, resolved_target_path, source_kind) =
         validate_manual_copy_request(&source_path, &target_root_path)?;
 
+    // For single files, report how long ago the source was last modified so the
+    // frontend can warn before queueing a freshly-generated file (which would
+    // otherwise sit in the stability wait).
+    let source_modified_secs_ago = if source_kind == "file" {
+        std::fs::metadata(&source_path)
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .map(|age| age.as_secs())
+    } else {
+        None
+    };
+
     Ok(ManualCopyPreview {
         folder_name,
         source_path: source_path.to_string_lossy().to_string(),
@@ -1593,6 +1622,7 @@ async fn preview_temporary_copy(
         resolved_target_path: resolved_target_path.to_string_lossy().to_string(),
         source_kind,
         target_exists: resolved_target_path.exists(),
+        source_modified_secs_ago,
     })
 }
 

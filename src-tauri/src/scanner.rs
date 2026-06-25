@@ -2051,6 +2051,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
     is_paused: Arc<AtomicBool>,
     file_extensions: Vec<String>,
     filename_includes: Vec<String>,
+    skip_stability_check: bool,
 ) -> Result<(), String> {
     let source_path = PathBuf::from(source_path.trim());
     let target_root_path = PathBuf::from(target_root_path.trim());
@@ -2108,6 +2109,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
             should_cancel,
             should_skip,
             is_paused,
+            skip_stability_check,
         )
         .await;
     }
@@ -2192,6 +2194,7 @@ async fn temporary_copy_file<R: tauri::Runtime>(
     should_cancel: Arc<AtomicBool>,
     should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    skip_stability_check: bool,
 ) -> Result<(), String> {
     let file_name = source_path
         .file_name()
@@ -2307,7 +2310,16 @@ async fn temporary_copy_file<R: tauri::Runtime>(
         .map(|age| age < StdDuration::from_secs(recent_file_guard_secs))
         .unwrap_or(true);
 
-    if is_recent && config.stability_check_secs > 0 {
+    if is_recent && skip_stability_check {
+        emit_log(
+            app_handle,
+            "File was recently modified, but user chose to copy immediately; skipping stability wait."
+                .to_string(),
+            "info",
+        );
+    }
+
+    if is_recent && config.stability_check_secs > 0 && !skip_stability_check {
         emit_log(
             app_handle,
             format!(

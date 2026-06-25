@@ -447,6 +447,8 @@ export interface ManualCopyPreview {
   resolved_target_path: string;
   source_kind: 'file' | 'directory';
   target_exists: boolean;
+  /** Seconds since the source file was last modified; null for directories or unreadable mtime. */
+  source_modified_secs_ago: number | null;
 }
 
 export async function queueTemporaryCopy(
@@ -455,8 +457,9 @@ export async function queueTemporaryCopy(
   overwriteExisting = false,
   fileExtensions: string[] = [],
   filenameIncludes: string[] = [],
+  skipStabilityCheck = false,
 ): Promise<ManualCopyQueueAck> {
-  return await invoke('queue_temporary_copy', { sourcePath, targetRootPath, overwriteExisting, fileExtensions, filenameIncludes });
+  return await invoke('queue_temporary_copy', { sourcePath, targetRootPath, overwriteExisting, fileExtensions, filenameIncludes, skipStabilityCheck });
 }
 
 export async function previewTemporaryCopy(sourcePath: string, targetRootPath: string): Promise<ManualCopyPreview> {
