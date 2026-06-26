@@ -2244,7 +2244,7 @@ async fn enable_appliance_ssh_via_api(
 ) -> Result<(), String> {
     let request_url = build_appliance_ssh_api_url(ip, version, "set");
     let request_body = json!({
-        "ServiceSshdEnable": 1
+        "enable": 1
     });
 
     let response = client
@@ -2925,6 +2925,11 @@ async fn enable_appliance_ssh_for_target(
         initial_status.expect("checked enable==Some(1) above")
     } else {
         if let Err(e) = enable_appliance_ssh_via_api(&client, &api_ip, api_version).await {
+            emit_runtime_log(
+                &app_handle,
+                format!("[appliance-access] target={} SSH/set failed: {}", ip, e),
+                "error",
+            );
             result.message = format!("Failed to enable SSH: {}", e);
             return Some(result);
         }

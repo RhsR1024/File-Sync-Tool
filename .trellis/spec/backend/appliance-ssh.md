@@ -75,6 +75,8 @@ pub struct ApplianceSshRequest {
 - `componentized` maps to management API port `23006`.
 - `mainline` maps to management API port `9007`.
 - Both status (`/openAPI/system/v1/network/SSH/get`) and enable (`/openAPI/system/v1/network/SSH/set`) calls must use the same selected management API port.
+- The enable (`SSH/set`) request body is `{"enable": 1}`, matching the `data.enable` field returned by `SSH/get`. Do NOT use `{"ServiceSshdEnable": 1}` — the device rejects it with `param invalid`.
+- When `SSH/set` fails (transport error or device `code != 0`), the target worker logs an `error` to `log-message` / app log before returning the failed result, mirroring the `SSH/get` failure logging.
 - Jump-host targets use the selected version port against the jump-host IP because the management API lives on the jump host.
 - Do not use the management API version port as the SSH login port. SSH login still uses the `port` returned by the status API, falling back to `23333`.
 - Frontend defaults `whitelistScope` to `allTcp`; new UI submissions should therefore open every TCP port to the resolved management/source IP.

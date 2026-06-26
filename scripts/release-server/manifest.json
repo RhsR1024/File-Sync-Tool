@@ -3,9 +3,9 @@
   "versions": [
     {
       "version": "1.1.1",
-      "url": "file-sync-tool-1.1.1-202606251712.exe",
-      "sha256": "075d951f7dbf564f614c5b1869d5e1fdd0e1f54c02687b153ed07237a5f4d6f4",
-      "released_at": "2026-06-25",
+      "url": "file-sync-tool-1.1.1-202606261135.exe",
+      "sha256": "44c9e362ad0c57bec7f729aafbef7f0b4eb522d98db9d7ca7920e01ec4533d95",
+      "released_at": "2026-06-26",
       "changelog": [
         "硬盘缓存清理 Linux 来源新增组件化/主线切换。",
         "网络工具端口测试支持完整 TCP 端口段流式扫描，并优化大范围扫描体验。",
