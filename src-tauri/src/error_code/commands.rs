@@ -27,7 +27,11 @@ pub async fn error_code_sync(
     state: State<'_, AppState>,
 ) -> Result<SyncReport, String> {
     let root = cache_root(&app_handle).inspect_err(|error| {
-        emit_tool_log(&app_handle, "error", &format!("解析应用数据目录失败：{error}"));
+        emit_tool_log(
+            &app_handle,
+            "error",
+            &format!("解析应用数据目录失败：{error}"),
+        );
     })?;
     let log_app = app_handle.clone();
     let mut emit_sync_log = move |level: &str, message: String| {
@@ -42,8 +46,10 @@ pub async fn error_code_sync(
         })
 }
 
+// Async so ensure_loaded's cache read/parse happens on the tokio pool: as a sync
+// command it would run on the main thread and freeze the UI and tray while loading.
 #[tauri::command]
-pub fn error_code_query(
+pub async fn error_code_query(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     request: QueryRequest,
@@ -87,8 +93,9 @@ pub fn error_code_query(
     }
 }
 
+// Async for the same reason as error_code_query: keep cache loading off the main thread.
 #[tauri::command]
-pub fn error_code_get_meta(
+pub async fn error_code_get_meta(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<MetaInfo, String> {

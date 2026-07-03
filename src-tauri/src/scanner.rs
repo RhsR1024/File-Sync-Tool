@@ -264,15 +264,25 @@ pub fn write_log_to_file<R: tauri::Runtime>(
     let app_dir = crate::config::get_custom_data_dir(app_handle)
         .or_else(|| app_handle.path().app_data_dir().ok());
     if let Some(app_dir) = app_dir {
-        if std::fs::create_dir_all(&app_dir).is_ok() {
-            let log_path = app_dir.join("app.log");
-            let _guard = get_log_mutex().lock().unwrap();
-            rotate_log_if_needed(&log_path);
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-                let time = Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(file, "[{}] [{}] {}", time, level.to_uppercase(), msg);
-            }
-        }
+        write_log_to_dir(&app_dir, msg, level);
+    }
+}
+
+/// Write a log entry into `app.log` under the given data directory without an AppHandle.
+/// Poison-tolerant so it stays usable inside the panic hook.
+pub fn write_log_to_dir(app_dir: &Path, msg: &str, level: &str) {
+    if std::fs::create_dir_all(app_dir).is_err() {
+        return;
+    }
+    let log_path = app_dir.join("app.log");
+    let _guard = match get_log_mutex().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    rotate_log_if_needed(&log_path);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+        let time = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _ = writeln!(file, "[{}] [{}] {}", time, level.to_uppercase(), msg);
     }
 }
 

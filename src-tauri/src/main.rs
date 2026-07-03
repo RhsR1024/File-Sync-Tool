@@ -45,6 +45,143 @@ const TRAY_SHOW_ID: &str = "tray_show_main";
 const TRAY_CLIPBOARD_PANEL_ID: &str = "tray_toggle_clipboard_panel";
 const TRAY_QUIT_ID: &str = "tray_quit";
 const MANUAL_COPY_RECOVERY_DELAY: Duration = Duration::from_secs(60);
+/// Must match `identifier` in tauri.conf.json (used for AUMID and the fallback data dir).
+const APP_IDENTIFIER: &str = "com.filesync.tool";
+const CLIPBOARD_INIT_MAX_ATTEMPTS: u32 = 5;
+const CLIPBOARD_INIT_RETRY_DELAY: Duration = Duration::from_millis(600);
+const WATCHDOG_PING_INTERVAL: Duration = Duration::from_secs(2);
+const WATCHDOG_STALL_THRESHOLD_MS: u64 = 10_000;
+
+/// Default app data dir resolved without an AppHandle, for logging before/without
+/// a running Tauri app. Note: if the user configured a custom data dir, regular
+/// logs go there instead — startup/panic logs always land in the default location.
+fn default_app_data_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join(APP_IDENTIFIER))
+}
+
+/// Best-effort log for phases where the Tauri app may not exist (panics, setup failures).
+fn startup_log(level: &str, msg: &str) {
+    if let Some(dir) = default_app_data_dir() {
+        scanner::write_log_to_dir(&dir, msg, level);
+    }
+}
+
+/// Record every panic (any thread) into app.log. GUI builds have no visible stderr,
+/// so without this a crashed process leaves no trace — only a ghost tray icon.
+fn install_panic_log_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("unnamed").to_string();
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        };
+        let mut backtrace = std::backtrace::Backtrace::force_capture()
+            .to_string()
+            .replace(['\r', '\n'], " | ");
+        backtrace.truncate(4000);
+        startup_log(
+            "panic",
+            &format!(
+                "thread={thread_name}, location={location}, payload={payload}, backtrace={backtrace}"
+            ),
+        );
+        default_hook(info);
+    }));
+}
+
+/// Modal error dialog for fatal startup failures, so a failed launch is visible
+/// instead of silently exiting.
+fn show_fatal_startup_dialog(message: &str) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, MB_ICONERROR, MB_OK, MB_SYSTEMMODAL,
+        };
+        let title: Vec<u16> = "File Sync Tool 启动失败\0".encode_utf16().collect();
+        let text: Vec<u16> = format!("{message}\0").encode_utf16().collect();
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR | MB_SYSTEMMODAL,
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        eprintln!("{message}");
+    }
+}
+
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Watch the main thread: tray clicks, window restore and every sync command all
+/// depend on it. When it stops pumping for WATCHDOG_STALL_THRESHOLD_MS the app looks
+/// frozen and the tray is dead — record that to app.log so field reports can tell
+/// "main thread stalled" apart from "process died (ghost tray icon)".
+fn spawn_main_thread_watchdog(app_handle: tauri::AppHandle) {
+    use std::sync::atomic::AtomicU64;
+
+    let last_pong_ms = Arc::new(AtomicU64::new(now_unix_millis()));
+    let result = std::thread::Builder::new()
+        .name("main-thread-watchdog".into())
+        .spawn(move || {
+            let mut stall_start_ms: Option<u64> = None;
+            loop {
+                let pong_writer = last_pong_ms.clone();
+                if app_handle
+                    .run_on_main_thread(move || {
+                        pong_writer.store(now_unix_millis(), Ordering::Relaxed);
+                    })
+                    .is_err()
+                {
+                    // Event loop is gone — the app is exiting.
+                    break;
+                }
+                std::thread::sleep(WATCHDOG_PING_INTERVAL);
+
+                let last_pong = last_pong_ms.load(Ordering::Relaxed);
+                let age_ms = now_unix_millis().saturating_sub(last_pong);
+                if age_ms > WATCHDOG_STALL_THRESHOLD_MS {
+                    if stall_start_ms.is_none() {
+                        stall_start_ms = Some(last_pong);
+                        scanner::write_log_to_file(
+                            &app_handle,
+                            &format!(
+                                "【看门狗】主线程无响应已超过 {} 秒：界面与托盘点击此期间不会有反应，多为某个同步操作阻塞主线程",
+                                age_ms / 1000
+                            ),
+                            "warn",
+                        );
+                    }
+                } else if let Some(started) = stall_start_ms.take() {
+                    let total_ms = last_pong.saturating_sub(started);
+                    scanner::write_log_to_file(
+                        &app_handle,
+                        &format!("【看门狗】主线程已恢复响应，本次停顿约 {} 秒", total_ms / 1000),
+                        "info",
+                    );
+                }
+            }
+        });
+    if let Err(error) = result {
+        log::warn!("failed to spawn main-thread watchdog: {error}");
+    }
+}
 
 struct AppState {
     config: Arc<Mutex<AppConfig>>,
@@ -826,10 +963,12 @@ fn confirm_quit(app_handle: tauri::AppHandle) {
     app_handle.exit(0);
 }
 
+// Async so it runs on the tokio pool instead of the main thread: it spawns reg.exe
+// and does file IO, which would otherwise freeze the UI and tray while it runs.
 #[tauri::command]
-fn save_config_cmd(
+async fn save_config_cmd(
     app_handle: tauri::AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     config: AppConfig,
 ) -> Result<(), String> {
     config::validate_config(&config)?;
@@ -2329,8 +2468,7 @@ async fn wait_for_appliance_ssh_enabled(
         }
     } else {
         WaitForEnableOutcome::GetFailed {
-            last_error: last_get_error
-                .unwrap_or_else(|| "no GET attempts were made".to_string()),
+            last_error: last_get_error.unwrap_or_else(|| "no GET attempts were made".to_string()),
         }
     }
 }
@@ -3221,6 +3359,8 @@ async fn enable_appliance_ssh(
 }
 
 fn main() {
+    install_panic_log_hook();
+
     // Register an explicit AppUserModelID so Windows notifications show the app
     // name ("File Sync Tool") rather than the launching shell ("PowerShell").
     // Must run before any notification or WinRT call. Failures are non-fatal.
@@ -3228,7 +3368,7 @@ fn main() {
     unsafe {
         use windows::core::PCWSTR;
         use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
-        let aumid: Vec<u16> = "com.filesync.tool\0".encode_utf16().collect();
+        let aumid: Vec<u16> = format!("{APP_IDENTIFIER}\0").encode_utf16().collect();
         let _ = SetCurrentProcessExplicitAppUserModelID(PCWSTR(aumid.as_ptr()));
     }
 
@@ -3274,55 +3414,10 @@ fn main() {
             }
         })
         .setup(|app| {
-            let tray_menu = MenuBuilder::new(app)
-                .text(TRAY_SHOW_ID, "显示主窗口")
-                .text(TRAY_CLIPBOARD_PANEL_ID, "Clipboard Panel")
-                .separator()
-                .text(TRAY_QUIT_ID, "退出")
-                .build()?;
-
-            let app_handle = app.handle().clone();
-            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
-                .menu(&tray_menu)
-                .show_menu_on_left_click(false)
-                .tooltip("File Sync Tool")
-                .on_menu_event(move |app, event| match event.id().as_ref() {
-                    TRAY_SHOW_ID => show_main_window(app),
-                    TRAY_CLIPBOARD_PANEL_ID => {
-                        let _ = clipboard::commands::cb_toggle_panel_internal(app.clone());
-                    }
-                    TRAY_QUIT_ID => {
-                        if let Some(state) = app.try_state::<AppState>() {
-                            state.is_quitting.store(true, Ordering::SeqCst);
-                        }
-                        // Notify frontend to save state before exiting
-                        let _ = app.emit("before-quit", ());
-                        // Fallback: force exit after 2 seconds if frontend doesn't respond
-                        let app_clone = app.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_secs(2));
-                            app_clone.exit(0);
-                        });
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(move |_tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        show_main_window(&app_handle);
-                    }
-                });
-
-            if let Some(icon) = app.default_window_icon().cloned() {
-                tray_builder = tray_builder.icon(icon);
-            }
-
-            let _ = tray_builder.build(app)?;
-
+            // The tray icon is deliberately created at the END of this block: if any
+            // fallible init below errors out while the tray already exists, the process
+            // exits leaving a dead "ghost" tray icon that ignores clicks.
+            let setup_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let config = config::load_config(app.handle());
             let task_manager = task_manager::TaskManager::new(app.handle().clone());
             let _ = sync_launch_on_startup(
@@ -3354,8 +3449,34 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("app_data_dir: {e}"))?;
-            let clipboard_state =
-                clipboard::ClipboardState::init(&app_data_dir, config.clipboard.clone())?;
+            // At logon the clipboard DB can be transiently locked (AV/backup scans);
+            // retry briefly before treating it as fatal.
+            let clipboard_state = {
+                let mut attempt = 0;
+                loop {
+                    attempt += 1;
+                    match clipboard::ClipboardState::init(&app_data_dir, config.clipboard.clone())
+                    {
+                        Ok(state) => break state,
+                        Err(error) if attempt < CLIPBOARD_INIT_MAX_ATTEMPTS => {
+                            startup_log(
+                                "warn",
+                                &format!(
+                                    "剪贴板初始化第 {attempt} 次失败（可能被杀毒/备份软件占用）：{error}，{}ms 后重试",
+                                    CLIPBOARD_INIT_RETRY_DELAY.as_millis()
+                                ),
+                            );
+                            std::thread::sleep(CLIPBOARD_INIT_RETRY_DELAY);
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "剪贴板初始化失败（已重试 {attempt} 次）：{error}"
+                            )
+                            .into());
+                        }
+                    }
+                }
+            };
             let clipboard_state_for_startup = clipboard_state.clone();
             let clipboard_enabled_at_start = config.clipboard.enabled;
             let clipboard_hotkey_at_start = config.clipboard.hotkey.clone();
@@ -3466,6 +3587,59 @@ fn main() {
                 }
             }
 
+            // Create the tray icon last, after every fallible init above succeeded,
+            // so a failed startup never leaves a ghost tray icon behind.
+            let tray_menu = MenuBuilder::new(app)
+                .text(TRAY_SHOW_ID, "显示主窗口")
+                .text(TRAY_CLIPBOARD_PANEL_ID, "Clipboard Panel")
+                .separator()
+                .text(TRAY_QUIT_ID, "退出")
+                .build()?;
+
+            let app_handle = app.handle().clone();
+            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .tooltip("File Sync Tool")
+                .on_menu_event(move |app, event| match event.id().as_ref() {
+                    TRAY_SHOW_ID => show_main_window(app),
+                    TRAY_CLIPBOARD_PANEL_ID => {
+                        let _ = clipboard::commands::cb_toggle_panel_internal(app.clone());
+                    }
+                    TRAY_QUIT_ID => {
+                        if let Some(state) = app.try_state::<AppState>() {
+                            state.is_quitting.store(true, Ordering::SeqCst);
+                        }
+                        // Notify frontend to save state before exiting
+                        let _ = app.emit("before-quit", ());
+                        // Fallback: force exit after 2 seconds if frontend doesn't respond
+                        let app_clone = app.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_secs(2));
+                            app_clone.exit(0);
+                        });
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(move |_tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(&app_handle);
+                    }
+                });
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+
+            let _ = tray_builder.build(app)?;
+
+            spawn_main_thread_watchdog(app.handle().clone());
+
             // Fire a startup toast so users know the watcher is live and how to open the panel.
             // Delayed 500ms so the notification plugin + tray finish initializing first.
             if clipboard_enabled_at_start && config_show_startup_notification {
@@ -3481,6 +3655,19 @@ fn main() {
                         .body(format!("剪贴板监听已启动，按 {hotkey_display} 呼出面板"))
                         .show();
                 });
+            }
+
+            Ok(())
+            })();
+
+            if let Err(error) = setup_result {
+                let message = format!("应用初始化失败：{error}");
+                startup_log("error", &message);
+                log::error!("{message}");
+                show_fatal_startup_dialog(&format!(
+                    "{message}\n\n程序即将退出，详细信息见 app.log。"
+                ));
+                return Err(error);
             }
 
             Ok(())
