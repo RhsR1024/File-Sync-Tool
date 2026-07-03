@@ -75,6 +75,11 @@ const CAPTURE_RETRY_CANCEL_POLL_MS: u64 = 100;
 /// 采集器重建的无限重试退避表；到顶后维持 30s 间隔直到会话被取消。
 /// 锁屏可能持续数小时——共享必须活着等到解锁自动恢复。
 const CAPTURE_RECREATE_BACKOFF_MS: [u64; 6] = [1000, 2000, 4000, 8000, 15000, 30000];
+/// graceful shutdown 后允许连接 drain 的最长时间；超时直接丢弃 serve future
+/// （连带 listener），确保端口一定释放——半死的 viewer 连接不能扣住端口。
+const SERVER_DRAIN_DEADLINE: Duration = Duration::from_secs(3);
+/// screen_share_stop 等待服务真正退出的上限（略大于 drain 上限）。
+const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(4);
 
 fn capture_recreate_backoff(attempt: u32) -> Duration {
     let index = (attempt as usize).min(CAPTURE_RECREATE_BACKOFF_MS.len() - 1);
@@ -218,6 +223,10 @@ pub struct ScreenShareHandle {
     start_time: Mutex<Option<Instant>>,
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
     capture_paused: Arc<AtomicBool>,
+    /// Completed by the server watcher once the HTTP server has fully exited
+    /// (port released); screen_share_stop awaits it so "stop returned" means
+    /// "the port is immediately reusable".
+    server_done_rx: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl ScreenShareHandle {
@@ -236,6 +245,7 @@ impl ScreenShareHandle {
             start_time: Mutex::new(None),
             viewer_ips: Arc::new(Mutex::new(HashMap::new())),
             capture_paused: Arc::new(AtomicBool::new(false)),
+            server_done_rx: Mutex::new(None),
         }
     }
 }
@@ -303,6 +313,7 @@ fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
     *handle.all_urls.lock().unwrap() = Vec::new();
     *handle.start_time.lock().unwrap() = None;
     handle.capture_paused.store(false, Ordering::SeqCst);
+    *handle.server_done_rx.lock().unwrap() = None;
     if let Ok(mut ips) = handle.viewer_ips.lock() {
         ips.clear();
     }
@@ -669,6 +680,9 @@ pub async fn screen_share_start(
         run_http_server(listener, server_state, shutdown_rx).await;
     });
 
+    let (server_done_tx, server_done_rx) = oneshot::channel::<()>();
+    *handle.server_done_rx.lock().unwrap() = Some(server_done_rx);
+
     // Watcher: when the server task ends (normal or panic), clean up state
     tokio::spawn(async move {
         match server_join.await {
@@ -697,6 +711,8 @@ pub async fn screen_share_start(
             );
             emit_inactive_status(&ss_server_app);
         }
+
+        let _ = server_done_tx.send(());
     });
 
     // --- Spawn status reporter ---
@@ -770,6 +786,9 @@ pub async fn screen_share_stop(
         let _ = tx.send(());
     }
 
+    // Take the receiver BEFORE reset_runtime_state clears it.
+    let done_rx = handle.server_done_rx.lock().unwrap().take();
+
     reset_runtime_state(handle);
 
     crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, "已停止", "info");
@@ -780,7 +799,11 @@ pub async fn screen_share_stop(
     );
     emit_inactive_status(&app_handle);
 
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    // 等待 HTTP 服务真正退出（graceful 或 drain 超时强制关闭），
+    // 返回后端口保证已释放，前端可立即用同端口重启。
+    if let Some(done_rx) = done_rx {
+        let _ = tokio::time::timeout(STOP_WAIT_TIMEOUT, done_rx).await;
+    }
 
     Ok(())
 }
@@ -2447,16 +2470,34 @@ async fn run_http_server(
         .route("/status", get(handler_status))
         .with_state(state);
 
-    if let Err(e) = axum::serve(
+    let (drain_started_tx, drain_started_rx) = oneshot::channel::<()>();
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
+    .with_graceful_shutdown(async move {
         shutdown_rx.await.ok();
-    })
-    .await
-    {
-        log::error!("Screen share HTTP server error: {}", e);
+        let _ = drain_started_tx.send(());
+    });
+
+    tokio::select! {
+        result = serve => {
+            if let Err(e) = result {
+                log::error!("Screen share HTTP server error: {}", e);
+            }
+        }
+        _ = async {
+            drain_started_rx.await.ok();
+            tokio::time::sleep(SERVER_DRAIN_DEADLINE).await;
+        } => {
+            // Deadline branch: the select drops the serve future — and with it the
+            // listener — so the port becomes reusable immediately even if half-dead
+            // viewer connections never finish draining.
+            log::warn!(
+                "Screen share drain deadline ({}s) exceeded; forcing listener close",
+                SERVER_DRAIN_DEADLINE.as_secs()
+            );
+        }
     }
 
     log::info!("Screen share HTTP server stopped");
@@ -3117,6 +3158,7 @@ mod tests {
         *handle.server_url.lock().unwrap() = "http://stale".into();
         *handle.all_urls.lock().unwrap() = vec!["http://stale".into()];
         *handle.start_time.lock().unwrap() = Some(Instant::now());
+        *handle.server_done_rx.lock().unwrap() = Some(oneshot::channel::<()>().1);
         record_viewer_ip(&handle.viewer_ips, "10.0.0.1");
 
         prepare_runtime_state_for_start(&handle);
@@ -3130,6 +3172,7 @@ mod tests {
         assert!(handle.server_url.lock().unwrap().is_empty());
         assert!(handle.all_urls.lock().unwrap().is_empty());
         assert!(handle.start_time.lock().unwrap().is_none());
+        assert!(handle.server_done_rx.lock().unwrap().is_none());
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
     }
 
@@ -3144,6 +3187,7 @@ mod tests {
         *handle.server_url.lock().unwrap() = "http://active".into();
         *handle.all_urls.lock().unwrap() = vec!["http://active".into()];
         *handle.start_time.lock().unwrap() = Some(Instant::now());
+        *handle.server_done_rx.lock().unwrap() = Some(oneshot::channel::<()>().1);
         record_viewer_ip(&handle.viewer_ips, "10.0.0.2");
 
         reset_runtime_state(&handle);
@@ -3157,6 +3201,7 @@ mod tests {
         assert!(handle.server_url.lock().unwrap().is_empty());
         assert!(handle.all_urls.lock().unwrap().is_empty());
         assert!(handle.start_time.lock().unwrap().is_none());
+        assert!(handle.server_done_rx.lock().unwrap().is_none());
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
     }
 
