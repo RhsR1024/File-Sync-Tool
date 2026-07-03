@@ -248,7 +248,7 @@ function onExpandLeave(el: Element) {
                 </span>
               </div>
               <p class="mt-3 text-3xl font-semibold tracking-tight text-slate-950">
-                {{ state?.current ?? '1.1.1' }}
+                {{ state?.current ?? '1.1.2' }}
               </p>
               <p class="mt-1 text-sm text-slate-500">
                 {{ formatReleaseDate(currentReleaseDate) || '—' }}
