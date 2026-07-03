@@ -413,6 +413,10 @@ struct HttpServerState {
     auth_username: Option<String>,
     bytes_sent: Arc<AtomicU64>,
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
+    /// Session epoch: viewers use it to detect a server-side restart and
+    /// reconnect their stream without a manual page refresh.
+    session_id: u64,
+    capture_paused: Arc<AtomicBool>,
 }
 
 /// RAII guard that decrements viewer count and removes IP on drop.
@@ -669,6 +673,8 @@ pub async fn screen_share_start(
         auth_username,
         bytes_sent: handle.bytes_sent.clone(),
         viewer_ips: handle.viewer_ips.clone(),
+        session_id,
+        capture_paused: handle.capture_paused.clone(),
     });
 
     // --- Spawn HTTP server ---
@@ -2706,6 +2712,8 @@ async fn handler_status(
     Json(serde_json::json!({
         "active": !state.cancel.load(Ordering::Relaxed),
         "viewers": state.viewer_count.load(Ordering::Relaxed),
+        "session_id": state.session_id,
+        "capture_paused": state.capture_paused.load(Ordering::Relaxed),
     }))
 }
 
@@ -2873,6 +2881,9 @@ html,body{height:100%;background:#060911;color:#e2e8f0;font-family:-apple-system
         <span id="pausedText"></span>
       </div>
     </div>
+    <div id="captureRetry" style="display:none;position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:6;align-items:center;gap:8px;background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.35);color:#fbbf24;padding:8px 16px;border-radius:10px;font-size:13px;font-weight:500;backdrop-filter:blur(6px)">
+      <span class="dot dot-retry"></span><span id="captureRetryText"></span>
+    </div>
   </div>
   <div class="bar">
     <div class="status-pill">
@@ -2911,6 +2922,7 @@ const T={
   serverStopped:isZh?'服务已停止':'Server stopped',
   reconnecting:isZh?'重新连接中':'Reconnecting',
   paused:isZh?'已暂停':'Paused',
+  serverRetrying:isZh?'画面中断，服务端自动重试中':'Capture interrupted — server is retrying',
   pause:isZh?'暂停':'Pause',
   resume:isZh?'继续':'Resume',
   refresh:isZh?'刷新率':'Refresh',
@@ -2920,6 +2932,7 @@ const T={
 };
 // Apply i18n to static elements
 document.getElementById('pausedText').textContent=T.paused;
+document.getElementById('captureRetryText').textContent=T.serverRetrying;
 document.getElementById('btnPauseText').textContent=T.pause;
 document.getElementById('refreshLabel').textContent=T.refresh;
 document.getElementById('optOriginal').textContent=T.original;
@@ -3029,6 +3042,21 @@ setInterval(async()=>{
       const d=await r.json();
       heartbeatFails=0;
       if(d.viewers>0){vw.textContent=d.viewers+' '+(d.viewers>1?T.viewers:T.viewer);vw.style.display=''}else{vw.style.display='none'}
+      // 会话纪元变化 = 服务端重启过共享（旧流已死但 TCP 可能还挂着）→ 主动重连
+      if(typeof d.session_id!=='undefined'){
+        if(window.__ssSession!==undefined&&window.__ssSession!==d.session_id&&!paused&&d.active){
+          window.__ssSession=d.session_id;
+          holdCurrentFrame();
+          tryReconnect();
+        } else {
+          window.__ssSession=d.session_id;
+        }
+      }
+      // 服务端采集暂停（锁屏等）→ 显示重试提示条；恢复后自动隐藏
+      const captureRetryEl=document.getElementById('captureRetry');
+      if(captureRetryEl){
+        captureRetryEl.style.display=(d.capture_paused&&!paused)?'flex':'none';
+      }
       if(!d.active&&alive){
         // Server stopped sharing
         setDisconnected(T.serverStopped);

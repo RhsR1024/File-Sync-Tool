@@ -670,6 +670,13 @@ onUnmounted(() => {
 
         <div class="space-y-4 lg:col-span-2">
           <template v-if="isActive && serverUrl">
+            <div
+              v-if="status.capture_paused"
+              class="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 shadow-sm"
+            >
+              <span class="h-2 w-2 animate-pulse rounded-full bg-amber-500"></span>
+              {{ t('tools.screenShare.capturePaused') }}
+            </div>
             <div class="ss-card">
               <p class="ss-section-label">{{ t('tools.screenShare.accessUrl') }}</p>
               <div class="space-y-2">
