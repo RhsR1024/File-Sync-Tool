@@ -852,6 +852,55 @@ fn sanitize_log_field(value: &str) -> String {
     }
 }
 
+/// 报告当前输入桌面：交互桌面为 "Default"；锁屏/UAC 期间为 "Winlogon" 或直接打不开。
+/// 用于在采集创建失败时一条日志区分"锁屏/安全桌面"与"真实的采集冲突"。
+#[cfg(target_os = "windows")]
+fn describe_input_desktop() -> String {
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, DESKTOP_CONTROL_FLAGS,
+        DESKTOP_READOBJECTS, UOI_NAME,
+    };
+
+    unsafe {
+        let desktop = match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) {
+            Ok(desktop) => desktop,
+            Err(error) => {
+                return format!(
+                    "input_desktop=unavailable(likely lock screen or UAC secure desktop, error={})",
+                    sanitize_log_field(&error.message())
+                );
+            }
+        };
+
+        let mut name_buf = [0u16; 128];
+        let mut needed = 0u32;
+        let name = if GetUserObjectInformationW(
+            windows::Win32::Foundation::HANDLE(desktop.0),
+            UOI_NAME,
+            Some(name_buf.as_mut_ptr() as *mut _),
+            (name_buf.len() * 2) as u32,
+            Some(&mut needed),
+        )
+        .is_ok()
+        {
+            let len = name_buf
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(name_buf.len());
+            String::from_utf16_lossy(&name_buf[..len])
+        } else {
+            "unknown".to_string()
+        };
+        let _ = CloseDesktop(desktop);
+        format!("input_desktop={}", name)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn describe_input_desktop() -> String {
+    "input_desktop=n/a".to_string()
+}
+
 // ─── Cursor Overlay (Windows) ──────────────────────────────
 #[cfg(target_os = "windows")]
 mod cursor_overlay {
@@ -1385,12 +1434,13 @@ fn capture_loop(
             }
             Err(e) => {
                 let capture_error_detail = format!(
-                    "捕获循环异常，进入暂停重试: monitor_index={}, viewers={}, first_real_frame={}, error_kind={:?}, error={}",
+                    "捕获循环异常，进入暂停重试: monitor_index={}, viewers={}, first_real_frame={}, error_kind={:?}, error={}, {}",
                     monitor_index,
                     viewer_count.load(Ordering::Relaxed),
                     first_real_frame,
                     e.kind(),
-                    e
+                    e,
+                    describe_input_desktop()
                 );
                 log::warn!("{}", capture_error_detail);
                 crate::scanner::emit_tool_log(
@@ -2199,13 +2249,14 @@ fn create_capturer(
         app_handle,
         "info",
         format!(
-            "屏幕捕获器创建开始: session_id={}, monitor_index={}, attempts={}, retry_delays_ms={:?}, startup_timeout_ms={}, {}",
+            "屏幕捕获器创建开始: session_id={}, monitor_index={}, attempts={}, retry_delays_ms={:?}, startup_timeout_ms={}, {}, {}",
             session_id,
             monitor_index,
             total_attempts,
             retry_delays,
             CAPTURE_STARTUP_TIMEOUT.as_millis(),
-            capture_runtime_state_summary(runtime_handle, session_id)
+            capture_runtime_state_summary(runtime_handle, session_id),
+            describe_input_desktop()
         ),
     );
 
@@ -2278,7 +2329,7 @@ fn create_capturer(
                         "warn"
                     },
                     format!(
-                        "屏幕捕获器创建失败: session_id={}, attempt={}/{}, next_delay_ms={}, elapsed_ms={}, monitor_index={}, retryable={}, error_kind={:?}, cause={}, {}",
+                        "屏幕捕获器创建失败: session_id={}, attempt={}/{}, next_delay_ms={}, elapsed_ms={}, monitor_index={}, retryable={}, error_kind={:?}, cause={}, {}, {}",
                         session_id,
                         attempt_index + 1,
                         total_attempts,
@@ -2291,7 +2342,8 @@ fn create_capturer(
                         retryable,
                         error.kind,
                         error.detail,
-                        capture_runtime_state_summary(runtime_handle, session_id)
+                        capture_runtime_state_summary(runtime_handle, session_id),
+                        describe_input_desktop()
                     ),
                 );
                 if !error.retryable() || is_last_attempt {
@@ -3282,6 +3334,13 @@ mod tests {
         assert_eq!(capture_recreate_backoff(2), Duration::from_millis(4000));
         assert_eq!(capture_recreate_backoff(5), Duration::from_millis(30000));
         assert_eq!(capture_recreate_backoff(100), Duration::from_millis(30000));
+    }
+
+    #[test]
+    fn describe_input_desktop_reports_a_desktop_state() {
+        let described = describe_input_desktop();
+        assert!(described.starts_with("input_desktop="), "got: {described}");
+        assert!(described.len() > "input_desktop=".len(), "got: {described}");
     }
 
     #[test]
