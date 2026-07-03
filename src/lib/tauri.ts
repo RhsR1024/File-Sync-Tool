@@ -1041,6 +1041,7 @@ export interface ScreenShareStatus {
   server_url: string;
   all_urls: string[];
   connected_ips: string[];
+  capture_paused: boolean;
 }
 
 export async function screenShareListMonitors(): Promise<MonitorInfo[]> {

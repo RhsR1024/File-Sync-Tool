@@ -77,6 +77,7 @@ const status = ref<ScreenShareStatus>({
   server_url: '',
   all_urls: [],
   connected_ips: [],
+  capture_paused: false,
 });
 
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
@@ -278,6 +279,7 @@ async function stopShare() {
     server_url: '',
     all_urls: [],
     connected_ips: [],
+    capture_paused: false,
   };
 }
 

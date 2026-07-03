@@ -72,6 +72,14 @@ const VIEWER_IP_TTL: Duration = Duration::from_secs(12);
 const DXGI_CREATE_RETRY_DELAYS_MS: [u64; 3] = [0, 200, 400];
 const CAPTURE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPTURE_RETRY_CANCEL_POLL_MS: u64 = 100;
+/// 采集器重建的无限重试退避表；到顶后维持 30s 间隔直到会话被取消。
+/// 锁屏可能持续数小时——共享必须活着等到解锁自动恢复。
+const CAPTURE_RECREATE_BACKOFF_MS: [u64; 6] = [1000, 2000, 4000, 8000, 15000, 30000];
+
+fn capture_recreate_backoff(attempt: u32) -> Duration {
+    let index = (attempt as usize).min(CAPTURE_RECREATE_BACKOFF_MS.len() - 1);
+    Duration::from_millis(CAPTURE_RECREATE_BACKOFF_MS[index])
+}
 type ViewerIpMap = HashMap<String, Instant>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +194,9 @@ pub struct ScreenShareStatus {
     pub server_url: String,
     pub all_urls: Vec<String>,
     pub connected_ips: Vec<String>,
+    /// True while the capture source is down and being rebuilt (e.g. lock
+    /// screen); the HTTP server and viewer connections stay alive throughout.
+    pub capture_paused: bool,
 }
 
 // ─── Handle (stored in AppState) ────────────────────────────
@@ -206,6 +217,7 @@ pub struct ScreenShareHandle {
     all_urls: Mutex<Vec<String>>,
     start_time: Mutex<Option<Instant>>,
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
+    capture_paused: Arc<AtomicBool>,
 }
 
 impl ScreenShareHandle {
@@ -223,6 +235,7 @@ impl ScreenShareHandle {
             all_urls: Mutex::new(Vec::new()),
             start_time: Mutex::new(None),
             viewer_ips: Arc::new(Mutex::new(HashMap::new())),
+            capture_paused: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -266,6 +279,7 @@ fn inactive_status() -> ScreenShareStatus {
         server_url: String::new(),
         all_urls: Vec::new(),
         connected_ips: Vec::new(),
+        capture_paused: false,
     }
 }
 
@@ -288,6 +302,7 @@ fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
     *handle.server_url.lock().unwrap() = String::new();
     *handle.all_urls.lock().unwrap() = Vec::new();
     *handle.start_time.lock().unwrap() = None;
+    handle.capture_paused.store(false, Ordering::SeqCst);
     if let Ok(mut ips) = handle.viewer_ips.lock() {
         ips.clear();
     }
@@ -374,34 +389,6 @@ fn snapshot_viewer_ips_at(viewer_ips: &Arc<Mutex<ViewerIpMap>>, now: Instant) ->
 
 fn emit_inactive_status(app_handle: &AppHandle) {
     let _ = app_handle.emit("screen-share-status", inactive_status());
-}
-
-fn shutdown_after_capture_failure(
-    app_handle: &AppHandle,
-    handle: &ScreenShareHandle,
-    session_id: u64,
-    detail: &str,
-) {
-    if !is_current_session(handle, session_id) {
-        log::info!(
-            "Ignoring stale screen capture failure for session {}: {}",
-            session_id,
-            detail
-        );
-        return;
-    }
-
-    current_cancel_token(handle).store(true, Ordering::SeqCst);
-    if let Some(tx) = handle.shutdown_tx.lock().unwrap().take() {
-        let _ = tx.send(());
-    }
-    reset_runtime_state(handle);
-    crate::scanner::emit_tool_log(app_handle, TOOL_NAME, detail, "error");
-    let _ = app_handle.emit(
-        "screen-share-log",
-        serde_json::json!({ "level": "error", "message": detail }),
-    );
-    emit_inactive_status(app_handle);
 }
 
 // ─── Internal: HTTP server state ────────────────────────────
@@ -722,6 +709,7 @@ pub async fn screen_share_start(
     let reporter_all_urls = all_urls.clone();
     let reporter_start = Instant::now();
     let reporter_ips = handle.viewer_ips.clone();
+    let reporter_capture_paused = handle.capture_paused.clone();
     let reporter_runtime_handle = handle.clone();
     let reporter_session_id = session_id;
 
@@ -736,6 +724,7 @@ pub async fn screen_share_start(
             reporter_all_urls,
             reporter_start,
             reporter_ips,
+            reporter_capture_paused,
             reporter_runtime_handle,
             reporter_session_id,
         )
@@ -824,6 +813,7 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         server_url: handle.server_url.lock().unwrap().clone(),
         all_urls: handle.all_urls.lock().unwrap().clone(),
         connected_ips,
+        capture_paused: handle.capture_paused.load(Ordering::Relaxed),
     }
 }
 
@@ -1244,7 +1234,7 @@ fn capture_loop(
             if let Some(tx) = startup_tx.take() {
                 let _ = tx.send(Err(detail));
             } else {
-                shutdown_after_capture_failure(&app_handle, &runtime_handle, session_id, &detail);
+                log::error!("{}", detail);
             }
             return;
         }
@@ -1277,7 +1267,6 @@ fn capture_loop(
         quality,
         if show_cursor { "on" } else { "off" },
     );
-    let mut recreate_attempts = 0u32;
 
     // Send a placeholder frame so that viewers connecting immediately get something
     {
@@ -1372,10 +1361,8 @@ fn capture_loop(
                 continue;
             }
             Err(e) => {
-                recreate_attempts += 1;
                 let capture_error_detail = format!(
-                    "捕获循环异常，准备重建: attempt={}, monitor_index={}, viewers={}, first_real_frame={}, error_kind={:?}, error={}",
-                    recreate_attempts,
+                    "捕获循环异常，进入暂停重试: monitor_index={}, viewers={}, first_real_frame={}, error_kind={:?}, error={}",
                     monitor_index,
                     viewer_count.load(Ordering::Relaxed),
                     first_real_frame,
@@ -1387,73 +1374,95 @@ fn capture_loop(
                     &app_handle,
                     TOOL_NAME,
                     &capture_error_detail,
-                    "error",
+                    "warn",
                 );
                 let _ = app_handle.emit(
                     "screen-share-log",
-                    serde_json::json!({ "level": "error", "message": capture_error_detail }),
+                    serde_json::json!({ "level": "warn", "message": capture_error_detail }),
                 );
-                if !wait_for_capture_retry_delay(
-                    Duration::from_millis(500),
-                    &cancel,
-                    &runtime_handle,
-                    session_id,
-                ) {
-                    break;
+
+                if is_current_session(&runtime_handle, session_id) {
+                    runtime_handle.capture_paused.store(true, Ordering::SeqCst);
                 }
-                // Try to recreate the capture source, preferring the backend that was
-                // actually delivering frames before this failure (survival-first order).
+                // The HTTP server and viewer connections stay alive during the pause;
+                // viewers keep the last frame and see a "retrying" hint via /status.
                 drop(source);
-                match create_capture_source(
-                    monitor_index,
-                    show_cursor,
-                    backend_mode,
-                    CaptureStartKind::RuntimeRecreate,
-                    Some(current_backend),
-                    &cancel,
-                    &runtime_handle,
-                    session_id,
-                    &app_handle,
-                ) {
-                    Ok(c) => {
-                        let recreated_msg = format!(
-                            "屏幕捕获器重建成功: attempt={}, monitor_index={}, viewers={}",
-                            recreate_attempts,
+
+                let mut retry_attempt = 0u32;
+                let recovered = loop {
+                    if !wait_for_capture_retry_delay(
+                        capture_recreate_backoff(retry_attempt),
+                        &cancel,
+                        &runtime_handle,
+                        session_id,
+                    ) {
+                        break None;
+                    }
+                    match create_capture_source(
+                        monitor_index,
+                        show_cursor,
+                        backend_mode,
+                        CaptureStartKind::RuntimeRecreate,
+                        Some(current_backend),
+                        &cancel,
+                        &runtime_handle,
+                        session_id,
+                        &app_handle,
+                    ) {
+                        Ok(new_source) => break Some(new_source),
+                        Err(err) => {
+                            retry_attempt = retry_attempt.saturating_add(1);
+                            let retry_msg = format!(
+                                "屏幕捕获器重建失败，{}s 后继续重试: attempt={}, monitor_index={}, viewers={}, cause={}",
+                                capture_recreate_backoff(retry_attempt).as_secs(),
+                                retry_attempt,
+                                monitor_index,
+                                viewer_count.load(Ordering::Relaxed),
+                                err
+                            );
+                            log::warn!("{}", retry_msg);
+                            crate::scanner::emit_tool_log(
+                                &app_handle,
+                                TOOL_NAME,
+                                &retry_msg,
+                                "warn",
+                            );
+                            let _ = app_handle.emit(
+                                "screen-share-log",
+                                serde_json::json!({ "level": "warn", "message": retry_msg }),
+                            );
+                        }
+                    }
+                };
+
+                match recovered {
+                    Some(new_source) => {
+                        source = new_source;
+                        if is_current_session(&runtime_handle, session_id) {
+                            runtime_handle.capture_paused.store(false, Ordering::SeqCst);
+                        }
+                        let resumed_msg = format!(
+                            "屏幕捕获已恢复: retries={}, monitor_index={}, backend={}",
+                            retry_attempt,
                             monitor_index,
-                            viewer_count.load(Ordering::Relaxed)
+                            source.backend_kind().label()
                         );
-                        log::info!("{}", recreated_msg);
+                        log::info!("{}", resumed_msg);
                         crate::scanner::emit_tool_log(
                             &app_handle,
                             TOOL_NAME,
-                            &recreated_msg,
-                            "info",
+                            &resumed_msg,
+                            "success",
                         );
                         let _ = app_handle.emit(
                             "screen-share-log",
-                            serde_json::json!({ "level": "info", "message": recreated_msg }),
+                            serde_json::json!({ "level": "info", "message": resumed_msg }),
                         );
-                        source = c;
+                        first_real_frame = false;
+                        continue;
                     }
-                    Err(err) => {
-                        let recreate_failed_msg = format!(
-                            "屏幕捕获器重建失败，已停止: attempt={}, monitor_index={}, viewers={}, cause={}",
-                            recreate_attempts,
-                            monitor_index,
-                            viewer_count.load(Ordering::Relaxed),
-                            err
-                        );
-                        log::error!("{}", recreate_failed_msg);
-                        shutdown_after_capture_failure(
-                            &app_handle,
-                            &runtime_handle,
-                            session_id,
-                            &recreate_failed_msg,
-                        );
-                        break;
-                    }
+                    None => break, // 会话被取消，正常退出
                 }
-                continue;
             }
         }
 
@@ -2619,6 +2628,7 @@ async fn status_reporter(
     all_urls: Vec<String>,
     start_time: Instant,
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
+    capture_paused: Arc<AtomicBool>,
     runtime_handle: Arc<ScreenShareHandle>,
     session_id: u64,
 ) {
@@ -2649,6 +2659,7 @@ async fn status_reporter(
             server_url: server_url.clone(),
             all_urls: all_urls.clone(),
             connected_ips,
+            capture_paused: capture_paused.load(Ordering::Relaxed),
         };
 
         let _ = app_handle.emit("screen-share-status", &status);
@@ -3217,6 +3228,15 @@ mod tests {
             ),
             vec![CaptureBackendKind::Wgc, CaptureBackendKind::Dxgi]
         );
+    }
+
+    #[test]
+    fn capture_recreate_backoff_grows_and_caps_at_30s() {
+        assert_eq!(capture_recreate_backoff(0), Duration::from_millis(1000));
+        assert_eq!(capture_recreate_backoff(1), Duration::from_millis(2000));
+        assert_eq!(capture_recreate_backoff(2), Duration::from_millis(4000));
+        assert_eq!(capture_recreate_backoff(5), Duration::from_millis(30000));
+        assert_eq!(capture_recreate_backoff(100), Duration::from_millis(30000));
     }
 
     #[test]
