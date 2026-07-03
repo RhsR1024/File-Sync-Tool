@@ -3739,8 +3739,6 @@ fn main() {
             network::send_wol,
             screenshare::screen_share_list_monitors,
             screenshare::screen_share_list_interfaces,
-            screenshare::screen_share_scan_conflicts,
-            screenshare::screen_share_force_close_conflicts,
             screenshare::screen_share_start,
             screenshare::screen_share_stop,
             screenshare::screen_share_get_status,

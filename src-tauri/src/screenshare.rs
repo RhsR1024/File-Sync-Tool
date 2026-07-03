@@ -1,14 +1,14 @@
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
+#[cfg(target_os = "windows")]
+use std::mem;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
-#[cfg(target_os = "windows")]
-use std::{mem, process::Command};
 
 use axum::extract::{ConnectInfo, Query, State as AxumState};
 use axum::http::{header::USER_AGENT, HeaderMap, StatusCode};
@@ -34,7 +34,7 @@ use windows::Graphics::DirectX::Direct3D11::{IDirect3DDevice, IDirect3DSurface};
 #[cfg(target_os = "windows")]
 use windows::Graphics::DirectX::DirectXPixelFormat;
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{CloseHandle, BOOL, HMODULE, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{BOOL, HMODULE, LPARAM, RECT};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 #[cfg(target_os = "windows")]
@@ -54,10 +54,6 @@ use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
 };
 #[cfg(target_os = "windows")]
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
-};
-#[cfg(target_os = "windows")]
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
@@ -65,18 +61,15 @@ use windows::Win32::System::WinRT::Direct3D11::{
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
-#[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-};
 
 // ─── Public Data Types ──────────────────────────────────────
 
 const TOOL_NAME: &str = "屏幕共享";
 
 const VIEWER_IP_TTL: Duration = Duration::from_secs(12);
-const CAPTURE_CREATE_RETRY_DELAYS_MS: [u64; 8] = [0, 200, 400, 800, 1500, 2500, 4000, 6000];
-const CAPTURE_AUTO_DXGI_RETRY_DELAYS_MS: [u64; 3] = [0, 200, 400];
+/// DXGI DuplicateOutput 偶发瞬时失败，创建时做 3 次短重试；
+/// 长退避由捕获循环的暂停-重试机制负责，此处不需要更长的重试梯子。
+const DXGI_CREATE_RETRY_DELAYS_MS: [u64; 3] = [0, 200, 400];
 const CAPTURE_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPTURE_RETRY_CANCEL_POLL_MS: u64 = 100;
 type ViewerIpMap = HashMap<String, Instant>;
@@ -115,11 +108,38 @@ impl ScreenShareBackendMode {
     }
 }
 
-fn capture_retry_delays_for_mode(mode: ScreenShareBackendMode) -> &'static [u64] {
-    match mode {
-        ScreenShareBackendMode::Auto => &CAPTURE_AUTO_DXGI_RETRY_DELAYS_MS,
-        ScreenShareBackendMode::Dxgi => &CAPTURE_CREATE_RETRY_DELAYS_MS,
-        ScreenShareBackendMode::Wgc => &[],
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureStartKind {
+    InitialStart,
+    RuntimeRecreate,
+}
+
+/// 决定采集后端尝试顺序。
+/// - 初始启动：严格尊重用户选择（显式 DXGI 表示"要无边框"，失败就报错，不悄悄换成有黄框的 WGC）。
+///   Auto 模式 WGC 优先——它无独占语义、不被锁屏杀死，是稳定性默认。
+/// - 运行期重建：保命优先，先试刚才还活着的后端，另一个作为降级，绝不因单后端失败而停止共享。
+fn capture_backend_order(
+    mode: ScreenShareBackendMode,
+    kind: CaptureStartKind,
+    current: Option<CaptureBackendKind>,
+) -> Vec<CaptureBackendKind> {
+    match kind {
+        CaptureStartKind::InitialStart => match mode {
+            ScreenShareBackendMode::Auto => vec![CaptureBackendKind::Wgc, CaptureBackendKind::Dxgi],
+            ScreenShareBackendMode::Wgc => vec![CaptureBackendKind::Wgc],
+            ScreenShareBackendMode::Dxgi => vec![CaptureBackendKind::Dxgi],
+        },
+        CaptureStartKind::RuntimeRecreate => {
+            let first = current.unwrap_or(match mode {
+                ScreenShareBackendMode::Dxgi => CaptureBackendKind::Dxgi,
+                _ => CaptureBackendKind::Wgc,
+            });
+            let second = match first {
+                CaptureBackendKind::Wgc => CaptureBackendKind::Dxgi,
+                CaptureBackendKind::Dxgi => CaptureBackendKind::Wgc,
+            };
+            vec![first, second]
+        }
     }
 }
 
@@ -166,31 +186,6 @@ pub struct ScreenShareStatus {
     pub server_url: String,
     pub all_urls: Vec<String>,
     pub connected_ips: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ScreenShareConflictProcess {
-    pub pid: u32,
-    pub process_name: String,
-    pub window_title: String,
-    pub reason: String,
-    pub risk_level: String,
-    pub can_force_close: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ScreenShareConflictCloseResult {
-    pub closed_pids: Vec<u32>,
-    pub failed_pids: Vec<u32>,
-    pub skipped_pids: Vec<u32>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScreenCaptureConflictPolicy {
-    reason: &'static str,
-    risk_level: &'static str,
-    can_force_close: bool,
 }
 
 // ─── Handle (stored in AppState) ────────────────────────────
@@ -832,212 +827,6 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
     }
 }
 
-// ─── Cursor Overlay (Windows) ──────────────────────────────
-
-fn normalize_process_name(process_name: &str) -> String {
-    let normalized = process_name.trim().to_ascii_lowercase();
-    normalized
-        .strip_suffix(".exe")
-        .unwrap_or(&normalized)
-        .to_string()
-}
-
-fn screen_capture_conflict_policy(process_name: &str) -> Option<ScreenCaptureConflictPolicy> {
-    let normalized = normalize_process_name(process_name);
-
-    match normalized.as_str() {
-        "screentask"
-        | "dingtalk"
-        | "zoom"
-        | "wechat"
-        | "weixin"
-        | "qq"
-        | "qqpcrtp"
-        | "qqpctray"
-        | "lark"
-        | "feishu"
-        | "obs"
-        | "obs64"
-        | "rustdesk"
-        | "anydesk"
-        | "todesk"
-        | "sunlogin"
-        | "sunloginclient"
-        | "teamviewer"
-        | "scrcpy"
-        | "bandicam"
-        | "camtasia"
-        | "snagitcapture"
-        | "snagit32"
-        | "xsplit"
-        | "teams"
-        | "ms-teams"
-        | "msteams" => Some(ScreenCaptureConflictPolicy {
-            reason: "Known meeting, remote-control, or capture client may keep the desktop duplication session busy",
-            risk_level: "high",
-            can_force_close: true,
-        }),
-        "chrome" | "msedge" | "msedgewebview2" | "firefox" => {
-            Some(ScreenCaptureConflictPolicy {
-                reason: "Browser-based tab or window sharing can leave a capture session active",
-                risk_level: "medium",
-                can_force_close: false,
-            })
-        }
-        "mstsc" => Some(ScreenCaptureConflictPolicy {
-            reason: "Remote Desktop sessions can block local desktop duplication capture",
-            risk_level: "medium",
-            can_force_close: false,
-        }),
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn utf16_cstr_to_string(raw: &[u16]) -> String {
-    let len = raw
-        .iter()
-        .position(|value| *value == 0)
-        .unwrap_or(raw.len());
-    String::from_utf16_lossy(&raw[..len])
-}
-
-#[cfg(target_os = "windows")]
-fn collect_window_titles_by_pid() -> HashMap<u32, String> {
-    unsafe extern "system" fn callback(hwnd: HWND, data: LPARAM) -> BOOL {
-        if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
-            return BOOL(1);
-        }
-
-        let title_len = unsafe { GetWindowTextLengthW(hwnd) };
-        if title_len <= 0 {
-            return BOOL(1);
-        }
-
-        let mut pid = 0;
-        unsafe {
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        }
-        if pid == 0 {
-            return BOOL(1);
-        }
-
-        let mut buffer = vec![0u16; title_len as usize + 1];
-        let copied = unsafe { GetWindowTextW(hwnd, &mut buffer) };
-        if copied <= 0 {
-            return BOOL(1);
-        }
-
-        let title = String::from_utf16_lossy(&buffer[..copied as usize])
-            .trim()
-            .to_string();
-        if title.is_empty() {
-            return BOOL(1);
-        }
-
-        let titles = unsafe { &mut *(data.0 as *mut HashMap<u32, String>) };
-        titles.entry(pid).or_insert(title);
-
-        BOOL(1)
-    }
-
-    let mut titles = HashMap::new();
-    unsafe {
-        let _ = EnumWindows(
-            Some(callback),
-            LPARAM(&mut titles as *mut HashMap<u32, String> as isize),
-        );
-    }
-    titles
-}
-
-#[cfg(target_os = "windows")]
-fn scan_screen_share_conflicts() -> Result<Vec<ScreenShareConflictProcess>, String> {
-    let window_titles = collect_window_titles_by_pid();
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
-        .map_err(|error| format!("failed to snapshot running processes: {}", error))?;
-
-    let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
-    let mut conflicts = Vec::new();
-    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
-
-    while has_entry {
-        let process_name = utf16_cstr_to_string(&entry.szExeFile);
-        if let Some(policy) = screen_capture_conflict_policy(&process_name) {
-            let window_title = window_titles
-                .get(&entry.th32ProcessID)
-                .cloned()
-                .unwrap_or_default();
-            if policy.can_force_close || !window_title.is_empty() {
-                conflicts.push(ScreenShareConflictProcess {
-                    pid: entry.th32ProcessID,
-                    process_name,
-                    window_title,
-                    reason: policy.reason.to_string(),
-                    risk_level: policy.risk_level.to_string(),
-                    can_force_close: policy.can_force_close,
-                });
-            }
-        }
-
-        has_entry = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
-    }
-
-    let _ = unsafe { CloseHandle(snapshot) };
-
-    conflicts.sort_by(|left, right| {
-        right
-            .can_force_close
-            .cmp(&left.can_force_close)
-            .then(left.process_name.cmp(&right.process_name))
-            .then(left.pid.cmp(&right.pid))
-    });
-
-    Ok(conflicts)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn scan_screen_share_conflicts() -> Result<Vec<ScreenShareConflictProcess>, String> {
-    Ok(Vec::new())
-}
-
-fn blocking_capture_conflicts(
-    conflicts: &[ScreenShareConflictProcess],
-) -> Vec<&ScreenShareConflictProcess> {
-    conflicts
-        .iter()
-        .filter(|conflict| conflict.can_force_close && !conflict.window_title.trim().is_empty())
-        .collect()
-}
-
-fn format_capture_conflict_summary(conflicts: &[&ScreenShareConflictProcess]) -> String {
-    conflicts
-        .iter()
-        .take(5)
-        .map(|conflict| {
-            let title = sanitize_log_field(conflict.window_title.trim());
-            format!(
-                "{}(pid={}, title={})",
-                conflict.process_name, conflict.pid, title
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn capture_blocking_conflict_error(conflicts: &[ScreenShareConflictProcess]) -> Option<String> {
-    let blocking = blocking_capture_conflicts(conflicts);
-    if blocking.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "detected blocking screen-capture app(s): {}; close them and retry",
-        format_capture_conflict_summary(&blocking)
-    ))
-}
-
 fn sanitize_log_field(value: &str) -> String {
     let sanitized = value
         .trim()
@@ -1050,141 +839,7 @@ fn sanitize_log_field(value: &str) -> String {
     }
 }
 
-fn format_capture_conflict_diagnostics(conflicts: &[ScreenShareConflictProcess]) -> String {
-    let blocking = blocking_capture_conflicts(&conflicts);
-    let blocking_summary = if blocking.is_empty() {
-        "none".to_string()
-    } else {
-        format_capture_conflict_summary(&blocking)
-    };
-    let top_processes = conflicts
-        .iter()
-        .take(8)
-        .map(|conflict| {
-            format!(
-                "{}(pid={}, title={}, can_force_close={}, risk={})",
-                conflict.process_name,
-                conflict.pid,
-                sanitize_log_field(&conflict.window_title),
-                conflict.can_force_close,
-                sanitize_log_field(&conflict.risk_level)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    let top_processes = if top_processes.is_empty() {
-        "none".to_string()
-    } else {
-        top_processes
-    };
-
-    format!(
-        "conflict_scan=ok,total={},blocking_count={},blocking={},top={}",
-        conflicts.len(),
-        blocking.len(),
-        blocking_summary,
-        top_processes
-    )
-}
-
-fn capture_conflict_diagnostics_snapshot() -> String {
-    match scan_screen_share_conflicts() {
-        Ok(conflicts) => format_capture_conflict_diagnostics(&conflicts),
-        Err(error) => format!("conflict_scan=error,error={}", sanitize_log_field(&error)),
-    }
-}
-
-fn capture_blocking_conflict_error_snapshot() -> Option<String> {
-    let conflicts = scan_screen_share_conflicts().ok()?;
-    capture_blocking_conflict_error(&conflicts)
-}
-
-#[tauri::command]
-pub fn screen_share_scan_conflicts() -> Result<Vec<ScreenShareConflictProcess>, String> {
-    scan_screen_share_conflicts()
-}
-
-#[cfg(target_os = "windows")]
-fn force_close_screen_share_conflicts_inner(
-    pids: Vec<u32>,
-) -> Result<ScreenShareConflictCloseResult, String> {
-    let mut result = ScreenShareConflictCloseResult::default();
-    let allowed_conflicts = scan_screen_share_conflicts()?;
-    let allowed_pids: HashSet<u32> = allowed_conflicts
-        .into_iter()
-        .filter(|item| item.can_force_close)
-        .map(|item| item.pid)
-        .collect();
-    let mut seen = HashSet::new();
-    let mut failures = Vec::new();
-
-    for pid in pids {
-        if pid == 0 || !seen.insert(pid) {
-            continue;
-        }
-
-        if !allowed_pids.contains(&pid) {
-            result.skipped_pids.push(pid);
-            continue;
-        }
-
-        match Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F", "/T"])
-            .status()
-        {
-            Ok(status) if status.success() => result.closed_pids.push(pid),
-            Ok(status) => {
-                result.failed_pids.push(pid);
-                failures.push(format!("PID {} exited with status {}", pid, status));
-            }
-            Err(error) => {
-                result.failed_pids.push(pid);
-                failures.push(format!("PID {} taskkill failed: {}", pid, error));
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        result.error = Some(failures.join("; "));
-    }
-
-    Ok(result)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn force_close_screen_share_conflicts_inner(
-    _pids: Vec<u32>,
-) -> Result<ScreenShareConflictCloseResult, String> {
-    Ok(ScreenShareConflictCloseResult::default())
-}
-
-#[tauri::command]
-pub fn screen_share_force_close_conflicts(
-    app_handle: AppHandle,
-    pids: Vec<u32>,
-) -> Result<ScreenShareConflictCloseResult, String> {
-    let result = force_close_screen_share_conflicts_inner(pids)?;
-
-    if !result.closed_pids.is_empty() {
-        crate::scanner::emit_tool_log(
-            &app_handle,
-            TOOL_NAME,
-            &format!(
-                "已尝试结束屏幕采集冲突进程: {}",
-                result
-                    .closed_pids
-                    .iter()
-                    .map(|pid| pid.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            "warn",
-        );
-    }
-
-    Ok(result)
-}
-
+// ─── Cursor Overlay (Windows) ──────────────────────────────
 #[cfg(target_os = "windows")]
 mod cursor_overlay {
     use std::mem;
@@ -1571,6 +1226,8 @@ fn capture_loop(
         monitor_index,
         show_cursor,
         backend_mode,
+        CaptureStartKind::InitialStart,
+        None,
         &cancel,
         &runtime_handle,
         session_id,
@@ -1744,21 +1401,15 @@ fn capture_loop(
                 ) {
                     break;
                 }
-                // Prefer the backend that was actually working before this failure. Once WGC is
-                // active we pin WGC on recreate so a transient ACCESS_LOST does not re-probe DXGI
-                // every time — re-probing is slow and re-triggers the DXGI conflict with apps like
-                // DingTalk that keep the desktop-duplication session busy. While DXGI is still the
-                // active backend we keep the configured mode so Auto can fall back to WGC as usual.
-                let recreate_mode = match current_backend {
-                    CaptureBackendKind::Wgc => ScreenShareBackendMode::Wgc,
-                    CaptureBackendKind::Dxgi => backend_mode,
-                };
-                // Try to recreate capture source. On Windows this may fall back from DXGI to WGC.
+                // Try to recreate the capture source, preferring the backend that was
+                // actually delivering frames before this failure (survival-first order).
                 drop(source);
                 match create_capture_source(
                     monitor_index,
                     show_cursor,
-                    recreate_mode,
+                    backend_mode,
+                    CaptureStartKind::RuntimeRecreate,
+                    Some(current_backend),
                     &cancel,
                     &runtime_handle,
                     session_id,
@@ -1843,29 +1494,11 @@ fn should_retry_capture_creation(error_kind: std::io::ErrorKind) -> bool {
 fn capture_creation_hint(error_kind: std::io::ErrorKind) -> Option<&'static str> {
     if should_retry_capture_creation(error_kind) {
         Some(
-            "possible cause: another screen-capture session is still holding the monitor; close ScreenTask or other capture tools and retry",
+            "possible cause: the desktop is on the lock/UAC secure desktop, or the session is disconnected",
         )
     } else {
         None
     }
-}
-
-#[cfg(test)]
-fn capture_create_retry_window() -> Duration {
-    CAPTURE_CREATE_RETRY_DELAYS_MS
-        .iter()
-        .fold(Duration::from_millis(0), |total, delay_ms| {
-            total + Duration::from_millis(*delay_ms)
-        })
-}
-
-#[cfg(test)]
-fn capture_create_retry_window_for_mode(mode: ScreenShareBackendMode) -> Duration {
-    capture_retry_delays_for_mode(mode)
-        .iter()
-        .fold(Duration::from_millis(0), |total, delay_ms| {
-            total + Duration::from_millis(*delay_ms)
-        })
 }
 
 fn wait_for_capture_retry_delay(
@@ -1974,86 +1607,42 @@ fn create_capture_source(
     monitor_index: usize,
     show_cursor: bool,
     backend_mode: ScreenShareBackendMode,
+    start_kind: CaptureStartKind,
+    current_backend: Option<CaptureBackendKind>,
     cancel: &AtomicBool,
     runtime_handle: &ScreenShareHandle,
     session_id: u64,
     app_handle: &AppHandle,
 ) -> Result<CaptureSource, String> {
-    match backend_mode {
-        ScreenShareBackendMode::Dxgi => {
-            let capturer = create_capturer(
+    #[cfg(not(target_os = "windows"))]
+    let _ = show_cursor;
+
+    let order = capture_backend_order(backend_mode, start_kind, current_backend);
+    let mut failures: Vec<String> = Vec::new();
+
+    for (index, backend) in order.iter().enumerate() {
+        let result: Result<CaptureSource, String> = match backend {
+            CaptureBackendKind::Dxgi => create_capturer(
                 monitor_index,
-                ScreenShareBackendMode::Dxgi,
                 cancel,
                 runtime_handle,
                 session_id,
                 app_handle,
-            )?;
-            let source = CaptureSource::Dxgi(capturer);
-            emit_capture_create_diagnostic(
-                app_handle,
-                "success",
-                format_capture_backend_selected_message(
-                    source.backend_kind(),
-                    session_id,
-                    monitor_index,
-                    source.width(),
-                    source.height(),
-                ),
-            );
-            Ok(source)
-        }
-        ScreenShareBackendMode::Wgc => {
+            )
+            .map(CaptureSource::Dxgi),
             #[cfg(target_os = "windows")]
-            {
-                match create_wgc_capturer(monitor_index, show_cursor, session_id, app_handle) {
-                    Ok(wgc_capturer) => {
-                        let source = CaptureSource::Wgc(wgc_capturer);
-                        emit_capture_create_diagnostic(
-                            app_handle,
-                            "success",
-                            format_capture_backend_selected_message(
-                                source.backend_kind(),
-                                session_id,
-                                monitor_index,
-                                source.width(),
-                                source.height(),
-                            ),
-                        );
-                        Ok(source)
-                    }
-                    Err(wgc_error) => {
-                        emit_capture_create_diagnostic(
-                            app_handle,
-                            "error",
-                            format_capture_backend_failure_message(
-                                CaptureBackendKind::Wgc,
-                                session_id,
-                                monitor_index,
-                                &wgc_error,
-                            ),
-                        );
-                        Err(format!("WGC capture backend failed: {}", wgc_error))
-                    }
-                }
+            CaptureBackendKind::Wgc => {
+                create_wgc_capturer(monitor_index, show_cursor, session_id, app_handle)
+                    .map(CaptureSource::Wgc)
             }
-
             #[cfg(not(target_os = "windows"))]
-            {
-                let _ = show_cursor;
+            CaptureBackendKind::Wgc => {
                 Err("WGC capture backend is only available on Windows".to_string())
             }
-        }
-        ScreenShareBackendMode::Auto => match create_capturer(
-            monitor_index,
-            ScreenShareBackendMode::Auto,
-            cancel,
-            runtime_handle,
-            session_id,
-            app_handle,
-        ) {
-            Ok(capturer) => {
-                let source = CaptureSource::Dxgi(capturer);
+        };
+
+        match result {
+            Ok(source) => {
                 emit_capture_create_diagnostic(
                     app_handle,
                     "success",
@@ -2065,66 +1654,44 @@ fn create_capture_source(
                         source.height(),
                     ),
                 );
-                Ok(source)
+                return Ok(source);
             }
-            Err(dxgi_error) => {
-                #[cfg(target_os = "windows")]
-                {
+            Err(error) => {
+                let has_next = index + 1 < order.len();
+                if has_next {
                     emit_capture_create_diagnostic(
                         app_handle,
                         "warn",
                         format_capture_backend_fallback_message(
-                            CaptureBackendKind::Dxgi,
-                            CaptureBackendKind::Wgc,
+                            *backend,
+                            order[index + 1],
                             session_id,
                             monitor_index,
-                            &dxgi_error,
+                            &error,
                         ),
                     );
-
-                    match create_wgc_capturer(monitor_index, show_cursor, session_id, app_handle) {
-                        Ok(wgc_capturer) => {
-                            let source = CaptureSource::Wgc(wgc_capturer);
-                            emit_capture_create_diagnostic(
-                                app_handle,
-                                "success",
-                                format_capture_backend_selected_message(
-                                    source.backend_kind(),
-                                    session_id,
-                                    monitor_index,
-                                    source.width(),
-                                    source.height(),
-                                ),
-                            );
-                            Ok(source)
-                        }
-                        Err(wgc_error) => {
-                            emit_capture_create_diagnostic(
-                                app_handle,
-                                "error",
-                                format_capture_backend_failure_message(
-                                    CaptureBackendKind::Wgc,
-                                    session_id,
-                                    monitor_index,
-                                    &wgc_error,
-                                ),
-                            );
-                            Err(format!(
-                                "DXGI capture backend failed: {}; WGC capture backend failed: {}",
-                                dxgi_error, wgc_error
-                            ))
-                        }
-                    }
+                } else {
+                    emit_capture_create_diagnostic(
+                        app_handle,
+                        "error",
+                        format_capture_backend_failure_message(
+                            *backend,
+                            session_id,
+                            monitor_index,
+                            &error,
+                        ),
+                    );
                 }
-
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = show_cursor;
-                    Err(dxgi_error)
-                }
+                failures.push(format!("{}: {}", backend.label(), error));
             }
-        },
+        }
+
+        if cancel.load(Ordering::Relaxed) || !is_current_session(runtime_handle, session_id) {
+            return Err("screen capture init cancelled".to_string());
+        }
     }
+
+    Err(failures.join("; "))
 }
 
 #[cfg(target_os = "windows")]
@@ -2586,7 +2153,6 @@ fn create_wgc_capturer(
 
 fn create_capturer(
     monitor_index: usize,
-    backend_mode: ScreenShareBackendMode,
     cancel: &AtomicBool,
     runtime_handle: &ScreenShareHandle,
     session_id: u64,
@@ -2594,21 +2160,20 @@ fn create_capturer(
 ) -> Result<Capturer, String> {
     let mut last_error = None;
     let started_at = Instant::now();
-    let retry_delays = capture_retry_delays_for_mode(backend_mode);
+    let retry_delays: &[u64] = &DXGI_CREATE_RETRY_DELAYS_MS;
     let total_attempts = retry_delays.len();
 
     emit_capture_create_diagnostic(
         app_handle,
         "info",
         format!(
-            "屏幕捕获器创建开始: session_id={}, monitor_index={}, attempts={}, retry_delays_ms={:?}, startup_timeout_ms={}, {}, {}",
+            "屏幕捕获器创建开始: session_id={}, monitor_index={}, attempts={}, retry_delays_ms={:?}, startup_timeout_ms={}, {}",
             session_id,
             monitor_index,
             total_attempts,
             retry_delays,
             CAPTURE_STARTUP_TIMEOUT.as_millis(),
-            capture_runtime_state_summary(runtime_handle, session_id),
-            capture_conflict_diagnostics_snapshot()
+            capture_runtime_state_summary(runtime_handle, session_id)
         ),
     );
 
@@ -2673,7 +2238,6 @@ fn create_capturer(
             Err(error) => {
                 let is_last_attempt = attempt_index + 1 == retry_delays.len();
                 let retryable = error.retryable();
-                let conflicts = capture_conflict_diagnostics_snapshot();
                 emit_capture_create_diagnostic(
                     app_handle,
                     if is_last_attempt || !retryable {
@@ -2682,7 +2246,7 @@ fn create_capturer(
                         "warn"
                     },
                     format!(
-                        "屏幕捕获器创建失败: session_id={}, attempt={}/{}, next_delay_ms={}, elapsed_ms={}, monitor_index={}, retryable={}, error_kind={:?}, cause={}, {}, {}",
+                        "屏幕捕获器创建失败: session_id={}, attempt={}/{}, next_delay_ms={}, elapsed_ms={}, monitor_index={}, retryable={}, error_kind={:?}, cause={}, {}",
                         session_id,
                         attempt_index + 1,
                         total_attempts,
@@ -2695,15 +2259,9 @@ fn create_capturer(
                         retryable,
                         error.kind,
                         error.detail,
-                        capture_runtime_state_summary(runtime_handle, session_id),
-                        conflicts
+                        capture_runtime_state_summary(runtime_handle, session_id)
                     ),
                 );
-                if retryable {
-                    if let Some(conflict_error) = capture_blocking_conflict_error_snapshot() {
-                        return Err(format!("{}; {}", error.detail, conflict_error));
-                    }
-                }
                 if !error.retryable() || is_last_attempt {
                     let attempts = attempt_index + 1;
                     return Err(match last_error.take() {
@@ -3609,6 +3167,59 @@ mod tests {
     }
 
     #[test]
+    fn auto_mode_tries_wgc_before_dxgi_on_initial_start() {
+        assert_eq!(
+            capture_backend_order(
+                ScreenShareBackendMode::Auto,
+                CaptureStartKind::InitialStart,
+                None
+            ),
+            vec![CaptureBackendKind::Wgc, CaptureBackendKind::Dxgi]
+        );
+    }
+
+    #[test]
+    fn explicit_modes_are_strict_on_initial_start() {
+        assert_eq!(
+            capture_backend_order(
+                ScreenShareBackendMode::Dxgi,
+                CaptureStartKind::InitialStart,
+                None
+            ),
+            vec![CaptureBackendKind::Dxgi]
+        );
+        assert_eq!(
+            capture_backend_order(
+                ScreenShareBackendMode::Wgc,
+                CaptureStartKind::InitialStart,
+                None
+            ),
+            vec![CaptureBackendKind::Wgc]
+        );
+    }
+
+    #[test]
+    fn runtime_recreate_prefers_current_backend_then_survival_fallback() {
+        // 运行中重建：先试当前存活过的后端，另一个作为保命降级——即使用户显式选了 DXGI
+        assert_eq!(
+            capture_backend_order(
+                ScreenShareBackendMode::Dxgi,
+                CaptureStartKind::RuntimeRecreate,
+                Some(CaptureBackendKind::Dxgi)
+            ),
+            vec![CaptureBackendKind::Dxgi, CaptureBackendKind::Wgc]
+        );
+        assert_eq!(
+            capture_backend_order(
+                ScreenShareBackendMode::Auto,
+                CaptureStartKind::RuntimeRecreate,
+                Some(CaptureBackendKind::Wgc)
+            ),
+            vec![CaptureBackendKind::Wgc, CaptureBackendKind::Dxgi]
+        );
+    }
+
+    #[test]
     fn begin_start_rejects_second_start_until_guard_is_released() {
         let handle = Arc::new(ScreenShareHandle::new());
 
@@ -3674,90 +3285,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_startup_timeout_covers_full_retry_window() {
-        assert!(CAPTURE_STARTUP_TIMEOUT >= capture_create_retry_window() + Duration::from_secs(2));
-    }
-
-    #[test]
-    fn capture_startup_timeout_leaves_room_for_wgc_fallback_startup() {
-        assert!(CAPTURE_STARTUP_TIMEOUT >= capture_create_retry_window() + Duration::from_secs(10));
-    }
-
-    #[test]
-    fn blocking_capture_conflicts_selects_visible_force_close_processes() {
-        let conflicts = vec![
-            ScreenShareConflictProcess {
-                pid: 12400,
-                process_name: "DingTalk.exe".to_string(),
-                window_title: "钉钉".to_string(),
-                reason: "meeting app".to_string(),
-                risk_level: "high".to_string(),
-                can_force_close: true,
-            },
-            ScreenShareConflictProcess {
-                pid: 5392,
-                process_name: "msedgewebview2.exe".to_string(),
-                window_title: String::new(),
-                reason: "browser".to_string(),
-                risk_level: "medium".to_string(),
-                can_force_close: false,
-            },
-            ScreenShareConflictProcess {
-                pid: 7160,
-                process_name: "QQPCTray.exe".to_string(),
-                window_title: String::new(),
-                reason: "background tool".to_string(),
-                risk_level: "high".to_string(),
-                can_force_close: true,
-            },
-        ];
-
-        let blocking = blocking_capture_conflicts(&conflicts);
-
-        assert_eq!(blocking.len(), 1);
-        assert_eq!(blocking[0].process_name, "DingTalk.exe");
-    }
-
-    #[test]
-    fn capture_conflict_summary_includes_actionable_process_details() {
-        let conflicts = vec![ScreenShareConflictProcess {
-            pid: 12400,
-            process_name: "DingTalk.exe".to_string(),
-            window_title: "钉钉".to_string(),
-            reason: "meeting app".to_string(),
-            risk_level: "high".to_string(),
-            can_force_close: true,
-        }];
-        let blocking = blocking_capture_conflicts(&conflicts);
-
-        let summary = format_capture_conflict_summary(&blocking);
-
-        assert!(summary.contains("DingTalk.exe"));
-        assert!(summary.contains("pid=12400"));
-        assert!(summary.contains("钉钉"));
-    }
-
-    #[test]
-    fn capture_blocking_conflict_error_includes_close_and_retry_action() {
-        let conflicts = vec![ScreenShareConflictProcess {
-            pid: 12416,
-            process_name: "ScreenTask.exe".to_string(),
-            window_title: "Screen Task v1.2".to_string(),
-            reason: "capture app".to_string(),
-            risk_level: "high".to_string(),
-            can_force_close: true,
-        }];
-
-        let message = capture_blocking_conflict_error(&conflicts)
-            .expect("visible force-close conflict should produce an error");
-
-        assert!(message.contains("ScreenTask.exe"));
-        assert!(message.contains("pid=12416"));
-        assert!(message.contains("close"));
-        assert!(message.contains("retry"));
-    }
-
-    #[test]
     fn dxgi_failure_fallback_message_names_wgc_target_backend() {
         let message = format_capture_backend_fallback_message(
             CaptureBackendKind::Dxgi,
@@ -3801,47 +3328,6 @@ mod tests {
     }
 
     #[test]
-    fn automatic_backend_mode_uses_shorter_dxgi_retry_window_than_dxgi_only() {
-        assert!(
-            capture_create_retry_window_for_mode(ScreenShareBackendMode::Auto)
-                < capture_create_retry_window_for_mode(ScreenShareBackendMode::Dxgi)
-        );
-        assert_eq!(
-            capture_create_retry_window_for_mode(ScreenShareBackendMode::Auto),
-            Duration::from_millis(600)
-        );
-    }
-
-    #[test]
-    fn capture_conflict_diagnostics_reports_target_machine_snapshot() {
-        let conflicts = vec![
-            ScreenShareConflictProcess {
-                pid: 12400,
-                process_name: "DingTalk.exe".to_string(),
-                window_title: "钉钉".to_string(),
-                reason: "meeting app".to_string(),
-                risk_level: "high".to_string(),
-                can_force_close: true,
-            },
-            ScreenShareConflictProcess {
-                pid: 5392,
-                process_name: "msedgewebview2.exe".to_string(),
-                window_title: String::new(),
-                reason: "browser".to_string(),
-                risk_level: "medium".to_string(),
-                can_force_close: false,
-            },
-        ];
-
-        let diagnostics = format_capture_conflict_diagnostics(&conflicts);
-
-        assert!(diagnostics.contains("total=2"));
-        assert!(diagnostics.contains("blocking_count=1"));
-        assert!(diagnostics.contains("DingTalk.exe"));
-        assert!(diagnostics.contains("msedgewebview2.exe"));
-    }
-
-    #[test]
     fn snapshot_viewer_ips_prunes_stale_heartbeats() {
         let now = Instant::now();
         let ips = Arc::new(Mutex::new(std::collections::HashMap::new()));
@@ -3878,28 +3364,5 @@ mod tests {
         assert!(!should_retry_capture_creation(
             std::io::ErrorKind::InvalidData
         ));
-    }
-
-    #[test]
-    fn screen_capture_conflict_policy_marks_dingtalk_as_force_closeable() {
-        let policy =
-            screen_capture_conflict_policy("DingTalk.exe").expect("DingTalk should be detected");
-
-        assert_eq!(policy.risk_level, "high");
-        assert!(policy.can_force_close);
-    }
-
-    #[test]
-    fn screen_capture_conflict_policy_marks_browsers_as_detect_only() {
-        let policy =
-            screen_capture_conflict_policy("chrome.exe").expect("Chrome should be detected");
-
-        assert_eq!(policy.risk_level, "medium");
-        assert!(!policy.can_force_close);
-    }
-
-    #[test]
-    fn screen_capture_conflict_policy_ignores_unrelated_processes() {
-        assert!(screen_capture_conflict_policy("notepad.exe").is_none());
     }
 }
