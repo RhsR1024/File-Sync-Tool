@@ -198,7 +198,10 @@ struct ScreenCaptureConflictPolicy {
 pub struct ScreenShareHandle {
     active: Arc<AtomicBool>,
     starting: AtomicBool,
-    cancel: Arc<AtomicBool>,
+    /// Current session's cancel token. Each session gets a FRESH Arc so a new
+    /// start can never un-cancel streams/threads left over from a previous
+    /// session (the old token stays cancelled forever).
+    cancel: Mutex<Arc<AtomicBool>>,
     session_id: AtomicU64,
     viewer_count: Arc<AtomicU32>,
     fps_counter: Arc<AtomicU32>,
@@ -215,7 +218,7 @@ impl ScreenShareHandle {
         Self {
             active: Arc::new(AtomicBool::new(false)),
             starting: AtomicBool::new(false),
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             session_id: AtomicU64::new(0),
             viewer_count: Arc::new(AtomicU32::new(0)),
             fps_counter: Arc::new(AtomicU32::new(0)),
@@ -273,7 +276,16 @@ fn inactive_status() -> ScreenShareStatus {
 
 fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
     handle.active.store(false, Ordering::SeqCst);
-    handle.cancel.store(cancel, Ordering::SeqCst);
+    {
+        let mut token = handle.cancel.lock().unwrap();
+        // Cancel whatever session owned this token so its capture thread and
+        // MJPEG streams always exit, even if a new session starts right after.
+        token.store(true, Ordering::SeqCst);
+        if !cancel {
+            // Fresh start: install a brand-new, un-cancelled token.
+            *token = Arc::new(AtomicBool::new(false));
+        }
+    }
     handle.viewer_count.store(0, Ordering::Relaxed);
     handle.fps_counter.store(0, Ordering::Relaxed);
     handle.bytes_sent.store(0, Ordering::Relaxed);
@@ -329,6 +341,10 @@ fn is_current_session(handle: &ScreenShareHandle, session_id: u64) -> bool {
     handle.session_id.load(Ordering::SeqCst) == session_id
 }
 
+fn current_cancel_token(handle: &ScreenShareHandle) -> Arc<AtomicBool> {
+    handle.cancel.lock().unwrap().clone()
+}
+
 fn record_viewer_ip(viewer_ips: &Arc<Mutex<ViewerIpMap>>, ip: impl Into<String>) {
     record_viewer_ip_at(viewer_ips, ip, Instant::now());
 }
@@ -380,7 +396,7 @@ fn shutdown_after_capture_failure(
         return;
     }
 
-    handle.cancel.store(true, Ordering::SeqCst);
+    current_cancel_token(handle).store(true, Ordering::SeqCst);
     if let Some(tx) = handle.shutdown_tx.lock().unwrap().take() {
         let _ = tx.send(());
     }
@@ -521,6 +537,7 @@ pub async fn screen_share_start(
 
     let start_guard = begin_screen_share_start(handle)?;
     let session_id = start_guard.session_id();
+    let session_cancel = current_cancel_token(handle);
 
     // Verify monitor exists (in a block so displays is dropped before any .await)
     {
@@ -576,7 +593,7 @@ pub async fn screen_share_start(
     let auth_username = config.username.clone();
 
     // --- Spawn capture thread ---
-    let capture_cancel = handle.cancel.clone();
+    let capture_cancel = session_cancel.clone();
     let capture_fps = handle.fps_counter.clone();
     let capture_viewers = handle.viewer_count.clone();
     let capture_handle = handle.clone();
@@ -638,7 +655,7 @@ pub async fn screen_share_start(
         return Err(detail);
     }
 
-    if handle.cancel.load(Ordering::SeqCst) || !is_current_session(handle, session_id) {
+    if session_cancel.load(Ordering::SeqCst) || !is_current_session(handle, session_id) {
         return Err("Screen share startup was cancelled".into());
     }
 
@@ -654,7 +671,7 @@ pub async fn screen_share_start(
         app_handle: app_handle.clone(),
         broadcast_tx: broadcast_tx.clone(),
         viewer_count: handle.viewer_count.clone(),
-        cancel: handle.cancel.clone(),
+        cancel: session_cancel.clone(),
         auth_hash,
         auth_username,
         bytes_sent: handle.bytes_sent.clone(),
@@ -762,7 +779,7 @@ pub async fn screen_share_stop(
     }
 
     // Signal stop
-    handle.cancel.store(true, Ordering::SeqCst);
+    current_cancel_token(handle).store(true, Ordering::SeqCst);
 
     // Shutdown HTTP server
     if let Some(tx) = handle.shutdown_tx.lock().unwrap().take() {
@@ -1883,7 +1900,7 @@ fn capture_runtime_state_summary(runtime_handle: &ScreenShareHandle, session_id:
         "state={{active={},starting={},cancel={},session_id={},current_session_id={},is_current={}}}",
         runtime_handle.active.load(Ordering::SeqCst),
         runtime_handle.starting.load(Ordering::SeqCst),
-        runtime_handle.cancel.load(Ordering::SeqCst),
+        current_cancel_token(runtime_handle).load(Ordering::SeqCst),
         session_id,
         runtime_handle.session_id.load(Ordering::SeqCst),
         is_current_session(runtime_handle, session_id)
@@ -3523,7 +3540,7 @@ mod tests {
     fn prepare_runtime_state_for_start_clears_stale_runtime_state() {
         let handle = ScreenShareHandle::new();
         handle.active.store(true, Ordering::SeqCst);
-        handle.cancel.store(true, Ordering::SeqCst);
+        current_cancel_token(&handle).store(true, Ordering::SeqCst);
         handle.viewer_count.store(3, Ordering::Relaxed);
         handle.fps_counter.store(7, Ordering::Relaxed);
         handle.bytes_sent.store(4096, Ordering::Relaxed);
@@ -3536,7 +3553,7 @@ mod tests {
         prepare_runtime_state_for_start(&handle);
 
         assert!(!handle.active.load(Ordering::SeqCst));
-        assert!(!handle.cancel.load(Ordering::SeqCst));
+        assert!(!current_cancel_token(&handle).load(Ordering::SeqCst));
         assert_eq!(handle.viewer_count.load(Ordering::Relaxed), 0);
         assert_eq!(handle.fps_counter.load(Ordering::Relaxed), 0);
         assert_eq!(handle.bytes_sent.load(Ordering::Relaxed), 0);
@@ -3551,7 +3568,6 @@ mod tests {
     fn reset_runtime_state_marks_handle_inactive_and_clears_runtime_fields() {
         let handle = ScreenShareHandle::new();
         handle.active.store(true, Ordering::SeqCst);
-        handle.cancel.store(false, Ordering::SeqCst);
         handle.viewer_count.store(2, Ordering::Relaxed);
         handle.fps_counter.store(5, Ordering::Relaxed);
         handle.bytes_sent.store(2048, Ordering::Relaxed);
@@ -3564,7 +3580,7 @@ mod tests {
         reset_runtime_state(&handle);
 
         assert!(!handle.active.load(Ordering::SeqCst));
-        assert!(handle.cancel.load(Ordering::SeqCst));
+        assert!(current_cancel_token(&handle).load(Ordering::SeqCst));
         assert_eq!(handle.viewer_count.load(Ordering::Relaxed), 0);
         assert_eq!(handle.fps_counter.load(Ordering::Relaxed), 0);
         assert_eq!(handle.bytes_sent.load(Ordering::Relaxed), 0);
@@ -3573,6 +3589,23 @@ mod tests {
         assert!(handle.all_urls.lock().unwrap().is_empty());
         assert!(handle.start_time.lock().unwrap().is_none());
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn new_session_gets_fresh_cancel_token_and_old_token_stays_cancelled() {
+        let handle = ScreenShareHandle::new();
+        let old_token = current_cancel_token(&handle);
+
+        // 停止/失败路径：当前 token 被取消
+        reset_runtime_state(&handle);
+        assert!(old_token.load(Ordering::SeqCst));
+
+        // 新会话启动：拿到全新的未取消 token，旧 token 永久保持取消
+        prepare_runtime_state_for_start(&handle);
+        let new_token = current_cancel_token(&handle);
+        assert!(!new_token.load(Ordering::SeqCst));
+        assert!(old_token.load(Ordering::SeqCst));
+        assert!(!Arc::ptr_eq(&old_token, &new_token));
     }
 
     #[test]
@@ -3593,7 +3626,7 @@ mod tests {
         drop(first);
 
         assert!(!handle.starting.load(Ordering::SeqCst));
-        assert!(handle.cancel.load(Ordering::SeqCst));
+        assert!(current_cancel_token(&handle).load(Ordering::SeqCst));
     }
 
     #[test]
@@ -3608,7 +3641,7 @@ mod tests {
 
         assert!(!is_current_session(&handle, session_id));
         assert!(!handle.starting.load(Ordering::SeqCst));
-        assert!(handle.cancel.load(Ordering::SeqCst));
+        assert!(current_cancel_token(&handle).load(Ordering::SeqCst));
     }
 
     #[test]
@@ -3617,22 +3650,23 @@ mod tests {
         let start = begin_screen_share_start(&handle).expect("start should reserve a session");
         let session_id = start.session_id();
 
-        handle.cancel.store(true, Ordering::SeqCst);
+        let session_token = current_cancel_token(&handle);
+        session_token.store(true, Ordering::SeqCst);
         let cancelled_at = Instant::now();
         assert!(!wait_for_capture_retry_delay(
             Duration::from_secs(5),
-            &handle.cancel,
+            &session_token,
             &handle,
             session_id,
         ));
         assert!(cancelled_at.elapsed() < Duration::from_millis(250));
 
-        handle.cancel.store(false, Ordering::SeqCst);
+        session_token.store(false, Ordering::SeqCst);
         reset_runtime_state(&handle);
         let stale_at = Instant::now();
         assert!(!wait_for_capture_retry_delay(
             Duration::from_secs(5),
-            &handle.cancel,
+            &session_token,
             &handle,
             session_id,
         ));
@@ -3760,12 +3794,18 @@ mod tests {
         assert_eq!(ScreenShareBackendMode::Auto.label(), "auto");
         assert_eq!(ScreenShareBackendMode::Wgc.label(), "wgc");
         assert_eq!(ScreenShareBackendMode::Dxgi.label(), "dxgi");
-        assert_eq!(ScreenShareBackendMode::default(), ScreenShareBackendMode::Auto);
+        assert_eq!(
+            ScreenShareBackendMode::default(),
+            ScreenShareBackendMode::Auto
+        );
     }
 
     #[test]
     fn automatic_backend_mode_uses_shorter_dxgi_retry_window_than_dxgi_only() {
-        assert!(capture_create_retry_window_for_mode(ScreenShareBackendMode::Auto) < capture_create_retry_window_for_mode(ScreenShareBackendMode::Dxgi));
+        assert!(
+            capture_create_retry_window_for_mode(ScreenShareBackendMode::Auto)
+                < capture_create_retry_window_for_mode(ScreenShareBackendMode::Dxgi)
+        );
         assert_eq!(
             capture_create_retry_window_for_mode(ScreenShareBackendMode::Auto),
             Duration::from_millis(600)
