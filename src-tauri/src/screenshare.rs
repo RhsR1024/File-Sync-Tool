@@ -85,6 +85,26 @@ fn capture_recreate_backoff(attempt: u32) -> Duration {
     let index = (attempt as usize).min(CAPTURE_RECREATE_BACKOFF_MS.len() - 1);
     Duration::from_millis(CAPTURE_RECREATE_BACKOFF_MS[index])
 }
+
+/// 帧饥饿看门狗参数。WouldBlock 本身是正常信号（画面无变化），但
+/// "锁屏→解锁后帧迟迟不恢复"或"重建后拿不到首帧"说明采集源已静默死亡——
+/// WGC 在锁屏/显示器休眠后偶发不再触发 FrameArrived 且不报任何错误，
+/// 表现为观看端永久黑屏且刷新无效，必须由看门狗判定后强制重建。
+const FRAME_STARVATION_MIN: Duration = Duration::from_secs(2);
+/// 饥饿期间桌面锁定状态的采样间隔（OpenInputDesktop，开销可忽略）。
+const STARVATION_DESKTOP_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// 解锁后帧必须在此宽限期内恢复，否则强制重建采集源。
+const STARVATION_POST_UNLOCK_GRACE: Duration = Duration::from_secs(3);
+/// (重)建成功后在桌面可用状态下拿首帧的最长等待；健康的 WGC/DXGI
+/// 创建后必然立刻交付当前画面帧，超时即为僵尸源。
+const STARVATION_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// WGC 帧池主动探测：FrameArrived 事件通道静默死亡时，直接调用
+/// TryGetNextFrame 能把"设备丢失/池已关闭"暴露为携带精确 HRESULT 的
+/// 真实错误（事件死亡本身永远不报错）。饥饿超过 AFTER 后每 INTERVAL 探测一次。
+#[cfg(target_os = "windows")]
+const WGC_PROBE_AFTER: Duration = Duration::from_secs(2);
+#[cfg(target_os = "windows")]
+const WGC_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 type ViewerIpMap = HashMap<String, Instant>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -907,6 +927,29 @@ fn describe_input_desktop() -> String {
     "input_desktop=n/a".to_string()
 }
 
+/// 输入桌面是否可用（机器可交互）：锁屏/UAC 安全桌面期间 OpenInputDesktop
+/// 会失败。供帧饥饿看门狗区分"锁定中的正常静默"与"解锁后的异常静默"。
+#[cfg(target_os = "windows")]
+fn is_input_desktop_available() -> bool {
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS,
+    };
+    unsafe {
+        match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) {
+            Ok(desktop) => {
+                let _ = CloseDesktop(desktop);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_input_desktop_available() -> bool {
+    true
+}
+
 // ─── Cursor Overlay (Windows) ──────────────────────────────
 #[cfg(target_os = "windows")]
 mod cursor_overlay {
@@ -1206,6 +1249,147 @@ mod cursor_overlay {
     }
 }
 
+// ─── Frame Starvation Watchdog ──────────────────────────────
+
+/// 看门狗判定：采集源已静默死亡，须强制重建。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StarvationVerdict {
+    /// (重)建采集源后，桌面可用却迟迟无首帧（僵尸源，典型于
+    /// 锁屏期间重建"成功"的 WGC 会话，解锁后也不会自愈）。
+    NoFrameSinceCreate { waited: Duration },
+    /// 曾正常出帧，观察到锁屏后解锁，宽限期内帧仍未恢复
+    /// （WGC 锁屏静默死亡的已知形态）。
+    SilentAfterUnlock { since_unlock: Duration },
+}
+
+impl StarvationVerdict {
+    fn describe(&self) -> String {
+        match self {
+            Self::NoFrameSinceCreate { waited } => format!(
+                "capture source produced no frame for {}s after (re)create while desktop is available — treating as silently dead",
+                waited.as_secs()
+            ),
+            Self::SilentAfterUnlock { since_unlock } => format!(
+                "no frame within {}s after desktop unlock — capture source likely died during lock screen",
+                since_unlock.as_secs()
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct StarvationTick {
+    /// 本 tick 首次观察到桌面进入锁定/安全桌面
+    lock_observed: bool,
+    /// 本 tick 观察到桌面从锁定恢复可用
+    unlock_observed: bool,
+    force_recreate: Option<StarvationVerdict>,
+}
+
+/// 纯状态机：由捕获循环每 tick 驱动，桌面锁定状态由调用方按需采样传入。
+/// 关键设计：静止画面（长时间 WouldBlock 但从未观察到锁屏）永远不触发
+/// 重建——避免空闲机器上无意义的采集器重建（WGC 黄框闪烁）。
+struct FrameStarvationWatchdog {
+    created_at: Instant,
+    last_frame_at: Option<Instant>,
+    desktop_locked: Option<bool>,
+    saw_lock_while_starved: bool,
+    unlocked_at: Option<Instant>,
+    last_desktop_sample_at: Option<Instant>,
+}
+
+impl FrameStarvationWatchdog {
+    fn new(now: Instant) -> Self {
+        Self {
+            created_at: now,
+            last_frame_at: None,
+            desktop_locked: None,
+            saw_lock_while_starved: false,
+            unlocked_at: None,
+            last_desktop_sample_at: None,
+        }
+    }
+
+    /// 采集源（重）建成功后调用：全部状态复位，首帧计时重新开始。
+    fn on_created(&mut self, now: Instant) {
+        *self = Self::new(now);
+    }
+
+    /// 收到真实帧：饥饿与锁屏观察全部清零。
+    fn on_frame(&mut self, now: Instant) {
+        self.last_frame_at = Some(now);
+        self.saw_lock_while_starved = false;
+        self.unlocked_at = None;
+    }
+
+    fn starved_for(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.last_frame_at.unwrap_or(self.created_at))
+    }
+
+    fn is_starved(&self, now: Instant) -> bool {
+        self.starved_for(now) >= FRAME_STARVATION_MIN
+    }
+
+    /// 是否应采样桌面锁定状态（仅饥饿期间，至多每秒一次）。
+    fn should_sample_desktop(&self, now: Instant) -> bool {
+        self.is_starved(now)
+            && self.last_desktop_sample_at.map_or(true, |t| {
+                now.saturating_duration_since(t) >= STARVATION_DESKTOP_SAMPLE_INTERVAL
+            })
+    }
+
+    fn tick(&mut self, now: Instant, desktop_locked: Option<bool>) -> StarvationTick {
+        let mut out = StarvationTick::default();
+        if !self.is_starved(now) {
+            return out;
+        }
+
+        if let Some(locked) = desktop_locked {
+            self.last_desktop_sample_at = Some(now);
+            let prev = self.desktop_locked;
+            if locked {
+                if prev != Some(true) {
+                    out.lock_observed = true;
+                }
+                self.saw_lock_while_starved = true;
+                self.unlocked_at = None;
+            } else if prev == Some(true) {
+                out.unlock_observed = true;
+                self.unlocked_at = Some(now);
+            }
+            self.desktop_locked = Some(locked);
+        }
+
+        // 判定只在"当前桌面可用"时进行；锁定期间无帧是正常的，必须等待。
+        if self.desktop_locked != Some(false) {
+            return out;
+        }
+
+        match self.last_frame_at {
+            // (重)建后从未出过帧：僵尸源。经历过锁屏则从解锁时刻起算。
+            None => {
+                let base = self.unlocked_at.unwrap_or(self.created_at);
+                let waited = now.saturating_duration_since(base);
+                if waited >= STARVATION_FIRST_FRAME_TIMEOUT {
+                    out.force_recreate = Some(StarvationVerdict::NoFrameSinceCreate { waited });
+                }
+            }
+            // 出过帧且本轮饥饿期间观察到锁屏：解锁后宽限期内必须恢复出帧。
+            Some(_) if self.saw_lock_while_starved => {
+                if let Some(unlocked_at) = self.unlocked_at {
+                    let since_unlock = now.saturating_duration_since(unlocked_at);
+                    if since_unlock >= STARVATION_POST_UNLOCK_GRACE {
+                        out.force_recreate =
+                            Some(StarvationVerdict::SilentAfterUnlock { since_unlock });
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
 // ─── Screen Capture Loop ────────────────────────────────────
 
 enum CapturedFrame<'a> {
@@ -1322,14 +1506,23 @@ fn capture_loop(
         let _ = tx.send(Ok(()));
     }
 
-    let width = source.width();
-    let height = source.height();
+    // 尺寸随采集源重建/分辨率变化而更新——保持不变会让 encode 守卫
+    // 永远丢帧，观看端表现为无提示的永久黑屏。
+    let mut width = source.width();
+    let mut height = source.height();
     let frame_interval = Duration::from_millis(1000 / fps.max(1) as u64);
     let mut first_real_frame = false;
+    // 会话内是否推送过真实帧：决定 WouldBlock 时是否继续发占位帧
+    //（仅初始预热阶段发；重建等待期让观看端保留最后一帧真实画面）。
+    let mut session_ever_had_frame = false;
+    // 重建成功后延迟到真实帧到达才清除 capture_paused，
+    // 僵尸源期间观看端保持"画面中断，重试中"提示而不是无解释黑屏。
+    let mut pending_resume = false;
+    let mut starvation_watchdog = FrameStarvationWatchdog::new(Instant::now());
 
     // Cursor overlay setup
     #[cfg(target_os = "windows")]
-    let monitor_rect = if show_cursor {
+    let mut monitor_rect = if show_cursor {
         cursor_overlay::get_monitor_rect(monitor_index)
     } else {
         None
@@ -1368,11 +1561,78 @@ fn capture_loop(
 
         let tick_start = Instant::now();
 
+        // ── 帧饥饿看门狗：先于取帧判定采集源是否已静默死亡 ──
+        // WGC 锁屏/显示器休眠后可能停止触发 FrameArrived 且不报错（永远
+        // WouldBlock），旧逻辑会在"画面无变化"分支里死等——观看端黑屏且刷新无效。
+        let desktop_sample = if starvation_watchdog.should_sample_desktop(tick_start) {
+            Some(!is_input_desktop_available())
+        } else {
+            None
+        };
+        let starvation = starvation_watchdog.tick(tick_start, desktop_sample);
         let current_backend = source.backend_kind();
-        match source.frame() {
+        if starvation.lock_observed {
+            emit_capture_create_diagnostic(
+                &app_handle,
+                "info",
+                format!(
+                    "取帧饥饿期间检测到桌面锁定（锁屏/UAC），等待解锁后自动恢复: backend={}, starved_for={}s, first_real_frame={}",
+                    current_backend.label(),
+                    starvation_watchdog.starved_for(tick_start).as_secs(),
+                    first_real_frame
+                ),
+            );
+        }
+        if starvation.unlock_observed {
+            emit_capture_create_diagnostic(
+                &app_handle,
+                "info",
+                format!(
+                    "桌面已解锁，等待画面帧恢复（宽限 {}s）: backend={}, starved_for={}s",
+                    STARVATION_POST_UNLOCK_GRACE.as_secs(),
+                    current_backend.label(),
+                    starvation_watchdog.starved_for(tick_start).as_secs()
+                ),
+            );
+        }
+
+        let frame_result = match starvation.force_recreate {
+            Some(verdict) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("frame starvation watchdog: {}", verdict.describe()),
+            )),
+            None => source.frame(),
+        };
+
+        match frame_result {
             Ok(frame) => {
+                starvation_watchdog.on_frame(tick_start);
                 let stride = frame.stride();
                 let frame_pixels = frame.pixels();
+
+                // WGC 分辨率变化时帧尺寸会静默改变（staging 缓冲已随帧重建），
+                // 必须同步 loop 尺寸，否则 encode 守卫永远丢帧 → 黑屏。
+                // DXGI 的 stride 含行对齐填充，不适用此推导；其分辨率变化
+                // 会直接报错走重建路径，重建后尺寸在恢复分支同步。
+                if current_backend == CaptureBackendKind::Wgc && stride >= 4 {
+                    let (frame_w, frame_h) = (stride / 4, frame_pixels.len() / stride);
+                    if frame_w > 0 && frame_h > 0 && (frame_w != width || frame_h != height) {
+                        emit_capture_create_diagnostic(
+                            &app_handle,
+                            "warn",
+                            format!(
+                                "画面尺寸变化，已同步编码尺寸: {}x{} -> {}x{}, backend={}",
+                                width,
+                                height,
+                                frame_w,
+                                frame_h,
+                                current_backend.label()
+                            ),
+                        );
+                        width = frame_w;
+                        height = frame_h;
+                    }
+                }
 
                 #[cfg(target_os = "windows")]
                 let source_pixels: &[u8] =
@@ -1417,11 +1677,32 @@ fn capture_loop(
                     let _ = tx.send(data);
                     fps_counter.fetch_add(1, Ordering::Relaxed);
                     first_real_frame = true;
+                    session_ever_had_frame = true;
+                    if pending_resume {
+                        // 重建后的首个真实帧才是"恢复"——此前观看端一直
+                        // 显示"画面中断，重试中"提示（capture_paused=true）。
+                        pending_resume = false;
+                        if is_current_session(&runtime_handle, session_id) {
+                            runtime_handle.capture_paused.store(false, Ordering::SeqCst);
+                        }
+                        emit_capture_create_diagnostic(
+                            &app_handle,
+                            "success",
+                            format!(
+                                "画面推流已恢复: backend={}, size={}x{}",
+                                current_backend.label(),
+                                width,
+                                height
+                            ),
+                        );
+                    }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if !first_real_frame {
-                    // Still warming up DXGI — send placeholder every 500ms to keep stream alive
+                if !session_ever_had_frame {
+                    // Still warming up the very first source — send placeholder every 500ms
+                    // to keep stream alive. 重建后的预热不发占位帧：观看端保留最后
+                    // 一帧真实画面比被刷成深色占位帧（视觉上就是黑屏）好得多。
                     if !wait_for_capture_retry_delay(
                         Duration::from_millis(500),
                         &cancel,
@@ -1440,8 +1721,9 @@ fn capture_loop(
             }
             Err(e) => {
                 let capture_error_detail = format!(
-                    "捕获循环异常，进入暂停重试: monitor_index={}, viewers={}, first_real_frame={}, error_kind={:?}, error={}, {}",
+                    "捕获循环异常，进入暂停重试: monitor_index={}, backend={}, viewers={}, first_real_frame={}, error_kind={:?}, error={}, {}",
                     monitor_index,
+                    current_backend.label(),
                     viewer_count.load(Ordering::Relaxed),
                     first_real_frame,
                     e.kind(),
@@ -1517,14 +1799,34 @@ fn capture_loop(
                 match recovered {
                     Some(new_source) => {
                         source = new_source;
-                        if is_current_session(&runtime_handle, session_id) {
-                            runtime_handle.capture_paused.store(false, Ordering::SeqCst);
+                        // 注意：不在这里清除 capture_paused——重建"成功"可能是僵尸源
+                        //（锁屏期间创建的 WGC 会话不出帧），等首个真实帧到达再清除。
+                        pending_resume = true;
+                        starvation_watchdog.on_created(Instant::now());
+                        let (new_width, new_height) = (source.width(), source.height());
+                        if new_width != width || new_height != height {
+                            emit_capture_create_diagnostic(
+                                &app_handle,
+                                "warn",
+                                format!(
+                                    "重建后画面尺寸变化，已同步编码尺寸: {}x{} -> {}x{}",
+                                    width, height, new_width, new_height
+                                ),
+                            );
+                            width = new_width;
+                            height = new_height;
+                        }
+                        #[cfg(target_os = "windows")]
+                        if show_cursor {
+                            monitor_rect = cursor_overlay::get_monitor_rect(monitor_index);
                         }
                         let resumed_msg = format!(
-                            "屏幕捕获已恢复: retries={}, monitor_index={}, backend={}",
+                            "屏幕捕获已恢复，等待首帧推流: retries={}, monitor_index={}, backend={}, size={}x{}",
                             retry_attempt,
                             monitor_index,
-                            source.backend_kind().label()
+                            source.backend_kind().label(),
+                            width,
+                            height
                         );
                         log::info!("{}", resumed_msg);
                         crate::scanner::emit_tool_log(
@@ -1793,6 +2095,15 @@ struct WgcCapturer {
     _frame_arrived_handler: TypedEventHandler<Direct3D11CaptureFramePool, IInspectable>,
     frame_arrived_token: EventRegistrationToken,
     frame_rx: mpsc::Receiver<()>,
+    /// GraphicsCaptureItem.Closed 触发后置位（显示器丢失/显示拓扑变化）——
+    /// 事件死亡时帧循环永远收不到错误，靠此标志把"已关闭"暴露为可重建错误。
+    closed: Arc<AtomicBool>,
+    _closed_handler: TypedEventHandler<GraphicsCaptureItem, IInspectable>,
+    closed_token: EventRegistrationToken,
+    /// 最近一次真实交付帧的时刻；配合主动探测判定事件通道是否静默死亡。
+    last_frame_delivered: Instant,
+    last_probe_at: Option<Instant>,
+    probe_recovery_logged: bool,
     staging: Option<ID3D11Texture2D>,
     frame_buf: Vec<u8>,
     stride: usize,
@@ -1850,6 +2161,17 @@ impl WgcCapturer {
                     format_windows_error("Direct3D11CaptureFramePool::FrameArrived", &error)
                 })?;
 
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_flag = closed.clone();
+        let closed_handler =
+            TypedEventHandler::<GraphicsCaptureItem, IInspectable>::new(move |_, _| {
+                closed_flag.store(true, Ordering::SeqCst);
+                Ok(())
+            });
+        let closed_token = item
+            .Closed(&closed_handler)
+            .map_err(|error| format_windows_error("GraphicsCaptureItem::Closed", &error))?;
+
         session.StartCapture().map_err(|error| {
             format_windows_error("GraphicsCaptureSession::StartCapture", &error)
         })?;
@@ -1866,6 +2188,12 @@ impl WgcCapturer {
             _frame_arrived_handler: frame_arrived_handler,
             frame_arrived_token,
             frame_rx,
+            closed,
+            _closed_handler: closed_handler,
+            closed_token,
+            last_frame_delivered: Instant::now(),
+            last_probe_at: None,
+            probe_recovery_logged: false,
             staging: None,
             frame_buf: Vec::with_capacity(width * height * 4),
             stride: width * 4,
@@ -1884,14 +2212,43 @@ impl WgcCapturer {
         self.height
     }
 
+    /// 帧饥饿超过阈值后是否应主动探测帧池（限频）。
+    fn probe_due(&mut self) -> bool {
+        let now = Instant::now();
+        if now.saturating_duration_since(self.last_frame_delivered) < WGC_PROBE_AFTER {
+            return false;
+        }
+        if self
+            .last_probe_at
+            .is_some_and(|t| now.saturating_duration_since(t) < WGC_PROBE_INTERVAL)
+        {
+            return false;
+        }
+        self.last_probe_at = Some(now);
+        true
+    }
+
     fn frame(&mut self) -> io::Result<CapturedFrame<'_>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "WGC capture item closed (monitor lost or display topology changed)",
+            ));
+        }
+        let mut via_probe = false;
         match self.frame_rx.recv_timeout(Duration::from_millis(16)) {
             Ok(()) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "WGC frame not ready",
-                ));
+                // FrameArrived 长时间静默时不能只报 WouldBlock：事件通道死亡
+                // 是无声的（锁屏/设备丢失后的已知形态）。主动调用 TryGetNextFrame
+                // 把真实故障暴露成带 HRESULT 的错误，触发上层重建。
+                if !self.probe_due() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "WGC frame not ready",
+                    ));
+                }
+                via_probe = true;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(io::Error::new(
@@ -1902,9 +2259,33 @@ impl WgcCapturer {
         }
         while self.frame_rx.try_recv().is_ok() {}
 
-        let frame = self.frame_pool.TryGetNextFrame().map_err(|error| {
-            windows_error_to_io("Direct3D11CaptureFramePool::TryGetNextFrame", error)
-        })?;
+        let frame = match self.frame_pool.TryGetNextFrame() {
+            Ok(frame) => frame,
+            // 空帧（HRESULT=S_OK 且对象为 null）：池仍存活只是无新内容
+            //（纯静止画面），维持 WouldBlock 语义，绝不触发重建。
+            Err(error) if is_wgc_no_frame_error(&error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "WGC frame pool has no new frame",
+                ));
+            }
+            Err(error) => {
+                return Err(windows_error_to_io(
+                    if via_probe {
+                        "Direct3D11CaptureFramePool::TryGetNextFrame(starvation probe)"
+                    } else {
+                        "Direct3D11CaptureFramePool::TryGetNextFrame"
+                    },
+                    error,
+                ));
+            }
+        };
+        if via_probe && !self.probe_recovery_logged {
+            self.probe_recovery_logged = true;
+            log::warn!(
+                "WGC FrameArrived 事件静默但帧池仍在产帧，已通过主动探测恢复取帧（事件通道疑似失效）"
+            );
+        }
         let content_size = frame
             .ContentSize()
             .map_err(|error| windows_error_to_io("Direct3D11CaptureFrame::ContentSize", error))?;
@@ -1926,6 +2307,7 @@ impl WgcCapturer {
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
         let _ = frame.Close();
 
+        self.last_frame_delivered = Instant::now();
         Ok(CapturedFrame::Borrowed {
             pixels: &self.frame_buf,
             stride: self.stride,
@@ -2027,6 +2409,7 @@ impl WgcCapturer {
 #[cfg(target_os = "windows")]
 impl Drop for WgcCapturer {
     fn drop(&mut self) {
+        let _ = self._item.RemoveClosed(self.closed_token);
         let _ = self.frame_pool.RemoveFrameArrived(self.frame_arrived_token);
         let _ = self.session.Close();
         let _ = self.frame_pool.Close();
@@ -2066,6 +2449,14 @@ fn format_windows_error(stage: &str, error: &WindowsError) -> String {
 #[cfg(target_os = "windows")]
 fn windows_error_to_io(stage: &str, error: WindowsError) -> io::Error {
     io::Error::new(io::ErrorKind::Other, format_windows_error(stage, &error))
+}
+
+/// windows-rs 将"HRESULT=S_OK 但返回对象为 null"投影为 code==S_OK 的 Err；
+/// TryGetNextFrame 的"当前无新帧"正是这种形态——池仍存活，不是故障。
+/// 真正的设备丢失/池已关闭会携带非零错误码。
+#[cfg(target_os = "windows")]
+fn is_wgc_no_frame_error(error: &WindowsError) -> bool {
+    error.code() == HRESULT(0)
 }
 
 #[cfg(target_os = "windows")]
@@ -3516,5 +3907,176 @@ mod tests {
         assert!(!should_retry_capture_creation(
             std::io::ErrorKind::InvalidData
         ));
+    }
+
+    // ─── FrameStarvationWatchdog（锁屏解锁后采集静默死亡的判定） ───
+
+    #[test]
+    fn starvation_watchdog_stays_quiet_with_steady_frames() {
+        let t0 = Instant::now();
+        let mut w = FrameStarvationWatchdog::new(t0);
+        for s in 1..=60 {
+            let now = t0 + Duration::from_secs(s);
+            w.on_frame(now);
+            let check_at = now + Duration::from_millis(100);
+            assert!(!w.should_sample_desktop(check_at));
+            let tick = w.tick(check_at, None);
+            assert!(tick.force_recreate.is_none());
+        }
+    }
+
+    #[test]
+    fn starvation_watchdog_never_fires_on_static_screen_without_lock() {
+        let t0 = Instant::now();
+        let mut w = FrameStarvationWatchdog::new(t0);
+        w.on_frame(t0); // 有过真实帧，此后画面纯静止一小时
+        for s in 1..=3600u64 {
+            let now = t0 + Duration::from_secs(s);
+            let sample = w.should_sample_desktop(now).then_some(false); // 桌面始终未锁定
+            let tick = w.tick(now, sample);
+            assert!(tick.force_recreate.is_none(), "fired at +{}s", s);
+        }
+    }
+
+    #[test]
+    fn starvation_watchdog_fires_when_frames_stay_silent_after_unlock() {
+        let t0 = Instant::now();
+        let mut w = FrameStarvationWatchdog::new(t0);
+        w.on_frame(t0);
+        // 锁屏 60 秒：只允许等待，绝不重建
+        let mut lock_seen = false;
+        for s in 3..=60u64 {
+            let now = t0 + Duration::from_secs(s);
+            let sample = w.should_sample_desktop(now).then_some(true);
+            let tick = w.tick(now, sample);
+            lock_seen |= tick.lock_observed;
+            assert!(
+                tick.force_recreate.is_none(),
+                "must wait during lock, fired at +{}s",
+                s
+            );
+        }
+        assert!(lock_seen);
+        // 解锁后帧仍未恢复 → 宽限期后强制重建
+        let mut unlock_seen = false;
+        let mut fired = None;
+        for s in 61..=70u64 {
+            let now = t0 + Duration::from_secs(s);
+            let sample = w.should_sample_desktop(now).then_some(false);
+            let tick = w.tick(now, sample);
+            unlock_seen |= tick.unlock_observed;
+            if let Some(verdict) = tick.force_recreate {
+                fired = Some((s, verdict));
+                break;
+            }
+        }
+        assert!(unlock_seen);
+        let (fired_s, verdict) = fired.expect("watchdog must force recreate after unlock silence");
+        assert!(fired_s >= 61 + STARVATION_POST_UNLOCK_GRACE.as_secs());
+        assert!(matches!(verdict, StarvationVerdict::SilentAfterUnlock { .. }));
+    }
+
+    #[test]
+    fn starvation_watchdog_resets_when_frame_arrives_after_unlock() {
+        let t0 = Instant::now();
+        let mut w = FrameStarvationWatchdog::new(t0);
+        w.on_frame(t0);
+        for s in 3..=30u64 {
+            let now = t0 + Duration::from_secs(s);
+            let sample = w.should_sample_desktop(now).then_some(true);
+            let _ = w.tick(now, sample);
+        }
+        // 解锁 1 秒后画面恢复 → 看门狗复位，此后长时间静止画面不误报
+        let _ = w.tick(t0 + Duration::from_secs(31), Some(false));
+        w.on_frame(t0 + Duration::from_secs(32));
+        for s in 33..=120u64 {
+            let now = t0 + Duration::from_secs(s);
+            let sample = w.should_sample_desktop(now).then_some(false);
+            let tick = w.tick(now, sample);
+            assert!(
+                tick.force_recreate.is_none(),
+                "fired at +{}s after recovery",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn starvation_watchdog_fires_when_rebuilt_source_never_delivers_first_frame() {
+        let t0 = Instant::now();
+        let mut w = FrameStarvationWatchdog::new(t0);
+        w.on_created(t0);
+        let mut fired = None;
+        for s in 1..=30u64 {
+            let now = t0 + Duration::from_secs(s);
+            let sample = w.should_sample_desktop(now).then_some(false);
+            let tick = w.tick(now, sample);
+            if let Some(verdict) = tick.force_recreate {
+                fired = Some((s, verdict));
+                break;
+            }
+        }
+        let (fired_s, verdict) = fired.expect("zombie source must trigger recreate");
+        assert!(fired_s >= STARVATION_FIRST_FRAME_TIMEOUT.as_secs());
+        assert!(fired_s <= STARVATION_FIRST_FRAME_TIMEOUT.as_secs() + 1);
+        assert!(matches!(verdict, StarvationVerdict::NoFrameSinceCreate { .. }));
+    }
+
+    #[test]
+    fn starvation_watchdog_waits_out_lock_before_first_frame_timeout() {
+        let t0 = Instant::now();
+        let mut w = FrameStarvationWatchdog::new(t0);
+        w.on_created(t0); // 锁屏期间重建成功但拿不到首帧（僵尸源）
+        for s in 1..=120u64 {
+            let now = t0 + Duration::from_secs(s);
+            let sample = w.should_sample_desktop(now).then_some(true);
+            let tick = w.tick(now, sample);
+            assert!(
+                tick.force_recreate.is_none(),
+                "must not fire while locked, +{}s",
+                s
+            );
+        }
+        let mut fired = None;
+        for s in 121..=140u64 {
+            let now = t0 + Duration::from_secs(s);
+            let sample = w.should_sample_desktop(now).then_some(false);
+            let tick = w.tick(now, sample);
+            if let Some(verdict) = tick.force_recreate {
+                fired = Some((s, verdict));
+                break;
+            }
+        }
+        let (fired_s, verdict) = fired.expect("must fire after unlock + first-frame timeout");
+        assert!(
+            fired_s >= 120 + STARVATION_FIRST_FRAME_TIMEOUT.as_secs(),
+            "fired too early at +{}s",
+            fired_s
+        );
+        assert!(matches!(verdict, StarvationVerdict::NoFrameSinceCreate { .. }));
+    }
+
+    #[test]
+    fn starvation_watchdog_samples_desktop_at_one_second_cadence_only_when_starved() {
+        let t0 = Instant::now();
+        let mut w = FrameStarvationWatchdog::new(t0);
+        w.on_frame(t0);
+        // 未达饥饿阈值：不采样桌面状态
+        assert!(!w.should_sample_desktop(t0 + Duration::from_secs(1)));
+        // 饥饿后：至多 1 秒一次
+        let now = t0 + Duration::from_secs(3);
+        assert!(w.should_sample_desktop(now));
+        let _ = w.tick(now, Some(false));
+        assert!(!w.should_sample_desktop(now + Duration::from_millis(300)));
+        assert!(w.should_sample_desktop(now + Duration::from_secs(1)));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn wgc_null_frame_probe_error_is_recognized_as_no_frame() {
+        assert!(is_wgc_no_frame_error(&WindowsError::from(HRESULT(0))));
+        assert!(!is_wgc_no_frame_error(&WindowsError::from(HRESULT(
+            0x80004005u32 as i32
+        ))));
     }
 }
