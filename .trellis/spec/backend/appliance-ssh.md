@@ -25,6 +25,7 @@ export interface EnableApplianceSshRequest {
   jumpHostUseSeparateCreds?: boolean;
   jumpHostUsername?: string;
   jumpHostPassword?: string;
+  jumpHostSshPort?: number;
 }
 ```
 
@@ -52,6 +53,7 @@ pub struct ApplianceSshRequest {
     pub jump_host_use_separate_creds: bool,
     pub jump_host_username: Option<String>,
     pub jump_host_password: Option<String>,
+    pub jump_host_ssh_port: Option<u16>,
 }
 ```
 
@@ -89,6 +91,10 @@ pub struct ApplianceSshRequest {
 - After `SSH/set` returns success, the flow polls `SSH/get` to confirm `enable==1`. The poll has three outcomes: `Enabled` (use the returned status), `NotEnabled` (return an error with the last observed enable value), and `GetFailed` (every poll attempt errored — trust the `set` success, synthesize `enable=Some(1)`, fall back to `port=23333` if no port has ever been observed).
 
 - Status API `data.enable` uses `0` for disabled/off and `1` for enabled/on; Vue result chips must render `0` as disabled, not unknown.
+- Jump-host SSH port resolves by priority: user-supplied `jumpHostSshPort` (non-zero) → status-API `port` → `23333`. The resolved port is used for BOTH the SSH login to the jump host AND the nested jump-host→target hop (replacing the old hardcoded `JUMP_HOST_DEFAULT_TARGET_SSH_PORT`).
+- When `SSH/set` fails for a **jump-host** target, the flow does NOT abort. It logs a `warn` ("management API ... unavailable; degrading to SSH channel") and falls through to the SSH step: if a whitelist rule is requested, it applies it over SSH; otherwise it runs an SSH-login probe to the jump host. Degraded success/failure messages state the management API was unavailable, and degraded failures include both the API error and the SSH error.
+- Degradation is jump-host-only. A **direct** (non-jump-host) target with a failing `SSH/set` still returns `Failed to enable SSH: ...` as before, because SSH into a direct target is blocked by the very firewall this tool opens.
+- Credential resolution is centralized in `resolve_appliance_ssh_creds`: jump-host targets prefer non-blank separate jump-host creds, else fall back to the main SSH creds; direct targets always use the main creds.
 
 ### 4. Validation & Error Matrix
 
@@ -108,6 +114,10 @@ pub struct ApplianceSshRequest {
 | `SSH/set` succeeds, every verification `SSH/get` fails | Rust target worker | Log warn, treat as success with synthesized `enable=Some(1)`; do NOT return error |
 | `SSH/set` succeeds, verification `SSH/get` returns `enable!=1` | Rust target worker | Return error "current enable state is ..." (real failure, not a transport failure) |
 | Device status `enable=0` | Vue result presentation | Display disabled/off (`stateDisabled`), not unknown |
+| Jump-host `SSH/set` fails, whitelist on | Rust target worker | Log warn, degrade, apply iptables over SSH; message notes API unavailable |
+| Jump-host `SSH/set` fails, whitelist off | Rust target worker | Log warn, degrade, SSH-login probe to jump host decides success |
+| Direct target `SSH/set` fails | Rust target worker | Return `Failed to enable SSH: ...` (no degrade) |
+| `jumpHostSshPort` supplied | Rust resolver | Use it for jump-host login + nested hop, over status/default |
 
 ### 5. Good/Base/Bad Cases
 
