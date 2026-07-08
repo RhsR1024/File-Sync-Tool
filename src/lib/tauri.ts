@@ -580,6 +580,7 @@ export interface EnableApplianceSshRequest {
   jumpHostUseSeparateCreds?: boolean;
   jumpHostUsername?: string;
   jumpHostPassword?: string;
+  jumpHostSshPort?: number;
 }
 
 // Internal: Login API response (used by backend)

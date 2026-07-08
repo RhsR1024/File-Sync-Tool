@@ -4,7 +4,7 @@ import { ref, computed, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { AlertCircle, Check, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, Trash2, X as XIcon } from 'lucide-vue-next';
 import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshApiVersion, type ApplianceSshResult, type ApplianceSshTarget, type ApplianceSshWhitelistScope } from '../lib/tauri';
-import { getApplianceSshEnableState } from '../lib/applianceSshPresentation';
+import { getApplianceSshEnableState, isValidSshPort } from '../lib/applianceSshPresentation';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
 import Empty from '../components/Empty.vue';
 import { pushToast } from '../composables/useToast';
@@ -51,6 +51,7 @@ const WHITELIST_ALL_CIDR = '0.0.0.0/0';
 const useSeparateJumpHostCreds = ref<boolean>(false);
 const jumpHostUsername = ref<string>('');
 const jumpHostPassword = ref<string>('');
+const jumpHostSshPort = ref<number>(23333);
 const showJumpHostPassword = ref(false);
 const RECENT_IPS_KEY = 'applianceSsh.recentIps';
 const RECENT_IPS_LIMIT = 10;
@@ -177,6 +178,10 @@ const allTargetsSummary = computed(() => {
 });
 
 const hasAnyJumpHost = computed(() => validJumpHostPairs.value.length > 0);
+
+const jumpHostSshPortInvalid = computed(
+  () => hasAnyJumpHost.value && !isValidSshPort(jumpHostSshPort.value),
+);
 
 const needsSshCredentials = computed(() => addWhitelistRule.value);
 
@@ -333,6 +338,11 @@ const handleExecute = async () => {
     return;
   }
 
+  if (jumpHostSshPortInvalid.value) {
+    pushToast(t('tools.applianceSsh.jumpHostSshPortInvalid'), 'warning');
+    return;
+  }
+
   isLoading.value = true;
   results.value = [];
 
@@ -360,6 +370,7 @@ const handleExecute = async () => {
       jumpHostUseSeparateCreds: hasAnyJumpHost.value && useSeparateJumpHostCreds.value,
       jumpHostUsername: useSeparateJumpHostCreds.value ? jumpHostUsername.value.trim() : undefined,
       jumpHostPassword: useSeparateJumpHostCreds.value ? jumpHostPassword.value : undefined,
+      jumpHostSshPort: hasAnyJumpHost.value ? jumpHostSshPort.value : undefined,
     });
     results.value = response;
     pushToast(t('tools.applianceSsh.completed', { success: response.filter(item => item.success).length, total: response.length }), 'success', { ttlMs: 2600 });
@@ -649,6 +660,21 @@ const enableStateClass = (value?: number) => {
                 </button>
               </div>
               <p class="text-xs text-slate-400 mt-2">{{ t('tools.applianceSsh.jumpHostRowHint') }}</p>
+            </div>
+
+            <!-- Jump host SSH port (shown whenever a jump-host pair exists) -->
+            <div v-if="hasAnyJumpHost" class="px-5 pb-4 pt-0">
+              <label class="block text-xs font-medium text-slate-600 mb-1.5">{{ t('tools.applianceSsh.jumpHostSshPort') }}</label>
+              <input
+                v-model.number="jumpHostSshPort"
+                type="number"
+                min="1"
+                max="65535"
+                :disabled="isLoading"
+                class="w-32 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                :class="jumpHostSshPortInvalid ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
+              />
+              <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.jumpHostSshPortHint') }}</p>
             </div>
 
             <!-- Recent jump-host → target pairs (max 5) -->
