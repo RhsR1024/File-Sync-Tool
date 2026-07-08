@@ -1993,7 +1993,8 @@ mod tests {
     use super::schedule_dialog_task;
     use super::{
         appliance_ssh_api_port, build_appliance_ssh_api_url, build_iptables_whitelist_rule,
-        resolve_jump_host_ssh_port, ApplianceSshApiVersion, ApplianceSshWhitelistScope,
+        resolve_appliance_ssh_creds, resolve_jump_host_ssh_port, ApplianceSshApiVersion,
+        ApplianceSshWhitelistScope,
     };
     #[cfg(target_os = "windows")]
     use std::cell::Cell;
@@ -2145,6 +2146,24 @@ mod tests {
         assert_eq!(resolve_jump_host_ssh_port(None, None), 23333);
         // A 0 port is treated as "unset" and falls through to the status/default.
         assert_eq!(resolve_jump_host_ssh_port(Some(0), Some(2200)), 2200);
+    }
+
+    #[test]
+    fn resolve_appliance_ssh_creds_prefers_jump_host_then_falls_back() {
+        assert_eq!(
+            resolve_appliance_ssh_creds(true, "root", "main", Some("jump"), Some("jpass")),
+            ("jump".to_string(), "jpass".to_string())
+        );
+        // Blank jump-host creds fall back to the main SSH creds.
+        assert_eq!(
+            resolve_appliance_ssh_creds(true, "root", "main", Some("  "), Some("")),
+            ("root".to_string(), "main".to_string())
+        );
+        // Direct (non-jump-host) targets always use the main creds.
+        assert_eq!(
+            resolve_appliance_ssh_creds(false, "root", "main", Some("jump"), Some("jpass")),
+            ("root".to_string(), "main".to_string())
+        );
     }
 }
 
@@ -2553,6 +2572,33 @@ pub fn resolve_jump_host_ssh_port(user_port: Option<u16>, status_port: Option<u1
         .filter(|p| *p != 0)
         .or(status_port)
         .unwrap_or(JUMP_HOST_DEFAULT_TARGET_SSH_PORT)
+}
+
+/// Resolve the (username, password) used for SSH. Jump-host targets prefer the
+/// separate jump-host creds when non-blank, otherwise fall back to the main SSH
+/// creds; direct targets always use the main creds. Username is trimmed;
+/// password is used as-is (only rejected when empty).
+fn resolve_appliance_ssh_creds(
+    is_jump_host: bool,
+    ssh_username: &str,
+    ssh_password: &str,
+    jump_host_username: Option<&str>,
+    jump_host_password: Option<&str>,
+) -> (String, String) {
+    if is_jump_host {
+        let user = jump_host_username
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| ssh_username.to_string());
+        let pass = jump_host_password
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| ssh_password.to_string());
+        (user, pass)
+    } else {
+        (ssh_username.to_string(), ssh_password.to_string())
+    }
 }
 
 /// Build a command to be executed on the jump host that (1) opens the
@@ -3001,6 +3047,7 @@ async fn enable_appliance_ssh_for_target(
     whitelist_cidr: Option<String>,
     jump_host_username: Option<String>,
     jump_host_password: Option<String>,
+    jump_host_ssh_port: Option<u16>,
 ) -> Option<ApplianceSshResult> {
     let ip = target.ip.trim().to_string();
     let jump_host = target
@@ -3051,6 +3098,9 @@ async fn enable_appliance_ssh_for_target(
         "info",
     );
 
+    let is_jump_host = jump_host.is_some();
+    let mut degraded_api_error: Option<String> = None;
+
     // Initial GET is best-effort: some appliances (especially under access-control
     // hardening) reject the get endpoint while still accepting set. We log the
     // failure and proceed to SET so the user's enable intent isn't blocked.
@@ -3085,87 +3135,113 @@ async fn enable_appliance_ssh_for_target(
     let current_status = if initial_status.as_ref().and_then(|s| s.enable) == Some(1) {
         initial_status.expect("checked enable==Some(1) above")
     } else {
-        if let Err(e) = enable_appliance_ssh_via_api(&client, &api_ip, api_version).await {
-            emit_runtime_log(
-                &app_handle,
-                format!("[appliance-access] target={} SSH/set failed: {}", ip, e),
-                "error",
-            );
-            result.message = format!("Failed to enable SSH: {}", e);
-            return Some(result);
-        }
-        match wait_for_appliance_ssh_enabled(
-            &client,
-            &api_ip,
-            api_version,
-            10,
-            Duration::from_secs(1),
-        )
-        .await
-        {
-            WaitForEnableOutcome::Enabled(status) => status,
-            WaitForEnableOutcome::NotEnabled { last_status } => {
-                let observed = last_status
-                    .enable
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                result.current_enable = last_status.enable;
-                result.port = last_status.port.or(result.port);
-                result.message = format!(
-                    "SSH status verification failed: current enable state is {}",
-                    observed
-                );
-                return Some(result);
-            }
-            WaitForEnableOutcome::GetFailed { last_error } => {
-                // SET succeeded but every GET (initial + verification) failed.
-                // Trust the SET success and treat the appliance as enabled.
-                emit_runtime_log(
-                    &app_handle,
-                    format!(
-                        "[appliance-access] target={} GET unavailable after SET ({}); treating SET success as enabled",
-                        ip, last_error
-                    ),
-                    "warn",
-                );
-                ApplianceSshStatusData {
-                    enable: Some(1),
-                    port: initial_status.as_ref().and_then(|s| s.port),
+        match enable_appliance_ssh_via_api(&client, &api_ip, api_version).await {
+            Ok(()) => match wait_for_appliance_ssh_enabled(
+                &client,
+                &api_ip,
+                api_version,
+                10,
+                Duration::from_secs(1),
+            )
+            .await
+            {
+                WaitForEnableOutcome::Enabled(status) => status,
+                WaitForEnableOutcome::NotEnabled { last_status } => {
+                    let observed = last_status
+                        .enable
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    result.current_enable = last_status.enable;
+                    result.port = last_status.port.or(result.port);
+                    result.message = format!(
+                        "SSH status verification failed: current enable state is {}",
+                        observed
+                    );
+                    return Some(result);
+                }
+                WaitForEnableOutcome::GetFailed { last_error } => {
+                    // SET succeeded but every GET (initial + verification) failed.
+                    // Trust the SET success and treat the appliance as enabled.
+                    emit_runtime_log(
+                        &app_handle,
+                        format!(
+                            "[appliance-access] target={} GET unavailable after SET ({}); treating SET success as enabled",
+                            ip, last_error
+                        ),
+                        "warn",
+                    );
+                    ApplianceSshStatusData {
+                        enable: Some(1),
+                        port: initial_status.as_ref().and_then(|s| s.port),
+                    }
+                }
+            },
+            Err(e) => {
+                if is_jump_host {
+                    // Management API is unreachable, but the jump-host SSH path may
+                    // still work. Degrade: skip verification and fall through to the
+                    // SSH whitelist/probe step instead of failing the whole run.
+                    emit_runtime_log(
+                        &app_handle,
+                        format!(
+                            "[appliance-access] target={} management API {}:{} unavailable ({}); degrading to SSH channel",
+                            ip,
+                            api_ip,
+                            appliance_ssh_api_port(api_version),
+                            e
+                        ),
+                        "warn",
+                    );
+                    degraded_api_error = Some(e);
+                    ApplianceSshStatusData {
+                        enable: None,
+                        port: initial_status.as_ref().and_then(|s| s.port),
+                    }
+                } else {
+                    emit_runtime_log(
+                        &app_handle,
+                        format!("[appliance-access] target={} SSH/set failed: {}", ip, e),
+                        "error",
+                    );
+                    result.message = format!("Failed to enable SSH: {}", e);
+                    return Some(result);
                 }
             }
         }
     };
 
     result.current_enable = current_status.enable;
-    result.port = current_status.port.or(result.port).or(Some(23333));
-    let api_ssh_port = result.port.unwrap_or(23333);
+    // SSH login port. Jump hosts prefer the user-supplied port, then the
+    // status-reported port, then 23333; direct targets keep the historical
+    // status-port-or-23333 behavior. The same port is reused for the nested
+    // jump-host -> target hop below.
+    let api_ssh_port = if is_jump_host {
+        resolve_jump_host_ssh_port(jump_host_ssh_port, current_status.port.or(result.port))
+    } else {
+        current_status.port.or(result.port).unwrap_or(23333)
+    };
+    result.port = Some(api_ssh_port);
     emit_runtime_log(
         &app_handle,
         format!(
-            "[appliance-access] target={} currentStatus enable={:?} sshPort={}",
-            ip, current_status.enable, api_ssh_port
+            "[appliance-access] target={} currentStatus enable={:?} sshPort={} degraded={}",
+            ip,
+            current_status.enable,
+            api_ssh_port,
+            degraded_api_error.is_some()
         ),
         "info",
     );
 
     if add_whitelist_rule {
         // Resolve credentials for SSH to jump host (or direct target).
-        let (ssh_user, ssh_pass) = if jump_host.is_some() {
-            let user = jump_host_username
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| ssh_username.clone());
-            let pass = jump_host_password
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| ssh_password.clone());
-            (user, pass)
-        } else {
-            (ssh_username.clone(), ssh_password.clone())
-        };
+        let (ssh_user, ssh_pass) = resolve_appliance_ssh_creds(
+            is_jump_host,
+            &ssh_username,
+            &ssh_password,
+            jump_host_username.as_deref(),
+            jump_host_password.as_deref(),
+        );
 
         if ssh_user.is_empty() || ssh_pass.is_empty() {
             result.whitelist_applied = Some(false);
@@ -3208,7 +3284,7 @@ async fn enable_appliance_ssh_for_target(
             // and B (pre-shared keys), which is the appliance HA convention.
             // B's SSH username defaults to the main SSH username (typically
             // `root` — same across the master/backup pair).
-            let target_port = JUMP_HOST_DEFAULT_TARGET_SSH_PORT;
+            let target_port = api_ssh_port;
             let cmd = build_nested_iptables_whitelist_command(
                 &ssh_username,
                 &ip,
@@ -3267,7 +3343,12 @@ async fn enable_appliance_ssh_for_target(
                     ),
                     "success",
                 );
-                result.message = if jump_host.is_some() {
+                result.message = if let Some(api_err) = degraded_api_error.as_ref() {
+                    format!(
+                        "Management API unavailable ({}); applied the iptables whitelist rule on {} for {} ({}) over SSH via jump host {}",
+                        api_err, ip, source, whitelist_scope_desc, api_ip
+                    )
+                } else if jump_host.is_some() {
                     format!(
                         "SSH is enabled on jump host {}. Added an iptables whitelist rule on {} for {} ({})",
                         api_ip, ip, source, whitelist_scope_desc
@@ -3286,7 +3367,12 @@ async fn enable_appliance_ssh_for_target(
                     format!("[appliance-access] target={} whitelist failed: {}", ip, e),
                     "error",
                 );
-                result.message = if jump_host.is_some() {
+                result.message = if let Some(api_err) = degraded_api_error.as_ref() {
+                    format!(
+                        "Management API unavailable ({}); failed to apply the iptables rule on {} over SSH via jump host {}: {}",
+                        api_err, ip, api_ip, e
+                    )
+                } else if jump_host.is_some() {
                     format!(
                         "SSH is enabled on jump host {}, but failed to apply the iptables rule on {}: {}",
                         api_ip, ip, e
@@ -3297,6 +3383,73 @@ async fn enable_appliance_ssh_for_target(
                         source, whitelist_scope_desc, e
                     )
                 };
+            }
+        }
+    } else if let Some(api_err) = degraded_api_error {
+        // Degraded jump-host path with no whitelist rule requested: prove the SSH
+        // channel works by logging into the jump host.
+        let (ssh_user, ssh_pass) = resolve_appliance_ssh_creds(
+            is_jump_host,
+            &ssh_username,
+            &ssh_password,
+            jump_host_username.as_deref(),
+            jump_host_password.as_deref(),
+        );
+        if ssh_user.is_empty() || ssh_pass.is_empty() {
+            result.message = format!(
+                "Management API unavailable ({}); SSH username and password are required to verify the SSH channel",
+                api_err
+            );
+            return Some(result);
+        }
+        let host_owned = api_ip.clone();
+        let user_owned = ssh_user.clone();
+        let password_owned = ssh_pass.clone();
+        let probe = tauri::async_runtime::spawn_blocking(move || {
+            run_remote_command_over_ssh(
+                &host_owned,
+                api_ssh_port,
+                &user_owned,
+                &password_owned,
+                "true",
+            )
+        })
+        .await;
+        match probe {
+            Ok(Ok(_)) => {
+                result.success = true;
+                result.message = format!(
+                    "Management API unavailable ({}), but jump host {} is reachable over SSH (port {})",
+                    api_err, api_ip, api_ssh_port
+                );
+                emit_runtime_log(
+                    &app_handle,
+                    format!(
+                        "[appliance-access] target={} degraded SSH probe ok via {}:{}",
+                        ip, api_ip, api_ssh_port
+                    ),
+                    "success",
+                );
+            }
+            Ok(Err(e)) => {
+                result.message = format!(
+                    "Management API unavailable ({}); SSH login to jump host {} also failed: {}",
+                    api_err, api_ip, e
+                );
+                emit_runtime_log(
+                    &app_handle,
+                    format!(
+                        "[appliance-access] target={} degraded SSH probe failed: {}",
+                        ip, e
+                    ),
+                    "error",
+                );
+            }
+            Err(join_err) => {
+                result.message = format!(
+                    "Management API unavailable ({}); failed to run the SSH probe task: {}",
+                    api_err, join_err
+                );
             }
         }
     } else {
@@ -3346,6 +3499,7 @@ async fn enable_appliance_ssh(
     } else {
         (None, None)
     };
+    let jump_host_ssh_port = request.jump_host_ssh_port;
 
     let results = crate::async_utils::run_ordered_with_limit(
         targets,
@@ -3371,6 +3525,7 @@ async fn enable_appliance_ssh(
                     whitelist_cidr,
                     jump_user,
                     jump_pass,
+                    jump_host_ssh_port,
                 )
                 .await
             }
