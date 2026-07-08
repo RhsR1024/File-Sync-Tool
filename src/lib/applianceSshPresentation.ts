@@ -11,3 +11,12 @@ export function getApplianceSshEnableState(value?: number | null): ApplianceSshE
 
   return 'unknown';
 }
+
+export function isValidSshPort(value: unknown): boolean {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= 65535
+  );
+}
