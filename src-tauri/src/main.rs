@@ -2164,6 +2164,16 @@ mod tests {
             resolve_appliance_ssh_creds(false, "root", "main", Some("jump"), Some("jpass")),
             ("root".to_string(), "main".to_string())
         );
+        // Non-blank username is trimmed while password is used as-is.
+        assert_eq!(
+            resolve_appliance_ssh_creds(true, "root", "main", Some(" jump "), Some("jpass")),
+            ("jump".to_string(), "jpass".to_string())
+        );
+        // Password is NOT trimmed (used verbatim).
+        assert_eq!(
+            resolve_appliance_ssh_creds(true, "root", "main", Some("jump"), Some(" jpass ")),
+            ("jump".to_string(), " jpass ".to_string())
+        );
     }
 }
 
@@ -2567,7 +2577,7 @@ const JUMP_HOST_DEFAULT_TARGET_SSH_PORT: u16 = 23333;
 /// Resolve the SSH port used to reach the jump host and the nested target hop.
 /// Priority: an explicit non-zero user port, then the status-API port, then the
 /// 23333 default.
-pub fn resolve_jump_host_ssh_port(user_port: Option<u16>, status_port: Option<u16>) -> u16 {
+fn resolve_jump_host_ssh_port(user_port: Option<u16>, status_port: Option<u16>) -> u16 {
     user_port
         .filter(|p| *p != 0)
         .or(status_port)
@@ -3245,9 +3255,15 @@ async fn enable_appliance_ssh_for_target(
 
         if ssh_user.is_empty() || ssh_pass.is_empty() {
             result.whitelist_applied = Some(false);
-            result.message =
+            result.message = if let Some(api_err) = degraded_api_error.as_ref() {
+                format!(
+                    "Management API unavailable ({}); SSH username and password are required to apply the whitelist rule",
+                    api_err
+                )
+            } else {
                 "SSH username and password are required when adding an iptables whitelist rule"
-                    .to_string();
+                    .to_string()
+            };
             return Some(result);
         }
 
@@ -3279,7 +3295,8 @@ async fn enable_appliance_ssh_for_target(
 
         // Build the command that will run via SSH on `api_ip` (jump host or direct).
         let (ssh_host, command) = if jump_host.is_some() {
-            // Nested: run on A a command that SSHes to B (default port) and
+            // Nested: run on A a command that SSHes to B using the resolved
+            // SSH port (user-supplied, else status-reported, else 23333) and
             // applies the iptables rule. Relies on passwordless SSH between A
             // and B (pre-shared keys), which is the appliance HA convention.
             // B's SSH username defaults to the main SSH username (typically
@@ -3433,7 +3450,7 @@ async fn enable_appliance_ssh_for_target(
             }
             Ok(Err(e)) => {
                 result.message = format!(
-                    "Management API unavailable ({}); SSH login to jump host {} also failed: {}",
+                    "Management API unavailable ({}); SSH channel to jump host {} is not usable: {}",
                     api_err, api_ip, e
                 );
                 emit_runtime_log(
@@ -3447,8 +3464,8 @@ async fn enable_appliance_ssh_for_target(
             }
             Err(join_err) => {
                 result.message = format!(
-                    "Management API unavailable ({}); failed to run the SSH probe task: {}",
-                    api_err, join_err
+                    "Management API unavailable ({}); SSH channel to jump host {} is not usable: {}",
+                    api_err, api_ip, join_err
                 );
             }
         }
