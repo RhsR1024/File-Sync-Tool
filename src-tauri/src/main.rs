@@ -1993,7 +1993,7 @@ mod tests {
     use super::schedule_dialog_task;
     use super::{
         appliance_ssh_api_port, build_appliance_ssh_api_url, build_iptables_whitelist_rule,
-        ApplianceSshApiVersion, ApplianceSshWhitelistScope,
+        resolve_jump_host_ssh_port, ApplianceSshApiVersion, ApplianceSshWhitelistScope,
     };
     #[cfg(target_os = "windows")]
     use std::cell::Cell;
@@ -2137,6 +2137,15 @@ mod tests {
 
         assert!(rule.contains("-p tcp -s 192.115.1.15 --dport 23333 -j ACCEPT"));
     }
+
+    #[test]
+    fn resolve_jump_host_ssh_port_prefers_user_then_status_then_default() {
+        assert_eq!(resolve_jump_host_ssh_port(Some(2222), Some(23333)), 2222);
+        assert_eq!(resolve_jump_host_ssh_port(None, Some(2200)), 2200);
+        assert_eq!(resolve_jump_host_ssh_port(None, None), 23333);
+        // A 0 port is treated as "unset" and falls through to the status/default.
+        assert_eq!(resolve_jump_host_ssh_port(Some(0), Some(2200)), 2200);
+    }
 }
 
 #[tauri::command]
@@ -2252,6 +2261,10 @@ pub struct ApplianceSshRequest {
     pub jump_host_username: Option<String>,
     #[serde(default)]
     pub jump_host_password: Option<String>,
+    /// SSH port used to reach the jump host and the nested hop to the target.
+    /// Resolution priority: this value > status-API port > 23333.
+    #[serde(default)]
+    pub jump_host_ssh_port: Option<u16>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -2531,6 +2544,16 @@ fn describe_whitelist_scope(scope: ApplianceSshWhitelistScope, port: u16) -> Str
 /// Default SSH port assumed for targets reached via jump host (the REST API
 /// that reports the real port is only available on direct targets).
 const JUMP_HOST_DEFAULT_TARGET_SSH_PORT: u16 = 23333;
+
+/// Resolve the SSH port used to reach the jump host and the nested target hop.
+/// Priority: an explicit non-zero user port, then the status-API port, then the
+/// 23333 default.
+pub fn resolve_jump_host_ssh_port(user_port: Option<u16>, status_port: Option<u16>) -> u16 {
+    user_port
+        .filter(|p| *p != 0)
+        .or(status_port)
+        .unwrap_or(JUMP_HOST_DEFAULT_TARGET_SSH_PORT)
+}
 
 /// Build a command to be executed on the jump host that (1) opens the
 /// idempotent iptables whitelist locally on A so future user→A SSH attempts
