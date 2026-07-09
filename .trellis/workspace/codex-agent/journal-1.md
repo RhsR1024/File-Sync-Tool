@@ -41,3 +41,38 @@ Aligned the Alt+C panel with ElegantClipboard-style group placement and fixed in
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: 一体机主备从接入组一键开启SSH与白名单
+
+**Date**: 2026-07-09
+**Task**: 一体机主备从接入组一键开启SSH与白名单
+**Branch**: `main`
+
+### Summary
+
+将一体机访问控制页的跳板机区块替换为主备（从）接入组：主机必填+备机可选+从机0~10台标签输入；有备机走既有跳板对路径（接口开主机SSH→本机白名单→链式SSH备机白名单），无备机主备从全部直连；结果表加组N·主备/主机/从机角色徽章；最近记录升级为主=>备=>从格式并兼容旧两段格式；白名单来源默认改为全部放行。纯前端改造后端零改动，抽取IpTagInput组件与applianceSshGroups纯逻辑模块（15个node --test单测）。构建验证file-sync-tool-1.1.2-202607091619.exe通过（期间一次rustc OOM为8GB内存环境问题，重试成功）。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `927aa41` | (see git log) |
+| `b44a0c3` | (see git log) |
+| `450b9db` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
