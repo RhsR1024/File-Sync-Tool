@@ -74,3 +74,27 @@ Behavior notes:
 - If `manifest.json` is malformed, the script fails instead of overwriting history.
 
 No service restart is required.
+
+## WebView2 Runtime assets
+
+The bare `.exe` startup bootstrap downloads the WebView2 Runtime installer from
+the update server. These files are independent of `manifest.json`:
+
+```text
+<server-root>/
+|-- manifest.json                  # app update manifest (existing)
+|-- file-sync-tool-*.exe           # app release artifacts (existing)
+`-- webview2/
+    |-- MicrosoftEdgeWebView2RuntimeInstallerX64.exe
+    `-- MicrosoftEdgeWebView2RuntimeInstallerX64.exe.sha256
+```
+
+Download the "Evergreen Standalone Installer x64" from
+https://developer.microsoft.com/microsoft-edge/webview2/ and generate the
+sidecar hash file:
+
+```powershell
+$f = "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+$hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+"$hash  $f" | Out-File -Encoding ascii "$f.sha256" -NoNewline
+```

@@ -66,6 +66,25 @@ fn format_capture_backend_fallback_message(
     monitor_index: usize,
     cause: &str,
 ) -> String;
+
+struct ScreenShareAccessUrls {
+    server_url: String,
+    all_urls: Vec<String>,
+}
+
+fn build_screen_share_access_urls(
+    lan_ips: &[String],
+    bind_address: Option<&str>,
+    port: u16,
+) -> ScreenShareAccessUrls;
+
+enum BlackFrameDecision {
+    Accept,
+    Suppress,
+    ForceRecreate { reason: String },
+}
+
+struct BlackFrameRecoveryWatchdog { ... }
 ```
 
 ### 3. Contracts
@@ -87,6 +106,10 @@ fn format_capture_backend_fallback_message(
 - WGC fallback must log the transition from `DXGI` to `WGC`, log WGC creation start, log WGC failure with the failing stage/HRESULT when applicable, and log the selected backend on success.
 - WGC monitor capture must use Win32 interop (`IGraphicsCaptureItemInterop::CreateForMonitor`) rather than `TryCreateFromDisplayId`, so Windows 10 Enterprise 21H2 remains supported.
 - `CAPTURE_STARTUP_TIMEOUT` must leave enough room for the full DXGI retry window plus WGC fallback startup slack.
+- `build_screen_share_access_urls` must publish only the bound IP when `ScreenShareConfig.bind_address` is a specific address; URLs for other local adapters are not reachable and must not be shown.
+- `build_screen_share_access_urls` must publish all detected non-loopback LAN IPv4 URLs only when binding all interfaces (`0.0.0.0` or empty), with `127.0.0.1` as the no-LAN-IP fallback.
+- After a session has delivered at least one non-black content frame, recovery-period near-black frames are not healthy frames. Suppress them, keep `capture_paused=true`, preserve the viewer's last good frame, and force capture-source recreation after `BLACK_FRAME_RECREATE_AFTER`.
+- An initially black desktop before any prior content frame must still be accepted; black-frame recovery must be gated by prior content plus recovery/desktop-unavailable evidence.
 
 ### 4. Validation & Error Matrix
 
@@ -106,6 +129,10 @@ fn format_capture_backend_fallback_message(
 | `capture_backend_mode=dxgi` and DXGI cannot start | Fail startup without attempting WGC |
 | WGC creation fails after DXGI failed | Final error includes both DXGI and WGC failure causes |
 | WGC creation succeeds after DXGI failed | Continue sharing with backend `WGC` and log the selected backend |
+| `bind_address` is a specific IP | `server_url` and `all_urls` contain only `http://<bind_address>:<port>` |
+| `bind_address` is `0.0.0.0` or empty | `all_urls` contains every detected LAN URL, falling back to localhost only when none are detected |
+| Recovery emits continuous near-black frames after prior content | Suppress frames, keep `capture_paused=true`, and recreate the capture source after `BLACK_FRAME_RECREATE_AFTER` |
+| First captured desktop is black with no prior content | Accept it and do not force recreation from blackness alone |
 
 ### 5. Good/Base/Bad Cases
 
@@ -113,6 +140,8 @@ fn format_capture_backend_fallback_message(
 - Base: a normal start transitions `starting -> active`, stores URLs and start time, then starts HTTP serving and status reporting for the same session. On Windows, DXGI remains the preferred backend when it is available.
 - Fallback: if DXGI is blocked by another capture stack, WGC is attempted and selected without requiring the user to close DingTalk first.
 - Bad: using only `active` to block duplicate starts, because `active` is false during the capture startup window.
+- Bad: publishing every local adapter URL after binding the listener to one specific adapter, because the extra URLs cannot be reached.
+- Bad: treating continuous near-black recovery frames as healthy frames after lock/UAC; that clears `capture_paused` and leaves viewers with a black screen plus a moving cursor.
 
 ### 6. Tests Required
 
@@ -127,6 +156,10 @@ fn format_capture_backend_fallback_message(
 - Unit test: backend failure messages include the backend name and WGC failure cause.
 - Unit test: backend mode labels serialize to `auto`, `wgc`, and `dxgi`.
 - Unit test: automatic mode uses a shorter DXGI retry window than DXGI-only mode.
+- Unit test: `build_screen_share_access_urls` publishes exactly one URL for a specific `bind_address`.
+- Unit test: `build_screen_share_access_urls` preserves all LAN URLs when binding all interfaces.
+- Unit test: `BlackFrameRecoveryWatchdog` suppresses near-black recovery frames and forces recreation after the recovery deadline.
+- Unit test: `BlackFrameRecoveryWatchdog` accepts an initially black desktop before any prior content frame exists.
 - Full backend verification: `cargo test --manifest-path src-tauri/Cargo.toml`.
 
 ### 7. Wrong vs Correct

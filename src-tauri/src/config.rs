@@ -223,11 +223,11 @@ fn default_framework_password_api_timeout_secs() -> u64 {
 fn default_disk_cleanup_http_timeout_secs() -> u64 {
     5
 }
-fn default_update_server_url() -> String {
+pub(crate) fn default_update_server_url() -> String {
     "http://192.115.1.3:8080".to_string()
 }
 
-fn normalize_update_server_url(value: &str) -> String {
+pub(crate) fn normalize_update_server_url(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         String::new()
@@ -236,7 +236,7 @@ fn normalize_update_server_url(value: &str) -> String {
     }
 }
 
-fn validate_update_server_url(value: &str) -> Result<(), String> {
+pub(crate) fn validate_update_server_url(value: &str) -> Result<(), String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(());

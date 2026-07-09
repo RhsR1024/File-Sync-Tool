@@ -12,6 +12,7 @@ const toolPaths = SIDEBAR_NAV_SECTIONS[1].items.map((item) => item.path);
 assert.deepEqual(toolPaths, [
   '/tools',
   '/tools/appliance-ssh',
+  '/tools/remote-package-patch',
   '/tools/framework-password',
   '/tools/code-statistics',
   '/tools/network',

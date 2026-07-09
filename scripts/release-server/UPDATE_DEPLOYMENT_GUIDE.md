@@ -607,3 +607,31 @@ scp src-tauri/target/release/file-sync-tool-1.0.8-202604261530.exe user@your-ser
 8. 用一台安装旧版本的客户端做完整升级验证
 
 做到这一步，就已经具备基本的内网应用内升级能力。
+
+## WebView2 Runtime asset deployment
+
+The WebView2 startup bootstrap uses the same `update_server_url`, but the
+Runtime installer files are not part of `manifest.json`. Place them under a
+fixed `webview2/` directory at the server root:
+
+```text
+<server-root>/
+|-- manifest.json
+|-- file-sync-tool-*.exe
+`-- webview2/
+    |-- MicrosoftEdgeWebView2RuntimeInstallerX64.exe
+    `-- MicrosoftEdgeWebView2RuntimeInstallerX64.exe.sha256
+```
+
+Download the "Evergreen Standalone Installer x64" from
+https://developer.microsoft.com/microsoft-edge/webview2/ and create the sidecar
+hash file on Windows:
+
+```powershell
+$f = "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+$hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+"$hash  $f" | Out-File -Encoding ascii "$f.sha256" -NoNewline
+```
+
+When updating the WebView2 installer version, replace only the installer and
+the `.sha256` file. No `manifest.json` change is required.

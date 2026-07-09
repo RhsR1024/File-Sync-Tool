@@ -19,6 +19,7 @@
 | [Screen Share](./screen-share.md) | Contracts for capture startup fencing, stale worker invalidation, and recovery timing | Active |
 | [Update Checker](./update-checker.md) | Contracts for manifest fetch, verified update download/apply flow, updater events, and config migration | Active |
 | [Tauri Native Dialogs](./tauri-native-dialogs.md) | Contracts for Windows-safe native folder picker execution through the Tauri main thread | Active |
+| [WebView2 Bootstrap](./webview2-bootstrap.md) | Contracts for pre-Tauri WebView2 Runtime detection, verified install, and restart recovery | Active |
 
 ---
 

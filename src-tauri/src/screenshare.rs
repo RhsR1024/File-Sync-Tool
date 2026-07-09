@@ -105,6 +105,11 @@ const STARVATION_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const WGC_PROBE_AFTER: Duration = Duration::from_secs(2);
 #[cfg(target_os = "windows")]
 const WGC_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+const BLACK_FRAME_RECREATE_AFTER: Duration = Duration::from_millis(1500);
+const BLACK_FRAME_RECOVERY_WINDOW: Duration = Duration::from_secs(8);
+const BLACK_FRAME_DESKTOP_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const BLACK_FRAME_BRIGHT_THRESHOLD: u8 = 12;
+const BLACK_FRAME_MAX_BRIGHT_PIXELS_PER_10K: usize = 35;
 type ViewerIpMap = HashMap<String, Instant>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +227,12 @@ pub struct ScreenShareStatus {
     /// True while the capture source is down and being rebuilt (e.g. lock
     /// screen); the HTTP server and viewer connections stay alive throughout.
     pub capture_paused: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenShareAccessUrls {
+    server_url: String,
+    all_urls: Vec<String>,
 }
 
 // ─── Handle (stored in AppState) ────────────────────────────
@@ -578,18 +589,6 @@ pub async fn screen_share_start(
         );
     }
 
-    // Get local IPs (all non-loopback IPv4)
-    let all_ips = get_lan_ips();
-    let local_ip = all_ips
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let server_url = format!("http://{}:{}", local_ip, config.port);
-    let all_urls: Vec<String> = all_ips
-        .iter()
-        .map(|ip| format!("http://{}:{}", ip, config.port))
-        .collect();
-
     // Bind listener BEFORE spawning so that bind errors propagate to the caller
     let bind_ip = config.bind_address.as_deref().unwrap_or("0.0.0.0");
     let addr = format!("{}:{}", bind_ip, config.port);
@@ -599,6 +598,14 @@ pub async fn screen_share_start(
         msg
     })?;
     log::info!("Screen share HTTP server listening on {}", addr);
+
+    // Get local IPs (all non-loopback IPv4). When bound to a specific address,
+    // only that address is reachable, so only publish that single URL.
+    let all_ips = get_lan_ips();
+    let access_urls =
+        build_screen_share_access_urls(&all_ips, config.bind_address.as_deref(), config.port);
+    let server_url = access_urls.server_url;
+    let all_urls = access_urls.all_urls;
 
     // Broadcast channel for JPEG frames
     let (broadcast_tx, _) = broadcast::channel::<Arc<Bytes>>(8);
@@ -1392,6 +1399,148 @@ impl FrameStarvationWatchdog {
 
 // ─── Screen Capture Loop ────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BlackFrameDecision {
+    Accept,
+    Suppress,
+    ForceRecreate { reason: String },
+}
+
+struct BlackFrameRecoveryWatchdog {
+    had_content_frame: bool,
+    recovery_armed_at: Option<Instant>,
+    black_since: Option<Instant>,
+    saw_black_while_desktop_unavailable: bool,
+    last_desktop_sample_at: Option<Instant>,
+}
+
+impl BlackFrameRecoveryWatchdog {
+    fn new() -> Self {
+        Self {
+            had_content_frame: false,
+            recovery_armed_at: None,
+            black_since: None,
+            saw_black_while_desktop_unavailable: false,
+            last_desktop_sample_at: None,
+        }
+    }
+
+    fn arm_for_recovery(&mut self, now: Instant) {
+        self.recovery_armed_at = Some(now);
+        self.black_since = None;
+    }
+
+    fn should_sample_desktop(&mut self, now: Instant, near_black: bool) -> bool {
+        if !near_black || !self.had_content_frame {
+            return false;
+        }
+        if self.last_desktop_sample_at.map_or(false, |sampled_at| {
+            now.saturating_duration_since(sampled_at) < BLACK_FRAME_DESKTOP_SAMPLE_INTERVAL
+        }) {
+            return false;
+        }
+        self.last_desktop_sample_at = Some(now);
+        true
+    }
+
+    fn observe_frame(
+        &mut self,
+        now: Instant,
+        bgra: &[u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+        recovery_pending: bool,
+        desktop_available: Option<bool>,
+    ) -> BlackFrameDecision {
+        let near_black = is_nearly_black_bgra_frame(bgra, width, height, stride);
+        self.observe_frame_classification(now, near_black, recovery_pending, desktop_available)
+    }
+
+    fn observe_frame_classification(
+        &mut self,
+        now: Instant,
+        near_black: bool,
+        recovery_pending: bool,
+        desktop_available: Option<bool>,
+    ) -> BlackFrameDecision {
+        if !near_black {
+            self.had_content_frame = true;
+            self.recovery_armed_at = None;
+            self.black_since = None;
+            self.saw_black_while_desktop_unavailable = false;
+            return BlackFrameDecision::Accept;
+        }
+
+        if !self.had_content_frame {
+            return BlackFrameDecision::Accept;
+        }
+
+        if desktop_available == Some(false) {
+            self.saw_black_while_desktop_unavailable = true;
+            self.black_since = None;
+            return BlackFrameDecision::Suppress;
+        }
+
+        let recovery_window_open = recovery_pending
+            || self.recovery_armed_at.map_or(false, |armed_at| {
+                now.saturating_duration_since(armed_at) <= BLACK_FRAME_RECOVERY_WINDOW
+            });
+        let returning_from_unavailable_desktop =
+            self.saw_black_while_desktop_unavailable && desktop_available == Some(true);
+
+        if !(recovery_window_open || returning_from_unavailable_desktop) {
+            return BlackFrameDecision::Accept;
+        }
+
+        let black_since = *self.black_since.get_or_insert_with(|| {
+            if recovery_window_open {
+                self.recovery_armed_at.unwrap_or(now)
+            } else {
+                now
+            }
+        });
+        if now.saturating_duration_since(black_since) >= BLACK_FRAME_RECREATE_AFTER {
+            return BlackFrameDecision::ForceRecreate {
+                reason: format!(
+                    "near-black frames persisted for {}ms after capture recovery",
+                    now.saturating_duration_since(black_since).as_millis()
+                ),
+            };
+        }
+
+        BlackFrameDecision::Suppress
+    }
+}
+
+fn is_nearly_black_bgra_frame(bgra: &[u8], width: usize, height: usize, stride: usize) -> bool {
+    if width == 0 || height == 0 || stride < width * 4 || bgra.len() < height * stride {
+        return false;
+    }
+
+    let x_step = (width / 64).max(1);
+    let y_step = (height / 64).max(1);
+    let mut sampled = 0usize;
+    let mut bright = 0usize;
+
+    for y in (0..height).step_by(y_step) {
+        let row_start = y * stride;
+        for x in (0..width).step_by(x_step) {
+            let offset = row_start + x * 4;
+            if offset + 2 >= bgra.len() {
+                continue;
+            }
+            sampled += 1;
+            let max_channel = bgra[offset].max(bgra[offset + 1]).max(bgra[offset + 2]);
+            if max_channel > BLACK_FRAME_BRIGHT_THRESHOLD {
+                bright += 1;
+            }
+        }
+    }
+
+    sampled > 0 && bright * 10_000 <= sampled * BLACK_FRAME_MAX_BRIGHT_PIXELS_PER_10K
+}
+
 enum CapturedFrame<'a> {
     Dxgi(Frame<'a>, usize),
     Borrowed { pixels: &'a [u8], stride: usize },
@@ -1519,6 +1668,9 @@ fn capture_loop(
     // 僵尸源期间观看端保持"画面中断，重试中"提示而不是无解释黑屏。
     let mut pending_resume = false;
     let mut starvation_watchdog = FrameStarvationWatchdog::new(Instant::now());
+    let mut black_frame_watchdog = BlackFrameRecoveryWatchdog::new();
+    let mut black_frame_suppressed_logged = false;
+    let mut forced_recreate_error: Option<io::Error> = None;
 
     // Cursor overlay setup
     #[cfg(target_os = "windows")]
@@ -1572,6 +1724,7 @@ fn capture_loop(
         let starvation = starvation_watchdog.tick(tick_start, desktop_sample);
         let current_backend = source.backend_kind();
         if starvation.lock_observed {
+            black_frame_watchdog.arm_for_recovery(tick_start);
             emit_capture_create_diagnostic(
                 &app_handle,
                 "info",
@@ -1596,17 +1749,20 @@ fn capture_loop(
             );
         }
 
-        let frame_result = match starvation.force_recreate {
-            Some(verdict) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("frame starvation watchdog: {}", verdict.describe()),
-            )),
-            None => source.frame(),
+        let frame_result = if let Some(error) = forced_recreate_error.take() {
+            Err(error)
+        } else {
+            match starvation.force_recreate {
+                Some(verdict) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("frame starvation watchdog: {}", verdict.describe()),
+                )),
+                None => source.frame(),
+            }
         };
 
         match frame_result {
             Ok(frame) => {
-                starvation_watchdog.on_frame(tick_start);
                 let stride = frame.stride();
                 let frame_pixels = frame.pixels();
 
@@ -1661,6 +1817,73 @@ fn capture_loop(
 
                 #[cfg(not(target_os = "windows"))]
                 let source_pixels: &[u8] = frame_pixels;
+
+                let near_black = is_nearly_black_bgra_frame(source_pixels, width, height, stride);
+                let black_desktop_sample =
+                    if black_frame_watchdog.should_sample_desktop(tick_start, near_black) {
+                        Some(is_input_desktop_available())
+                    } else {
+                        None
+                    };
+                match black_frame_watchdog.observe_frame_classification(
+                    tick_start,
+                    near_black,
+                    pending_resume,
+                    black_desktop_sample,
+                ) {
+                    BlackFrameDecision::Accept => {
+                        black_frame_suppressed_logged = false;
+                        starvation_watchdog.on_frame(tick_start);
+                    }
+                    BlackFrameDecision::Suppress => {
+                        if is_current_session(&runtime_handle, session_id) {
+                            runtime_handle.capture_paused.store(true, Ordering::SeqCst);
+                        }
+                        if !black_frame_suppressed_logged {
+                            black_frame_suppressed_logged = true;
+                            emit_capture_create_diagnostic(
+                                &app_handle,
+                                "warn",
+                                format!(
+                                    "near-black screen frames suppressed while waiting for capture recovery: backend={}, pending_resume={}, desktop_available={:?}",
+                                    current_backend.label(),
+                                    pending_resume,
+                                    black_desktop_sample
+                                ),
+                            );
+                        }
+                        let elapsed = tick_start.elapsed();
+                        if elapsed < frame_interval {
+                            std::thread::sleep(frame_interval - elapsed);
+                        }
+                        continue;
+                    }
+                    BlackFrameDecision::ForceRecreate { reason } => {
+                        forced_recreate_error = Some(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("black frame watchdog: {}", reason),
+                        ));
+                        if is_current_session(&runtime_handle, session_id) {
+                            runtime_handle.capture_paused.store(true, Ordering::SeqCst);
+                        }
+                        emit_capture_create_diagnostic(
+                            &app_handle,
+                            "warn",
+                            format!(
+                                "near-black screen frames persisted; rebuilding capture source: backend={}, pending_resume={}, desktop_available={:?}, reason={}",
+                                current_backend.label(),
+                                pending_resume,
+                                black_desktop_sample,
+                                reason
+                            ),
+                        );
+                        let elapsed = tick_start.elapsed();
+                        if elapsed < frame_interval {
+                            std::thread::sleep(frame_interval - elapsed);
+                        }
+                        continue;
+                    }
+                }
 
                 let jpeg = encode_jpeg_reuse(
                     source_pixels,
@@ -1802,7 +2025,10 @@ fn capture_loop(
                         // 注意：不在这里清除 capture_paused——重建"成功"可能是僵尸源
                         //（锁屏期间创建的 WGC 会话不出帧），等首个真实帧到达再清除。
                         pending_resume = true;
-                        starvation_watchdog.on_created(Instant::now());
+                        let recovered_at = Instant::now();
+                        starvation_watchdog.on_created(recovered_at);
+                        black_frame_watchdog.arm_for_recovery(recovered_at);
+                        black_frame_suppressed_logged = false;
                         let (new_width, new_height) = (source.width(), source.height());
                         if new_width != width || new_height != height {
                             emit_capture_create_diagnostic(
@@ -3186,6 +3412,41 @@ fn check_auth_cookie(headers: &HeaderMap, expected_hash: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn build_screen_share_access_urls(
+    lan_ips: &[String],
+    bind_address: Option<&str>,
+    port: u16,
+) -> ScreenShareAccessUrls {
+    let bind_address = bind_address
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("0.0.0.0");
+
+    let display_ips: Vec<String> = if bind_address == "0.0.0.0" {
+        if lan_ips.is_empty() {
+            vec!["127.0.0.1".to_string()]
+        } else {
+            lan_ips.to_vec()
+        }
+    } else {
+        vec![bind_address.to_string()]
+    };
+
+    let all_urls: Vec<String> = display_ips
+        .iter()
+        .map(|ip| format!("http://{}:{}", ip, port))
+        .collect();
+    let server_url = all_urls
+        .first()
+        .cloned()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", port));
+
+    ScreenShareAccessUrls {
+        server_url,
+        all_urls,
+    }
+}
+
 fn get_lan_ips() -> Vec<String> {
     use std::net::{IpAddr, Ipv4Addr};
     let mut ips: Vec<Ipv4Addr> = local_ip_address::list_afinet_netifas()
@@ -3618,6 +3879,33 @@ mod tests {
     }
 
     #[test]
+    fn access_urls_respect_specific_bind_address() {
+        let ips = vec![
+            "192.168.1.15".to_string(),
+            "192.168.2.15".to_string(),
+            "10.222.88.140".to_string(),
+        ];
+
+        let urls = build_screen_share_access_urls(&ips, Some("192.168.2.15"), 9870);
+
+        assert_eq!(urls.server_url, "http://192.168.2.15:9870");
+        assert_eq!(urls.all_urls, vec!["http://192.168.2.15:9870"]);
+    }
+
+    #[test]
+    fn access_urls_keep_all_lan_ips_when_binding_all_interfaces() {
+        let ips = vec!["192.168.1.15".to_string(), "10.222.88.140".to_string()];
+
+        let urls = build_screen_share_access_urls(&ips, Some("0.0.0.0"), 9870);
+
+        assert_eq!(urls.server_url, "http://192.168.1.15:9870");
+        assert_eq!(
+            urls.all_urls,
+            vec!["http://192.168.1.15:9870", "http://10.222.88.140:9870"]
+        );
+    }
+
+    #[test]
     fn prepare_runtime_state_for_start_clears_stale_runtime_state() {
         let handle = ScreenShareHandle::new();
         handle.active.store(true, Ordering::SeqCst);
@@ -3973,7 +4261,10 @@ mod tests {
         assert!(unlock_seen);
         let (fired_s, verdict) = fired.expect("watchdog must force recreate after unlock silence");
         assert!(fired_s >= 61 + STARVATION_POST_UNLOCK_GRACE.as_secs());
-        assert!(matches!(verdict, StarvationVerdict::SilentAfterUnlock { .. }));
+        assert!(matches!(
+            verdict,
+            StarvationVerdict::SilentAfterUnlock { .. }
+        ));
     }
 
     #[test]
@@ -4019,7 +4310,10 @@ mod tests {
         let (fired_s, verdict) = fired.expect("zombie source must trigger recreate");
         assert!(fired_s >= STARVATION_FIRST_FRAME_TIMEOUT.as_secs());
         assert!(fired_s <= STARVATION_FIRST_FRAME_TIMEOUT.as_secs() + 1);
-        assert!(matches!(verdict, StarvationVerdict::NoFrameSinceCreate { .. }));
+        assert!(matches!(
+            verdict,
+            StarvationVerdict::NoFrameSinceCreate { .. }
+        ));
     }
 
     #[test]
@@ -4053,7 +4347,10 @@ mod tests {
             "fired too early at +{}s",
             fired_s
         );
-        assert!(matches!(verdict, StarvationVerdict::NoFrameSinceCreate { .. }));
+        assert!(matches!(
+            verdict,
+            StarvationVerdict::NoFrameSinceCreate { .. }
+        ));
     }
 
     #[test]
@@ -4069,6 +4366,75 @@ mod tests {
         let _ = w.tick(now, Some(false));
         assert!(!w.should_sample_desktop(now + Duration::from_millis(300)));
         assert!(w.should_sample_desktop(now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn black_frame_watchdog_forces_recreate_after_recovery_black_frames() {
+        let t0 = Instant::now();
+        let mut watchdog = BlackFrameRecoveryWatchdog::new();
+        let content = solid_bgra_frame(16, 16, [64, 80, 96, 255]);
+        let black = solid_bgra_frame(16, 16, [0, 0, 0, 255]);
+
+        assert_eq!(
+            watchdog.observe_frame(t0, &content, 16, 16, 16 * 4, false, None),
+            BlackFrameDecision::Accept
+        );
+
+        watchdog.arm_for_recovery(t0 + Duration::from_secs(1));
+
+        assert_eq!(
+            watchdog.observe_frame(
+                t0 + Duration::from_secs(1) + BLACK_FRAME_RECREATE_AFTER / 2,
+                &black,
+                16,
+                16,
+                16 * 4,
+                true,
+                Some(true),
+            ),
+            BlackFrameDecision::Suppress
+        );
+
+        assert!(matches!(
+            watchdog.observe_frame(
+                t0 + Duration::from_secs(1) + BLACK_FRAME_RECREATE_AFTER,
+                &black,
+                16,
+                16,
+                16 * 4,
+                true,
+                Some(true),
+            ),
+            BlackFrameDecision::ForceRecreate { .. }
+        ));
+    }
+
+    #[test]
+    fn black_frame_watchdog_allows_initial_black_desktop() {
+        let t0 = Instant::now();
+        let mut watchdog = BlackFrameRecoveryWatchdog::new();
+        let black = solid_bgra_frame(16, 16, [0, 0, 0, 255]);
+
+        assert_eq!(
+            watchdog.observe_frame(
+                t0 + BLACK_FRAME_RECREATE_AFTER * 2,
+                &black,
+                16,
+                16,
+                16 * 4,
+                false,
+                Some(true),
+            ),
+            BlackFrameDecision::Accept
+        );
+    }
+
+    fn solid_bgra_frame(width: usize, height: usize, pixel: [u8; 4]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(width * height * 4);
+        for _ in 0..width * height {
+            frame.extend_from_slice(&pixel);
+        }
+        frame
     }
 
     #[cfg(target_os = "windows")]
