@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorUp, Share2, Shield, type LucideIcon } from 'lucide-vue-next';
+import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorUp, PackageSearch, Share2, Shield, type LucideIcon } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
 import { appStore } from '@/lib/store';
 
@@ -65,6 +65,15 @@ const toolCards = computed<ToolCard[]>(() => [
     icon: markRaw(Shield as LucideIcon),
     iconClasses: 'from-sky-500 to-indigo-600 shadow-sky-500/20',
     chipKey: 'toolsHub.cards.applianceSsh.chip',
+  },
+  {
+    key: 'remote-package-patch',
+    titleKey: 'sidebar.remotePackagePatch',
+    descriptionKey: 'toolsHub.cards.remotePackagePatch.description',
+    path: '/tools/remote-package-patch',
+    icon: markRaw(PackageSearch as LucideIcon),
+    iconClasses: 'from-blue-500 to-emerald-600 shadow-blue-500/20',
+    chipKey: 'toolsHub.cards.remotePackagePatch.chip',
   },
   {
     key: 'code-statistics',

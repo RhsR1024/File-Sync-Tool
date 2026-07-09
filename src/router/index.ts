@@ -48,6 +48,10 @@ const routes: RouteRecordRaw[] = [
     component: EnableApplianceSshPage,
   },
   {
+    path: '/tools/remote-package-patch',
+    component: () => import('../pages/RemotePackagePatchPage.vue'),
+  },
+  {
     path: '/tools/code-statistics',
     component: () => import('../pages/CodeStatisticsPage.vue'),
   },

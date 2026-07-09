@@ -6,6 +6,7 @@ export type SidebarIconKey =
   | 'toolsOverview'
   | 'frameworkPassword'
   | 'applianceSsh'
+  | 'remotePackagePatch'
   | 'codeStatistics'
   | 'networkTools'
   | 'screenShare'
@@ -76,6 +77,13 @@ export const SIDEBAR_NAV_SECTIONS = [
         labelKey: 'sidebar.applianceSsh',
         path: '/tools/appliance-ssh',
         iconKey: 'applianceSsh',
+        matchMode: 'prefix',
+      },
+      {
+        key: 'remote-package-patch',
+        labelKey: 'sidebar.remotePackagePatch',
+        path: '/tools/remote-package-patch',
+        iconKey: 'remotePackagePatch',
         matchMode: 'prefix',
       },
       {

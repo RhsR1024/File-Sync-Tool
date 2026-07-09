@@ -724,6 +724,102 @@ export async function enableApplianceSsh(request: EnableApplianceSshRequest): Pr
   return await invoke<ApplianceSshResult[]>('enable_appliance_ssh', { request });
 }
 
+// Remote Package Patch
+export type RemoteAuth =
+  | { kind: 'password'; password: string }
+  | { kind: 'keyFile'; keyPath: string; passphrase: string | null };
+
+export interface RemoteSshConfig {
+  host: string;
+  port: number;
+  username: string;
+  auth: RemoteAuth;
+}
+
+export interface RemoteDirEntry {
+  name: string;
+  path: string;
+  kind: 'dir' | 'file' | 'symlink' | 'other';
+  size: number;
+  modifiedMs: number | null;
+}
+
+export interface RemoteDirListing {
+  path: string;
+  entries: RemoteDirEntry[];
+}
+
+export type InternalLayer =
+  | { kind: 'middle' }
+  | { kind: 'zst'; zstPath: string };
+
+export interface PackageEntry {
+  layer: InternalLayer;
+  path: string;
+  kind: 'file' | 'dir' | 'symlink' | 'other';
+  size: number;
+  permsText: string;
+  ownerText: string;
+  mtimeText: string;
+}
+
+export interface PackageInventory {
+  packagePath: string;
+  middleTarPath: string;
+  entries: PackageEntry[];
+}
+
+export interface PickedLocalFile {
+  path: string;
+  name: string;
+  size: number;
+}
+
+export type PatchOutputPolicy =
+  | { mode: 'newFile'; outputPath: string }
+  | { mode: 'overwrite' };
+
+export interface PackagePatchRequest {
+  config: RemoteSshConfig;
+  packagePath: string;
+  replacementLocalPath: string;
+  targetInternalPath: string;
+  targetLayer: InternalLayer | null;
+  output: PatchOutputPolicy;
+}
+
+export interface PackagePatchResult {
+  outputPath: string;
+  backupPath: string | null;
+  targetMd5: string;
+  workdir: string;
+  updatedManifests: string[];
+}
+
+export interface RemotePackagePatchEvent {
+  kind: 'stage' | 'log' | 'result' | 'uploadProgress';
+  stage?: string;
+  level?: 'info' | 'warn' | 'error' | string;
+  message?: string;
+  key?: string;
+  value?: string;
+  sent?: number;
+  total?: number;
+}
+
+export const remotePackagePatchApi = {
+  testConnection: (config: RemoteSshConfig) =>
+    invoke<string>('remote_package_test_connection', { config }),
+  listDir: (config: RemoteSshConfig, path: string) =>
+    invoke<RemoteDirListing>('remote_package_list_dir', { config, path }),
+  pickLocalFile: (kind: 'replacement' | 'privateKey') =>
+    invoke<PickedLocalFile | null>('remote_package_pick_local_file', { kind }),
+  scanPackage: (config: RemoteSshConfig, packagePath: string) =>
+    invoke<PackageInventory>('remote_package_scan_package', { config, packagePath }),
+  startPatch: (request: PackagePatchRequest) =>
+    invoke<PackagePatchResult>('remote_package_start_patch', { request }),
+};
+
 // Disk Cache Cleanup
 export interface DiskServerItem {
   serverName: string;

@@ -14,6 +14,7 @@
 | [Clipboard Preview Windows](./clipboard-preview-windows.md) | Contracts for non-activating Alt+C hover preview windows and no-overlap placement | Active |
 | [Error Code Lookup](./error-code-lookup.md) | Contracts for GitLab archive sync, on-disk cache, and Tauri query commands backing the error-code tool | Active |
 | [File Share](./file-share.md) | Contracts for large uploads, upload path validation, and restart-safe browser sessions | Active |
+| [Remote Package Patch](./remote-package-patch.md) | Contracts for remote SSH/SFTP package browsing, nested tar.zst rewrite, md5 updates, and safety defaults | Active |
 | [Network Tools](./network-tools.md) | Contracts for streaming port scan events, cancellation, and full TCP port-range support | Active |
 | [Screen Share](./screen-share.md) | Contracts for capture startup fencing, stale worker invalidation, and recovery timing | Active |
 | [Update Checker](./update-checker.md) | Contracts for manifest fetch, verified update download/apply flow, updater events, and config migration | Active |

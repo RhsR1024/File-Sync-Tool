@@ -7,12 +7,14 @@ mod code_count;
 mod config;
 mod deploy;
 mod disk_cleanup;
+mod download_verify;
 mod error_code;
 mod fileshare;
 mod history;
 mod local_exec;
 mod network;
 mod persist;
+mod remote_package_patch;
 mod scanner;
 mod screenshare;
 mod single_instance_guard;
@@ -23,6 +25,7 @@ mod task_manager;
 mod task_persist;
 mod task_runtime;
 mod updater;
+mod webview2_bootstrap;
 
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
@@ -3563,6 +3566,16 @@ async fn enable_appliance_ssh(
 fn main() {
     install_panic_log_hook();
 
+    // WebView2 bootstrap must run before the single-instance guard. The guard
+    // mutex lives until process exit, so a post-install child could otherwise
+    // race the parent and silently exit as a duplicate before Tauri exists.
+    if matches!(
+        webview2_bootstrap::ensure_webview2_runtime(),
+        webview2_bootstrap::BootstrapOutcome::Exit
+    ) {
+        return;
+    }
+
     // 跨提权等级的单实例判重必须在构建 Tauri 应用之前完成：开机时管理员计划
     // 任务先拉起提权实例、Run 键再拉起普通实例，单实例插件的互斥体跨提权判重
     // 会失效（ERROR_ACCESS_DENIED 被当成“首个实例”），导致双窗口。重复实例在
@@ -3919,6 +3932,11 @@ fn main() {
             open_path_parent,
             open_url,
             open_directory,
+            remote_package_patch::remote_package_test_connection,
+            remote_package_patch::remote_package_list_dir,
+            remote_package_patch::remote_package_pick_local_file,
+            remote_package_patch::remote_package_scan_package,
+            remote_package_patch::remote_package_start_patch,
             save_text_file,
             change_framework_password,
             enable_appliance_ssh,
