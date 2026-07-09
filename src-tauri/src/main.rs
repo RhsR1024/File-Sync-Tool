@@ -15,6 +15,7 @@ mod network;
 mod persist;
 mod scanner;
 mod screenshare;
+mod single_instance_guard;
 mod task_commands;
 mod task_domain;
 mod task_events;
@@ -916,6 +917,12 @@ pub(crate) fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
     {
         const RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
         const VALUE_NAME: &str = "FileSyncToolAutoStart";
+
+        // 剪贴板管理员自启动（FileSyncToolClipboardAdmin + ONLOGON 计划任务）激活
+        // 时，开机启动由该通道独占：若再写 FileSyncToolAutoStart，登录时会同时拉起
+        // “普通 + 提权”两个实例（双窗口且互相争抢剪贴板数据库）。此处强制删除，
+        // 也顺带清理受影响机器上遗留的重复启动项。
+        let enabled = enabled && !crate::clipboard::admin::is_autostart_as_admin_enabled();
 
         if enabled {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -3556,6 +3563,12 @@ async fn enable_appliance_ssh(
 fn main() {
     install_panic_log_hook();
 
+    // 跨提权等级的单实例判重必须在构建 Tauri 应用之前完成：开机时管理员计划
+    // 任务先拉起提权实例、Run 键再拉起普通实例，单实例插件的互斥体跨提权判重
+    // 会失效（ERROR_ACCESS_DENIED 被当成“首个实例”），导致双窗口。重复实例在
+    // 这里直接退出，不会走到窗口创建。
+    single_instance_guard::ensure_single_instance(APP_IDENTIFIER);
+
     // Register an explicit AppUserModelID so Windows notifications show the app
     // name ("File Sync Tool") rather than the launching shell ("PowerShell").
     // Must run before any notification or WinRT call. Failures are non-fatal.
@@ -3615,20 +3628,30 @@ fn main() {
             let setup_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let config = config::load_config(app.handle());
             let task_manager = task_manager::TaskManager::new(app.handle().clone());
-            let _ = sync_launch_on_startup(
-                config.launch_and_auto_scan || config.launch_and_auto_start_file_share,
-            );
+
+            // 单实例插件的隐藏窗口此时已创建：放行“低完整性 → 本实例”的
+            // WM_COPYDATA，否则本实例提权运行时，普通权限的重复启动无法唤起主窗口。
+            #[cfg(target_os = "windows")]
+            single_instance_guard::allow_notifications_from_lower_integrity(APP_IDENTIFIER);
+
+            // 先刷新管理员自启动通道，再同步 FileSyncToolAutoStart：后者要根据
+            // 前者的最终注册表状态决定是否让位，两条开机通道并存会导致登录双开。
             if config.clipboard.run_as_admin {
                 match std::env::current_exe() {
                     Ok(exe) => {
                         let exe_path = exe.to_string_lossy().to_string();
-                        if let Err(error) =
-                            crate::clipboard::admin::set_autostart_as_admin(&exe_path, true)
-                        {
-                            log::warn!(
-                                "[clipboard] failed to refresh admin autostart path on startup: {}",
-                                error
-                            );
+                        // 仅在计划任务缺失或指向旧 exe 时才重建：普通权限进程重建
+                        // 必然失败并把有效的 schtasks 启动项降级成 UAC 弹窗回退。
+                        let status = crate::clipboard::admin::admin_task_status();
+                        if !(status.installed && status.path_valid) {
+                            if let Err(error) =
+                                crate::clipboard::admin::set_autostart_as_admin(&exe_path, true)
+                            {
+                                log::warn!(
+                                    "[clipboard] failed to refresh admin autostart path on startup: {}",
+                                    error
+                                );
+                            }
                         }
                     }
                     Err(error) => {
@@ -3639,6 +3662,9 @@ fn main() {
                     }
                 }
             }
+            let _ = sync_launch_on_startup(
+                config.launch_and_auto_scan || config.launch_and_auto_start_file_share,
+            );
 
             let app_data_dir = app
                 .path()

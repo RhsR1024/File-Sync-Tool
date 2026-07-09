@@ -191,13 +191,20 @@ fn reset_clipboard_config_internal(
     }
 
     *state.clipboard.settings.write() = defaults.clone();
-    {
+    let general_autostart = {
         let mut cfg = state
             .config
             .lock()
             .map_err(|e| format!("lock config: {e}"))?;
         cfg.clipboard = defaults.clone();
         crate::config::save_config(app, &cfg)?;
+        cfg.launch_and_auto_scan || cfg.launch_and_auto_start_file_share
+    };
+    if old.run_as_admin && !defaults.run_as_admin {
+        // 重置关闭了管理员自启动通道，按全局开机自启开关恢复 FileSyncToolAutoStart。
+        if let Err(error) = crate::sync_launch_on_startup(general_autostart) {
+            log::warn!("[clipboard] resync FileSyncToolAutoStart after reset failed: {error}");
+        }
     }
 
     Ok(defaults)
@@ -359,7 +366,10 @@ pub fn cb_move_to_group(
 }
 
 #[tauri::command]
-pub fn cb_set_active_group(state: State<'_, AppState>, group_id: Option<i64>) -> Result<(), String> {
+pub fn cb_set_active_group(
+    state: State<'_, AppState>,
+    group_id: Option<i64>,
+) -> Result<(), String> {
     *state.clipboard.active_group_id.lock() = group_id;
     Ok(())
 }
@@ -830,13 +840,21 @@ pub fn cb_set_run_as_admin(
     let exe_path = exe.to_string_lossy().to_string();
     let status = crate::clipboard::admin::set_autostart_as_admin(&exe_path, enable)?;
     state.clipboard.settings.write().run_as_admin = enable;
-    {
+    let general_autostart = {
         let mut cfg = state
             .config
             .lock()
             .map_err(|e| format!("lock config: {e}"))?;
         cfg.clipboard.run_as_admin = enable;
         crate::config::save_config(&app, &cfg)?;
+        cfg.launch_and_auto_scan || cfg.launch_and_auto_start_file_share
+    };
+    // 管理员自启动通道切换后重算 FileSyncToolAutoStart：开启时删掉普通启动项
+    // （避免登录双开），关闭时按全局开机自启开关恢复。失败不影响本次开关结果。
+    if let Err(error) = crate::sync_launch_on_startup(general_autostart) {
+        log::warn!(
+            "[clipboard] resync FileSyncToolAutoStart after run_as_admin toggle failed: {error}"
+        );
     }
     Ok(status)
 }
