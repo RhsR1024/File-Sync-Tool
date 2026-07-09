@@ -205,6 +205,8 @@ watch(
 </template>
 
 <style scoped>
+@reference "../../style.css";
+
 .rpp-icon-button {
   @apply inline-flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:cursor-not-allowed disabled:opacity-50;
 }

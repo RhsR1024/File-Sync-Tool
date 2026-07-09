@@ -743,6 +743,8 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+@reference "../style.css";
+
 .rpp-input {
   @apply rounded-md border border-slate-200 px-3 py-2 text-sm outline-none transition-colors focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400;
 }
