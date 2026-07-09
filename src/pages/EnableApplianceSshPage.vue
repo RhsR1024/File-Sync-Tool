@@ -5,7 +5,21 @@ import { useI18n } from 'vue-i18n';
 import { AlertCircle, Check, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, Trash2, X as XIcon } from 'lucide-vue-next';
 import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshApiVersion, type ApplianceSshResult, type ApplianceSshTarget, type ApplianceSshWhitelistScope } from '../lib/tauri';
 import { getApplianceSshEnableState, isValidSshPort } from '../lib/applianceSshPresentation';
-import { isValidIp } from '../lib/applianceSshGroups';
+import {
+  MAX_SLAVES_PER_GROUP,
+  buildRoleMap,
+  composeAllTargets,
+  createEmptyGroup,
+  isGroupActive,
+  isValidIp,
+  normalizeGroup,
+  parseGroupEntry,
+  serializeGroup,
+  targetKey,
+  type HaAccessGroup,
+  type HaRole,
+  type HaRoleInfo,
+} from '../lib/applianceSshGroups';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
 import Empty from '../components/Empty.vue';
 import IpTagInput from '../components/IpTagInput.vue';
@@ -35,21 +49,18 @@ const currentProgress = ref<{ current: number; total: number } | null>(null);
 const showInfoDetail = ref<boolean>(false);
 const apiTimeoutSecs = ref<number>(5);
 
-// Jump-host targets: each row is a pair of (jumpHost, target) where the jump
-// host A has the management API and the target B sits behind it.
-interface JumpHostPair {
-  jump: string;
-  target: string;
-}
-const jumpHostPairs = ref<JumpHostPair[]>([]);
+// HA access groups: master (has the management API) + optional backup reached
+// via chained SSH through the master + up to 10 standalone slaves that behave
+// like direct targets.
+const haGroups = ref<HaAccessGroup[]>([]);
 
-// Whitelist source: 'local' auto-detects the local IP; 'all' whitelists every
-// IP (0.0.0.0/0) with no address input required.
-const whitelistSourceMode = ref<'local' | 'all'>('local');
+// Whitelist source: 'all' whitelists every IP (0.0.0.0/0) with no address
+// input required; 'local' auto-detects the local IP.
+const whitelistSourceMode = ref<'local' | 'all'>('all');
 const WHITELIST_ALL_CIDR = '0.0.0.0/0';
 
-// When at least one jump-host pair is configured, allow using separate SSH
-// credentials for the jump host (common credentials by default).
+// When at least one group has a backup (jump path), allow using separate SSH
+// credentials for the master (common credentials by default).
 const useSeparateJumpHostCreds = ref<boolean>(false);
 const jumpHostUsername = ref<string>('');
 const jumpHostPassword = ref<string>('');
@@ -57,11 +68,11 @@ const jumpHostSshPort = ref<number>(23333);
 const showJumpHostPassword = ref(false);
 const RECENT_IPS_KEY = 'applianceSsh.recentIps';
 const RECENT_IPS_LIMIT = 10;
-// Recent jump-host → target pairs, serialized as "jump=>target".
-const recentJumpHostPairs = ref<string[]>([]);
-const RECENT_JUMP_HOST_KEY = 'applianceSsh.recentJumpHostPairs';
-const RECENT_JUMP_HOST_LIMIT = 5;
-const JUMP_HOST_PAIR_SEP = '=>';
+// Recent groups, serialized as "master=>backup=>slave1,slave2". The kv key is
+// kept from the jump-host era; old "jump=>target" entries still parse.
+const recentGroups = ref<string[]>([]);
+const RECENT_GROUPS_KEY = 'applianceSsh.recentJumpHostPairs';
+const RECENT_GROUPS_LIMIT = 5;
 
 const serverOptions = computed(() => {
   if (!config.value) return [];
@@ -91,22 +102,16 @@ const applyRecentIp = (ip: string) => {
   manualIpInputRef.value?.applyTag(ip);
 };
 
-const validJumpHostPairs = computed(() =>
-  jumpHostPairs.value
-    .map(p => ({ jump: p.jump.trim(), target: p.target.trim() }))
-    .filter(p => p.jump && p.target)
-);
+const activeGroups = computed(() => haGroups.value.filter(isGroupActive).map(normalizeGroup));
 
-const allTargetsSummary = computed(() => {
-  const direct = directTargetIps.value.map(ip => ({ ip, jump: null as string | null }));
-  const viaJump = validJumpHostPairs.value.map(p => ({ ip: p.target, jump: p.jump }));
-  return [...direct, ...viaJump];
-});
+const allTargets = computed(() => composeAllTargets(directTargetIps.value, activeGroups.value));
 
-const hasAnyJumpHost = computed(() => validJumpHostPairs.value.length > 0);
+const roleMap = computed(() => buildRoleMap(activeGroups.value));
+
+const hasAnyBackup = computed(() => activeGroups.value.some(g => g.backup !== ''));
 
 const jumpHostSshPortInvalid = computed(
-  () => hasAnyJumpHost.value && !isValidSshPort(jumpHostSshPort.value),
+  () => hasAnyBackup.value && !isValidSshPort(jumpHostSshPort.value),
 );
 
 const needsSshCredentials = computed(() => addWhitelistRule.value);
@@ -114,14 +119,14 @@ const needsSshCredentials = computed(() => addWhitelistRule.value);
 const hasWhitelistConfigError = computed(() => {
   if (!needsSshCredentials.value) return false;
   if (!sshUsername.value.trim() || !sshPassword.value) return true;
-  if (hasAnyJumpHost.value && useSeparateJumpHostCreds.value) {
+  if (hasAnyBackup.value && useSeparateJumpHostCreds.value) {
     if (!jumpHostUsername.value.trim() || !jumpHostPassword.value) return true;
   }
   return false;
 });
 
 const isFormValid = computed(() => {
-  if (isLoading.value || allTargetsSummary.value.length === 0) {
+  if (isLoading.value || allTargets.value.length === 0) {
     return false;
   }
   if (needsSshCredentials.value && hasWhitelistConfigError.value) {
@@ -130,36 +135,40 @@ const isFormValid = computed(() => {
   return true;
 });
 
-const addJumpHostPair = () => {
-  jumpHostPairs.value.push({ jump: '', target: '' });
+const addGroup = () => {
+  haGroups.value.push(createEmptyGroup());
 };
-const removeJumpHostPair = (index: number) => {
-  jumpHostPairs.value.splice(index, 1);
+const removeGroup = (index: number) => {
+  haGroups.value.splice(index, 1);
 };
 
-const recentJumpHostPairsParsed = computed(() =>
-  recentJumpHostPairs.value
-    .map(raw => {
-      const [jump, target] = raw.split(JUMP_HOST_PAIR_SEP);
-      return { jump: (jump ?? '').trim(), target: (target ?? '').trim(), key: raw };
-    })
-    .filter(p => p.jump && p.target)
+const handleSlaveLimitExceeded = () => {
+  pushToast(t('tools.applianceSsh.haGroupSlaveLimit', { max: MAX_SLAVES_PER_GROUP }), 'warning');
+};
+
+const recentGroupsParsed = computed(() =>
+  recentGroups.value
+    .map(raw => ({ key: raw, group: parseGroupEntry(raw) }))
+    .filter((entry): entry is { key: string; group: HaAccessGroup } => entry.group !== null)
 );
 
-const isRecentJumpHostSelected = (pair: { jump: string; target: string }) =>
-  validJumpHostPairs.value.some(p => p.jump === pair.jump && p.target === pair.target);
+const isRecentGroupSelected = (group: HaAccessGroup) => {
+  const serialized = serializeGroup(group);
+  return activeGroups.value.some(g => serializeGroup(g) === serialized);
+};
 
-const applyRecentJumpHostPair = (pair: { jump: string; target: string }) => {
-  if (isLoading.value || isRecentJumpHostSelected(pair)) {
+const applyRecentGroup = (group: HaAccessGroup) => {
+  if (isLoading.value || isRecentGroupSelected(group)) {
     return;
   }
-  // Reuse an empty row if the user just added one, otherwise append.
-  const emptyRow = jumpHostPairs.value.find(p => !p.jump.trim() && !p.target.trim());
-  if (emptyRow) {
-    emptyRow.jump = pair.jump;
-    emptyRow.target = pair.target;
+  // Reuse an empty group if the user just added one, otherwise append.
+  const emptyGroup = haGroups.value.find(g => !isGroupActive(g) && !g.backup.trim() && g.slaves.length === 0);
+  if (emptyGroup) {
+    emptyGroup.master = group.master;
+    emptyGroup.backup = group.backup;
+    emptyGroup.slaves = [...group.slaves];
   } else {
-    jumpHostPairs.value.push({ jump: pair.jump, target: pair.target });
+    haGroups.value.push({ master: group.master, backup: group.backup, slaves: [...group.slaves] });
   }
 };
 
@@ -191,12 +200,12 @@ const clearRecentIps = async () => {
   await storeRecentIps([]);
 };
 
-const storeRecentJumpHostPairs = async (items: readonly string[]) => {
-  const normalized = normalizeRecentItems(items, RECENT_JUMP_HOST_LIMIT);
-  recentJumpHostPairs.value = normalized;
+const storeRecentGroups = async (items: readonly string[]) => {
+  const normalized = normalizeRecentItems(items, RECENT_GROUPS_LIMIT);
+  recentGroups.value = normalized;
   try {
     await invoke('save_kv', {
-      key: RECENT_JUMP_HOST_KEY,
+      key: RECENT_GROUPS_KEY,
       value: normalized,
     });
   } catch {
@@ -204,20 +213,20 @@ const storeRecentJumpHostPairs = async (items: readonly string[]) => {
   }
 };
 
-const rememberRecentJumpHostPairs = async (pairs: readonly { jump: string; target: string }[]) => {
-  const items = pairs.map(p => `${p.jump}${JUMP_HOST_PAIR_SEP}${p.target}`);
+const rememberRecentGroups = async (groups: readonly HaAccessGroup[]) => {
+  const items = groups.map(serializeGroup);
   if (items.length === 0) {
     return;
   }
-  await storeRecentJumpHostPairs(mergeRecentItems(recentJumpHostPairs.value, items, RECENT_JUMP_HOST_LIMIT));
+  await storeRecentGroups(mergeRecentItems(recentGroups.value, items, RECENT_GROUPS_LIMIT));
 };
 
-const removeRecentJumpHostPair = async (key: string) => {
-  await storeRecentJumpHostPairs(removeRecentItems(recentJumpHostPairs.value, key, RECENT_JUMP_HOST_LIMIT));
+const removeRecentGroup = async (key: string) => {
+  await storeRecentGroups(removeRecentItems(recentGroups.value, key, RECENT_GROUPS_LIMIT));
 };
 
-const clearRecentJumpHostPairs = async () => {
-  await storeRecentJumpHostPairs([]);
+const clearRecentGroups = async () => {
+  await storeRecentGroups([]);
 };
 
 onMounted(async () => {
@@ -236,8 +245,8 @@ onMounted(async () => {
   }
 
   try {
-    const savedPairs = await invoke<string[] | null>('load_kv', { key: RECENT_JUMP_HOST_KEY });
-    recentJumpHostPairs.value = normalizeRecentItems(savedPairs, RECENT_JUMP_HOST_LIMIT);
+    const savedGroups = await invoke<string[] | null>('load_kv', { key: RECENT_GROUPS_KEY });
+    recentGroups.value = normalizeRecentItems(savedGroups, RECENT_GROUPS_LIMIT);
   } catch {
     // Ignore malformed recent history from older builds.
   }
@@ -253,8 +262,35 @@ const saveApiTimeout = async () => {
   }
 };
 
+// Snapshot of the role map taken at execute time so result badges stay stable
+// while the user edits groups afterwards.
+const resultRoles = ref<Map<string, HaRoleInfo>>(new Map());
+
+const roleForResult = (result: ApplianceSshResult): HaRoleInfo | undefined =>
+  resultRoles.value.get(targetKey({ ip: result.ip, jumpHost: result.jumpHost }));
+
+const roleLabel = (role: HaRole) => {
+  if (role === 'masterBackup') return t('tools.applianceSsh.haRoleMasterBackup');
+  if (role === 'master') return t('tools.applianceSsh.haRoleMaster');
+  return t('tools.applianceSsh.haRoleSlave');
+};
+
+const roleBadge = (info: HaRoleInfo | undefined) =>
+  info
+    ? t('tools.applianceSsh.haGroupRoleBadge', { index: info.groupIndex + 1, role: roleLabel(info.role) })
+    : null;
+
+const targetChips = computed(() =>
+  allTargets.value.map(target => ({
+    key: targetKey(target),
+    ip: target.ip,
+    jump: target.jumpHost ?? null,
+    badge: roleBadge(roleMap.value.get(targetKey(target))),
+  }))
+);
+
 const handleExecute = async () => {
-  if (allTargetsSummary.value.length === 0) {
+  if (allTargets.value.length === 0) {
     pushToast(t('tools.applianceSsh.noIps'), 'warning');
     return;
   }
@@ -272,16 +308,14 @@ const handleExecute = async () => {
   isLoading.value = true;
   results.value = [];
 
-  const targets: ApplianceSshTarget[] = [
-    ...directTargetIps.value.map(ip => ({ ip })),
-    ...validJumpHostPairs.value.map(p => ({ ip: p.target, jumpHost: p.jump })),
-  ];
+  const targets: ApplianceSshTarget[] = allTargets.value;
+  resultRoles.value = roleMap.value;
   const recentValidIps = targets.map(target => target.ip).filter(isValidIp);
 
   try {
     currentProgress.value = { current: 0, total: targets.length };
     await rememberRecentIps(recentValidIps);
-    await rememberRecentJumpHostPairs(validJumpHostPairs.value);
+    await rememberRecentGroups(activeGroups.value);
 
     const response = await enableApplianceSsh({
       targets,
@@ -293,10 +327,10 @@ const handleExecute = async () => {
       whitelistCidr: whitelistSourceMode.value === 'all'
         ? WHITELIST_ALL_CIDR
         : undefined,
-      jumpHostUseSeparateCreds: hasAnyJumpHost.value && useSeparateJumpHostCreds.value,
+      jumpHostUseSeparateCreds: hasAnyBackup.value && useSeparateJumpHostCreds.value,
       jumpHostUsername: useSeparateJumpHostCreds.value ? jumpHostUsername.value.trim() : undefined,
       jumpHostPassword: useSeparateJumpHostCreds.value ? jumpHostPassword.value : undefined,
-      jumpHostSshPort: hasAnyJumpHost.value ? jumpHostSshPort.value : undefined,
+      jumpHostSshPort: hasAnyBackup.value ? jumpHostSshPort.value : undefined,
     });
     results.value = response;
     pushToast(t('tools.applianceSsh.completed', { success: response.filter(item => item.success).length, total: response.length }), 'success', { ttlMs: 2600 });
@@ -495,65 +529,88 @@ const enableStateClass = (value?: number) => {
             </div>
           </div>
 
-          <!-- Jump host targets card (collapsed by default) -->
+          <!-- HA access groups card (master / optional backup / slaves) -->
           <div class="bg-white border border-slate-200/80 rounded-xl shadow-sm overflow-hidden">
             <div class="flex items-center justify-between gap-3 px-5 py-4">
               <div class="flex items-center gap-2">
                 <Network class="w-4 h-4 text-slate-400" />
-                <h3 class="text-sm font-semibold text-slate-800">{{ t('tools.applianceSsh.jumpHostSection') }}</h3>
+                <h3 class="text-sm font-semibold text-slate-800">{{ t('tools.applianceSsh.haGroupSection') }}</h3>
                 <span class="text-xs text-slate-400">({{ t('tools.applianceSsh.optional') }})</span>
               </div>
               <button
                 type="button"
-                @click="addJumpHostPair"
+                @click="addGroup"
                 :disabled="isLoading"
                 class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Plus class="w-3.5 h-3.5" />
-                {{ t('tools.applianceSsh.jumpHostAdd') }}
+                {{ t('tools.applianceSsh.haGroupAdd') }}
               </button>
             </div>
-            <div v-if="jumpHostPairs.length === 0" class="px-5 pb-4 pt-0">
-              <p class="text-xs text-slate-400 leading-relaxed">{{ t('tools.applianceSsh.jumpHostEmptyHint') }}</p>
+            <div v-if="haGroups.length === 0" class="px-5 pb-4 pt-0">
+              <p class="text-xs text-slate-400 leading-relaxed">{{ t('tools.applianceSsh.haGroupEmptyHint') }}</p>
             </div>
-            <div v-else class="px-5 pb-4 space-y-2">
+            <div v-else class="px-5 pb-4 space-y-3">
               <div
-                v-for="(pair, idx) in jumpHostPairs"
+                v-for="(group, idx) in haGroups"
                 :key="idx"
-                class="flex items-center gap-2"
+                class="border border-slate-200 rounded-lg p-3 space-y-2.5"
               >
-                <input
-                  v-model="pair.jump"
-                  type="text"
-                  :placeholder="t('tools.applianceSsh.jumpHostIpPlaceholder')"
-                  :disabled="isLoading"
-                  class="flex-1 min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
-                  :class="pair.jump.trim() && !isValidIp(pair.jump.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
-                />
-                <span class="text-slate-400 text-sm shrink-0">→</span>
-                <input
-                  v-model="pair.target"
-                  type="text"
-                  :placeholder="t('tools.applianceSsh.jumpHostTargetPlaceholder')"
-                  :disabled="isLoading"
-                  class="flex-1 min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
-                  :class="pair.target.trim() && !isValidIp(pair.target.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
-                />
-                <button
-                  type="button"
-                  @click="removeJumpHostPair(idx)"
-                  :disabled="isLoading"
-                  class="shrink-0 p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  :title="t('tools.applianceSsh.jumpHostRemove')"
-                >
-                  <XIcon class="w-4 h-4" />
-                </button>
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs font-semibold text-slate-500">{{ t('tools.applianceSsh.haGroupIndex', { index: idx + 1 }) }}</span>
+                  <button
+                    type="button"
+                    @click="removeGroup(idx)"
+                    :disabled="isLoading"
+                    class="shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    :title="t('tools.applianceSsh.haGroupRemove')"
+                  >
+                    <XIcon class="w-4 h-4" />
+                  </button>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">{{ t('tools.applianceSsh.haGroupMasterLabel') }}</label>
+                    <input
+                      v-model="group.master"
+                      type="text"
+                      :placeholder="t('tools.applianceSsh.haGroupMasterPlaceholder')"
+                      :disabled="isLoading"
+                      class="w-full min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                      :class="group.master.trim() && !isValidIp(group.master.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">{{ t('tools.applianceSsh.haGroupBackupLabel') }}</label>
+                    <input
+                      v-model="group.backup"
+                      type="text"
+                      :placeholder="t('tools.applianceSsh.haGroupBackupPlaceholder')"
+                      :disabled="isLoading"
+                      class="w-full min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                      :class="group.backup.trim() && !isValidIp(group.backup.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-600 mb-1">
+                    {{ t('tools.applianceSsh.haGroupSlavesLabel', { count: group.slaves.length, max: MAX_SLAVES_PER_GROUP }) }}
+                  </label>
+                  <IpTagInput
+                    v-model="group.slaves"
+                    :disabled="isLoading"
+                    :max-tags="MAX_SLAVES_PER_GROUP"
+                    :placeholder="t('tools.applianceSsh.haGroupSlavesPlaceholder')"
+                    :aria-label="t('tools.applianceSsh.haGroupSlavesLabel', { count: group.slaves.length, max: MAX_SLAVES_PER_GROUP })"
+                    @limit-exceeded="handleSlaveLimitExceeded"
+                  />
+                </div>
               </div>
-              <p class="text-xs text-slate-400 mt-2">{{ t('tools.applianceSsh.jumpHostRowHint') }}</p>
+              <p class="text-xs text-slate-400 mt-1">{{ t('tools.applianceSsh.haGroupHint') }}</p>
             </div>
 
-            <!-- Jump host SSH port (shown whenever a jump-host pair exists) -->
-            <div v-if="hasAnyJumpHost" class="px-5 pb-4 pt-0">
+            <!-- Master SSH port (shown whenever a group has a backup) -->
+            <div v-if="hasAnyBackup" class="px-5 pb-4 pt-0">
               <label class="block text-xs font-medium text-slate-600 mb-1.5">{{ t('tools.applianceSsh.jumpHostSshPort') }}</label>
               <input
                 v-model.number="jumpHostSshPort"
@@ -567,25 +624,25 @@ const enableStateClass = (value?: number) => {
               <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.jumpHostSshPortHint') }}</p>
             </div>
 
-            <!-- Recent jump-host → target pairs (max 5) -->
-            <div v-if="recentJumpHostPairsParsed.length > 0" class="px-5 pb-4 pt-0 space-y-2">
+            <!-- Recent groups (max 5) -->
+            <div v-if="recentGroupsParsed.length > 0" class="px-5 pb-4 pt-0 space-y-2">
               <div class="flex items-center justify-between gap-2">
-                <span class="text-xs font-medium text-slate-500">{{ t('tools.applianceSsh.jumpHostRecent') }}</span>
+                <span class="text-xs font-medium text-slate-500">{{ t('tools.applianceSsh.haGroupRecent') }}</span>
                 <button
                   type="button"
                   :disabled="isLoading"
                   class="text-xs font-medium text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  @click="clearRecentJumpHostPairs"
+                  @click="clearRecentGroups"
                 >
-                  {{ t('tools.applianceSsh.clearRecentJumpHost') }}
+                  {{ t('tools.applianceSsh.clearRecentHaGroups') }}
                 </button>
               </div>
               <div class="flex items-center gap-2 flex-wrap">
                 <span
-                  v-for="pair in recentJumpHostPairsParsed"
-                  :key="`appliance-ssh-jh-history-${pair.key}`"
+                  v-for="entry in recentGroupsParsed"
+                  :key="`appliance-ssh-group-history-${entry.key}`"
                   class="inline-flex items-stretch overflow-hidden rounded-full border transition-colors"
-                  :class="isRecentJumpHostSelected(pair)
+                  :class="isRecentGroupSelected(entry.group)
                     ? 'border-blue-600 bg-blue-600 text-white'
                     : 'border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50'"
                 >
@@ -593,19 +650,23 @@ const enableStateClass = (value?: number) => {
                     type="button"
                     :disabled="isLoading"
                     class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium font-mono disabled:cursor-not-allowed"
-                    @click="applyRecentJumpHostPair(pair)"
+                    :title="entry.group.slaves.length > 0 ? entry.group.slaves.join(', ') : undefined"
+                    @click="applyRecentGroup(entry.group)"
                   >
-                    <Check v-if="isRecentJumpHostSelected(pair)" class="h-3 w-3" />
-                    <span>{{ pair.jump }}</span>
-                    <span class="opacity-60">→</span>
-                    <span>{{ pair.target }}</span>
+                    <Check v-if="isRecentGroupSelected(entry.group)" class="h-3 w-3" />
+                    <span>{{ entry.group.master }}</span>
+                    <template v-if="entry.group.backup">
+                      <span class="opacity-60">→</span>
+                      <span>{{ entry.group.backup }}</span>
+                    </template>
+                    <span v-if="entry.group.slaves.length > 0" class="opacity-60">+{{ entry.group.slaves.length }}</span>
                   </button>
                   <button
                     type="button"
                     :disabled="isLoading"
                     class="inline-flex items-center border-l border-current/10 px-2 text-current/70 transition hover:text-current disabled:cursor-not-allowed"
-                    :title="t('tools.applianceSsh.removeRecentJumpHost')"
-                    @click.stop="removeRecentJumpHostPair(pair.key)"
+                    :title="t('tools.applianceSsh.removeRecentHaGroup')"
+                    @click.stop="removeRecentGroup(entry.key)"
                   >
                     <Trash2 class="h-3.5 w-3.5" />
                   </button>
@@ -743,7 +804,7 @@ const enableStateClass = (value?: number) => {
                   leave-from-class="opacity-100 translate-y-0 max-h-80"
                   leave-to-class="opacity-0 -translate-y-1 max-h-0"
                 >
-                  <div v-if="hasAnyJumpHost" class="overflow-hidden">
+                  <div v-if="hasAnyBackup" class="overflow-hidden">
                     <div class="mt-4 pt-4 border-t border-slate-100">
                       <label class="inline-flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer">
                         <input
@@ -807,14 +868,15 @@ const enableStateClass = (value?: number) => {
           </div>
 
           <!-- Selected IPs summary -->
-          <div v-if="allTargetsSummary.length > 0" class="bg-slate-50 border border-slate-200/80 rounded-xl px-4 py-3">
-            <p class="text-xs font-medium text-slate-500 mb-2">{{ t('tools.applianceSsh.selectedIps', { count: allTargetsSummary.length }) }}</p>
+          <div v-if="targetChips.length > 0" class="bg-slate-50 border border-slate-200/80 rounded-xl px-4 py-3">
+            <p class="text-xs font-medium text-slate-500 mb-2">{{ t('tools.applianceSsh.selectedIps', { count: targetChips.length }) }}</p>
             <div class="flex flex-wrap gap-1.5">
               <span
-                v-for="item in allTargetsSummary"
-                :key="`${item.jump ?? ''}->${item.ip}`"
+                v-for="item in targetChips"
+                :key="item.key"
                 class="inline-flex items-center bg-blue-100/80 text-blue-800 px-2.5 py-0.5 rounded-md text-xs font-mono"
               >
+                <span v-if="item.badge" class="text-blue-500 mr-1">{{ item.badge }}</span>
                 <template v-if="item.jump">
                   <span class="text-blue-500">{{ item.jump }}</span>
                   <span class="text-blue-400 mx-1">→</span>
@@ -911,8 +973,14 @@ const enableStateClass = (value?: number) => {
                   <td class="px-5 py-3 text-sm font-mono text-slate-800">
                     <div class="flex flex-col gap-0.5">
                       <span>{{ result.ip }}</span>
+                      <span
+                        v-if="roleBadge(roleForResult(result))"
+                        class="self-start inline-flex items-center rounded-md bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700"
+                      >
+                        {{ roleBadge(roleForResult(result)) }}
+                      </span>
                       <span v-if="result.jumpHost" class="text-xs text-slate-500 font-normal">
-                        {{ t('tools.applianceSsh.viaJumpHost') }}
+                        {{ t('tools.applianceSsh.haViaMaster') }}
                         <span class="font-mono">{{ result.jumpHost }}</span>
                       </span>
                     </div>
@@ -940,7 +1008,7 @@ const enableStateClass = (value?: number) => {
                       <template v-if="result.jumpHost">
                         <div class="space-y-2">
                           <div>
-                            <div class="text-[11px] font-medium text-slate-500 mb-1">{{ t('tools.applianceSsh.jumpHostGroupLabel', { ip: result.jumpHost }) }}</div>
+                            <div class="text-[11px] font-medium text-slate-500 mb-1">{{ t('tools.applianceSsh.haMasterGroupLabel', { ip: result.jumpHost }) }}</div>
                             <div class="flex flex-wrap gap-1.5">
                               <span
                                 v-if="result.previousEnable !== undefined"
@@ -965,7 +1033,7 @@ const enableStateClass = (value?: number) => {
                             </div>
                           </div>
                           <div>
-                            <div class="text-[11px] font-medium text-slate-500 mb-1">{{ t('tools.applianceSsh.targetGroupLabel', { ip: result.ip }) }}</div>
+                            <div class="text-[11px] font-medium text-slate-500 mb-1">{{ t('tools.applianceSsh.haBackupGroupLabel', { ip: result.ip }) }}</div>
                             <div class="flex flex-wrap gap-1.5">
                               <span
                                 v-if="result.whitelistSourceIp"
