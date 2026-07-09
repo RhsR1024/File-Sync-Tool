@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { invoke } from '@tauri-apps/api/core';
-import { ref, computed, onMounted, nextTick } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { AlertCircle, Check, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, Trash2, X as XIcon } from 'lucide-vue-next';
 import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshApiVersion, type ApplianceSshResult, type ApplianceSshTarget, type ApplianceSshWhitelistScope } from '../lib/tauri';
 import { getApplianceSshEnableState, isValidSshPort } from '../lib/applianceSshPresentation';
+import { isValidIp } from '../lib/applianceSshGroups';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
 import Empty from '../components/Empty.vue';
+import IpTagInput from '../components/IpTagInput.vue';
 import { pushToast } from '../composables/useToast';
 
 defineOptions({
@@ -18,8 +20,8 @@ const { t } = useI18n();
 const config = ref<AppConfig | null>(null);
 const selectedIps = ref<string[]>([]);
 const manualIpTags = ref<string[]>([]);
-const manualIpInput = ref<string>('');
-const ipInputRef = ref<HTMLInputElement | null>(null);
+const manualIpPending = ref<string>('');
+const manualIpInputRef = ref<InstanceType<typeof IpTagInput> | null>(null);
 const recentIps = ref<string[]>([]);
 const applianceVersion = ref<ApplianceSshApiVersion>('componentized');
 const whitelistScope = ref<ApplianceSshWhitelistScope>('allTcp');
@@ -72,84 +74,10 @@ const serverOptions = computed(() => {
     }));
 });
 
-const SEPARATORS = /[\s,，、;；\n\r]+/;
-
-const isValidIp = (ip: string): boolean => {
-  const parts = ip.split('.');
-  if (parts.length !== 4) return false;
-  return parts.every(p => /^\d+$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
-};
-
-const addManualIpTag = (raw: string) => {
-  const parts = raw.split(SEPARATORS).map(s => s.trim()).filter(Boolean);
-  for (const ip of parts) {
-    if (!manualIpTags.value.includes(ip)) {
-      manualIpTags.value.push(ip);
-    }
-  }
-};
-
-const removeManualIpTag = (ip: string) => {
-  const idx = manualIpTags.value.indexOf(ip);
-  if (idx > -1) manualIpTags.value.splice(idx, 1);
-};
-
-// Clicking a tag's text moves it back into the input so a single character can
-// be edited (e.g. 192.115.2.30 → 192.115.2.130) instead of deleting it whole.
-const editManualIpTag = (ip: string) => {
-  if (manualIpInput.value.trim()) {
-    addManualIpTag(manualIpInput.value);
-  }
-  removeManualIpTag(ip);
-  manualIpInput.value = ip;
-  nextTick(() => ipInputRef.value?.focus());
-};
-
-const handleIpKeydown = (e: KeyboardEvent) => {
-  const triggerKeys = ['Enter', 'Tab', ' '];
-  const raw = manualIpInput.value.trim();
-  if (triggerKeys.includes(e.key)) {
-    if (raw) {
-      e.preventDefault();
-      addManualIpTag(raw);
-      manualIpInput.value = '';
-    }
-  } else if (e.key === 'Backspace' && !raw && manualIpTags.value.length > 0) {
-    // Move the last tag back into the input for editing rather than deleting it.
-    const last = manualIpTags.value.pop();
-    if (last !== undefined) {
-      manualIpInput.value = last;
-    }
-  }
-};
-
-const handleIpInputChange = () => {
-  // Confirm tag when user types a separator character inline
-  const raw = manualIpInput.value;
-  if (SEPARATORS.test(raw)) {
-    addManualIpTag(raw);
-    manualIpInput.value = '';
-  }
-};
-
-const handleIpPaste = (e: ClipboardEvent) => {
-  e.preventDefault();
-  const text = e.clipboardData?.getData('text') ?? '';
-  addManualIpTag(text);
-  manualIpInput.value = '';
-};
-
-const handleIpBlur = () => {
-  if (manualIpInput.value.trim()) {
-    addManualIpTag(manualIpInput.value);
-    manualIpInput.value = '';
-  }
-};
-
 const directTargetIps = computed(() => {
   const ips = new Set<string>([...selectedIps.value, ...manualIpTags.value]);
-  if (manualIpInput.value.trim()) {
-    ips.add(manualIpInput.value.trim());
+  if (manualIpPending.value.trim()) {
+    ips.add(manualIpPending.value.trim());
   }
   return Array.from(ips);
 });
@@ -160,9 +88,7 @@ const applyRecentIp = (ip: string) => {
   if (isLoading.value || isRecentIpSelected(ip)) {
     return;
   }
-  manualIpInput.value = '';
-  addManualIpTag(ip);
-  nextTick(() => ipInputRef.value?.focus());
+  manualIpInputRef.value?.applyTag(ip);
 };
 
 const validJumpHostPairs = computed(() =>
@@ -496,51 +422,15 @@ const enableStateClass = (value?: number) => {
                 <label class="text-sm font-semibold text-slate-800">{{ t('tools.applianceSsh.manualIp') }}</label>
               </div>
               <!-- Tag Input -->
-              <div
-                role="listbox"
+              <IpTagInput
+                ref="manualIpInputRef"
+                v-model="manualIpTags"
+                :disabled="isLoading"
+                :placeholder="t('tools.applianceSsh.manualIpPlaceholder')"
                 :aria-label="t('tools.applianceSsh.manualIp')"
-                class="min-h-[2.375rem] w-full flex flex-wrap gap-1.5 px-2.5 py-1.5 border border-slate-200 rounded-lg transition-colors cursor-text"
-                :class="isLoading ? 'bg-slate-50 cursor-not-allowed' : 'bg-white focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-400/20'"
-                @click="ipInputRef?.focus()"
-              >
-                <span
-                  v-for="ip in manualIpTags"
-                  :key="ip"
-                  class="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-md"
-                  :class="isValidIp(ip)
-                    ? 'bg-blue-100 text-blue-800'
-                    : 'bg-red-100 text-red-700 border border-red-200'"
-                  :title="isValidIp(ip) ? undefined : t('tools.applianceSsh.invalidIp', { ip })"
-                >
-                  <button
-                    type="button"
-                    :disabled="isLoading"
-                    class="disabled:cursor-not-allowed leading-none font-mono"
-                    :title="t('tools.applianceSsh.editTag')"
-                    @click.stop="editManualIpTag(ip)"
-                  >{{ ip }}</button>
-                  <button
-                    type="button"
-                    :disabled="isLoading"
-                    class="disabled:cursor-not-allowed leading-none"
-                    :class="isValidIp(ip) ? 'text-blue-500 hover:text-blue-700' : 'text-red-400 hover:text-red-600'"
-                    @click.stop="removeManualIpTag(ip)"
-                  >×</button>
-                </span>
-                <input
-                  ref="ipInputRef"
-                  v-model="manualIpInput"
-                  type="text"
-                  list="appliance-ssh-recent-ips"
-                  :placeholder="manualIpTags.length === 0 ? t('tools.applianceSsh.manualIpPlaceholder') : ''"
-                  :disabled="isLoading"
-                  class="flex-1 min-w-[120px] text-sm bg-transparent outline-none disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 py-0.5"
-                  @keydown="handleIpKeydown"
-                  @input="handleIpInputChange"
-                  @paste="handleIpPaste"
-                  @blur="handleIpBlur"
-                />
-              </div>
+                datalist-id="appliance-ssh-recent-ips"
+                @update:pending="manualIpPending = $event"
+              />
               <datalist id="appliance-ssh-recent-ips">
                 <option v-for="ip in recentIps" :key="`appliance-ssh-recent-${ip}`" :value="ip" />
               </datalist>
