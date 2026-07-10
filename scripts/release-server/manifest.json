@@ -3,9 +3,9 @@
   "versions": [
     {
       "version": "1.1.2",
-      "url": "file-sync-tool-1.1.2-202607092049.exe",
-      "sha256": "048e78776a814999c93cdd20495eed2cea76ab2ff2b35c62a126e8499416b33d",
-      "released_at": "2026-07-09",
+      "url": "file-sync-tool-1.1.2-202607100951.exe",
+      "sha256": "15052d2e350d389d2b9255a9dbfc3bdbeff72b9c2729ec98ffc4fb4b6cdcde83",
+      "released_at": "2026-07-10",
       "changelog": [
         "更新下载落地策略与版本化 EXE 文件名自愈，优化关于/更新页布局与升级状态展示。",
         "手动复制补齐单文件任务状态流转，并为刚生成文件新增 10 秒确认，可按需立即复制。",
