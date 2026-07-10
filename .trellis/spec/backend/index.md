@@ -12,6 +12,7 @@
 | [Clipboard Manager](./clipboard-manager.md) | Contracts for group-scoped clipboard history, active capture targets, and deletion semantics | Active |
 | [Disk Cache Cleanup](./disk-cache-cleanup.md) | Contracts for Linux local disk, Windows raw disk, IPSAN, and Redis cache-key operations | Active |
 | [Clipboard Preview Windows](./clipboard-preview-windows.md) | Contracts for non-activating Alt+C hover preview windows and no-overlap placement | Active |
+| [Config Domain Persistence](./config-domain-persistence.md) | Contracts for sync/app patch ownership, merge semantics, Tauri commands, and frontend config-store refresh behavior | Active |
 | [Error Code Lookup](./error-code-lookup.md) | Contracts for GitLab archive sync, on-disk cache, and Tauri query commands backing the error-code tool | Active |
 | [File Share](./file-share.md) | Contracts for large uploads, upload path validation, and restart-safe browser sessions | Active |
 | [Remote Package Patch](./remote-package-patch.md) | Contracts for remote SSH/SFTP package browsing, nested tar.zst rewrite, md5 updates, and safety defaults | Active |

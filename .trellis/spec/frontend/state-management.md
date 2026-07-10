@@ -1,51 +1,47 @@
 # State Management
 
-> How state is managed in this project.
+> Concrete state ownership rules used by the Vue frontend.
 
----
+## State categories
 
-## Overview
+| Category | Owner | Examples |
+| --- | --- | --- |
+| Component-local UI state | `ref` / `computed` in the component | open dialogs, draft rows, validation messages, active preview |
+| Cross-route runtime state | reactive module store under `src/lib/` | `appStore`, `taskStateStore`, `configStore` |
+| Backend-owned persisted state | Tauri command plus explicit refresh | `AppConfig`, task records, updater state |
+| Navigation state | Vue Router | sync-console tab path, tool routes |
 
-<!--
-Document your project's state management conventions here.
+Do not add Pinia or another state framework for a single feature. Existing stores are small reactive modules with explicit command dependencies.
 
-Questions to answer:
-- What state management solution do you use?
-- How is local vs global state decided?
-- How do you handle server state?
-- What are the patterns for derived state?
--->
+## Shared configuration
 
-(To be filled by the team)
+`src/lib/configStore.ts` is the only long-lived `AppConfig` source for `SettingsPage` and sync-console configuration pages.
 
----
+```ts
+configStore.config       // AppConfig | null
+configStore.ensureLoaded()
+configStore.refresh()
+configStore.saveSync()
+configStore.saveApp()
+```
 
-## State Categories
+Rules:
 
-<!-- Local state, global state, server state, URL state -->
+- Call `ensureLoaded()` from component lifecycle hooks; concurrent callers are deduplicated.
+- Bind forms to `configStore.config`; do not copy the full object into a page-local ref.
+- Use `saveSync()` only for the 13 sync-owned fields and `saveApp()` only for the 12 app-owned fields. The exact cross-layer field contract is in `../backend/config-domain-persistence.md`.
+- After a save, accept the refreshed backend value as canonical because normalization may change submitted values.
+- Keep transient form state (which modal is open, unsaved row input, validation text) local to the owning editor.
 
-(To be filled by the team)
+## Runtime stores
 
----
+- `appStore` owns process-wide logs, scheduler/runtime flags, and tool runtime indicators.
+- `taskStateStore` owns task groups and manual task/deploy actions shared by overview and delivery surfaces.
+- Components may derive display state with `computed`, but should call store methods or Tauri wrappers for mutations.
 
-## When to Use Global State
+## Common mistakes
 
-<!-- Criteria for promoting state to global -->
-
-(To be filled by the team)
-
----
-
-## Server State
-
-<!-- How server data is cached and synchronized -->
-
-(To be filled by the team)
-
----
-
-## Common Mistakes
-
-<!-- State management mistakes your team has made -->
-
-(To be filled by the team)
+- Holding two full `AppConfig` refs in different keep-alive pages and saving either object wholesale.
+- Treating a successful invoke as the canonical value without refreshing backend state.
+- Moving modal-only draft state into a global store, which leaks unfinished edits across unrelated pages.
+- Using a local route-tab ref when the URL already represents the active tab.
