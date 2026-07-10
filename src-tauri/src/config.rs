@@ -199,6 +199,70 @@ pub struct AppConfig {
     pub clipboard: ClipboardSettings,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SyncConfigPatch {
+    pub tasks: Vec<ScanTask>,
+    pub local_path: String,
+    pub interval_minutes: u64,
+    pub time_ranges: Vec<String>,
+    pub file_extensions: Vec<String>,
+    pub filename_includes: Vec<String>,
+    pub deploy_enabled: bool,
+    pub servers: Vec<DeployServer>,
+    pub command_groups: Vec<CommandGroup>,
+    pub local_command_groups: Vec<LocalCommandGroup>,
+    pub stability_check_secs: u64,
+    pub recent_file_guard_mins: u64,
+    pub copy_buffer_size_kb: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AppDomainConfigPatch {
+    pub launch_and_auto_scan: bool,
+    pub launch_and_auto_start_file_share: bool,
+    pub close_to_tray: bool,
+    pub max_log_lines: u32,
+    pub max_task_records: u32,
+    pub appliance_ssh_api_timeout_secs: u64,
+    pub framework_password_api_timeout_secs: u64,
+    pub disk_cleanup_http_timeout_secs: u64,
+    pub disk_cleanup_linux_mode: DiskCleanupLinuxMode,
+    pub update_server_url: String,
+    pub notify_on_new_version: bool,
+    pub clipboard: ClipboardSettings,
+}
+
+pub fn apply_sync_patch(config: &mut AppConfig, patch: SyncConfigPatch) {
+    config.tasks = patch.tasks;
+    config.local_path = patch.local_path;
+    config.interval_minutes = patch.interval_minutes;
+    config.time_ranges = patch.time_ranges;
+    config.file_extensions = patch.file_extensions;
+    config.filename_includes = patch.filename_includes;
+    config.deploy_enabled = patch.deploy_enabled;
+    config.servers = patch.servers;
+    config.command_groups = patch.command_groups;
+    config.local_command_groups = patch.local_command_groups;
+    config.stability_check_secs = patch.stability_check_secs;
+    config.recent_file_guard_mins = patch.recent_file_guard_mins;
+    config.copy_buffer_size_kb = patch.copy_buffer_size_kb;
+}
+
+pub fn apply_app_patch(config: &mut AppConfig, patch: AppDomainConfigPatch) {
+    config.launch_and_auto_scan = patch.launch_and_auto_scan;
+    config.launch_and_auto_start_file_share = patch.launch_and_auto_start_file_share;
+    config.close_to_tray = patch.close_to_tray;
+    config.max_log_lines = patch.max_log_lines;
+    config.max_task_records = patch.max_task_records;
+    config.appliance_ssh_api_timeout_secs = patch.appliance_ssh_api_timeout_secs;
+    config.framework_password_api_timeout_secs = patch.framework_password_api_timeout_secs;
+    config.disk_cleanup_http_timeout_secs = patch.disk_cleanup_http_timeout_secs;
+    config.disk_cleanup_linux_mode = patch.disk_cleanup_linux_mode;
+    config.update_server_url = patch.update_server_url;
+    config.notify_on_new_version = patch.notify_on_new_version;
+    config.clipboard = patch.clipboard;
+}
+
 fn default_stability_secs() -> u64 {
     30
 }
@@ -522,6 +586,122 @@ pub fn get_config_path(app_handle: &tauri::AppHandle) -> PathBuf {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn sync_domain_snapshot(config: &AppConfig) -> serde_json::Value {
+        json!({
+            "tasks": config.tasks,
+            "local_path": config.local_path,
+            "interval_minutes": config.interval_minutes,
+            "time_ranges": config.time_ranges,
+            "file_extensions": config.file_extensions,
+            "filename_includes": config.filename_includes,
+            "deploy_enabled": config.deploy_enabled,
+            "servers": config.servers,
+            "command_groups": config.command_groups,
+            "local_command_groups": config.local_command_groups,
+            "stability_check_secs": config.stability_check_secs,
+            "recent_file_guard_mins": config.recent_file_guard_mins,
+            "copy_buffer_size_kb": config.copy_buffer_size_kb,
+        })
+    }
+
+    fn app_and_backend_domain_snapshot(config: &AppConfig) -> serde_json::Value {
+        json!({
+            "launch_and_auto_scan": config.launch_and_auto_scan,
+            "launch_and_auto_start_file_share": config.launch_and_auto_start_file_share,
+            "close_to_tray": config.close_to_tray,
+            "max_log_lines": config.max_log_lines,
+            "max_task_records": config.max_task_records,
+            "appliance_ssh_api_timeout_secs": config.appliance_ssh_api_timeout_secs,
+            "framework_password_api_timeout_secs": config.framework_password_api_timeout_secs,
+            "disk_cleanup_http_timeout_secs": config.disk_cleanup_http_timeout_secs,
+            "disk_cleanup_linux_mode": config.disk_cleanup_linux_mode,
+            "update_server_url": config.update_server_url,
+            "notify_on_new_version": config.notify_on_new_version,
+            "clipboard": config.clipboard,
+            "last_update_check_at": config.last_update_check_at,
+            "pending_update": config.pending_update,
+        })
+    }
+
+    #[test]
+    fn apply_sync_patch_updates_only_sync_domain() {
+        let mut config = AppConfig::default();
+        config.launch_and_auto_scan = true;
+        config.update_server_url = "http://updates.example.test".into();
+        config.last_update_check_at = Some("2026-07-10T12:00:00+08:00".into());
+        config.pending_update = Some(crate::updater::PendingUpdate {
+            target_version: "9.9.9".into(),
+            temp_path: r"C:\temp\update.exe".into(),
+            target_file_name: "file-sync-tool-9.9.9.exe".into(),
+            sha256: "ab".repeat(32),
+            downloaded_at: "2026-07-10T12:00:00+08:00".into(),
+        });
+        let preserved = app_and_backend_domain_snapshot(&config);
+
+        apply_sync_patch(
+            &mut config,
+            SyncConfigPatch {
+                tasks: vec![],
+                local_path: r"D:\sync".into(),
+                interval_minutes: 15,
+                time_ranges: vec!["09:00-18:00".into()],
+                file_extensions: vec!["tar.gz".into()],
+                filename_includes: vec!["VMS".into()],
+                deploy_enabled: true,
+                servers: vec![],
+                command_groups: vec![],
+                local_command_groups: vec![],
+                stability_check_secs: 180,
+                recent_file_guard_mins: 5,
+                copy_buffer_size_kb: 8192,
+            },
+        );
+
+        assert_eq!(config.local_path, r"D:\sync");
+        assert_eq!(config.interval_minutes, 15);
+        assert!(config.deploy_enabled);
+        assert_eq!(app_and_backend_domain_snapshot(&config), preserved);
+    }
+
+    #[test]
+    fn apply_app_patch_updates_only_app_domain() {
+        let mut config = AppConfig::default();
+        config.local_path = r"D:\existing-sync".into();
+        config.interval_minutes = 30;
+        config.file_extensions = vec!["zip".into()];
+        config.last_update_check_at = Some("2026-07-10T12:00:00+08:00".into());
+        let preserved_sync = sync_domain_snapshot(&config);
+        let preserved_last_check = config.last_update_check_at.clone();
+        let preserved_pending = config.pending_update.clone();
+
+        let mut clipboard = config.clipboard.clone();
+        clipboard.enabled = false;
+        apply_app_patch(
+            &mut config,
+            AppDomainConfigPatch {
+                launch_and_auto_scan: true,
+                launch_and_auto_start_file_share: true,
+                close_to_tray: true,
+                max_log_lines: 500,
+                max_task_records: 250,
+                appliance_ssh_api_timeout_secs: 10,
+                framework_password_api_timeout_secs: 11,
+                disk_cleanup_http_timeout_secs: 12,
+                disk_cleanup_linux_mode: DiskCleanupLinuxMode::Mainline,
+                update_server_url: "http://new-updates.example.test/".into(),
+                notify_on_new_version: true,
+                clipboard,
+            },
+        );
+
+        assert!(config.launch_and_auto_scan);
+        assert_eq!(config.max_log_lines, 500);
+        assert!(!config.clipboard.enabled);
+        assert_eq!(sync_domain_snapshot(&config), preserved_sync);
+        assert_eq!(config.last_update_check_at, preserved_last_check);
+        assert_eq!(config.pending_update, preserved_pending);
+    }
 
     #[test]
     fn app_config_uses_simplified_clipboard_defaults() {

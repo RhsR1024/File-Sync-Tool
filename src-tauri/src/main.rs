@@ -1078,6 +1078,42 @@ async fn save_config_cmd(
 }
 
 #[tauri::command]
+async fn update_sync_config(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    patch: config::SyncConfigPatch,
+) -> Result<(), String> {
+    let mut next = state.config.lock().unwrap().clone();
+    config::apply_sync_patch(&mut next, patch);
+    config::validate_config(&next)?;
+    let next = config::normalize_config(next);
+    *state.config.lock().unwrap() = next.clone();
+    config::save_config(&app_handle, &next)
+}
+
+#[tauri::command]
+async fn update_app_config(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    patch: config::AppDomainConfigPatch,
+) -> Result<(), String> {
+    let previous = state.config.lock().unwrap().clone();
+    let mut next = previous.clone();
+    config::apply_app_patch(&mut next, patch);
+    config::validate_config(&next)?;
+    let mut next = config::normalize_config(next);
+    let server_url_changed = previous.update_server_url != next.update_server_url;
+    if server_url_changed {
+        next.last_update_check_at = None;
+    }
+    sync_launch_on_startup(next.launch_and_auto_scan || next.launch_and_auto_start_file_share)?;
+    *state.config.lock().unwrap() = next.clone();
+    config::save_config(&app_handle, &next)?;
+    updater::commands::handle_config_changed(&app_handle, state.inner(), server_url_changed);
+    Ok(())
+}
+
+#[tauri::command]
 async fn scan_now(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -4021,6 +4057,8 @@ fn main() {
             get_config,
             mark_frontend_ready,
             save_config_cmd,
+            update_sync_config,
+            update_app_config,
             scan_now,
             cancel_scan,
             pause_scan,
