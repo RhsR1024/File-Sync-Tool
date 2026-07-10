@@ -76,3 +76,36 @@ Aligned the Alt+C panel with ElegantClipboard-style group placement and fixed in
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Remote package patch SSH hardening
+
+**Date**: 2026-07-10
+**Task**: Remote package patch SSH hardening
+**Branch**: `main`
+
+### Summary
+
+加固远程产品包替换的 SSH 探测：默认 23333 端口、认证级连接测试、一体机访问控制自动开启 SSH 后重试，并补齐 keep-alive、回归测试和后端契约。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f9bcdd4` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
