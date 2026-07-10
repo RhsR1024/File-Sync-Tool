@@ -246,7 +246,7 @@ onUnmounted(() => {
           Other pages either reload cheaply or rely on Tauri events that
           re-hydrate state on mount, so they intentionally remount.
         -->
-        <keep-alive include="MainConsole,CodeStatisticsPage,NetworkToolsPage,SettingsPage">
+        <keep-alive include="MainConsole,CodeStatisticsPage,NetworkToolsPage,RemotePackagePatchPage,SettingsPage">
           <component :is="Component" />
         </keep-alive>
       </router-view>

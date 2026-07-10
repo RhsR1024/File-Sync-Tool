@@ -1,4 +1,45 @@
-import type { InternalLayer, PackageEntry, PackageInventory } from './tauri';
+import type {
+  EnableApplianceSshRequest,
+  InternalLayer,
+  PackageEntry,
+  PackageInventory,
+  RemoteSshConfig,
+} from './tauri';
+
+export const REMOTE_PACKAGE_PATCH_DEFAULT_SSH_PORT = 23333;
+
+function isValidIpv4Address(value: string): boolean {
+  const parts = value.split('.');
+  return (
+    parts.length === 4 &&
+    parts.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255)
+  );
+}
+
+export function resolveRemotePackagePatchSshPort(value: unknown): number {
+  const port = typeof value === 'number' ? value : Number(value);
+  if (Number.isInteger(port) && port > 0 && port <= 65535) return port;
+  return REMOTE_PACKAGE_PATCH_DEFAULT_SSH_PORT;
+}
+
+export function shouldAttemptRemotePackagePatchAutoEnable(error: string): boolean {
+  const lower = error.toLowerCase();
+  return lower.includes('tcp connect failed') || lower.includes('ssh handshake failed');
+}
+
+export function buildRemotePackagePatchEnableSshRequest(config: RemoteSshConfig): EnableApplianceSshRequest | null {
+  const host = config.host.trim();
+  if (!isValidIpv4Address(host)) return null;
+
+  return {
+    targets: [{ ip: host }],
+    applianceVersion: 'componentized',
+    whitelistScope: 'allTcp',
+    sshUsername: config.username.trim(),
+    sshPassword: config.auth.kind === 'password' ? config.auth.password : '',
+    addWhitelistRule: false,
+  };
+}
 
 export function replacementName(pathOrName: string): string {
   const normalized = pathOrName.replace(/\\/g, '/');

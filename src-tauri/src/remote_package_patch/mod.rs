@@ -342,13 +342,23 @@ fn parse_patch_result(
     })
 }
 
+fn run_connection_test<F>(config: RemoteSshConfig, connect: F) -> Result<String, String>
+where
+    F: FnOnce(&RemoteSshConfig) -> Result<(), String>,
+{
+    validate_config(&config)?;
+    connect(&config)?;
+    Ok(format!(
+        "SSH authentication succeeded on {}:{}",
+        config.host.trim(),
+        config.port
+    ))
+}
+
 #[tauri::command]
 pub async fn remote_package_test_connection(config: RemoteSshConfig) -> Result<String, String> {
-    validate_config(&config)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let session = ssh::connect(&config)?;
-        let output = ssh::exec_capture(&session, "uname -sr")?;
-        Ok(output.trim().to_string())
+        run_connection_test(config, |config| ssh::connect(config).map(|_| ()))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -635,5 +645,27 @@ mod tests {
         assert_eq!(result.target_md5, "abc");
         assert_eq!(result.workdir, "/tmp/work");
         assert_eq!(result.updated_manifests, vec!["md5"]);
+    }
+
+    #[test]
+    fn test_connection_success_depends_only_on_ssh_authentication() {
+        let message = run_connection_test(password_config(), |config| {
+            assert_eq!(config.host, "10.0.0.1");
+            assert_eq!(config.port, 22);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(message.contains("SSH authentication succeeded"));
+    }
+
+    #[test]
+    fn test_connection_surfaces_connect_error_without_remote_command_probe() {
+        let error = run_connection_test(password_config(), |_| {
+            Err("TCP connect failed: connection refused".to_string())
+        })
+        .unwrap_err();
+
+        assert_eq!(error, "TCP connect failed: connection refused");
     }
 }

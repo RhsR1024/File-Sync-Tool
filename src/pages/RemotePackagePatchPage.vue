@@ -16,6 +16,7 @@ import { useI18n } from 'vue-i18n';
 
 import RemoteDirBrowser from '@/components/remote-package-patch/RemoteDirBrowser.vue';
 import {
+  enableApplianceSsh,
   getConfig,
   remotePackagePatchApi,
   type DeployServer,
@@ -29,11 +30,15 @@ import {
   type RemoteSshConfig,
 } from '@/lib/tauri';
 import {
+  REMOTE_PACKAGE_PATCH_DEFAULT_SSH_PORT,
+  buildRemotePackagePatchEnableSshRequest,
   composeInternalTargetPath,
   defaultPatchedPath,
   formatBytes,
   layerKey,
   replacementName,
+  resolveRemotePackagePatchSshPort,
+  shouldAttemptRemotePackagePatchAutoEnable,
   targetCandidates,
   validateInternalTargetPath,
   visibleStages,
@@ -49,12 +54,14 @@ interface DirectoryOption {
   label: string;
 }
 
+defineOptions({ name: 'RemotePackagePatchPage' });
+
 const { t, te } = useI18n();
 
 const savedServers = ref<DeployServer[]>([]);
 const selectedServerId = ref('');
 const host = ref('');
-const port = ref(22);
+const port = ref(REMOTE_PACKAGE_PATCH_DEFAULT_SSH_PORT);
 const username = ref('root');
 const authMode = ref<AuthMode>('password');
 const password = ref('');
@@ -97,7 +104,7 @@ let unlisten: UnlistenFn | null = null;
 
 const sshConfig = computed<RemoteSshConfig>(() => ({
   host: host.value.trim(),
-  port: Number(port.value) || 22,
+  port: resolveRemotePackagePatchSshPort(port.value),
   username: username.value.trim(),
   auth:
     authMode.value === 'password'
@@ -222,24 +229,75 @@ function applyServer(serverId: string) {
   const server = savedServers.value.find((item) => item.id === serverId);
   if (!server) return;
   host.value = server.host;
-  port.value = server.port || 22;
+  port.value = resolveRemotePackagePatchSshPort(server.port);
   username.value = server.user || 'root';
   password.value = server.password || '';
   authMode.value = 'password';
+}
+
+async function runConnectionProbe(): Promise<string> {
+  const message = await remotePackagePatchApi.testConnection(sshConfig.value);
+  const displayMessage = message || 'OK';
+  connectionMessage.value = displayMessage;
+  connected.value = true;
+  log('info', t('remotePackagePatch.logs.connected', { info: displayMessage }));
+  return displayMessage;
+}
+
+async function enableApplianceSshAndRetry(firstError: string): Promise<boolean> {
+  if (!shouldAttemptRemotePackagePatchAutoEnable(firstError)) {
+    return false;
+  }
+
+  const request = buildRemotePackagePatchEnableSshRequest(sshConfig.value);
+  if (!request) {
+    log('warn', t('remotePackagePatch.connection.autoEnableSkipped'));
+    return false;
+  }
+
+  log('warn', t('remotePackagePatch.connection.autoEnableStart', { error: firstError }));
+  try {
+    const results = await enableApplianceSsh(request);
+    const result = results[0];
+    if (!result?.success) {
+      log('error', t('remotePackagePatch.connection.autoEnableFailed', { message: result?.message ?? 'No result' }));
+      return false;
+    }
+    if (result.port) {
+      port.value = resolveRemotePackagePatchSshPort(result.port);
+    }
+    log('info', t('remotePackagePatch.connection.autoEnableSuccess', { message: result.message }));
+    return true;
+  } catch (error) {
+    log('error', t('remotePackagePatch.connection.autoEnableFailed', { message: String(error) }));
+    return false;
+  }
 }
 
 async function testConnection() {
   connectionBusy.value = true;
   connectionMessage.value = '';
   try {
-    const message = await remotePackagePatchApi.testConnection(sshConfig.value);
-    connectionMessage.value = message || 'OK';
-    connected.value = true;
-    log('info', t('remotePackagePatch.logs.connected', { info: connectionMessage.value }));
+    await runConnectionProbe();
   } catch (err) {
-    connected.value = false;
-    connectionMessage.value = String(err);
-    log('error', connectionMessage.value);
+    const firstError = String(err);
+    const enabled = await enableApplianceSshAndRetry(firstError);
+    if (enabled) {
+      try {
+        await runConnectionProbe();
+      } catch (retryError) {
+        connected.value = false;
+        connectionMessage.value = t('remotePackagePatch.connection.retryFailed', {
+          first: firstError,
+          retry: String(retryError),
+        });
+        log('error', connectionMessage.value);
+      }
+    } else {
+      connected.value = false;
+      connectionMessage.value = firstError;
+      log('error', connectionMessage.value);
+    }
   } finally {
     connectionBusy.value = false;
   }

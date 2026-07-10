@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 
 import {
+  REMOTE_PACKAGE_PATCH_DEFAULT_SSH_PORT,
+  buildRemotePackagePatchEnableSshRequest,
   composeInternalTargetPath,
   defaultPatchedPath,
   formatBytes,
   layerKey,
   replacementName,
+  resolveRemotePackagePatchSshPort,
+  shouldAttemptRemotePackagePatchAutoEnable,
   targetCandidates,
   validateInternalTargetPath,
   visibleStages,
@@ -47,8 +51,42 @@ const inventory = {
 };
 
 assert.equal(replacementName(String.raw`C:\libs\libdemo.so`), 'libdemo.so');
+assert.equal(REMOTE_PACKAGE_PATCH_DEFAULT_SSH_PORT, 23333);
+assert.equal(resolveRemotePackagePatchSshPort(undefined), 23333);
+assert.equal(resolveRemotePackagePatchSshPort(0), 23333);
+assert.equal(resolveRemotePackagePatchSshPort('abc'), 23333);
+assert.equal(resolveRemotePackagePatchSshPort(2222), 2222);
+assert.equal(shouldAttemptRemotePackagePatchAutoEnable('TCP connect failed: connection refused'), true);
+assert.equal(shouldAttemptRemotePackagePatchAutoEnable('SSH handshake failed: banner timeout'), true);
+assert.equal(shouldAttemptRemotePackagePatchAutoEnable('SSH password authentication failed: denied'), false);
 assert.equal(defaultPatchedPath('/tmp/VMS.tar.gz'), '/tmp/VMS.patched.tar.gz');
 assert.equal(defaultPatchedPath('/tmp/VMS.bin'), '/tmp/VMS.bin.patched.tar.gz');
+
+assert.deepEqual(
+  buildRemotePackagePatchEnableSshRequest({
+    host: '192.168.1.15',
+    port: 23333,
+    username: 'root',
+    auth: { kind: 'password', password: 'secret' },
+  }),
+  {
+    targets: [{ ip: '192.168.1.15' }],
+    applianceVersion: 'componentized',
+    whitelistScope: 'allTcp',
+    sshUsername: 'root',
+    sshPassword: 'secret',
+    addWhitelistRule: false,
+  },
+);
+assert.equal(
+  buildRemotePackagePatchEnableSshRequest({
+    host: 'example.local',
+    port: 23333,
+    username: 'root',
+    auth: { kind: 'password', password: 'secret' },
+  }),
+  null,
+);
 
 const candidates = targetCandidates(inventory, 'libdemo.so');
 assert.equal(candidates.length, 1);

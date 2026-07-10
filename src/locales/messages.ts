@@ -927,6 +927,11 @@ export const messages = {
         testing: 'Connecting',
         connected: 'Connected',
         notConnected: 'Not connected',
+        autoEnableSkipped: 'Automatic SSH enable is only available for IPv4 appliance addresses.',
+        autoEnableStart: 'Initial SSH probe failed: {error}. Trying appliance access-control SSH enable, then retrying.',
+        autoEnableSuccess: 'Appliance access-control SSH enable succeeded: {message}',
+        autoEnableFailed: 'Appliance access-control SSH enable failed: {message}',
+        retryFailed: 'Initial SSH probe failed: {first}. SSH enable was attempted, but retry still failed: {retry}',
       },
       browser: {
         parentDir: 'Parent directory',
@@ -2978,6 +2983,11 @@ export const messages = {
         testing: '连接中',
         connected: '已连接',
         notConnected: '未连接',
+        autoEnableSkipped: '仅 IPv4 一体机地址支持自动调用开启 SSH。',
+        autoEnableStart: '首次 SSH 探测失败：{error}。正在调用一体机访问控制开启 SSH 后重试。',
+        autoEnableSuccess: '一体机访问控制开启 SSH 成功：{message}',
+        autoEnableFailed: '一体机访问控制开启 SSH 失败：{message}',
+        retryFailed: '首次 SSH 探测失败：{first}。已尝试开启 SSH，但重试仍失败：{retry}',
       },
       browser: {
         parentDir: '上级目录',
