@@ -775,21 +775,21 @@ const enableStateClass = (value?: number) => {
                       <input
                         v-model="whitelistSourceMode"
                         type="radio"
-                        value="local"
-                        :disabled="isLoading"
-                        class="text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                      />
-                      <span>{{ t('tools.applianceSsh.whitelistSourceLocal') }}</span>
-                    </label>
-                    <label class="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
-                      <input
-                        v-model="whitelistSourceMode"
-                        type="radio"
                         value="all"
                         :disabled="isLoading"
                         class="text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                       />
                       <span>{{ t('tools.applianceSsh.whitelistSourceAll') }}</span>
+                    </label>
+                    <label class="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                      <input
+                        v-model="whitelistSourceMode"
+                        type="radio"
+                        value="local"
+                        :disabled="isLoading"
+                        class="text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                      />
+                      <span>{{ t('tools.applianceSsh.whitelistSourceLocal') }}</span>
                     </label>
                   </div>
                   <p v-if="whitelistSourceMode === 'all'" class="text-xs text-amber-600 mt-1.5">{{ t('tools.applianceSsh.whitelistSourceAllHint') }}</p>

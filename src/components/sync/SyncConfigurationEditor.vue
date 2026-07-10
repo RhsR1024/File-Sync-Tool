@@ -734,7 +734,7 @@ onMounted(load);
 
 <template>
   <div class="h-full min-h-0 overflow-y-auto overscroll-y-none bg-slate-50">
-  <div v-if="config" class="min-h-full w-full p-6 max-w-4xl mx-auto space-y-6 pb-24">
+  <div v-if="config" class="sync-console-workspace min-h-full w-full space-y-6 p-6 pb-24">
     <!-- Local Path -->
     <div v-if="shows('strategy')" class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
       <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
@@ -1048,7 +1048,7 @@ onMounted(load);
         </div>
         <h3 class="text-base font-semibold text-slate-700">{{ t('settings.scanTime') }}</h3>
       </div>
-      <div class="p-6 space-y-5">
+      <div class="grid grid-cols-1 gap-6 p-6 xl:grid-cols-2 xl:gap-x-8">
       <div class="space-y-3">
         <label for="settings-scan-interval" class="block text-base font-medium text-slate-700">
           {{ t('settings.scanInterval') }}
@@ -1068,10 +1068,10 @@ onMounted(load);
         <p v-if="intervalError" class="text-xs leading-5 text-red-500" role="alert">{{ intervalError }}</p>
       </div>
 
-      <div class="pt-5 border-t border-slate-100 space-y-4">
+      <div class="space-y-4 xl:border-l xl:border-slate-100 xl:pl-8">
         <h4 class="text-base font-medium text-slate-700">{{ t('settings.stabilityCheck') }}</h4>
         <p class="text-sm leading-6 text-slate-500">{{ t('settings.stabilityCheckDesc') }}</p>
-        <div class="space-y-4">
+        <div class="grid grid-cols-1 gap-5 2xl:grid-cols-2">
           <div class="space-y-3">
             <label for="settings-recent-file-guard" class="block text-base font-medium text-slate-700">{{ t('settings.recentFileGuard') }}</label>
             <div class="flex items-center gap-3">
@@ -1108,7 +1108,7 @@ onMounted(load);
         </div>
       </div>
 
-      <div class="pt-5 border-t border-slate-100 space-y-3">
+      <div class="space-y-3 border-t border-slate-100 pt-5">
         <div>
           <label for="settings-copy-buffer-size" class="block text-base font-medium text-slate-700">{{ t('settings.copyBufferSize') }}</label>
           <p class="text-sm leading-6 text-slate-500 mt-1">{{ t('settings.copyBufferSizeDesc') }}</p>
@@ -1124,7 +1124,7 @@ onMounted(load);
         </select>
       </div>
 
-      <div class="pt-5 border-t border-slate-100 space-y-4">
+      <div class="space-y-4 border-t border-slate-100 pt-5">
         <h4 class="text-base font-medium text-slate-700">{{ t('settings.timeRanges') }}</h4>
         <p class="text-sm leading-6 text-slate-500">{{ t('settings.timeRangesDesc') }}</p>
         <div class="flex items-center gap-3">

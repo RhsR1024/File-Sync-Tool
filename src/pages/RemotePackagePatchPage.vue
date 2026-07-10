@@ -454,8 +454,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex-1 overflow-y-auto bg-slate-100">
-    <div class="mx-auto flex w-full max-w-7xl flex-col gap-4 px-5 py-5">
+  <div class="flex-1 overflow-y-auto bg-slate-50">
+    <div class="flex w-full flex-col gap-6 px-6 py-6">
       <header class="flex flex-col gap-3 border-b border-slate-200 pb-4 md:flex-row md:items-center md:justify-between">
         <div class="flex items-center gap-2">
           <PackageSearch class="h-6 w-6 text-sky-600" />
@@ -466,9 +466,9 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
-      <div class="grid grid-cols-1 gap-4 xl:grid-cols-[400px_minmax(0,1fr)] xl:items-start">
-        <section class="rounded-lg border border-slate-200 bg-white p-4">
-          <div class="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800">
+      <div class="grid grid-cols-1 gap-6 xl:grid-cols-[400px_minmax(0,1fr)] xl:items-start">
+        <section class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div class="flex items-center gap-2 border-b border-slate-200 bg-slate-50 px-5 py-4 text-sm font-semibold text-slate-800">
             <span class="rpp-step-badge" :class="stepBadgeClass(1)">1</span>
             <Server class="h-4 w-4 text-sky-600" />
             {{ t('remotePackagePatch.steps.connect') }}
@@ -479,7 +479,8 @@ onBeforeUnmount(() => {
               {{ connected ? t('remotePackagePatch.connection.connected') : t('remotePackagePatch.connection.notConnected') }}
             </span>
           </div>
-          <div class="space-y-3">
+          <div class="p-5">
+            <div class="space-y-3">
             <select
               v-if="savedServers.length > 0"
               v-model="selectedServerId"
@@ -555,55 +556,62 @@ onBeforeUnmount(() => {
             >
               {{ connectionMessage }}
             </div>
+            </div>
           </div>
         </section>
 
-        <section class="rounded-lg border border-slate-200 bg-white p-4">
-          <div class="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800">
+        <section class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div class="flex items-center gap-2 border-b border-slate-200 bg-slate-50 px-5 py-4 text-sm font-semibold text-slate-800">
             <span class="rpp-step-badge" :class="stepBadgeClass(2)">2</span>
             <FolderOpen class="h-4 w-4 text-sky-600" />
             {{ t('remotePackagePatch.steps.package') }}
           </div>
-          <RemoteDirBrowser
-            v-model="selectedPackage"
-            :config="connected ? sshConfig : null"
-            :disabled="!connected || running"
-            @error="log('error', $event)"
-          />
-          <div v-if="selectedPackage" class="mt-3 rounded-md bg-slate-50 p-2 text-xs">
-            <div class="font-medium text-slate-600">{{ t('remotePackagePatch.execution.packageLabel') }}</div>
-            <div class="mt-1 break-all font-mono text-slate-800">{{ selectedPackage }}</div>
+          <div class="p-5">
+            <RemoteDirBrowser
+              v-model="selectedPackage"
+              :config="connected ? sshConfig : null"
+              :disabled="!connected || running"
+              @error="log('error', $event)"
+            />
+            <div v-if="selectedPackage" class="mt-3 rounded-md bg-slate-50 p-2 text-xs">
+              <div class="font-medium text-slate-600">{{ t('remotePackagePatch.execution.packageLabel') }}</div>
+              <div class="mt-1 break-all font-mono text-slate-800">{{ selectedPackage }}</div>
+            </div>
           </div>
         </section>
 
-        <section class="rounded-lg border border-slate-200 bg-white p-4">
-          <div class="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800">
+        <section class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm xl:col-span-2">
+          <div class="flex items-center gap-2 border-b border-slate-200 bg-slate-50 px-5 py-4 text-sm font-semibold text-slate-800">
             <span class="rpp-step-badge" :class="stepBadgeClass(3)">3</span>
             <FileUp class="h-4 w-4 text-sky-600" />
             {{ t('remotePackagePatch.steps.target') }}
           </div>
-          <div class="space-y-3">
-            <button class="rpp-secondary w-full" :disabled="replacementBusy" @click="pickReplacement">
-              <Loader2 v-if="replacementBusy" class="h-4 w-4 animate-spin" />
-              <FileUp v-else class="h-4 w-4" />
-              {{ t('remotePackagePatch.target.pickReplacement') }}
-            </button>
-            <div v-if="replacement" class="rounded-md bg-slate-50 p-2 text-xs">
-              <div class="font-medium text-slate-700">{{ replacement.name }}</div>
-              <div class="mt-1 break-all font-mono text-slate-500">{{ replacement.path }}</div>
-              <div class="mt-1 text-slate-500">{{ formatBytes(replacement.size) }}</div>
-            </div>
-            <button class="rpp-primary w-full" :disabled="!canScan" @click="scanPackage">
-              <Loader2 v-if="scanBusy" class="h-4 w-4 animate-spin" />
-              <Play v-else class="h-4 w-4" />
-              {{ scanBusy ? t('remotePackagePatch.target.scanning') : t('remotePackagePatch.target.scan') }}
-            </button>
-            <div v-if="scanBusy && scanStage" class="text-center text-xs text-slate-500">
-              {{ stageText(scanStage) }}
-            </div>
-            <div v-if="scanError" class="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{{ scanError }}</div>
+          <div class="p-5">
+            <div class="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(320px,0.8fr)_minmax(0,1.2fr)]">
+              <div class="space-y-3">
+                <button class="rpp-secondary w-full" :disabled="replacementBusy" @click="pickReplacement">
+                  <Loader2 v-if="replacementBusy" class="h-4 w-4 animate-spin" />
+                  <FileUp v-else class="h-4 w-4" />
+                  {{ t('remotePackagePatch.target.pickReplacement') }}
+                </button>
+                <div v-if="replacement" class="rounded-md bg-slate-50 p-2 text-xs">
+                  <div class="font-medium text-slate-700">{{ replacement.name }}</div>
+                  <div class="mt-1 break-all font-mono text-slate-500">{{ replacement.path }}</div>
+                  <div class="mt-1 text-slate-500">{{ formatBytes(replacement.size) }}</div>
+                </div>
+                <button class="rpp-primary w-full" :disabled="!canScan" @click="scanPackage">
+                  <Loader2 v-if="scanBusy" class="h-4 w-4 animate-spin" />
+                  <Play v-else class="h-4 w-4" />
+                  {{ scanBusy ? t('remotePackagePatch.target.scanning') : t('remotePackagePatch.target.scan') }}
+                </button>
+                <div v-if="scanBusy && scanStage" class="text-center text-xs text-slate-500">
+                  {{ stageText(scanStage) }}
+                </div>
+                <div v-if="scanError" class="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{{ scanError }}</div>
+              </div>
 
-            <template v-if="inventory">
+              <div class="space-y-3">
+                <template v-if="inventory">
               <div class="grid grid-cols-3 gap-2">
                 <button
                   type="button"
@@ -686,15 +694,17 @@ onBeforeUnmount(() => {
                 <input v-model="overwriteConfirmed" type="checkbox" class="mt-0.5" />
                 {{ t('remotePackagePatch.target.overwriteConfirm') }}
               </label>
-            </template>
-            <div v-else class="rounded-md bg-slate-50 p-3 text-xs text-slate-500">
-              {{ t('remotePackagePatch.target.scanHint') }}
+                </template>
+                <div v-else class="rounded-md bg-slate-50 p-3 text-xs text-slate-500">
+                  {{ t('remotePackagePatch.target.scanHint') }}
+                </div>
+              </div>
             </div>
           </div>
         </section>
 
-        <section class="rounded-lg border border-slate-200 bg-white p-4">
-          <div class="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <section class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm xl:col-span-2">
+          <div class="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 px-5 py-4 md:flex-row md:items-center md:justify-between">
             <div class="flex items-center gap-2 text-sm font-semibold text-slate-800">
               <span class="rpp-step-badge" :class="stepBadgeClass(4)">4</span>
               {{ t('remotePackagePatch.steps.execute') }}
@@ -706,6 +716,7 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
+          <div class="p-5">
           <div
             v-if="errorMessage"
             class="mb-3 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800"
@@ -794,6 +805,7 @@ onBeforeUnmount(() => {
             <ShieldAlert class="h-4 w-4 shrink-0" />
             {{ t('remotePackagePatch.execution.overwriteNeedConfirm') }}
           </div>
+          </div>
         </section>
       </div>
     </div>
@@ -804,19 +816,19 @@ onBeforeUnmount(() => {
 @reference "../style.css";
 
 .rpp-input {
-  @apply rounded-md border border-slate-200 px-3 py-2 text-sm outline-none transition-colors focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400;
+  @apply rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400;
 }
 
 .rpp-primary {
-  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-md bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:cursor-not-allowed disabled:bg-slate-300;
+  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-300;
 }
 
 .rpp-secondary {
-  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .rpp-segment {
-  @apply cursor-pointer rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300;
+  @apply cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2;
 }
 
 .rpp-segment-active {

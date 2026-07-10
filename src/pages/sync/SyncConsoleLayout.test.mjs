@@ -8,6 +8,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const consoleSource = readFileSync(join(__dirname, 'SyncConsolePage.vue'), 'utf8');
 const overviewSource = readFileSync(join(__dirname, 'SyncOverviewPage.vue'), 'utf8');
 const tableSource = readFileSync(join(__dirname, '..', '..', 'components', 'tasks', 'TaskGroupsTable.vue'), 'utf8');
+const configurationSource = readFileSync(
+  join(__dirname, '..', '..', 'components', 'sync', 'SyncConfigurationEditor.vue'),
+  'utf8',
+);
 
 test('sync console shell and overview share the same full-width workspace', () => {
   assert.doesNotMatch(consoleSource, /max-w-7xl/);
@@ -20,4 +24,11 @@ test('sync overview renders as one integrated console surface', () => {
   assert.match(overviewSource, /sync-overview-summary/);
   assert.match(overviewSource, /sync-overview-panel/);
   assert.doesNotMatch(tableSource, /bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden/);
+});
+
+test('sync configuration tabs use the full-width console workspace', () => {
+  assert.match(configurationSource, /sync-console-workspace/);
+  assert.doesNotMatch(configurationSource, /max-w-4xl/);
+  assert.doesNotMatch(configurationSource, /min-h-full[^\"]*mx-auto/);
+  assert.match(configurationSource, /xl:grid-cols-2/);
 });
