@@ -1,6 +1,5 @@
 export type SidebarIconKey =
-  | 'tasks'
-  | 'console'
+  | 'sync'
   | 'history'
   | 'settings'
   | 'toolsOverview'
@@ -39,18 +38,11 @@ export const SIDEBAR_NAV_SECTIONS = [
     labelKey: 'sidebar.commonGroup',
     items: [
       {
-        key: 'tasks',
-        labelKey: 'sidebar.tasks',
-        path: '/tasks',
-        iconKey: 'tasks',
+        key: 'sync',
+        labelKey: 'sidebar.syncConsole',
+        path: '/sync',
+        iconKey: 'sync',
         matchMode: 'prefix',
-      },
-      {
-        key: 'console',
-        labelKey: 'sidebar.console',
-        path: '/',
-        iconKey: 'console',
-        matchMode: 'exact',
       },
       {
         key: 'history',
@@ -165,7 +157,7 @@ export function isSidebarItemActive(
   currentPath: string,
   item: Pick<SidebarNavItem, 'path' | 'matchMode'>,
 ) {
-  if (item.matchMode === 'exact' || item.path === '/') {
+  if (item.matchMode === 'exact') {
     return currentPath === item.path;
   }
 

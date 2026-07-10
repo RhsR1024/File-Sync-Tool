@@ -2,11 +2,10 @@ export const messages = {
   en: {
     sidebar: {
       title: 'File Sync Tool',
-      console: 'Execution Logs',
       manualCopy: 'Manual Copy',
       history: 'History',
       settings: 'Settings',
-      tasks: 'Console',
+      syncConsole: 'Sync Console',
       commonGroup: 'Quick Access',
       toolsOverview: 'Tools Overview',
       systemGroup: 'System',
@@ -40,6 +39,18 @@ export const messages = {
       skipToMain: 'Skip to main content',
       error: 'Error',
       loading: 'Loading…',
+    },
+    sync: {
+      title: 'Sync Console',
+      description: 'Monitor file synchronization and manage tasks, scan rules, delivery, and logs in one place.',
+      navigation: 'Sync console sections',
+      tabs: {
+        overview: 'Overview',
+        tasks: 'Sync Tasks',
+        strategy: 'Scan Strategy',
+        delivery: 'Delivery',
+        logs: 'Runtime Logs',
+      },
     },
     tasks: {
       empty: {
@@ -170,6 +181,7 @@ export const messages = {
     },
     settings: {
       title: 'Settings',
+      applicationSettingsDesc: 'Application behavior, updates, language, and data storage.',
       save: 'Save Changes',
       saved: 'Settings saved successfully!',
       saveError: 'Error saving: {error}',
@@ -2058,11 +2070,10 @@ export const messages = {
   zh: {
     sidebar: {
       title: '文件同步工具',
-      console: '执行日志',
       manualCopy: '指定复制',
       history: '历史记录',
       settings: '设置',
-      tasks: '控制台',
+      syncConsole: '同步控制台',
       commonGroup: '\u5e38\u7528\u529f\u80fd',
       toolsOverview: '\u5de5\u5177\u603b\u89c8',
       systemGroup: '\u7cfb\u7edf\u8bbe\u7f6e',
@@ -2096,6 +2107,18 @@ export const messages = {
       skipToMain: '跳到主内容',
       error: '错误',
       loading: '加载中…',
+    },
+    sync: {
+      title: '同步控制台',
+      description: '集中查看文件同步状态，并管理任务、扫描策略、交付流程与运行日志。',
+      navigation: '同步控制台分区',
+      tabs: {
+        overview: '概览',
+        tasks: '同步任务',
+        strategy: '扫描策略',
+        delivery: '交付流程',
+        logs: '运行日志',
+      },
     },
     tasks: {
       empty: {
@@ -2226,6 +2249,7 @@ export const messages = {
     },
     settings: {
       title: '设置',
+      applicationSettingsDesc: '管理应用行为、更新、语言与数据存储。',
       save: '保存更改',
       saved: '设置保存成功！',
       saveError: '保存失败: {error}',

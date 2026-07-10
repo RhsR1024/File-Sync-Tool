@@ -235,18 +235,17 @@ onUnmounted(() => {
       <router-view v-slot="{ Component }">
         <!--
           Keep-alive list intentionally narrow:
-          - MainConsole: preserves the live log buffer / scroll position so
-            users don't lose console state when bouncing between routes.
+          - SyncConsolePage: owns the nested sync tabs and keeps their forms,
+            overview state, and log scroll position alive across main routes.
           - CodeStatisticsPage: large analysis results and form inputs are
             expensive to recompute; keep-alive preserves them across nav.
           - NetworkToolsPage: holds tab state (ping scan, port test, WOL,
             subnet calc, TCP table) — remounting would lose in-progress data.
-          - SettingsPage: a 1900-line form with many nested mutable refs;
-            keep-alive avoids the cost of reloading config + remounting fields.
+          - SettingsPage: keeps application preferences stable across routes.
           Other pages either reload cheaply or rely on Tauri events that
           re-hydrate state on mount, so they intentionally remount.
         -->
-        <keep-alive include="MainConsole,CodeStatisticsPage,NetworkToolsPage,RemotePackagePatchPage,SettingsPage">
+        <keep-alive include="SyncConsolePage,CodeStatisticsPage,NetworkToolsPage,RemotePackagePatchPage,SettingsPage">
           <component :is="Component" />
         </keep-alive>
       </router-view>

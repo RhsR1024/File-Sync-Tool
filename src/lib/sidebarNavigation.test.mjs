@@ -8,6 +8,17 @@ assert.deepEqual(
   ['sidebar.commonGroup', 'sidebar.tools', 'sidebar.systemGroup'],
 );
 
+assert.deepEqual(
+  SIDEBAR_NAV_SECTIONS[0].items.map((item) => item.path),
+  ['/sync', '/history'],
+  'common navigation should expose one sync-console entry plus history',
+);
+assert.equal(
+  isSidebarItemActive('/sync/delivery', SIDEBAR_NAV_SECTIONS[0].items[0]),
+  true,
+  'the sync-console entry should stay active for every nested tab',
+);
+
 const toolPaths = SIDEBAR_NAV_SECTIONS[1].items.map((item) => item.path);
 assert.deepEqual(toolPaths, [
   '/tools',

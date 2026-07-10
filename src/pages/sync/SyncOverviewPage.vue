@@ -23,7 +23,7 @@ import { startScheduler, stopScheduler, executeScan } from '@/lib/scheduler';
 import { pushToast, type ToastTone } from '@/composables/useToast';
 
 defineOptions({
-  name: 'TaskStatusPage',
+  name: 'SyncOverviewPage',
 });
 
 const { t } = useI18n();
@@ -80,7 +80,7 @@ async function handleClearAll() {
 }
 
 async function handlePause(taskGroupId: string, runId: string) {
-  console.log('[TaskStatusPage] pause clicked', { taskGroupId, runId });
+  console.log('[SyncOverviewPage] pause clicked', { taskGroupId, runId });
   try {
     await pauseTaskRun(taskGroupId, runId);
     addLog(t('console.paused'), 'info');
@@ -92,7 +92,7 @@ async function handlePause(taskGroupId: string, runId: string) {
 }
 
 async function handleResume(taskGroupId: string, runId: string) {
-  console.log('[TaskStatusPage] resume clicked', { taskGroupId, runId });
+  console.log('[SyncOverviewPage] resume clicked', { taskGroupId, runId });
   try {
     await resumeTaskRun(taskGroupId, runId);
     addLog(t('console.resumed'), 'info');
@@ -104,7 +104,7 @@ async function handleResume(taskGroupId: string, runId: string) {
 }
 
 async function handleCancel(taskGroupId: string, runId: string) {
-  console.log('[TaskStatusPage] cancel clicked', { taskGroupId, runId });
+  console.log('[SyncOverviewPage] cancel clicked', { taskGroupId, runId });
   try {
     await cancelTaskRun(taskGroupId, runId);
     addLog(t('console.cancelling'), 'info');
@@ -267,7 +267,7 @@ function handleManualCopyClose() {
 
 <template>
   <div class="p-6 h-full flex flex-col gap-6 bg-slate-50">
-    <h2 class="text-2xl font-bold text-slate-800">{{ t('sidebar.tasks') }}</h2>
+    <h2 class="text-2xl font-bold text-slate-800">{{ t('sync.tabs.overview') }}</h2>
 
     <!-- Status cards -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">

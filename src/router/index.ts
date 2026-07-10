@@ -1,24 +1,57 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
-import MainConsole from '@/pages/MainConsole.vue'
-import TaskStatusPage from '@/pages/TaskStatusPage.vue'
+import SyncOverviewPage from '@/pages/sync/SyncOverviewPage.vue'
+import SyncLogsPage from '@/pages/sync/SyncLogsPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import HistoryPage from '@/pages/HistoryPage.vue'
 import EnableApplianceSshPage from '@/pages/EnableApplianceSshPage.vue'
+import SyncConsolePage from '@/pages/sync/SyncConsolePage.vue'
+import SyncTasksPage from '@/pages/sync/SyncTasksPage.vue'
+import SyncStrategyPage from '@/pages/sync/SyncStrategyPage.vue'
+import SyncDeliveryPage from '@/pages/sync/SyncDeliveryPage.vue'
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
-    name: 'console',
-    component: MainConsole,
+    redirect: '/sync',
   },
   {
     path: '/tasks',
-    name: 'tasks',
-    component: TaskStatusPage,
+    redirect: '/sync',
   },
   {
     path: '/manual-copy',
-    redirect: '/tasks',
+    redirect: '/sync',
+  },
+  {
+    path: '/sync',
+    component: SyncConsolePage,
+    children: [
+      {
+        path: '',
+        name: 'sync-overview',
+        component: SyncOverviewPage,
+      },
+      {
+        path: 'tasks',
+        name: 'sync-tasks',
+        component: SyncTasksPage,
+      },
+      {
+        path: 'strategy',
+        name: 'sync-strategy',
+        component: SyncStrategyPage,
+      },
+      {
+        path: 'delivery',
+        name: 'sync-delivery',
+        component: SyncDeliveryPage,
+      },
+      {
+        path: 'logs',
+        name: 'sync-logs',
+        component: SyncLogsPage,
+      },
+    ],
   },
   {
     path: '/history',

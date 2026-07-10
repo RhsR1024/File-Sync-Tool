@@ -6,7 +6,7 @@ import { getConfig } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { appStore } from '@/lib/store';
 
-defineOptions({ name: 'MainConsole' });
+defineOptions({ name: 'SyncLogsPage' });
 
 // Pixel distance from the bottom that still counts as "user is at the tail";
 // scrolling further up disables auto-scroll until the user explicitly opts back in.

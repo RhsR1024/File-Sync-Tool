@@ -8,7 +8,6 @@ import {
   HardDrive,
   History,
   KeyRound,
-  ListChecks,
   MonitorUp,
   PackageSearch,
   Server,
@@ -33,8 +32,7 @@ const { t } = useI18n();
 const { state: updaterState } = useUpdater();
 
 const iconMap: Record<SidebarIconKey, Component> = {
-  tasks: ListChecks,
-  console: Activity,
+  sync: Activity,
   history: History,
   settings: Settings,
   toolsOverview: Server,

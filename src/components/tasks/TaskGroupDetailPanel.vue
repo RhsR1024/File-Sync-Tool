@@ -573,7 +573,7 @@ function phaseIconClass(status: string): string {
 </template>
 
 <style scoped>
-/* Terminal-tone scrollbar for the dark log box — mirrors MainConsole so the
+/* Terminal-tone scrollbar for the dark log box — mirrors SyncLogsPage so the
    look stays consistent until M03 lands a global `.scrollbar-terminal` utility
    we can switch to. */
 .detail-panel-log-scroll::-webkit-scrollbar { width: 8px; }

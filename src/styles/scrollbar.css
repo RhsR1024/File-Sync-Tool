@@ -1,7 +1,7 @@
 /*
  * Shared scrollbar treatments.
  *
- * `scrollbar-terminal` matches the dark slate console used by `MainConsole`
+ * `scrollbar-terminal` matches the dark slate console used by `SyncLogsPage`
  * and any inset terminal-like surfaces.  `scrollbar-light` is the soft slate
  * thumb used inside light cards (history list, settings panels, etc.).
  *
