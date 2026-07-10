@@ -198,7 +198,7 @@ function progressSizeText(row: TaskGroupListItem): string {
 </script>
 
 <template>
-  <div class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+  <div class="min-w-0 overflow-hidden rounded-md bg-white">
     <div class="overflow-x-auto">
       <table class="w-full table-fixed" style="min-width: 1240px">
         <colgroup>

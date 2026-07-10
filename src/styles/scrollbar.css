@@ -1,9 +1,10 @@
 /*
  * Shared scrollbar treatments.
  *
- * `scrollbar-terminal` matches the dark slate console used by `SyncLogsPage`
+ * `scrollbar-terminal` matches the dark slate console used by `RuntimeLogsPage`
  * and any inset terminal-like surfaces.  `scrollbar-light` is the soft slate
  * thumb used inside light cards (history list, settings panels, etc.).
+ * `scrollbar-sidebar` is a hover-revealed rail for the dark app sidebar.
  *
  * Plain CSS so the rules are stable across Tailwind upgrades; Tailwind
  * utilities can still override individual properties on the same element.
@@ -36,4 +37,31 @@
 }
 .scrollbar-light::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
+}
+
+.scrollbar-sidebar {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.scrollbar-sidebar:hover {
+  scrollbar-color: rgba(71, 85, 105, 0.75) transparent;
+}
+.scrollbar-sidebar::-webkit-scrollbar {
+  width: 6px;
+}
+.scrollbar-sidebar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-sidebar::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+}
+.scrollbar-sidebar:hover::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.75);
+}
+.scrollbar-sidebar::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.9);
+}
+.scrollbar-sidebar::-webkit-scrollbar-corner {
+  background: transparent;
 }

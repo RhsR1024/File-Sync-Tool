@@ -15,6 +15,7 @@ import {
   Share2,
   Shield,
   ShieldCheck,
+  Terminal,
 } from 'lucide-vue-next';
 import { computed, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -33,6 +34,7 @@ const { state: updaterState } = useUpdater();
 
 const iconMap: Record<SidebarIconKey, Component> = {
   sync: Activity,
+  console: Terminal,
   history: History,
   settings: Settings,
   toolsOverview: Server,
@@ -92,69 +94,72 @@ const versionChipLabel = computed(() => {
       </h1>
     </div>
 
-    <nav
-      class="flex-1 overflow-y-auto px-3 py-4"
-      role="navigation"
-      :aria-label="t('sidebar.navigation')"
-    >
-      <div class="space-y-5">
-        <section
-          v-for="section in sections"
-          :key="section.key"
-          class="space-y-2"
-          :aria-labelledby="section.headingId"
-        >
-          <h2 :id="section.headingId" class="sr-only">{{ section.srLabel }}</h2>
-          <div class="flex items-center gap-2 px-1.5" aria-hidden="true">
-            <span class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">{{ section.label }}</span>
-            <span class="rounded-full border border-slate-800 bg-slate-950/70 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">
-              {{ section.items.length }}
-            </span>
-            <span class="h-px flex-1 bg-slate-800/70"></span>
-          </div>
+    <div class="sidebar-scroll-region relative min-h-0 flex-1">
+      <nav
+        class="scrollbar-sidebar h-full overflow-y-auto overflow-x-hidden px-3 py-4 pr-2"
+        role="navigation"
+        :aria-label="t('sidebar.navigation')"
+      >
+        <div class="space-y-5 pb-5">
+          <section
+            v-for="section in sections"
+            :key="section.key"
+            class="space-y-2"
+            :aria-labelledby="section.headingId"
+          >
+            <h2 :id="section.headingId" class="sr-only">{{ section.srLabel }}</h2>
+            <div class="flex items-center gap-2 px-1.5" aria-hidden="true">
+              <span class="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">{{ section.label }}</span>
+              <span class="rounded-full border border-slate-800 bg-slate-950/70 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">
+                {{ section.items.length }}
+              </span>
+              <span class="h-px flex-1 bg-slate-800/70"></span>
+            </div>
 
-          <ul class="rounded-2xl border border-slate-800/80 bg-slate-900/65 p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03),0_14px_28px_rgba(2,6,23,0.18)]">
-            <li v-for="item in section.items" :key="item.path">
-              <router-link
-                :to="item.path"
-                class="group flex items-start gap-3 rounded-xl border px-3 py-3 transition-all duration-200 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b1220]"
-                :class="item.active
-                  ? 'border-sky-500/25 bg-sky-500/10 text-slate-50 shadow-[0_10px_22px_rgba(14,165,233,0.10)] forced-colors:outline forced-colors:outline-1 forced-colors:outline-sky-300'
-                  : 'border-transparent text-slate-400 hover:border-slate-800 hover:bg-slate-800/70 hover:text-slate-100'"
-                :aria-current="item.active ? 'page' : undefined"
-              >
-                <component
-                  :is="item.icon"
-                  class="mt-0.5 h-[18px] w-[18px] shrink-0 transition-transform duration-200 group-hover:scale-110 motion-reduce:transform-none motion-reduce:transition-none"
-                  :class="item.active ? 'text-sky-300' : 'text-slate-500 group-hover:text-slate-300'"
-                  aria-hidden="true"
-                />
+            <ul class="rounded-2xl border border-slate-800/80 bg-slate-900/65 p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.03),0_14px_28px_rgba(2,6,23,0.18)]">
+              <li v-for="item in section.items" :key="item.path">
+                <router-link
+                  :to="item.path"
+                  class="group flex min-h-11 items-center gap-3 rounded-xl border px-3 py-2.5 transition-[transform,box-shadow,background-color,border-color,color] duration-200 hover:-translate-y-0.5 hover:shadow-[0_10px_24px_rgba(2,6,23,0.32)] motion-reduce:hover:translate-y-0 motion-reduce:hover:shadow-none motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b1220]"
+                  :class="item.active
+                    ? 'border-sky-500/25 bg-sky-500/10 text-slate-50 shadow-[0_10px_22px_rgba(14,165,233,0.10)] forced-colors:outline forced-colors:outline-1 forced-colors:outline-sky-300'
+                    : 'border-transparent text-slate-400 hover:border-slate-700/70 hover:bg-slate-800/80 hover:text-slate-100'"
+                  :aria-current="item.active ? 'page' : undefined"
+                >
+                  <component
+                    :is="item.icon"
+                    class="h-[18px] w-[18px] shrink-0 transition-[transform,color,filter] duration-200 group-hover:scale-110 group-hover:drop-shadow-[0_0_8px_rgba(125,211,252,0.28)] motion-reduce:transform-none motion-reduce:transition-none"
+                    :class="item.active ? 'text-sky-300' : 'text-slate-500 group-hover:text-slate-300'"
+                    aria-hidden="true"
+                  />
 
-                <span class="min-w-0 flex-1 text-sm font-medium leading-5 tracking-[0.01em]">
-                  {{ item.label }}
-                </span>
+                  <span class="min-w-0 flex-1 truncate text-sm font-medium leading-5 tracking-[0.01em]">
+                    {{ item.label }}
+                  </span>
 
-                <div class="ml-auto flex items-center gap-2 pl-2">
-                  <template v-if="item.runtimeActive">
+                  <div class="ml-auto flex items-center gap-2 pl-2">
+                    <template v-if="item.runtimeActive">
+                      <span
+                        class="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.12)]"
+                        :class="item.active ? 'animate-pulse motion-reduce:animate-none' : ''"
+                        aria-hidden="true"
+                      ></span>
+                      <span class="sr-only">{{ t('sidebar.runtimeActive') }}</span>
+                    </template>
                     <span
-                      class="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.12)]"
-                      :class="item.active ? 'animate-pulse motion-reduce:animate-none' : ''"
+                      v-if="item.active"
+                      class="h-7 w-1 shrink-0 rounded-full bg-gradient-to-b from-sky-300 to-cyan-300"
                       aria-hidden="true"
                     ></span>
-                    <span class="sr-only">{{ t('sidebar.runtimeActive') }}</span>
-                  </template>
-                  <span
-                    v-if="item.active"
-                    class="h-7 w-1 shrink-0 rounded-full bg-gradient-to-b from-sky-300 to-cyan-300"
-                    aria-hidden="true"
-                  ></span>
-                </div>
-              </router-link>
-            </li>
-          </ul>
-        </section>
-      </div>
-    </nav>
+                  </div>
+                </router-link>
+              </li>
+            </ul>
+          </section>
+        </div>
+      </nav>
+      <div class="sidebar-scroll-fade pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-[#0b1220] via-[#0b1220]/85 to-transparent" aria-hidden="true"></div>
+    </div>
 
     <div class="border-t border-slate-800/90 bg-slate-950/25 px-5 py-4">
       <button

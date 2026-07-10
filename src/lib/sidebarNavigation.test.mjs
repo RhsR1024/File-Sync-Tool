@@ -10,13 +10,23 @@ assert.deepEqual(
 
 assert.deepEqual(
   SIDEBAR_NAV_SECTIONS[0].items.map((item) => item.path),
-  ['/sync', '/history'],
-  'common navigation should expose one sync-console entry plus history',
+  ['/sync', '/', '/history'],
+  'common navigation should expose sync console, global logs, and history',
 );
 assert.equal(
   isSidebarItemActive('/sync/delivery', SIDEBAR_NAV_SECTIONS[0].items[0]),
   true,
   'the sync-console entry should stay active for every nested tab',
+);
+assert.equal(
+  isSidebarItemActive('/', SIDEBAR_NAV_SECTIONS[0].items[1]),
+  true,
+  'global logs should be active only at the app root',
+);
+assert.equal(
+  isSidebarItemActive('/sync', SIDEBAR_NAV_SECTIONS[0].items[1]),
+  false,
+  'global logs should not stay active inside sync console routes',
 );
 
 const toolPaths = SIDEBAR_NAV_SECTIONS[1].items.map((item) => item.path);

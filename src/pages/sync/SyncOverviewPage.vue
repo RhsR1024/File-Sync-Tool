@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onActivated } from 'vue';
-import { Play, Square, RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, Trash2 } from 'lucide-vue-next';
+import { Play, Square, RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, ListChecks, Trash2 } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
@@ -49,11 +49,13 @@ const pendingRetryRequest = ref<{ taskGroupId: string; source: string; target: s
 
 const rows = computed(() => buildTaskRows(taskStateStore.groups));
 
-const hasAnyTerminal = computed(() => rows.value.some(r => {
+const terminalTaskCount = computed(() => rows.value.filter(r => {
   const s = r.summary_status;
   return s === 'completed' || s === 'failed' || s === 'cancelled'
     || s === 'interrupted' || s === 'partial_failed';
-}));
+}).length);
+
+const hasAnyTerminal = computed(() => terminalTaskCount.value > 0);
 
 async function handleSelect(taskGroupId: string) {
   await taskStateStore.selectTaskGroup(taskGroupId);
@@ -80,7 +82,6 @@ async function handleClearAll() {
 }
 
 async function handlePause(taskGroupId: string, runId: string) {
-  console.log('[SyncOverviewPage] pause clicked', { taskGroupId, runId });
   try {
     await pauseTaskRun(taskGroupId, runId);
     addLog(t('console.paused'), 'info');
@@ -92,7 +93,6 @@ async function handlePause(taskGroupId: string, runId: string) {
 }
 
 async function handleResume(taskGroupId: string, runId: string) {
-  console.log('[SyncOverviewPage] resume clicked', { taskGroupId, runId });
   try {
     await resumeTaskRun(taskGroupId, runId);
     addLog(t('console.resumed'), 'info');
@@ -104,7 +104,6 @@ async function handleResume(taskGroupId: string, runId: string) {
 }
 
 async function handleCancel(taskGroupId: string, runId: string) {
-  console.log('[SyncOverviewPage] cancel clicked', { taskGroupId, runId });
   try {
     await cancelTaskRun(taskGroupId, runId);
     addLog(t('console.cancelling'), 'info');
@@ -266,99 +265,107 @@ function handleManualCopyClose() {
 </script>
 
 <template>
-  <div class="p-6 h-full flex flex-col gap-6 bg-slate-50">
-    <h2 class="text-2xl font-bold text-slate-800">{{ t('sync.tabs.overview') }}</h2>
-
-    <!-- Status cards -->
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-      <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm relative overflow-hidden group hover:shadow-md transition-shadow">
-        <div class="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-          <Activity class="w-16 h-16 text-blue-600" />
+  <div class="sync-console-workspace h-full min-h-0 w-full p-6 flex flex-col gap-4 bg-slate-50">
+    <section class="sync-overview-summary grid shrink-0 grid-cols-1 gap-3 xl:grid-cols-[minmax(220px,0.9fr)_minmax(220px,0.9fr)_minmax(180px,0.7fr)]">
+      <div class="flex min-h-[84px] items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+          <Activity class="h-5 w-5" aria-hidden="true" />
         </div>
-        <div class="text-slate-500 text-sm font-medium uppercase tracking-wider mb-2">{{ t('console.status') }}</div>
-        <div class="flex items-center gap-3 font-bold text-2xl" :class="appStore.isRunning ? 'text-emerald-600' : 'text-slate-700'">
-          <div class="relative flex h-3 w-3">
-            <span v-if="appStore.isRunning" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span class="relative inline-flex rounded-full h-3 w-3" :class="appStore.isRunning ? 'bg-emerald-500' : 'bg-slate-400'"></span>
+        <div class="min-w-0">
+          <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.status') }}</div>
+          <div class="mt-1 flex items-center gap-2 text-xl font-bold" :class="appStore.isRunning ? 'text-emerald-600' : 'text-slate-700'">
+            <div class="relative flex h-2.5 w-2.5 shrink-0">
+              <span v-if="appStore.isRunning" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75 motion-reduce:animate-none"></span>
+              <span class="relative inline-flex h-2.5 w-2.5 rounded-full" :class="appStore.isRunning ? 'bg-emerald-500' : 'bg-slate-400'"></span>
+            </div>
+            <span class="truncate">{{ appStore.isRunning ? t('console.running') : t('console.stopped') }}</span>
           </div>
-          {{ appStore.isRunning ? t('console.running') : t('console.stopped') }}
         </div>
       </div>
 
-      <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm relative overflow-hidden group hover:shadow-md transition-shadow">
-        <div class="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-          <Clock class="w-16 h-16 text-blue-600" />
+      <div class="flex min-h-[84px] items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
+          <Clock class="h-5 w-5" aria-hidden="true" />
         </div>
-        <div class="text-slate-500 text-sm font-medium uppercase tracking-wider mb-2">{{ t('console.nextRun') }}</div>
-        <div class="flex items-center gap-2 font-bold text-2xl text-slate-800 font-mono">
-          {{ appStore.nextRunTime }}
+        <div class="min-w-0">
+          <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.nextRun') }}</div>
+          <div class="mt-1 truncate font-mono text-xl font-bold tabular-nums text-slate-900">
+            {{ appStore.nextRunTime }}
+          </div>
         </div>
       </div>
-    </div>
 
-    <!-- Main area: scheduler controls + task groups table -->
-    <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col relative overflow-hidden flex-1">
-      <!-- Scheduler controls bar -->
-      <div class="p-4 flex gap-3 border-b border-slate-100 items-center justify-between">
-        <h3 class="text-lg font-semibold text-slate-700">{{ t('console.schedulerControls') }}</h3>
-        <div class="flex gap-3">
+      <div class="flex min-h-[84px] items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+          <ListChecks class="h-5 w-5" aria-hidden="true" />
+        </div>
+        <div class="min-w-0">
+          <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.taskRecords') }}</div>
+          <div class="mt-1 text-xl font-bold tabular-nums text-slate-900">{{ rows.length }}</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sync-overview-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div class="flex flex-col gap-3 border-b border-slate-200 bg-white px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+        <div class="min-w-0">
+          <h2 class="text-base font-semibold text-slate-800">{{ t('console.schedulerControls') }}</h2>
+          <p class="mt-0.5 text-xs text-slate-500">{{ rows.length }} {{ t('console.taskRecords') }}</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
           <button
             @click="appStore.isRunning ? stopScheduler() : startScheduler()"
-            class="px-6 py-2 rounded-lg font-bold transition-all motion-reduce:transition-none flex items-center justify-center gap-2 shadow-sm active:scale-95 motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2"
+            class="flex min-h-11 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2"
             :class="appStore.isRunning
-              ? 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-200'
-              : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-200'"
+              ? 'border border-red-200 bg-red-50 text-red-600 hover:bg-red-100'
+              : 'bg-emerald-600 text-white shadow-sm shadow-emerald-600/20 hover:bg-emerald-700'"
             :aria-label="appStore.isRunning ? t('console.stop') : t('console.start')"
             :title="appStore.isRunning ? t('console.stop') : t('console.start')"
           >
-            <component :is="appStore.isRunning ? Square : Play" class="w-4 h-4 fill-current" aria-hidden="true" />
+            <component :is="appStore.isRunning ? Square : Play" class="h-4 w-4 fill-current" aria-hidden="true" />
             {{ appStore.isRunning ? t('console.stop') : t('console.start') }}
           </button>
 
           <button
             @click="handleScanClick"
-            class="px-4 py-2 rounded-lg font-bold bg-white text-blue-600 border border-blue-200 hover:bg-blue-50 hover:border-blue-300 transition-all motion-reduce:transition-none flex items-center gap-2 shadow-sm active:scale-95 motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 disabled:hover:bg-white disabled:hover:border-blue-200"
+            class="flex min-h-11 items-center gap-2 rounded-lg border border-blue-200 bg-white px-3.5 py-2 text-sm font-semibold text-blue-700 shadow-sm transition-colors hover:border-blue-300 hover:bg-blue-50 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:hover:border-blue-200 disabled:hover:bg-white"
             :disabled="appStore.isRunning"
             :class="{ 'opacity-50 cursor-not-allowed': appStore.isRunning }"
             :aria-label="t('console.scanNow')"
             :title="t('console.scanNow')"
           >
-            <RefreshCw class="w-4 h-4 motion-reduce:animate-none" :class="{ 'animate-spin': appStore.isRunning }" aria-hidden="true" />
+            <RefreshCw class="h-4 w-4 motion-reduce:animate-none" :class="{ 'animate-spin': appStore.isRunning }" aria-hidden="true" />
             {{ t('console.scanNow') }}
           </button>
 
           <button
             ref="manualCopyTriggerRef"
             @click="isManualCopyModalOpen = true"
-            class="px-4 py-2 rounded-lg font-bold bg-white text-purple-600 border border-purple-200 hover:bg-purple-50 hover:border-purple-300 transition-all motion-reduce:transition-none flex items-center gap-2 shadow-sm active:scale-95 motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2"
+            class="flex min-h-11 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:border-blue-200 hover:bg-slate-50 hover:text-blue-700 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2"
             :aria-label="t('manualCopy.title')"
             :title="t('manualCopy.title')"
           >
-            <Copy class="w-4 h-4" aria-hidden="true" />
+            <Copy class="h-4 w-4 text-blue-500" aria-hidden="true" />
             {{ t('manualCopy.title') }}
           </button>
 
           <button
             v-if="hasAnyTerminal"
             @click="handleClearAll"
-            class="px-4 py-2 rounded-lg font-bold bg-white text-slate-500 border border-slate-200 hover:bg-red-50 hover:border-red-200 hover:text-red-600 transition-all motion-reduce:transition-none flex items-center gap-2 shadow-sm active:scale-95 motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2"
+            class="flex min-h-11 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-600 shadow-sm transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50 focus-visible:ring-offset-2"
             :aria-label="t('console.clearAllGroups')"
             :title="t('console.clearAllGroups')"
           >
-            <Trash2 class="w-4 h-4" aria-hidden="true" />
+            <Trash2 class="h-4 w-4" aria-hidden="true" />
             {{ t('console.clearAllGroups') }}
           </button>
         </div>
       </div>
 
-      <!-- Task groups table area -->
-      <div class="flex-1 min-h-0 bg-slate-50 p-4 overflow-auto">
-        <!-- Cold-boot skeleton: shown only on the very first hydrate, never on
-             subsequent re-renders so the table never visibly disappears once we
-             have any data. -->
+      <div class="min-h-0 flex-1 overflow-auto bg-slate-50/70 p-3">
         <div
           v-if="isInitialLoading && !rows.length"
-          class="rounded-xl border border-slate-200 bg-white p-4"
+          class="rounded-lg border border-slate-200 bg-white p-4"
           role="status"
           aria-live="polite"
           :aria-label="t('tasks.loading.tasks')"
@@ -389,7 +396,7 @@ function handleManualCopyClose() {
           @retry-run="handleRetryRun"
         />
       </div>
-    </div>
+    </section>
 
     <!-- Detail panel (slide-in) -->
     <TaskGroupDetailPanel

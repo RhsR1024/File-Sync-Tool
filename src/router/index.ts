@@ -1,6 +1,6 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 import SyncOverviewPage from '@/pages/sync/SyncOverviewPage.vue'
-import SyncLogsPage from '@/pages/sync/SyncLogsPage.vue'
+import RuntimeLogsPage from '@/pages/RuntimeLogsPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import HistoryPage from '@/pages/HistoryPage.vue'
 import EnableApplianceSshPage from '@/pages/EnableApplianceSshPage.vue'
@@ -12,7 +12,8 @@ import SyncDeliveryPage from '@/pages/sync/SyncDeliveryPage.vue'
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
-    redirect: '/sync',
+    name: 'runtime-logs',
+    component: RuntimeLogsPage,
   },
   {
     path: '/tasks',
@@ -21,6 +22,10 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/manual-copy',
     redirect: '/sync',
+  },
+  {
+    path: '/sync/logs',
+    redirect: '/',
   },
   {
     path: '/sync',
@@ -45,11 +50,6 @@ const routes: RouteRecordRaw[] = [
         path: 'delivery',
         name: 'sync-delivery',
         component: SyncDeliveryPage,
-      },
-      {
-        path: 'logs',
-        name: 'sync-logs',
-        component: SyncLogsPage,
       },
     ],
   },

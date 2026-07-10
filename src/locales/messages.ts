@@ -3,6 +3,7 @@ export const messages = {
     sidebar: {
       title: 'File Sync Tool',
       manualCopy: 'Manual Copy',
+      console: 'Execution Logs',
       history: 'History',
       settings: 'Settings',
       syncConsole: 'Sync Console',
@@ -42,7 +43,7 @@ export const messages = {
     },
     sync: {
       title: 'Sync Console',
-      description: 'Monitor file synchronization and manage tasks, scan rules, delivery, and logs in one place.',
+      description: 'Monitor file synchronization and manage tasks, scan rules, and delivery in one place.',
       navigation: 'Sync console sections',
       tabs: {
         overview: 'Overview',
@@ -2071,6 +2072,7 @@ export const messages = {
     sidebar: {
       title: '文件同步工具',
       manualCopy: '指定复制',
+      console: '运行日志',
       history: '历史记录',
       settings: '设置',
       syncConsole: '同步控制台',
@@ -2110,7 +2112,7 @@ export const messages = {
     },
     sync: {
       title: '同步控制台',
-      description: '集中查看文件同步状态，并管理任务、扫描策略、交付流程与运行日志。',
+      description: '集中查看文件同步状态，并管理任务、扫描策略与交付流程。',
       navigation: '同步控制台分区',
       tabs: {
         overview: '概览',
