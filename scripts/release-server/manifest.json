@@ -3,8 +3,8 @@
   "versions": [
     {
       "version": "1.1.2",
-      "url": "file-sync-tool-1.1.2-202607100951.exe",
-      "sha256": "15052d2e350d389d2b9255a9dbfc3bdbeff72b9c2729ec98ffc4fb4b6cdcde83",
+      "url": "file-sync-tool-1.1.2-202607101633.exe",
+      "sha256": "d00f9aca118438321beded4319fd2ab6ea2f00514f218ccc703df38e3c8b6eaf",
       "released_at": "2026-07-10",
       "changelog": [
         "更新下载落地策略与版本化 EXE 文件名自愈，优化关于/更新页布局与升级状态展示。",
