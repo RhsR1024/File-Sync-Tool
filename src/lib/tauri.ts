@@ -150,6 +150,39 @@ export interface AppConfig {
   clipboard: ClipboardSettings;
 }
 
+export interface SyncConfigPatch extends Pick<
+  AppConfig,
+  | 'tasks'
+  | 'local_path'
+  | 'interval_minutes'
+  | 'time_ranges'
+  | 'file_extensions'
+  | 'filename_includes'
+  | 'deploy_enabled'
+  | 'servers'
+  | 'command_groups'
+  | 'local_command_groups'
+  | 'stability_check_secs'
+  | 'recent_file_guard_mins'
+  | 'copy_buffer_size_kb'
+> {}
+
+export interface AppDomainConfigPatch extends Pick<
+  AppConfig,
+  | 'launch_and_auto_scan'
+  | 'launch_and_auto_start_file_share'
+  | 'close_to_tray'
+  | 'max_log_lines'
+  | 'max_task_records'
+  | 'appliance_ssh_api_timeout_secs'
+  | 'framework_password_api_timeout_secs'
+  | 'disk_cleanup_http_timeout_secs'
+  | 'disk_cleanup_linux_mode'
+  | 'update_server_url'
+  | 'notify_on_new_version'
+  | 'clipboard'
+> {}
+
 export interface ManifestVersion {
   version: string;
   url: string;
@@ -379,6 +412,14 @@ export async function markFrontendReady(label: string): Promise<void> {
 
 export async function saveConfig(config: AppConfig): Promise<void> {
   await invoke('save_config_cmd', { config });
+}
+
+export async function updateSyncConfig(patch: SyncConfigPatch): Promise<void> {
+  await invoke('update_sync_config', { patch });
+}
+
+export async function updateAppConfig(patch: AppDomainConfigPatch): Promise<void> {
+  await invoke('update_app_config', { patch });
 }
 
 export async function scanNow(): Promise<ScanResult> {

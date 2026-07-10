@@ -19,9 +19,11 @@ test('settings page no longer includes the quick-jump anchor strip polish', () =
   assert.doesNotMatch(pageSource, /pb-28/);
 });
 
-test('settings page uses existing locale keys for task and timing section titles', () => {
-  assert.match(pageSource, /settings\.scanTasks/);
-  assert.match(pageSource, /settings\.scanTime/);
-  assert.doesNotMatch(pageSource, /settings\.scanTaskManagement/);
-  assert.doesNotMatch(pageSource, /settings\.scanTiming/);
+test('settings page owns application settings only', () => {
+  assert.match(pageSource, /configStore\.saveApp\(\)/);
+  assert.match(pageSource, /settings\.startupOptions/);
+  assert.match(pageSource, /settings\.update\.section/);
+  assert.doesNotMatch(pageSource, /settings\.scanTasks/);
+  assert.doesNotMatch(pageSource, /settings\.scanTime/);
+  assert.doesNotMatch(pageSource, /settings\.remoteDeployment/);
 });
