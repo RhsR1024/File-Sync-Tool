@@ -372,6 +372,11 @@ export async function getConfig(): Promise<AppConfig> {
   return await invoke('get_config');
 }
 
+// 前端存活标记：主窗口挂载后写入 app.log，用于区分“webview 没加载”与“窗口没显示”。
+export async function markFrontendReady(label: string): Promise<void> {
+  return await invoke('mark_frontend_ready', { label });
+}
+
 export async function saveConfig(config: AppConfig): Promise<void> {
   await invoke('save_config_cmd', { config });
 }

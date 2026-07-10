@@ -847,30 +847,97 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
     });
 }
 
+/// One-line human-readable window state for app.log: the field reports for
+/// "tray click does nothing" need visible/minimized/position ground truth to
+/// tell "restore ran but window stayed hidden" apart from "event never arrived".
+fn window_state_snapshot(window: &WebviewWindow) -> String {
+    fn fmt<T: std::fmt::Display>(result: tauri::Result<T>) -> String {
+        match result {
+            Ok(v) => v.to_string(),
+            Err(e) => format!("err({e})"),
+        }
+    }
+    let position = window
+        .outer_position()
+        .map(|p| format!("({},{})", p.x, p.y))
+        .unwrap_or_else(|e| format!("err({e})"));
+    let monitor = match window.current_monitor() {
+        Ok(Some(m)) => {
+            let size = m.size();
+            let pos = m.position();
+            format!("{}x{}@({},{})", size.width, size.height, pos.x, pos.y)
+        }
+        Ok(None) => "none".to_string(),
+        Err(e) => format!("err({e})"),
+    };
+    format!(
+        "visible={}, minimized={}, focused={}, pos={}, monitor={}",
+        fmt(window.is_visible()),
+        fmt(window.is_minimized()),
+        fmt(window.is_focused()),
+        position,
+        monitor
+    )
+}
+
 fn restore_main_window(window: &WebviewWindow) {
+    let app_handle = window.app_handle();
+    scanner::write_log_to_file(
+        app_handle,
+        &format!("【窗口】恢复前状态：{}", window_state_snapshot(window)),
+        "info",
+    );
+
     let should_center = window.current_monitor().ok().flatten().is_none();
 
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_skip_taskbar(false);
-    let _ = window.set_focusable(true);
+    let mut failures: Vec<String> = Vec::new();
+    let mut record = |op: &str, result: tauri::Result<()>| {
+        if let Err(e) = result {
+            failures.push(format!("{op}: {e}"));
+        }
+    };
+
+    record("unminimize", window.unminimize());
+    record("show", window.show());
+    record("set_skip_taskbar", window.set_skip_taskbar(false));
+    record("set_focusable", window.set_focusable(true));
 
     if should_center {
-        let _ = window.center();
+        record("center", window.center());
     }
 
     #[cfg(target_os = "windows")]
-    let _ = window.set_always_on_top(true);
+    record("set_always_on_top(true)", window.set_always_on_top(true));
 
-    let _ = window.set_focus();
+    record("set_focus", window.set_focus());
 
     #[cfg(target_os = "windows")]
-    let _ = window.set_always_on_top(false);
+    record("set_always_on_top(false)", window.set_always_on_top(false));
+
+    drop(record);
+    if failures.is_empty() {
+        scanner::write_log_to_file(
+            app_handle,
+            &format!("【窗口】恢复后状态：{}", window_state_snapshot(window)),
+            "info",
+        );
+    } else {
+        scanner::write_log_to_file(
+            app_handle,
+            &format!(
+                "【窗口】恢复动作部分失败：{}；恢复后状态：{}",
+                failures.join("；"),
+                window_state_snapshot(window)
+            ),
+            "warn",
+        );
+    }
 }
 
 fn recreate_main_window(app: &tauri::AppHandle) {
     let Some(window_config) = app.config().app.windows.first().cloned() else {
         log::error!("Cannot recreate main window: missing window config");
+        scanner::write_log_to_file(app, "【窗口】重建主窗口失败：缺少窗口配置", "error");
         return;
     };
 
@@ -884,27 +951,42 @@ fn recreate_main_window(app: &tauri::AppHandle) {
     {
         Ok(window) => {
             log::warn!("Main window was missing and has been recreated");
+            scanner::write_log_to_file(app, "【窗口】主窗口实例缺失，已按配置重建", "warn");
             restore_main_window(&window);
         }
         Err(err) => {
             log::error!("Failed to recreate main window: {err}");
+            scanner::write_log_to_file(app, &format!("【窗口】重建主窗口失败：{err}"), "error");
         }
     }
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
+fn show_main_window(app: &tauri::AppHandle, reason: &str) {
+    scanner::write_log_to_file(
+        app,
+        &format!("【窗口】收到显示主窗口请求（来源：{reason}）"),
+        "info",
+    );
     let app_clone = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    let dispatch_result = app.run_on_main_thread(move || {
         if let Some(window) = app_clone.get_webview_window("main") {
             restore_main_window(&window);
         } else {
             recreate_main_window(&app_clone);
         }
     });
+    if let Err(e) = dispatch_result {
+        scanner::write_log_to_file(
+            app,
+            &format!("【窗口】显示主窗口失败：无法调度到主线程（{e}）"),
+            "error",
+        );
+    }
 }
 
 fn hide_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        scanner::write_log_to_file(app, "【窗口】主窗口已隐藏到托盘", "info");
         let _ = window.hide();
     }
 }
@@ -1773,6 +1855,19 @@ async fn preview_temporary_copy(
         target_exists: resolved_target_path.exists(),
         source_modified_secs_ago,
     })
+}
+
+/// Frontend liveness marker: the main window's JS calls this right after Vue
+/// mounts. Its absence after a boot line in app.log proves the webview never
+/// loaded — the prime suspect for "no window at logon, tray click dead" reports.
+/// Async so the file write runs off the main thread.
+#[tauri::command]
+async fn mark_frontend_ready(app_handle: tauri::AppHandle, label: String) {
+    scanner::write_log_to_file(
+        &app_handle,
+        &format!("【前端】窗口 {label} 页面已加载并挂载"),
+        "info",
+    );
 }
 
 #[tauri::command]
@@ -3595,7 +3690,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main_window(app);
+            show_main_window(app, "重复启动实例唤起");
             let _ = app.emit("single-instance", ());
         }))
         .plugin(tauri_plugin_log::Builder::default().build())
@@ -3836,7 +3931,7 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .tooltip("File Sync Tool")
                 .on_menu_event(move |app, event| match event.id().as_ref() {
-                    TRAY_SHOW_ID => show_main_window(app),
+                    TRAY_SHOW_ID => show_main_window(app, "托盘菜单「显示主窗口」"),
                     TRAY_CLIPBOARD_PANEL_ID => {
                         let _ = clipboard::commands::cb_toggle_panel_internal(app.clone());
                     }
@@ -3862,7 +3957,7 @@ fn main() {
                         ..
                     } = event
                     {
-                        show_main_window(&app_handle);
+                        show_main_window(&app_handle, "托盘图标左键点击");
                     }
                 });
 
@@ -3871,6 +3966,22 @@ fn main() {
             }
 
             let _ = tray_builder.build(app)?;
+
+            // Boot-time ground truth for "no window after logon" field reports:
+            // whether the main window is actually visible when setup finishes.
+            if let Some(window) = app.get_webview_window("main") {
+                scanner::write_log_to_file(
+                    app.handle(),
+                    &format!("【窗口】启动初始化完成，主窗口状态：{}", window_state_snapshot(&window)),
+                    "info",
+                );
+            } else {
+                scanner::write_log_to_file(
+                    app.handle(),
+                    "【窗口】启动初始化完成，但主窗口实例不存在",
+                    "warn",
+                );
+            }
 
             spawn_main_thread_watchdog(app.handle().clone());
 
@@ -3908,6 +4019,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
+            mark_frontend_ready,
             save_config_cmd,
             scan_now,
             cancel_scan,

@@ -46,7 +46,7 @@ pub fn allow_notifications_from_lower_integrity(identifier: &str) {
 mod windows_impl {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, LPARAM, WPARAM,
+        GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, LPARAM, LRESULT, WPARAM,
     };
     use windows::Win32::Security::{
         InitializeSecurityDescriptor, SetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
@@ -119,25 +119,48 @@ mod windows_impl {
         unsafe {
             let class_name = wide(&format!("{identifier}-sic"));
             let window_name = wide(&format!("{identifier}-siw"));
-            if let Ok(hwnd) = FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR(window_name.as_ptr()))
-            {
-                let cwd = std::env::current_dir().unwrap_or_default();
-                let payload = super::build_notify_payload(&cwd.to_string_lossy(), std::env::args());
-                let bytes = payload.as_bytes();
-                let cds = COPYDATASTRUCT {
-                    dwData: super::PLUGIN_COPYDATA_MARKER,
-                    cbData: bytes.len() as u32,
-                    lpData: bytes.as_ptr() as *mut core::ffi::c_void,
-                };
-                let _ = SendMessageTimeoutW(
-                    hwnd,
-                    WM_COPYDATA,
-                    WPARAM(0),
-                    LPARAM(&cds as *const _ as isize),
-                    SMTO_ABORTIFHUNG,
-                    NOTIFY_TIMEOUT_MS,
-                    None,
-                );
+            match FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR(window_name.as_ptr())) {
+                Ok(hwnd) => {
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    let payload =
+                        super::build_notify_payload(&cwd.to_string_lossy(), std::env::args());
+                    let bytes = payload.as_bytes();
+                    let cds = COPYDATASTRUCT {
+                        dwData: super::PLUGIN_COPYDATA_MARKER,
+                        cbData: bytes.len() as u32,
+                        lpData: bytes.as_ptr() as *mut core::ffi::c_void,
+                    };
+                    let send_result = SendMessageTimeoutW(
+                        hwnd,
+                        WM_COPYDATA,
+                        WPARAM(0),
+                        LPARAM(&cds as *const _ as isize),
+                        SMTO_ABORTIFHUNG,
+                        NOTIFY_TIMEOUT_MS,
+                        None,
+                    );
+                    // 返回 0 = 超时或投递失败（如 UIPI 拦截“低完整性 → 提权实例”），
+                    // 此时已有实例不会弹出主窗口——落日志便于现场定位“双击没反应”。
+                    if send_result == LRESULT(0) {
+                        crate::startup_log(
+                            "warn",
+                            &format!(
+                                "单实例守卫：通知已有实例超时或被拦截（GetLastError={:?}），其主窗口可能不会弹出",
+                                GetLastError()
+                            ),
+                        );
+                    } else {
+                        crate::startup_log("info", "单实例守卫：已成功通知已有实例显示主窗口");
+                    }
+                }
+                Err(error) => {
+                    crate::startup_log(
+                        "warn",
+                        &format!(
+                            "单实例守卫：未找到已有实例的接收窗口（可能仍在启动中），无法通知其显示主窗口：{error}"
+                        ),
+                    );
+                }
             }
         }
         std::process::exit(0);
