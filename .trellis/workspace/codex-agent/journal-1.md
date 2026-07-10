@@ -109,3 +109,40 @@ Aligned the Alt+C panel with ElegantClipboard-style group placement and fixed in
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: 同步控制台重构
+
+**Date**: 2026-07-10
+**Task**: 同步控制台重构
+**Branch**: `main`
+
+### Summary
+
+完成配置同步域与应用域的 Rust/Tauri/TypeScript 分域保存契约；引入共享 configStore；将同步任务、策略、远程部署、本地脚本和日志迁入 /sync 五页签控制台；瘦身设置页、合并侧边栏入口、补齐路由重定向、keep-alive、双语文案、测试与 Trellis 规范；构建版本化 EXE 并更新发布 manifest。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2186d09` | (see git log) |
+| `f93b72e` | (see git log) |
+| `f995478` | (see git log) |
+| `f329578` | (see git log) |
+| `8246e6c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
