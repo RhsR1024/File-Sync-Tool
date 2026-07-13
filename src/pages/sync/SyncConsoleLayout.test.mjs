@@ -65,13 +65,13 @@ test('sync configuration tabs use the full-width console workspace', () => {
   assert.match(configurationSource, /sync-console-workspace/);
   assert.doesNotMatch(configurationSource, /max-w-4xl/);
   assert.doesNotMatch(configurationSource, /min-h-full[^\"]*mx-auto/);
-  assert.match(configurationSource, /xl:grid-cols-2/);
+  assert.match(configurationSource, /sync-delivery-stack space-y-4/);
 });
 
 test('tasks route renders the combined tasks and strategy workspace', () => {
   assert.match(tasksSource, /section="tasks-strategy"/);
   assert.match(configurationSource, /'tasks-strategy'/);
-  assert.match(configurationSource, /sync-tasks-strategy-stack grid grid-cols-1 items-start gap-4/);
+  assert.match(configurationSource, /sync-tasks-strategy-stack space-y-4/);
   assert.doesNotMatch(configurationSource, /sync-tasks-strategy-grid/);
   assert.doesNotMatch(configurationSource, /xl:grid-cols-\[minmax\(0,1\.15fr\)_minmax\(360px,1fr\)\]/);
 });
@@ -79,8 +79,8 @@ test('tasks route renders the combined tasks and strategy workspace', () => {
 test('combined strategy panel follows the compact prototype without nested viewport columns', () => {
   assert.match(configurationSource, /sync-strategy-card/);
   assert.match(configurationSource, /t\('sync\.tabs\.strategy'\)/);
-  assert.match(configurationSource, /-mt-4 row-start-3 rounded-t-none/);
-  assert.match(configurationSource, /row-start-4/);
+  assert.doesNotMatch(configurationSource, /-mt-4 row-start-3 rounded-t-none/);
+  assert.doesNotMatch(configurationSource, /row-start-4/);
   assert.match(scanTimingSource, /sync-scan-timing-stack/);
   assert.match(scanTimingSource, /grid-cols-\[repeat\(auto-fit,minmax\(220px,1fr\)\)\]/);
   assert.doesNotMatch(scanTimingSource, /xl:grid-cols-2/);

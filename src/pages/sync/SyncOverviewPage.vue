@@ -275,52 +275,80 @@ function handleManualCopyClose() {
 
 <template>
   <div class="sync-console-workspace h-full min-h-0 w-full p-6 flex flex-col gap-4 bg-slate-50">
-    <section class="sync-overview-summary grid shrink-0 grid-cols-1 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm sm:grid-cols-2 xl:grid-cols-4">
-      <div class="flex min-h-[78px] items-center gap-3 border-b border-slate-100 px-5 py-3 sm:border-r xl:border-b-0">
-        <Activity class="h-5 w-5 shrink-0 text-blue-600" aria-hidden="true" />
-        <div class="min-w-0">
-          <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.status') }}</div>
-          <div class="mt-1 flex items-center gap-2 text-xl font-bold" :class="appStore.isRunning ? 'text-emerald-600' : 'text-slate-700'">
-            <div class="relative flex h-2.5 w-2.5 shrink-0">
-              <span v-if="appStore.isRunning" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75 motion-reduce:animate-none"></span>
-              <span class="relative inline-flex h-2.5 w-2.5 rounded-full" :class="appStore.isRunning ? 'bg-emerald-500' : 'bg-slate-400'"></span>
+    <section class="sync-overview-summary grid shrink-0 grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <!-- Status -->
+      <div class="relative overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div class="absolute inset-y-0 left-0 w-1" :class="appStore.isRunning ? 'bg-emerald-500' : 'bg-slate-300'"></div>
+        <div class="flex items-center gap-4 px-5 py-4">
+          <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset"
+               :class="appStore.isRunning ? 'bg-emerald-50 text-emerald-600 ring-emerald-100' : 'bg-slate-50 text-slate-400 ring-slate-100'">
+            <Activity class="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div class="min-w-0">
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{{ t('console.status') }}</div>
+            <div class="mt-1 flex items-center gap-2 text-lg font-bold" :class="appStore.isRunning ? 'text-emerald-600' : 'text-slate-700'">
+              <span class="relative flex h-2.5 w-2.5">
+                <span v-if="appStore.isRunning" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75 motion-reduce:animate-none"></span>
+                <span class="relative inline-flex h-2.5 w-2.5 rounded-full" :class="appStore.isRunning ? 'bg-emerald-500' : 'bg-slate-400'"></span>
+              </span>
+              <span class="truncate">{{ appStore.isRunning ? t('console.running') : t('console.stopped') }}</span>
             </div>
-            <span class="truncate">{{ appStore.isRunning ? t('console.running') : t('console.stopped') }}</span>
           </div>
         </div>
       </div>
 
-      <div class="flex min-h-[78px] items-center gap-3 border-b border-slate-100 px-5 py-3 xl:border-b-0 xl:border-r">
-        <Clock class="h-5 w-5 shrink-0 text-slate-500" aria-hidden="true" />
-        <div class="min-w-0">
-          <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.nextRun') }}</div>
-          <div class="mt-1 truncate font-mono text-xl font-bold tabular-nums text-slate-900">
-            {{ appStore.nextRunTime }}
+      <!-- Next Run -->
+      <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div class="flex items-center gap-4 px-5 py-4">
+          <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600 ring-1 ring-inset ring-blue-100">
+            <Clock class="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div class="min-w-0">
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{{ t('console.nextRun') }}</div>
+            <div class="mt-1 truncate font-mono text-lg font-bold tabular-nums text-slate-900">
+              {{ appStore.nextRunTime }}
+            </div>
           </div>
         </div>
       </div>
 
-      <div class="flex min-h-[78px] items-center gap-3 border-b border-slate-100 px-5 py-3 sm:border-b-0 sm:border-r">
-        <Gauge class="h-5 w-5 shrink-0 text-emerald-600" aria-hidden="true" />
-        <div class="min-w-0">
-          <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.speed') }}</div>
-          <div class="mt-1 truncate font-mono text-xl font-bold tabular-nums text-slate-900">{{ currentSpeed }}</div>
+      <!-- Speed -->
+      <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div class="flex items-center gap-4 px-5 py-4">
+          <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-50 text-sky-600 ring-1 ring-inset ring-sky-100">
+            <Gauge class="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div class="min-w-0">
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{{ t('console.speed') }}</div>
+            <div class="mt-1 truncate font-mono text-lg font-bold tabular-nums text-slate-900">{{ currentSpeed }}</div>
+          </div>
         </div>
       </div>
 
-      <div class="flex min-h-[78px] items-center gap-3 px-5 py-3">
-        <ListChecks class="h-5 w-5 shrink-0 text-indigo-600" aria-hidden="true" />
-        <div class="min-w-0">
-          <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.taskRecords') }}</div>
-          <div class="mt-1 text-xl font-bold tabular-nums text-slate-900">{{ rows.length }}</div>
+      <!-- Task Records -->
+      <div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div class="flex items-center gap-4 px-5 py-4">
+          <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-indigo-100">
+            <ListChecks class="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div class="min-w-0">
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{{ t('console.taskRecords') }}</div>
+            <div class="mt-1 text-lg font-bold tabular-nums text-slate-900">{{ rows.length }}</div>
+          </div>
         </div>
       </div>
     </section>
 
-    <section class="sync-overview-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-      <div class="flex flex-col gap-3 border-b border-slate-200 bg-white px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-        <div class="min-w-0">
-          <h2 class="text-lg font-bold text-slate-900">{{ t('console.taskRecords') }}</h2>
+    <section class="sync-overview-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div class="flex flex-col gap-3 border-b border-slate-100 bg-slate-50/60 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+        <div class="flex items-center gap-3 min-w-0">
+          <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-100 text-blue-600">
+            <ListChecks class="h-4 w-4" aria-hidden="true" />
+          </div>
+          <div>
+            <h2 class="text-base font-bold text-slate-900">{{ t('console.taskRecords') }}</h2>
+            <p class="text-xs text-slate-500 mt-0.5">{{ t('sync.description') }}</p>
+          </div>
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <button

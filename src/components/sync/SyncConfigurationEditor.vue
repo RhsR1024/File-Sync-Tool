@@ -739,16 +739,15 @@ onMounted(load);
     v-if="config"
     class="sync-console-workspace min-h-full w-full p-6 pb-24"
     :class="props.section === 'tasks-strategy'
-      ? 'sync-tasks-strategy-stack grid grid-cols-1 items-start gap-4'
+      ? 'sync-tasks-strategy-stack space-y-4'
       : props.section === 'delivery'
-        ? 'sync-delivery-grid grid grid-cols-1 items-start gap-4 xl:grid-cols-2'
+        ? 'sync-delivery-stack space-y-4'
         : 'space-y-6'"
   >
     <!-- Local Path -->
     <div
       v-if="shows('strategy')"
       class="sync-strategy-card overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
-      :class="{ 'row-start-2 rounded-b-none border-b-0': props.section === 'tasks-strategy' }"
     >
       <div class="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-5 py-4">
         <div class="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
@@ -776,7 +775,6 @@ onMounted(load);
     <div
       v-if="shows('tasks')"
       class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
-      :class="{ 'row-start-1': props.section === 'tasks-strategy' }"
     >
       <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
         <div class="flex items-center gap-3">
@@ -1061,7 +1059,6 @@ onMounted(load);
     <div
       v-if="shows('strategy')"
       class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
-      :class="{ '-mt-4 row-start-3 rounded-t-none': props.section === 'tasks-strategy' }"
     >
       <div class="flex items-center gap-3 border-b border-slate-200 bg-white px-5 py-3">
         <div class="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
@@ -1178,7 +1175,6 @@ onMounted(load);
     <div
       v-if="shows('strategy')"
       class="grid grid-cols-1 gap-4 md:grid-cols-2"
-      :class="{ 'row-start-4': props.section === 'tasks-strategy' }"
     >
       <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">

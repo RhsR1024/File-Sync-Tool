@@ -1,5 +1,5 @@
 use super::{RemoteAuth, RemoteDirEntry, RemoteDirListing, RemoteSshConfig};
-use ssh2::{FileStat, Session};
+use ssh2::{FileStat, PtyModeOpcode, PtyModes, Session};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
@@ -52,14 +52,90 @@ pub fn connect(config: &RemoteSshConfig) -> Result<Session, String> {
 }
 
 pub fn exec_capture(session: &Session, command: &str) -> Result<String, String> {
+    match exec_capture_mode(session, command, CommandMode::Exec) {
+        Ok(output) => Ok(output),
+        Err(exec_error) if is_exec_restriction(&exec_error) => {
+            match exec_capture_mode(session, command, CommandMode::ExecPty) {
+                Ok(output) => Ok(output),
+                Err(pty_error) if is_exec_restriction(&pty_error) => {
+                    exec_capture_mode(session, command, CommandMode::Shell).map_err(|shell_error| {
+                        format!(
+                            "exec failed: {exec_error}; exec+pty failed: {pty_error}; shell failed: {shell_error}"
+                        )
+                    })
+                }
+                Err(pty_error) => Err(format!(
+                    "exec failed: {exec_error}; exec+pty failed: {pty_error}"
+                )),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CommandMode {
+    Exec,
+    ExecPty,
+    Shell,
+}
+
+fn is_exec_restriction(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("not allowed")
+        || message.contains("not permitted")
+        || message.contains("forbidden")
+        || message.contains("restricted")
+}
+
+fn prepare_command_channel(
+    session: &Session,
+    command: &str,
+    mode: CommandMode,
+) -> Result<ssh2::Channel, String> {
     let mut channel = session
         .channel_session()
         .map_err(|error| format!("channel_session failed: {error}"))?;
     channel
         .handle_extended_data(ssh2::ExtendedData::Merge)
         .map_err(|error| error.to_string())?;
-    channel.exec(command).map_err(|error| error.to_string())?;
+
+    match mode {
+        CommandMode::Exec => channel.exec(command).map_err(|error| error.to_string())?,
+        CommandMode::ExecPty => {
+            channel
+                .request_pty("xterm", None, None)
+                .map_err(|error| format!("PTY allocation failed: {error}"))?;
+            channel.exec(command).map_err(|error| error.to_string())?;
+        }
+        CommandMode::Shell => {
+            // A few hardened appliances reject SSH exec requests but allow an
+            // interactive shell. Disable terminal echo so the submitted scan
+            // script cannot be mistaken for script protocol output.
+            let mut modes = PtyModes::new();
+            modes.set_boolean(PtyModeOpcode::ECHO, false);
+            modes.set_boolean(PtyModeOpcode::ECHONL, false);
+            channel
+                .request_pty("xterm", Some(modes), None)
+                .map_err(|error| format!("PTY allocation failed: {error}"))?;
+            channel
+                .shell()
+                .map_err(|error| format!("Shell start failed: {error}"))?;
+            channel
+                .write_all(format!("printf '\\n'\n{command}\nexit $?\n").as_bytes())
+                .map_err(|error| format!("Shell command write failed: {error}"))?;
+        }
+    }
     let _ = channel.send_eof();
+    Ok(channel)
+}
+
+fn exec_capture_mode(
+    session: &Session,
+    command: &str,
+    mode: CommandMode,
+) -> Result<String, String> {
+    let mut channel = prepare_command_channel(session, command, mode)?;
     let mut output = String::new();
     channel
         .read_to_string(&mut output)
@@ -82,17 +158,54 @@ where
     // Remote scan/patch scripts may stay silent for minutes (gzip/zstd on
     // large archives), so streaming reads must not hit the session timeout.
     session.set_timeout(0);
-    let mut channel = session
-        .channel_session()
-        .map_err(|error| format!("channel_session failed: {error}"))?;
-    channel
-        .handle_extended_data(ssh2::ExtendedData::Merge)
-        .map_err(|error| error.to_string())?;
-    channel.exec(command).map_err(|error| error.to_string())?;
-    let _ = channel.send_eof();
+    match exec_stream_mode(session, command, CommandMode::Exec, &mut on_line) {
+        Ok((exit_code, false)) | Ok((exit_code @ 0, true)) => Ok(exit_code),
+        Ok((_exit_code, true)) => {
+            match exec_stream_mode(session, command, CommandMode::ExecPty, &mut on_line) {
+                Ok((exit_code, false)) | Ok((exit_code @ 0, true)) => Ok(exit_code),
+                Ok((_exit_code, true)) => {
+                    exec_stream_mode(session, command, CommandMode::Shell, &mut on_line)
+                        .map(|(exit_code, _)| exit_code)
+                }
+                Err(error) if is_exec_restriction(&error) => {
+                    exec_stream_mode(session, command, CommandMode::Shell, &mut on_line)
+                        .map(|(exit_code, _)| exit_code)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) if is_exec_restriction(&error) => {
+            match exec_stream_mode(session, command, CommandMode::ExecPty, &mut on_line) {
+                Ok((exit_code, false)) | Ok((exit_code @ 0, true)) => Ok(exit_code),
+                Ok((_exit_code, true)) => {
+                    exec_stream_mode(session, command, CommandMode::Shell, &mut on_line)
+                        .map(|(exit_code, _)| exit_code)
+                }
+                Err(pty_error) if is_exec_restriction(&pty_error) => {
+                    exec_stream_mode(session, command, CommandMode::Shell, &mut on_line)
+                        .map(|(exit_code, _)| exit_code)
+                }
+                Err(pty_error) => Err(pty_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn exec_stream_mode<F>(
+    session: &Session,
+    command: &str,
+    mode: CommandMode,
+    on_line: &mut F,
+) -> Result<(i32, bool), String>
+where
+    F: FnMut(&str),
+{
+    let mut channel = prepare_command_channel(session, command, mode)?;
 
     let mut pending = String::new();
     let mut buffer = [0_u8; 8192];
+    let mut restriction_seen = false;
     loop {
         match channel.read(&mut buffer) {
             Ok(0) => break,
@@ -100,6 +213,7 @@ where
                 pending.push_str(&String::from_utf8_lossy(&buffer[..count]));
                 while let Some(index) = pending.find('\n') {
                     let line = pending[..index].trim_end_matches('\r').to_string();
+                    restriction_seen |= is_exec_restriction(&line);
                     on_line(&line);
                     pending = pending[index + 1..].to_string();
                 }
@@ -108,11 +222,13 @@ where
         }
     }
     if !pending.trim().is_empty() {
-        on_line(pending.trim_end_matches('\r'));
+        let line = pending.trim_end_matches('\r');
+        restriction_seen |= is_exec_restriction(line);
+        on_line(line);
     }
 
     channel.wait_close().map_err(|error| error.to_string())?;
-    Ok(channel.exit_status().unwrap_or(-1))
+    Ok((channel.exit_status().unwrap_or(-1), restriction_seen))
 }
 
 pub fn list_dir(session: &Session, path: &str) -> Result<RemoteDirListing, String> {
@@ -250,4 +366,18 @@ pub fn write_remote_file(
         )
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_exec_restriction;
+
+    #[test]
+    fn detects_restricted_exec_messages() {
+        assert!(is_exec_restriction(
+            "Remote command execution is not allowed."
+        ));
+        assert!(is_exec_restriction("operation is FORBIDDEN"));
+        assert!(!is_exec_restriction("tar: package not found"));
+    }
 }

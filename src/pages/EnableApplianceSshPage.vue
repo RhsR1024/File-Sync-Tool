@@ -43,6 +43,7 @@ const sshUsername = ref<string>('root');
 const sshPassword = ref<string>('admin_123');
 const showSshPassword = ref(false);
 const addWhitelistRule = ref<boolean>(true);
+const showWhitelistDetail = ref<boolean>(false);
 const isLoading = ref<boolean>(false);
 const results = ref<ApplianceSshResult[]>([]);
 const currentProgress = ref<{ current: number; total: number } | null>(null);
@@ -529,163 +530,24 @@ const enableStateClass = (value?: number) => {
             </div>
           </div>
 
-          <!-- HA access groups card (master / optional backup / slaves) -->
+          <!-- Whitelist rule card -->
           <div class="bg-white border border-slate-200/80 rounded-xl shadow-sm overflow-hidden">
-            <div class="flex items-center justify-between gap-3 px-5 py-4">
-              <div class="flex items-center gap-2">
-                <Network class="w-4 h-4 text-slate-400" />
-                <h3 class="text-sm font-semibold text-slate-800">{{ t('tools.applianceSsh.haGroupSection') }}</h3>
-                <span class="text-xs text-slate-400">({{ t('tools.applianceSsh.optional') }})</span>
-              </div>
+            <div class="flex items-start justify-between gap-4">
               <button
                 type="button"
-                @click="addGroup"
-                :disabled="isLoading"
-                class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                class="min-w-0 flex-1 flex items-start gap-2 px-5 py-4 text-left hover:bg-slate-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
+                :aria-expanded="showWhitelistDetail"
+                aria-controls="appliance-ssh-whitelist-detail"
+                @click="showWhitelistDetail = !showWhitelistDetail"
               >
-                <Plus class="w-3.5 h-3.5" />
-                {{ t('tools.applianceSsh.haGroupAdd') }}
-              </button>
-            </div>
-            <div v-if="haGroups.length === 0" class="px-5 pb-4 pt-0">
-              <p class="text-xs text-slate-400 leading-relaxed">{{ t('tools.applianceSsh.haGroupEmptyHint') }}</p>
-            </div>
-            <div v-else class="px-5 pb-4 space-y-3">
-              <div
-                v-for="(group, idx) in haGroups"
-                :key="idx"
-                class="border border-slate-200 rounded-lg p-3 space-y-2.5"
-              >
-                <div class="flex items-center justify-between gap-2">
-                  <span class="text-xs font-semibold text-slate-500">{{ t('tools.applianceSsh.haGroupIndex', { index: idx + 1 }) }}</span>
-                  <button
-                    type="button"
-                    @click="removeGroup(idx)"
-                    :disabled="isLoading"
-                    class="shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    :title="t('tools.applianceSsh.haGroupRemove')"
-                  >
-                    <XIcon class="w-4 h-4" />
-                  </button>
-                </div>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  <div>
-                    <label class="block text-xs font-medium text-slate-600 mb-1">{{ t('tools.applianceSsh.haGroupMasterLabel') }}</label>
-                    <input
-                      v-model="group.master"
-                      type="text"
-                      :placeholder="t('tools.applianceSsh.haGroupMasterPlaceholder')"
-                      :disabled="isLoading"
-                      class="w-full min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
-                      :class="group.master.trim() && !isValidIp(group.master.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
-                    />
-                  </div>
-                  <div>
-                    <label class="block text-xs font-medium text-slate-600 mb-1">{{ t('tools.applianceSsh.haGroupBackupLabel') }}</label>
-                    <input
-                      v-model="group.backup"
-                      type="text"
-                      :placeholder="t('tools.applianceSsh.haGroupBackupPlaceholder')"
-                      :disabled="isLoading"
-                      class="w-full min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
-                      :class="group.backup.trim() && !isValidIp(group.backup.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label class="block text-xs font-medium text-slate-600 mb-1">
-                    {{ t('tools.applianceSsh.haGroupSlavesLabel', { count: group.slaves.length, max: MAX_SLAVES_PER_GROUP }) }}
-                  </label>
-                  <IpTagInput
-                    v-model="group.slaves"
-                    :disabled="isLoading"
-                    :max-tags="MAX_SLAVES_PER_GROUP"
-                    :placeholder="t('tools.applianceSsh.haGroupSlavesPlaceholder')"
-                    :aria-label="t('tools.applianceSsh.haGroupSlavesLabel', { count: group.slaves.length, max: MAX_SLAVES_PER_GROUP })"
-                    @limit-exceeded="handleSlaveLimitExceeded"
-                  />
-                </div>
-              </div>
-              <p class="text-xs text-slate-400 mt-1">{{ t('tools.applianceSsh.haGroupHint') }}</p>
-            </div>
-
-            <!-- Master SSH port (shown whenever a group has a backup) -->
-            <div v-if="hasAnyBackup" class="px-5 pb-4 pt-0">
-              <label class="block text-xs font-medium text-slate-600 mb-1.5">{{ t('tools.applianceSsh.jumpHostSshPort') }}</label>
-              <input
-                v-model.number="jumpHostSshPort"
-                type="number"
-                min="1"
-                max="65535"
-                :disabled="isLoading"
-                class="w-32 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
-                :class="jumpHostSshPortInvalid ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
-              />
-              <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.jumpHostSshPortHint') }}</p>
-            </div>
-
-            <!-- Recent groups (max 5) -->
-            <div v-if="recentGroupsParsed.length > 0" class="px-5 pb-4 pt-0 space-y-2">
-              <div class="flex items-center justify-between gap-2">
-                <span class="text-xs font-medium text-slate-500">{{ t('tools.applianceSsh.haGroupRecent') }}</span>
-                <button
-                  type="button"
-                  :disabled="isLoading"
-                  class="text-xs font-medium text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  @click="clearRecentGroups"
-                >
-                  {{ t('tools.applianceSsh.clearRecentHaGroups') }}
-                </button>
-              </div>
-              <div class="flex items-center gap-2 flex-wrap">
-                <span
-                  v-for="entry in recentGroupsParsed"
-                  :key="`appliance-ssh-group-history-${entry.key}`"
-                  class="inline-flex items-stretch overflow-hidden rounded-full border transition-colors"
-                  :class="isRecentGroupSelected(entry.group)
-                    ? 'border-blue-600 bg-blue-600 text-white'
-                    : 'border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50'"
-                >
-                  <button
-                    type="button"
-                    :disabled="isLoading"
-                    class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium font-mono disabled:cursor-not-allowed"
-                    :title="entry.group.slaves.length > 0 ? entry.group.slaves.join(', ') : undefined"
-                    @click="applyRecentGroup(entry.group)"
-                  >
-                    <Check v-if="isRecentGroupSelected(entry.group)" class="h-3 w-3" />
-                    <span>{{ entry.group.master }}</span>
-                    <template v-if="entry.group.backup">
-                      <span class="opacity-60">→</span>
-                      <span>{{ entry.group.backup }}</span>
-                    </template>
-                    <span v-if="entry.group.slaves.length > 0" class="opacity-60">+{{ entry.group.slaves.length }}</span>
-                  </button>
-                  <button
-                    type="button"
-                    :disabled="isLoading"
-                    class="inline-flex items-center border-l border-current/10 px-2 text-current/70 transition hover:text-current disabled:cursor-not-allowed"
-                    :title="t('tools.applianceSsh.removeRecentHaGroup')"
-                    @click.stop="removeRecentGroup(entry.key)"
-                  >
-                    <Trash2 class="h-3.5 w-3.5" />
-                  </button>
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <!-- Whitelist rule card -->
-          <div class="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm">
-            <div class="flex items-start justify-between gap-4">
-              <div class="flex items-start gap-2">
-                <Shield class="w-4 h-4 text-slate-400 mt-0.5" />
-                <div>
+                <Shield class="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+                <div class="min-w-0 flex-1">
                   <h3 class="text-sm font-semibold text-slate-800">{{ t('tools.applianceSsh.whitelistTitle') }}</h3>
                   <p class="text-xs text-slate-400 mt-0.5 leading-relaxed">{{ t('tools.applianceSsh.whitelistDescription') }}</p>
                 </div>
-              </div>
-              <label class="inline-flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer shrink-0 mt-0.5">
+                <component :is="showWhitelistDetail ? ChevronUp : ChevronDown" class="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+              </button>
+              <label class="inline-flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer shrink-0 mr-5 mt-4">
                 <input
                   v-model="addWhitelistRule"
                   type="checkbox"
@@ -705,8 +567,12 @@ const enableStateClass = (value?: number) => {
               leave-from-class="opacity-100 translate-y-0 max-h-[48rem]"
               leave-to-class="opacity-0 -translate-y-2 max-h-0"
             >
-              <div v-if="addWhitelistRule" class="overflow-hidden">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4 pt-4 border-t border-slate-100">
+              <div
+                v-show="showWhitelistDetail && addWhitelistRule"
+                id="appliance-ssh-whitelist-detail"
+                class="overflow-hidden px-5 pb-5"
+              >
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 pt-4 border-t border-slate-100">
                   <div>
                     <label class="block text-xs font-medium text-slate-600 mb-1.5">{{ t('tools.applianceSsh.sshUsername') }}</label>
                     <input
@@ -913,9 +779,157 @@ const enableStateClass = (value?: number) => {
           </button>
         </div>
 
-        <!-- Right column: Results panel -->
-        <div class="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm h-fit sticky top-6">
-          <h3 class="text-sm font-semibold text-slate-800 mb-4">{{ t('tools.applianceSsh.results') }}</h3>
+        <!-- Right column: HA access groups + results -->
+        <div class="space-y-4 h-fit">
+          <!-- HA access groups card (master / optional backup / slaves) -->
+          <div class="bg-white border border-slate-200/80 rounded-xl shadow-sm overflow-hidden">
+            <div class="flex items-center justify-between gap-3 px-5 py-4">
+              <div class="flex items-center gap-2">
+                <Network class="w-4 h-4 text-slate-400" />
+                <h3 class="text-sm font-semibold text-slate-800">{{ t('tools.applianceSsh.haGroupSection') }}</h3>
+                <span class="text-xs text-slate-400">({{ t('tools.applianceSsh.optional') }})</span>
+              </div>
+              <button
+                type="button"
+                @click="addGroup"
+                :disabled="isLoading"
+                class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Plus class="w-3.5 h-3.5" />
+                {{ t('tools.applianceSsh.haGroupAdd') }}
+              </button>
+            </div>
+            <div v-if="haGroups.length === 0" class="px-5 pb-4 pt-0">
+              <p class="text-xs text-slate-400 leading-relaxed">{{ t('tools.applianceSsh.haGroupEmptyHint') }}</p>
+            </div>
+            <div v-else class="px-5 pb-4 space-y-3">
+              <div
+                v-for="(group, idx) in haGroups"
+                :key="idx"
+                class="border border-slate-200 rounded-lg p-3 space-y-2.5"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs font-semibold text-slate-500">{{ t('tools.applianceSsh.haGroupIndex', { index: idx + 1 }) }}</span>
+                  <button
+                    type="button"
+                    @click="removeGroup(idx)"
+                    :disabled="isLoading"
+                    class="shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    :title="t('tools.applianceSsh.haGroupRemove')"
+                  >
+                    <XIcon class="w-4 h-4" />
+                  </button>
+                </div>
+                <div class="grid grid-cols-1 gap-2.5">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">{{ t('tools.applianceSsh.haGroupMasterLabel') }}</label>
+                    <input
+                      v-model="group.master"
+                      type="text"
+                      :placeholder="t('tools.applianceSsh.haGroupMasterPlaceholder')"
+                      :disabled="isLoading"
+                      class="w-full min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                      :class="group.master.trim() && !isValidIp(group.master.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">{{ t('tools.applianceSsh.haGroupBackupLabel') }}</label>
+                    <input
+                      v-model="group.backup"
+                      type="text"
+                      :placeholder="t('tools.applianceSsh.haGroupBackupPlaceholder')"
+                      :disabled="isLoading"
+                      class="w-full min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                      :class="group.backup.trim() && !isValidIp(group.backup.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-600 mb-1">
+                    {{ t('tools.applianceSsh.haGroupSlavesLabel', { count: group.slaves.length, max: MAX_SLAVES_PER_GROUP }) }}
+                  </label>
+                  <IpTagInput
+                    v-model="group.slaves"
+                    :disabled="isLoading"
+                    :max-tags="MAX_SLAVES_PER_GROUP"
+                    :placeholder="t('tools.applianceSsh.haGroupSlavesPlaceholder')"
+                    :aria-label="t('tools.applianceSsh.haGroupSlavesLabel', { count: group.slaves.length, max: MAX_SLAVES_PER_GROUP })"
+                    @limit-exceeded="handleSlaveLimitExceeded"
+                  />
+                </div>
+              </div>
+              <p class="text-xs text-slate-400 mt-1">{{ t('tools.applianceSsh.haGroupHint') }}</p>
+            </div>
+
+            <!-- Master SSH port (shown whenever a group has a backup) -->
+            <div v-if="hasAnyBackup" class="px-5 pb-4 pt-0">
+              <label class="block text-xs font-medium text-slate-600 mb-1.5">{{ t('tools.applianceSsh.jumpHostSshPort') }}</label>
+              <input
+                v-model.number="jumpHostSshPort"
+                type="number"
+                min="1"
+                max="65535"
+                :disabled="isLoading"
+                class="w-32 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
+                :class="jumpHostSshPortInvalid ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
+              />
+              <p class="text-xs text-slate-400 mt-1.5">{{ t('tools.applianceSsh.jumpHostSshPortHint') }}</p>
+            </div>
+
+            <!-- Recent groups (max 5) -->
+            <div v-if="recentGroupsParsed.length > 0" class="px-5 pb-4 pt-0 space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs font-medium text-slate-500">{{ t('tools.applianceSsh.haGroupRecent') }}</span>
+                <button
+                  type="button"
+                  :disabled="isLoading"
+                  class="text-xs font-medium text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  @click="clearRecentGroups"
+                >
+                  {{ t('tools.applianceSsh.clearRecentHaGroups') }}
+                </button>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span
+                  v-for="entry in recentGroupsParsed"
+                  :key="`appliance-ssh-group-history-${entry.key}`"
+                  class="inline-flex items-stretch overflow-hidden rounded-full border transition-colors"
+                  :class="isRecentGroupSelected(entry.group)
+                    ? 'border-blue-600 bg-blue-600 text-white'
+                    : 'border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50'"
+                >
+                  <button
+                    type="button"
+                    :disabled="isLoading"
+                    class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium font-mono disabled:cursor-not-allowed"
+                    :title="entry.group.slaves.length > 0 ? entry.group.slaves.join(', ') : undefined"
+                    @click="applyRecentGroup(entry.group)"
+                  >
+                    <Check v-if="isRecentGroupSelected(entry.group)" class="h-3 w-3" />
+                    <span>{{ entry.group.master }}</span>
+                    <template v-if="entry.group.backup">
+                      <span class="opacity-60">→</span>
+                      <span>{{ entry.group.backup }}</span>
+                    </template>
+                    <span v-if="entry.group.slaves.length > 0" class="opacity-60">+{{ entry.group.slaves.length }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="isLoading"
+                    class="inline-flex items-center border-l border-current/10 px-2 text-current/70 transition hover:text-current disabled:cursor-not-allowed"
+                    :title="t('tools.applianceSsh.removeRecentHaGroup')"
+                    @click.stop="removeRecentGroup(entry.key)"
+                  >
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </button>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Results panel -->
+          <div class="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm">
+            <h3 class="text-sm font-semibold text-slate-800 mb-4">{{ t('tools.applianceSsh.results') }}</h3>
 
           <div class="grid grid-cols-3 gap-3 text-center">
             <div class="rounded-lg bg-slate-50 p-2.5">
@@ -953,6 +967,7 @@ const enableStateClass = (value?: number) => {
             :description="t('tools.applianceSsh.emptyDescription')"
             dashed
           />
+          </div>
         </div>
       </div>
 

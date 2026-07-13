@@ -40,6 +40,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::webview::PageLoadEvent;
 
 use serde_json::json;
 use tauri::{Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder, WindowEvent};
@@ -1903,6 +1904,15 @@ async fn mark_frontend_ready(app_handle: tauri::AppHandle, label: String) {
         &format!("【前端】窗口 {label} 页面已加载并挂载"),
         "info",
     );
+
+    // The main window starts hidden so Windows never exposes WebView2's blank
+    // surface while Tauri setup and the first page load are still in progress.
+    // This is also a fallback for platforms where the page-load hook is missed.
+    if label == "main" {
+        if let Some(window) = app_handle.get_webview_window("main") {
+            let _ = window.show();
+        }
+    }
 }
 
 #[tauri::command]
@@ -3724,6 +3734,13 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .on_page_load(|webview, payload| {
+            // Only reveal the main window after its document has finished loading.
+            // Auxiliary clipboard windows remain hidden until explicitly requested.
+            if webview.label() == "main" && matches!(payload.event(), PageLoadEvent::Finished) {
+                let _ = webview.window().show();
+            }
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app, "重复启动实例唤起");
             let _ = app.emit("single-instance", ());

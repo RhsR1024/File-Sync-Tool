@@ -23,3 +23,19 @@ test('whitelist source modes keep their existing request mapping', () => {
     /whitelistSourceMode\.value === 'all'[\s\S]*?WHITELIST_ALL_CIDR[\s\S]*?: undefined/,
   );
 });
+
+test('whitelist details are collapsed by default and exposed by an accessible disclosure', () => {
+  assert.match(pageSource, /showWhitelistDetail = ref<boolean>\(false\)/);
+  assert.match(pageSource, /:aria-expanded="showWhitelistDetail"/);
+  assert.match(pageSource, /v-show="showWhitelistDetail && addWhitelistRule"/);
+});
+
+test('HA access groups are placed in the right column above results', () => {
+  const rightColumn = pageSource.indexOf('<!-- Right column: HA access groups + results -->');
+  const haGroups = pageSource.indexOf("t('tools.applianceSsh.haGroupSection')", rightColumn);
+  const results = pageSource.indexOf("t('tools.applianceSsh.results')", rightColumn);
+
+  assert.ok(rightColumn >= 0);
+  assert.ok(haGroups > rightColumn);
+  assert.ok(results > haGroups);
+});
