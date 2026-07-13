@@ -1,4 +1,0 @@
-{"file": ".trellis/spec/backend/update-checker.md", "reason": "update_app_config 必须保留 save_config_cmd 中 update_server_url 变化的副作用（重置 last_update_check_at、handle_config_changed）；pending_update/last_update_check_at 为后端专有字段不得进补丁"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "本任务跨 Vue 组件 → configStore → tauri.ts → Rust command → config.json 持久化五层，域字段划分需逐层一致"}
-{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "R2 要求同步编辑器只有一份实现；从 SettingsPage 提取组件时先搜索既有实现，禁止复制两份编辑器逻辑"}
-{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "前端提取组件与新页面需遵守项目质量规范（i18n 双语、script setup、Tailwind 工具类）"}

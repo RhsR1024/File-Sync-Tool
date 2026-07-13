@@ -48,7 +48,6 @@ If `--message` is omitted, generate a concise Conventional Commit message from t
 ## Scope
 
 - Include changed project files in the repository.
-- Exclude personal session artifacts such as `.trellis/workspace/` unless the user explicitly asks to include them.
 - If the repository is already clean, report that and stop.
 
 ## Steps

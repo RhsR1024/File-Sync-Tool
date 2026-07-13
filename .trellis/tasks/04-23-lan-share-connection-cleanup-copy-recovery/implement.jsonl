@@ -1,9 +1,0 @@
-{"file": ".trellis/workflow.md", "reason": "Project workflow and conventions"}
-{"file": ".trellis/spec/backend/index.md", "reason": "Backend development guide"}
-{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend development guide"}
-{"file": "src-tauri/src/scanner.rs", "reason": "remote copy retry, resume, size mismatch recovery"}
-{"file": "src-tauri/src/task_manager.rs", "reason": "copy task lifecycle and failure status"}
-{"file": "src-tauri/src/fileshare/mod.rs", "reason": "file share connection status backend"}
-{"file": "src/pages/FileSharePage.vue", "reason": "file share status refresh UI"}
-{"file": "src-tauri/src/screenshare.rs", "reason": "screen share connection status backend"}
-{"file": "src/pages/ScreenSharePage.vue", "reason": "screen share status refresh UI"}

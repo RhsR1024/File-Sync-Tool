@@ -76,9 +76,8 @@ src-tauri/src/
 
 ## 修改流程
 
-1. 先读取 `.trellis/workflow.md` 和相关 `.trellis/spec/` 规范。
-2. 仓库存在 `.codegraph/` 时，定位或理解代码优先使用 CodeGraph；文本搜索优先使用 `rg`。
-3. 检查 Git 状态并保护用户已有修改，不回退无关文件。
+1. 仓库存在 `.codegraph/` 时，定位或理解代码优先使用 CodeGraph；文本搜索优先使用 `rg`。
+2. 检查 Git 状态并保护用户已有修改，不回退无关文件。
 4. 只修改任务范围内的文件，避免无关重构和格式化。
 5. 运行与改动相称的测试，并执行适用的 `pnpm check`、`pnpm lint`、`git diff --check`。
 6. 仅在用户要求发布或生产构建验证时运行耗时较长的 Tauri release 构建。

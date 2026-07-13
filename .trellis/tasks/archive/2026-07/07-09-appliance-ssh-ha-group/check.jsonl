@@ -1,3 +1,0 @@
-{"file": ".trellis/tasks/07-09-appliance-ssh-ha-group/prd.md", "reason": "验收标准逐条核对"}
-{"file": ".trellis/tasks/07-09-appliance-ssh-ha-group/design.md", "reason": "§5 兼容性（后端 diff 为空、旧最近记录兼容）与 §6 测试策略核对"}
-{"file": ".trellis/tasks/07-09-appliance-ssh-ha-group/implement.md", "reason": "步骤 7 全量质量门命令清单"}

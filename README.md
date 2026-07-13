@@ -121,8 +121,6 @@ src/share-web/               局域网文件共享 Web 前端
 src-tauri/src/               Rust/Tauri 后端
 scripts/                     构建、EXE 重命名和发布 manifest 脚本
 docs/                        专题设计与开发文档
-.trellis/spec/               项目开发规范
-.trellis/tasks/              任务 PRD、设计和实施记录
 AGENTS.md                    Codex 项目指令
 CLAUDE.md                    Claude 项目指令
 ```

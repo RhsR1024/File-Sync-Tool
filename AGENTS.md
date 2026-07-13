@@ -9,21 +9,6 @@
 如果不存在 `.codegraph/`，则跳过 CodeGraph；是否建立索引由用户决定。
 <!-- CODEGRAPH_END -->
 
-<!-- TRELLIS:START -->
-# Trellis 项目指令
-
-本项目由 Trellis 管理，开发知识位于 `.trellis/`：
-
-- `.trellis/workflow.md`：开发阶段、任务路由和交付物约定。
-- `.trellis/spec/`：按前后端分层的开发规范；修改代码前必须读取对应规范。
-- `.trellis/workspace/`：开发者日志和会话轨迹。
-- `.trellis/tasks/`：进行中及归档任务的 PRD、设计、计划和研究记录。
-
-平台提供 Trellis 命令或项目技能时，优先使用它们，不要手工重建相同流程。可复用技能位于 `.agents/skills/`，可选 Codex 代理位于 `.codex/agents/`。
-
-此区块由 Trellis 管理。区块外修改会保留；区块内内容可能被后续 `trellis update` 覆盖。
-<!-- TRELLIS:END -->
-
 # File Sync Tool 项目指南
 
 本文件是 Codex 的仓库级指令入口。Codex 会自动读取作用域内的 `AGENTS.md`。`CLAUDE.md` 面向 Claude；两份文档应保持项目事实一致，但不要互相覆盖或假设另一份一定已加载。

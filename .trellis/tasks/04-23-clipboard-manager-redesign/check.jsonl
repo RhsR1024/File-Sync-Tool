@@ -1,6 +1,0 @@
-{"file": ".gemini/commands/trellis/finish-work.toml", "reason": "Finish work checklist"}
-{"file": ".gemini/commands/trellis/check-backend.toml", "reason": "Backend check spec"}
-{"file": ".gemini/commands/trellis/check-frontend.toml", "reason": "Frontend check spec"}
-{"file": "docs/superpowers/specs/2026-04-23-clipboard-manager-redesign-design.md", "reason": "Validate final behavior against the approved redesign spec"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Review contract coverage across DB, Tauri, and Vue layers"}
-{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Check for duplicated source-badge or self-copy helper logic"}

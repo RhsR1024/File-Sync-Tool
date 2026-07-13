@@ -1,4 +1,0 @@
-{"file": ".trellis/tasks/07-09-appliance-ssh-ha-group/prd.md", "reason": "需求、角色语义表与验收标准"}
-{"file": ".trellis/tasks/07-09-appliance-ssh-ha-group/design.md", "reason": "技术设计：数据模型、组件拆分、i18n 键清单、兼容性约束（后端零改动）"}
-{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "前端质量规范（Partial，实现前过一遍禁止项）"}
-{"file": "CLAUDE.md", "reason": "项目约定：i18n en+zh 强制、类型唯一真相源 src/lib/tauri.ts、完成后 versioned-exe 构建验证"}

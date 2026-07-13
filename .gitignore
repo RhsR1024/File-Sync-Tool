@@ -13,8 +13,7 @@ dist-ssr
 *.local
 
 # Editor directories and files
-.vscode/*
-!.vscode/extensions.json
+.vscode/
 .idea
 .DS_Store
 *.suo
@@ -30,4 +29,11 @@ vite.config.ts.timestamp-*.mjs
 
 # 对标参考源码（仅本地研究，禁止提交）
 /ElegantClipboard-main/
+
+# Local AI assistant and design artifacts
+/.agent/
+/.gemini/
+/.superpowers/
+/.trellis/
+/design_handoff_share_web_redesign/
 
