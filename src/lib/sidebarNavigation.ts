@@ -1,7 +1,6 @@
 export type SidebarIconKey =
   | 'sync'
   | 'console'
-  | 'history'
   | 'settings'
   | 'toolsOverview'
   | 'frameworkPassword'
@@ -51,13 +50,6 @@ export const SIDEBAR_NAV_SECTIONS = [
         path: '/',
         iconKey: 'console',
         matchMode: 'exact',
-      },
-      {
-        key: 'history',
-        labelKey: 'sidebar.history',
-        path: '/history',
-        iconKey: 'history',
-        matchMode: 'prefix',
       },
     ],
   },

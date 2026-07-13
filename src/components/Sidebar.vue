@@ -6,7 +6,6 @@ import {
   FileSearch,
   Globe,
   HardDrive,
-  History,
   KeyRound,
   MonitorUp,
   PackageSearch,
@@ -35,7 +34,6 @@ const { state: updaterState } = useUpdater();
 const iconMap: Record<SidebarIconKey, Component> = {
   sync: Activity,
   console: Terminal,
-  history: History,
   settings: Settings,
   toolsOverview: Server,
   frameworkPassword: KeyRound,

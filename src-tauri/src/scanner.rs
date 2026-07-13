@@ -4,7 +4,6 @@ use crate::config::{
     AppConfig, LocalScriptBinding, MatchRule, PostCopyExecutionOrder, TaskServerBinding,
 };
 use crate::deploy::deploy_to_remote;
-use crate::history::{add_history_entry, HistoryEntry};
 use crate::local_exec::{self, LocalExecContext, LocalExecResult};
 use crate::task_domain::{TaskSourceType, TaskTriggerSource};
 use crate::task_manager::{TaskManager, TaskRunHandle, TaskStartRequest};
@@ -1500,24 +1499,6 @@ async fn perform_copy<R: tauri::Runtime>(
             "info",
         );
 
-        // ---- Confirmed: we have files to copy ----
-        // Record COPY_STARTED only now, so history is clean when nothing needs copying.
-        add_history_entry(
-            &handle,
-            HistoryEntry {
-                id: uuid::Uuid::new_v4().to_string(),
-                timestamp: Local::now().to_rfc3339(),
-                action_type: "COPY_STARTED".to_string(),
-                description: format!("Started copying {}", folder_name_clone),
-                folder_name: folder_name_clone.clone(),
-                source_path: source_path_clone.to_string_lossy().to_string(),
-                target_path: target_full_path_clone.to_string_lossy().to_string(),
-                copied_files_count: 0,
-                total_size: 0,
-                files: vec![],
-            },
-        );
-
         let start_time = Instant::now();
         let mut last_emit_time = Instant::now();
 
@@ -1571,23 +1552,6 @@ async fn perform_copy<R: tauri::Runtime>(
         for (src, _size, overwrite_this_file) in filtered_files {
             // Check skip before starting file
             if should_skip_clone.load(Ordering::SeqCst) {
-                if !copied_files_list.is_empty() {
-                    add_history_entry(
-                        &handle,
-                        HistoryEntry {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            timestamp: Local::now().to_rfc3339(),
-                            action_type: "COPY_SKIPPED".to_string(),
-                            description: format!("Skipped copying {}", folder_name_clone),
-                            folder_name: format!("{} (Skipped)", folder_name_clone),
-                            source_path: source_path_clone.to_string_lossy().to_string(),
-                            target_path: target_full_path_clone.to_string_lossy().to_string(),
-                            copied_files_count: copied_files_list.len(),
-                            total_size: copied_bytes_total,
-                            files: copied_files_list.clone(),
-                        },
-                    );
-                }
                 return Err(fs_extra::error::Error::new(
                     fs_extra::error::ErrorKind::Interrupted,
                     "Skipped by user",
@@ -1596,24 +1560,6 @@ async fn perform_copy<R: tauri::Runtime>(
 
             // Check cancel before starting file
             if should_cancel_clone.load(Ordering::SeqCst) {
-                // Log partial
-                if !copied_files_list.is_empty() {
-                    add_history_entry(
-                        &handle,
-                        HistoryEntry {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            timestamp: Local::now().to_rfc3339(),
-                            action_type: "COPY_CANCELLED".to_string(),
-                            description: format!("Cancelled copying {}", folder_name_clone),
-                            folder_name: format!("{} (Cancelled)", folder_name_clone),
-                            source_path: source_path_clone.to_string_lossy().to_string(),
-                            target_path: target_full_path_clone.to_string_lossy().to_string(),
-                            copied_files_count: copied_files_list.len(),
-                            total_size: copied_bytes_total,
-                            files: copied_files_list.clone(),
-                        },
-                    );
-                }
                 return Err(fs_extra::error::Error::new(
                     fs_extra::error::ErrorKind::Interrupted,
                     "Cancelled by user",
@@ -1656,51 +1602,11 @@ async fn perform_copy<R: tauri::Runtime>(
                 }
                 Err(e) => {
                     if e.contains("Skipped") {
-                        // Save partial
-                        if !copied_files_list.is_empty() {
-                            add_history_entry(
-                                &handle,
-                                HistoryEntry {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    timestamp: Local::now().to_rfc3339(),
-                                    action_type: "COPY_SKIPPED".to_string(),
-                                    description: format!("Skipped copying {}", folder_name_clone),
-                                    folder_name: format!("{} (Skipped)", folder_name_clone),
-                                    source_path: source_path_clone.to_string_lossy().to_string(),
-                                    target_path: target_full_path_clone
-                                        .to_string_lossy()
-                                        .to_string(),
-                                    copied_files_count: copied_files_list.len(),
-                                    total_size: copied_bytes_total,
-                                    files: copied_files_list,
-                                },
-                            );
-                        }
                         return Err(fs_extra::error::Error::new(
                             fs_extra::error::ErrorKind::Interrupted,
                             "Skipped by user",
                         ));
                     } else if e.contains("Cancelled") {
-                        // Save partial
-                        if !copied_files_list.is_empty() {
-                            add_history_entry(
-                                &handle,
-                                HistoryEntry {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    timestamp: Local::now().to_rfc3339(),
-                                    action_type: "COPY_CANCELLED".to_string(),
-                                    description: format!("Cancelled copying {}", folder_name_clone),
-                                    folder_name: format!("{} (Cancelled)", folder_name_clone),
-                                    source_path: source_path_clone.to_string_lossy().to_string(),
-                                    target_path: target_full_path_clone
-                                        .to_string_lossy()
-                                        .to_string(),
-                                    copied_files_count: copied_files_list.len(),
-                                    total_size: copied_bytes_total,
-                                    files: copied_files_list,
-                                },
-                            );
-                        }
                         return Err(fs_extra::error::Error::new(
                             fs_extra::error::ErrorKind::Interrupted,
                             "Cancelled by user",
@@ -1715,45 +1621,11 @@ async fn perform_copy<R: tauri::Runtime>(
         }
 
         if !copy_failures.is_empty() {
-            if !copied_files_list.is_empty() {
-                add_history_entry(
-                    &handle,
-                    HistoryEntry {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        timestamp: Local::now().to_rfc3339(),
-                        action_type: "COPY_FAILED".to_string(),
-                        description: format!("Copy failed for {}", folder_name_clone),
-                        folder_name: format!("{} (Failed)", folder_name_clone),
-                        source_path: source_path_clone.to_string_lossy().to_string(),
-                        target_path: target_full_path_clone.to_string_lossy().to_string(),
-                        copied_files_count: copied_files_list.len(),
-                        total_size: copied_bytes_total,
-                        files: copied_files_list.clone(),
-                    },
-                );
-            }
             return Err(fs_extra::error::Error::new(
                 fs_extra::error::ErrorKind::Other,
                 &copy_failures.join("; "),
             ));
         }
-
-        // Done
-        add_history_entry(
-            &handle,
-            HistoryEntry {
-                id: uuid::Uuid::new_v4().to_string(),
-                timestamp: Local::now().to_rfc3339(),
-                action_type: "COPY_COMPLETED".to_string(),
-                description: format!("Successfully copied {}", folder_name_clone),
-                folder_name: folder_name_clone.clone(),
-                source_path: source_path_clone.to_string_lossy().to_string(),
-                target_path: target_full_path_clone.to_string_lossy().to_string(),
-                copied_files_count: copied_files_list.len(),
-                total_size: copied_bytes_total,
-                files: copied_files_list.clone(),
-            },
-        );
 
         // Post-copy orchestration: local scripts + remote deploy
         // Re-read the latest config so that enabling deploy after scheduler
@@ -2370,23 +2242,6 @@ async fn temporary_copy_file<R: tauri::Runtime>(
         }
     }
 
-    // Record history: COPY_STARTED
-    add_history_entry(
-        app_handle,
-        HistoryEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Local::now().to_rfc3339(),
-            action_type: "COPY_STARTED".to_string(),
-            description: format!("Started copying file {}", file_name),
-            folder_name: file_name.clone(),
-            source_path: source_path.to_string_lossy().to_string(),
-            target_path: target_root_path.to_string_lossy().to_string(),
-            copied_files_count: 0,
-            total_size: 0,
-            files: vec![],
-        },
-    );
-
     // Copy with progress
     let app_handle_clone = app_handle.clone();
     let file_name_clone = file_name.clone();
@@ -2454,23 +2309,6 @@ async fn temporary_copy_file<R: tauri::Runtime>(
                     file_name, bytes_copied
                 ),
                 "success",
-            );
-
-            // Record history: COPY_COMPLETED
-            add_history_entry(
-                app_handle,
-                HistoryEntry {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    timestamp: Local::now().to_rfc3339(),
-                    action_type: "COPY_COMPLETED".to_string(),
-                    description: format!("Completed copying file {}", file_name),
-                    folder_name: file_name.clone(),
-                    source_path: source_path.to_string_lossy().to_string(),
-                    target_path: target_root_path.to_string_lossy().to_string(),
-                    copied_files_count: 1,
-                    total_size: bytes_copied,
-                    files: vec![file_name],
-                },
             );
 
             mark_copy_completed_for_handle(

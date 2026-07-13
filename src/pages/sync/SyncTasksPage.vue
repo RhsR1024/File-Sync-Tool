@@ -5,5 +5,5 @@ defineOptions({ name: 'SyncTasksPage' });
 </script>
 
 <template>
-  <SyncConfigurationEditor section="tasks" />
+  <SyncConfigurationEditor section="tasks-strategy" />
 </template>

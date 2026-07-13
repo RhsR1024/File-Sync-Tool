@@ -10,7 +10,6 @@ mod disk_cleanup;
 mod download_verify;
 mod error_code;
 mod fileshare;
-mod history;
 mod local_exec;
 mod network;
 mod persist;
@@ -4068,9 +4067,6 @@ fn main() {
             resume_task_run,
             skip_current_copy,
             remove_from_scan_queue,
-            history::get_history,
-            history::clear_history,
-            history::add_system_event,
             test_ssh_connection,
             start_manual_copy_task,
             start_manual_deploy_task,

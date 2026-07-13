@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onActivated } from 'vue';
-import { Play, Square, RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, ListChecks, Trash2 } from 'lucide-vue-next';
+import { RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, Gauge, ListChecks, Trash2 } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
@@ -19,7 +19,7 @@ import { useI18n } from 'vue-i18n';
 import { appStore, addLog } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { buildTaskRows } from '@/lib/taskStatusView';
-import { startScheduler, stopScheduler, executeScan } from '@/lib/scheduler';
+import { executeScan, startScheduler } from '@/lib/scheduler';
 import { pushToast, type ToastTone } from '@/composables/useToast';
 
 defineOptions({
@@ -48,6 +48,15 @@ const retryTargetPreview = ref<ManualCopyPreview | null>(null);
 const pendingRetryRequest = ref<{ taskGroupId: string; source: string; target: string } | null>(null);
 
 const rows = computed(() => buildTaskRows(taskStateStore.groups));
+
+const currentSpeed = computed(() => {
+  const bytesPerSecond = appStore.progress?.speed ?? 0;
+  if (bytesPerSecond <= 0) return '—';
+  if (bytesPerSecond < 1024) return `${bytesPerSecond.toFixed(0)} B/s`;
+  if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
+  if (bytesPerSecond < 1024 * 1024 * 1024) return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
+  return `${(bytesPerSecond / (1024 * 1024 * 1024)).toFixed(2)} GB/s`;
+});
 
 const terminalTaskCount = computed(() => rows.value.filter(r => {
   const s = r.summary_status;
@@ -266,11 +275,9 @@ function handleManualCopyClose() {
 
 <template>
   <div class="sync-console-workspace h-full min-h-0 w-full p-6 flex flex-col gap-4 bg-slate-50">
-    <section class="sync-overview-summary grid shrink-0 grid-cols-1 gap-3 xl:grid-cols-[minmax(220px,0.9fr)_minmax(220px,0.9fr)_minmax(180px,0.7fr)]">
-      <div class="flex min-h-[84px] items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
-        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
-          <Activity class="h-5 w-5" aria-hidden="true" />
-        </div>
+    <section class="sync-overview-summary grid shrink-0 grid-cols-1 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm sm:grid-cols-2 xl:grid-cols-4">
+      <div class="flex min-h-[78px] items-center gap-3 border-b border-slate-100 px-5 py-3 sm:border-r xl:border-b-0">
+        <Activity class="h-5 w-5 shrink-0 text-blue-600" aria-hidden="true" />
         <div class="min-w-0">
           <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.status') }}</div>
           <div class="mt-1 flex items-center gap-2 text-xl font-bold" :class="appStore.isRunning ? 'text-emerald-600' : 'text-slate-700'">
@@ -283,10 +290,8 @@ function handleManualCopyClose() {
         </div>
       </div>
 
-      <div class="flex min-h-[84px] items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
-        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
-          <Clock class="h-5 w-5" aria-hidden="true" />
-        </div>
+      <div class="flex min-h-[78px] items-center gap-3 border-b border-slate-100 px-5 py-3 xl:border-b-0 xl:border-r">
+        <Clock class="h-5 w-5 shrink-0 text-slate-500" aria-hidden="true" />
         <div class="min-w-0">
           <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.nextRun') }}</div>
           <div class="mt-1 truncate font-mono text-xl font-bold tabular-nums text-slate-900">
@@ -295,10 +300,16 @@ function handleManualCopyClose() {
         </div>
       </div>
 
-      <div class="flex min-h-[84px] items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
-        <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
-          <ListChecks class="h-5 w-5" aria-hidden="true" />
+      <div class="flex min-h-[78px] items-center gap-3 border-b border-slate-100 px-5 py-3 sm:border-b-0 sm:border-r">
+        <Gauge class="h-5 w-5 shrink-0 text-emerald-600" aria-hidden="true" />
+        <div class="min-w-0">
+          <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.speed') }}</div>
+          <div class="mt-1 truncate font-mono text-xl font-bold tabular-nums text-slate-900">{{ currentSpeed }}</div>
         </div>
+      </div>
+
+      <div class="flex min-h-[78px] items-center gap-3 px-5 py-3">
+        <ListChecks class="h-5 w-5 shrink-0 text-indigo-600" aria-hidden="true" />
         <div class="min-w-0">
           <div class="text-[11px] font-semibold uppercase text-slate-500">{{ t('console.taskRecords') }}</div>
           <div class="mt-1 text-xl font-bold tabular-nums text-slate-900">{{ rows.length }}</div>
@@ -309,23 +320,9 @@ function handleManualCopyClose() {
     <section class="sync-overview-panel flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       <div class="flex flex-col gap-3 border-b border-slate-200 bg-white px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div class="min-w-0">
-          <h2 class="text-base font-semibold text-slate-800">{{ t('console.schedulerControls') }}</h2>
-          <p class="mt-0.5 text-xs text-slate-500">{{ rows.length }} {{ t('console.taskRecords') }}</p>
+          <h2 class="text-lg font-bold text-slate-900">{{ t('console.taskRecords') }}</h2>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <button
-            @click="appStore.isRunning ? stopScheduler() : startScheduler()"
-            class="flex min-h-11 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2"
-            :class="appStore.isRunning
-              ? 'border border-red-200 bg-red-50 text-red-600 hover:bg-red-100'
-              : 'bg-emerald-600 text-white shadow-sm shadow-emerald-600/20 hover:bg-emerald-700'"
-            :aria-label="appStore.isRunning ? t('console.stop') : t('console.start')"
-            :title="appStore.isRunning ? t('console.stop') : t('console.start')"
-          >
-            <component :is="appStore.isRunning ? Square : Play" class="h-4 w-4 fill-current" aria-hidden="true" />
-            {{ appStore.isRunning ? t('console.stop') : t('console.start') }}
-          </button>
-
           <button
             @click="handleScanClick"
             class="flex min-h-11 items-center gap-2 rounded-lg border border-blue-200 bg-white px-3.5 py-2 text-sm font-semibold text-blue-700 shadow-sm transition-colors hover:border-blue-300 hover:bg-blue-50 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:hover:border-blue-200 disabled:hover:bg-white"

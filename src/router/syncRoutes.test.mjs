@@ -26,3 +26,16 @@ test('sync console declares only sync-owned child tabs', () => {
   }
   assert.doesNotMatch(routerSource, /name: 'sync-logs'/);
 });
+
+test('the retired copy history page is no longer routable', () => {
+  assert.doesNotMatch(routerSource, /HistoryPage/);
+  assert.doesNotMatch(routerSource, /path: '\/history'/);
+});
+
+test('the legacy strategy URL redirects to the combined tasks and strategy page', () => {
+  assert.match(
+    routerSource,
+    /path: 'strategy',[\s\S]{0,100}name: 'sync-strategy',[\s\S]{0,100}redirect: '\/sync\/tasks'/,
+  );
+  assert.doesNotMatch(routerSource, /path: 'strategy',[\s\S]{0,100}component: SyncStrategyPage/);
+});

@@ -47,7 +47,6 @@ test('config store deduplicates concurrent initial loads', async () => {
     updateSyncConfig: async () => {},
     updateAppConfig: async () => {},
     restartSchedulerInterval: async () => {},
-    addConfigEvent: () => {},
     setMaxLogLines: () => {},
   });
 
@@ -71,7 +70,6 @@ test('saveSync sends only the sync patch, refreshes, then restarts the scheduler
     updateSyncConfig: async (patch) => { calls.push(['sync', patch]); },
     updateAppConfig: async () => {},
     restartSchedulerInterval: async () => { calls.push(['restart']); },
-    addConfigEvent: () => { calls.push(['event']); },
     setMaxLogLines: () => {},
   });
 
@@ -80,7 +78,7 @@ test('saveSync sends only the sync patch, refreshes, then restarts the scheduler
 
   assert.equal('pending_update' in calls[0][1], false);
   assert.equal(calls[0][1].interval_minutes, 15);
-  assert.deepEqual(calls.slice(1), [['restart'], ['event']]);
+  assert.deepEqual(calls.slice(1), [['restart']]);
   assert.equal(store.config?.interval_minutes, 20);
 });
 
@@ -92,7 +90,6 @@ test('saveApp updates max log lines from the refreshed configuration', async () 
     updateSyncConfig: async () => {},
     updateAppConfig: async () => {},
     restartSchedulerInterval: async () => {},
-    addConfigEvent: () => {},
     setMaxLogLines: (value) => { maxLogLines.push(value); },
   });
 

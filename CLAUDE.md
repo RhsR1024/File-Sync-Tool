@@ -1,217 +1,99 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件是 Claude 在 File Sync Tool 仓库中的项目级开发指南。它应与 `AGENTS.md` 的项目事实保持一致，同时可以独立阅读。
 
-## Worktree Shared Dependencies / Worktree 共享依赖
+## 项目概览
 
-- When using a git worktree in this repository, prefer reusing the main workspace dependency tree and build artifacts instead of duplicating large directories per worktree.
-- Frontend dependencies should reuse the repo-root `node_modules`; in Windows worktrees, prefer a junction or symlink from the worktree `node_modules`.
-- Rust and Tauri commands in a worktree should reuse a shared build directory through `CARGO_TARGET_DIR`, preferably the repo-root `src-tauri/target`.
-- If a shared dependency path is recreated or disappears, verify `vite`, `vue-tsc`, and cargo artifacts resolve correctly before treating the environment as broken.
-- Do not commit temporary dependency copies created only to bypass worktree isolation.
-
----
-
-## 项目概述
-
-Windows 桌面文件同步工具（Tauri 2.x + Vue 3 + Rust），用于自动监控远程共享目录、增量复制版本文件夹到本地，并通过 SSH/SFTP 部署到 Linux 服务器。
-
----
+File Sync Tool 是基于 Tauri 2、Vue 3、TypeScript、Tailwind CSS 4 和 Rust 的 Windows 桌面工具箱。应用以文件同步和远程交付为核心，同时提供文件共享、屏幕共享、剪贴板、网络诊断、磁盘缓存清理、错误码查询、代码统计和远程产品包替换等工具。
 
 ## 开发命令
 
-```bash
-# 前端开发（热重载，无 Tauri 壳）
-pnpm dev
-
-# 完整桌面开发模式
-pnpm tauri dev
-
-# 生产构建
-pnpm tauri build
-
-# Rust 格式化与检查
-cargo fmt
-cargo clippy
+```powershell
+pnpm dev                              # Vue 前端开发服务器
+pnpm tauri dev                        # 完整桌面开发模式
+pnpm check                            # Vue/TypeScript 类型检查
+pnpm lint                             # ESLint
+pnpm build                            # 主前端和文件共享 Web 生产构建
+pnpm test:share-web                   # 文件共享 Web 测试
+cmd /c pnpm tauri:build:versioned-exe # 版本化裸 EXE 和发布 manifest
 ```
 
-**重要**：每次修改完成后必须提交 git 并执行 `cmd /c pnpm tauri:build:versioned-exe` 验证构建通过。该命令先运行 `pnpm tauri build`，再通过 `scripts/rename-tauri-exe.mjs` 将产物重命名为 `file-sync-tool-1.0.0-YYYYMMDDHHmm.exe` 格式。
+Tauri 配置当前为 `bundle.active: false`。`pnpm tauri build` 生成裸 EXE；版本化脚本将其重命名为 `file-sync-tool-<version>-<时间戳>.exe`，并更新 `scripts/release-server/manifest.json`。
 
----
+## 技术与代码风格
 
-## 技术栈
+- Vue 组件使用 `<script setup>`、Composition API 和 TypeScript。
+- 使用 Tailwind CSS 4 与现有设计系统；界面图标使用 `lucide-vue-next`，不要使用 Emoji 代替产品图标。
+- 面向用户的文本必须通过 Vue I18n，并同时维护 `src/locales/messages.ts` 中英文内容。
+- 前端 Tauri 类型和调用封装集中在 `src/lib/tauri.ts`，Rust 结构和 command 实现位于 `src-tauri/src/`。
+- Rust 异步任务使用 Tokio；阻塞 I/O、SSH 和文件操作需放入合适的阻塞执行上下文。
+- 跨层字段变更必须同步检查前端类型、Rust 结构、默认值、迁移、序列化和持久化。
 
-| 层次 | 技术 |
-|------|------|
-| 前端框架 | Vue 3 + TypeScript (`<script setup>`) |
-| 构建工具 | Vite |
-| 样式 | Tailwind CSS 4 |
-| 图标 | lucide-vue-next |
-| 国际化 | vue-i18n |
-| 包管理 | pnpm |
-| 桌面框架 | Tauri 2.x |
-| 后端语言 | Rust (Tokio 异步运行时) |
-| SSH/SFTP | ssh2 crate |
-| 文件操作 | fs_extra、tokio::fs |
+## 代码结构
 
----
+### 前端
 
-## 代码架构
-
-### 前端文件结构
-
-```
+```text
 src/
-├── main.ts                 # Vue 应用入口，挂载 i18n 和 Router
-├── App.vue                 # 根组件，订阅 log-message / copy-progress 事件
-├── i18n.ts                 # i18n 初始化
-├── router/index.ts         # 路由配置
-├── lib/
-│   ├── store.ts            # 全局响应式状态（日志、TaskRecord、进度）
-│   ├── tauri.ts            # Tauri invoke 封装 + 所有接口类型定义（唯一类型真相来源）
-│   ├── scheduler.ts        # 前端定时调度（setInterval + executeScan）
-│   └── utils.ts            # 工具函数
-├── composables/
-│   └── useTheme.ts         # 主题相关 composable
-├── pages/
-│   ├── MainConsole.vue     # 控制台日志页（默认路由 /）
-│   ├── TaskStatusPage.vue  # 任务状态页（/tasks）- 启停调度器、实时进度
-│   ├── ManualCopyPage.vue  # 手动复制页（/manual-copy）- 触发 temporary_copy
-│   ├── HistoryPage.vue     # 历史记录页（/history）
-│   └── SettingsPage.vue    # 配置页（/settings）
-├── components/
-│   ├── Sidebar.vue         # 侧边导航栏
-│   ├── TaskRecordsPanel.vue # 任务记录面板（进度表格）
-│   └── Empty.vue           # 空状态占位组件
-└── locales/messages.ts     # i18n 中英翻译（所有 UI 文本在此）
+├─ main.ts、App.vue          应用入口、根布局和全局事件
+├─ router/index.ts           路由配置
+├─ pages/sync/               同步控制台：概览、任务与策略、交付
+├─ pages/                    日志、历史、设置及工具页面
+├─ components/               共享组件和业务组件
+├─ composables/              可复用组合式逻辑
+├─ lib/tauri.ts              Tauri 调用和跨层类型
+├─ lib/configStore.ts        配置加载与域级保存
+├─ lib/taskStateStore.ts     任务组、运行、日志和进度状态
+├─ locales/messages.ts       中英文文案
+└─ share-web/                局域网文件共享 Web 前端
 ```
 
-### 后端文件结构
+### Rust/Tauri
 
-```
+```text
 src-tauri/src/
-├── main.rs     # Tauri 入口；AppState 定义；所有 Command 注册；系统托盘；开机启动
-├── lib.rs      # Tauri mobile 入口（run 函数导出）
-├── config.rs   # AppConfig/ScanTask/DeployServer/CommandGroup 数据结构；配置读写；旧版迁移
-├── scanner.rs  # 核心扫描与复制逻辑（scan_and_copy、temporary_copy、perform_copy）
-├── deploy.rs   # SSH 连接、SFTP 上传（64KB 分块）、后置命令执行
-└── history.rs  # 历史事件持久化（JSON，最多 100 条）
+├─ main.rs、lib.rs           应用入口、初始化、状态和 command 注册
+├─ config.rs                 配置、默认值、迁移和域补丁
+├─ scanner.rs                扫描、复制和文件稳定性检查
+├─ deploy.rs、local_exec.rs  SSH/SFTP 交付和本地脚本
+├─ task_*.rs                 任务领域、运行时、持久化和事件
+├─ screenshare.rs            屏幕共享会话与采集
+├─ disk_cleanup.rs           磁盘缓存清理
+├─ network.rs                网络工具
+└─ code_count.rs             代码统计
 ```
 
-### Tauri Commands（main.rs 注册）
+入口文档只描述稳定边界；完整路由、command 和字段清单以源码为准。
 
-| Command | 说明 |
-|---------|------|
-| `get_config` | 读取当前配置 |
-| `save_config_cmd` | 验证并保存配置，同步开机启动注册表 |
-| `scan_now` | 触发一次扫描复制（使用 `is_scanning` AtomicBool 防并发） |
-| `cancel_scan` | 取消扫描（同时解除暂停） |
-| `pause_scan` / `resume_scan` | 暂停/继续 |
-| `test_ssh_connection` | 测试 SSH 连通性 |
-| `manual_deploy` | 手动触发 SFTP 部署（`spawn_blocking`） |
-| `temporary_copy` | 手动复制页触发临时复制（复用 scanner 逻辑） |
-| `get_app_paths` | 返回 config 路径和 log 路径 |
-| `open_path_parent` | 用 Explorer 打开路径所在目录 |
-| `get_history` / `clear_history` / `add_system_event` | 历史记录管理 |
+## 同步配置契约
 
-### AppState（并发控制）
+配置使用域级补丁保存，避免不同页面互相覆盖：
 
-```rust
-struct AppState {
-    config: Arc<Mutex<AppConfig>>,         // 热读配置（复制完成后重新读取决定是否部署）
-    is_scanning: Arc<AtomicBool>,          // 防止重复扫描（temporary_copy 也用此锁）
-    is_manually_deploying: Arc<AtomicBool>,
-    should_cancel: Arc<AtomicBool>,        // 文件分块循环中轮询
-    is_paused: Arc<AtomicBool>,
-    is_quitting: Arc<AtomicBool>,          // 区分"关闭到托盘"和"真正退出"
-}
-```
+- `configStore.saveSync()` 保存任务、扫描策略、服务器、命令组和复制相关字段。
+- `configStore.saveApp()` 保存通用设置和工具配置。
+- Rust 的 `SyncConfigPatch` 和 `AppDomainConfigPatch` 必须保持字段互斥，并共同覆盖全部可写配置。
+- 同步配置保存后会刷新配置并重启调度器。不要重新引入前端整对象 `saveConfig()` 流程。
 
-### 事件流
+## 修改流程
 
-```
-Tauri emit → Vue listen (App.vue):
-  copy-progress  → store.upsertTaskRecord() → TaskRecordsPanel 进度表格
-  log-message    → store.addLog() + store.syncTaskRecordByLog() → MainConsole
-```
+1. 先读取 `.trellis/workflow.md` 和相关 `.trellis/spec/` 规范。
+2. 仓库存在 `.codegraph/` 时，定位或理解代码优先使用 CodeGraph；文本搜索优先使用 `rg`。
+3. 检查 Git 状态并保护用户已有修改，不回退无关文件。
+4. 只修改任务范围内的文件，避免无关重构和格式化。
+5. 运行与改动相称的测试，并执行适用的 `pnpm check`、`pnpm lint`、`git diff --check`。
+6. 仅在用户要求发布或生产构建验证时运行耗时较长的 Tauri release 构建。
+7. 未经明确授权，不自动提交、推送或发布。
 
-`store.ts` 中的 `TaskRecord` 系统负责将进度事件和日志消息聚合为统一的任务记录（支持合并同路径重复记录、阶段状态机转换）。
+## Windows 与 PowerShell
 
----
+- 默认命令环境为 PowerShell，不使用 Bash 专属命令连接方式。
+- 需要执行 package script 的批处理语义时使用 `cmd /c`，例如版本化 EXE 构建。
+- GitHub SSH 异常时优先检查仓库本地 `core.sshCommand` 和 Windows OpenSSH，而不是修改全局配置。
+- 路径可能包含空格或反斜杠，脚本中使用安全的参数传递和字面路径。
 
-## 配置数据结构
+## Worktree 共享依赖
 
-完整的 `AppConfig`（定义在 `config.rs` 和 `tauri.ts`）：
-
-```typescript
-interface AppConfig {
-  tasks: ScanTask[];
-  local_path: string;
-  interval_minutes: number;          // 最小值 5 分钟
-  time_ranges: string[];             // "HH:mm-HH:mm" 格式
-  file_extensions: string[];
-  filename_includes: string[];       // OR 逻辑
-  deploy_enabled: boolean;
-  servers: DeployServer[];
-  command_groups: CommandGroup[];    // 命名命令组，替代旧版 post_commands
-  stability_check_secs: number;      // 文件写入稳定等待秒数（最小 60）
-  recent_file_guard_mins: number;    // 近期文件必须等待稳定（最小 3）
-  launch_and_auto_scan: boolean;     // 开机启动 + 启动后自动开始调度
-  close_to_tray: boolean;            // 关闭按钮隐藏到托盘而非退出
-  max_log_lines: number;             // 控制台最大日志行数（默认 200）
-}
-
-interface ScanTask {
-  id: string;
-  enabled: boolean;
-  name: string;
-  remote_path: string;
-  local_path: string | null;         // null 时使用全局 local_path
-  rule: { type: 'VersionMatch' | 'DateMatch'; value: string };
-  server_bindings: TaskServerBinding[]; // 每个服务器绑定的命令组
-}
-```
-
-`CommandGroup`（替代旧版全局 `post_commands`）：每个任务通过 `TaskServerBinding` 指定对哪些服务器执行哪些命令组，命令中支持 `${filename}` 变量（自动查找 `.tar.gz` 文件名）。
-
----
-
-## MatchRule 详解
-
-- **VersionMatch**：匹配 `YYYY_MM_DD_HH_MM_(版本号)` 格式，只处理今天或昨天的最新目录
-- **DateMatch**：匹配 `chrono` 格式字符串的日期目录（默认 `%y%m%d`），遍历所有子目录增量复制
-
----
-
-## 系统托盘与开机启动
-
-- 托盘图标支持"显示主窗口"和"退出"菜单
-- `close_to_tray=true` 时关闭按钮隐藏窗口而非退出（通过 `is_quitting` 标志区分）
-- 开机启动通过写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 注册表实现
-
----
-
-## 数据存储路径
-
-- 配置文件：`%APPDATA%\<app>\config\config.json`
-- 历史记录：`%APPDATA%\<app>\app_data\history.json`（最多 100 条）
-- 日志文件：`%APPDATA%\<app>\app_data\app.log`
-
----
-
-## 开发规则
-
-### 国际化 (i18n)
-
-所有面向用户的文本必须在 `src/locales/messages.ts` 中同时添加 `en` 和 `zh` 翻译，使用 `t('key')` 调用，禁止硬编码。
-
-### 代码风格
-
-- Vue：`<script setup>` + Composition API + Tailwind CSS 工具类
-- 类型定义：所有接口在 `src/lib/tauri.ts` 中定义，Rust 侧在 `config.rs` 中对应
-- Rust：遵循 `cargo fmt` 和 `clippy` 建议
-
-### Git 工作流
-
-- 提交信息使用中文
-- 每次修改完成后提交 git 并执行 `cmd /c pnpm tauri:build:versioned-exe` 验证
+- worktree 优先复用主工作区的 `node_modules` 和 Rust target，避免重复占用大量磁盘。
+- Windows 上可使用 junction 或 symlink 将 worktree 的 `node_modules` 指向主工作区。
+- Rust/Tauri 命令通过 `CARGO_TARGET_DIR` 指向共享构建目录。
+- 共享路径异常时先验证 `vite`、`vue-tsc` 和 Cargo 解析，不要提交临时依赖副本。

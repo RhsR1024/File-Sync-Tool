@@ -549,7 +549,6 @@ pub fn cb_reset_all(
         let conn = state.clipboard.write_db.lock();
         db::clear_all(&conn, false).map_err(|e| e.to_string())?;
     }
-    crate::history::clear_history(app)?;
     state.clipboard.cleanup_orphan_assets();
     Ok(settings)
 }

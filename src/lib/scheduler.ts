@@ -1,5 +1,5 @@
 import { appStore, addLog } from './store';
-import { scanNow, addSystemEvent, getConfig, type ScanResult } from './tauri';
+import { scanNow, getConfig, type ScanResult } from './tauri';
 import { i18n } from '../i18n';
 
 // Helper to access translation function outside components
@@ -62,7 +62,6 @@ export async function startScheduler(isRestart = false) {
     if (!isRestart) {
         const msg = t('console.schedulerStarted', { interval: config.interval_minutes });
         addLog(msg, 'info');
-        addSystemEvent('SCHEDULER_START', msg);
         
         // Execute first scan immediately
         executeScan();
@@ -86,7 +85,6 @@ export function stopScheduler() {
     appStore.nextRunTime = '-';
     const msg = t('console.schedulerStopped');
     addLog(msg, 'info');
-    addSystemEvent('SCHEDULER_STOP', msg);
 }
 
 /** Called after saving config while scheduler is running — reloads interval without re-triggering an immediate scan */

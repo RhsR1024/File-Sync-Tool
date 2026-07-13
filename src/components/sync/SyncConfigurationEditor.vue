@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw } from 'lucide-vue-next';
-import { testSshConnection, addSystemEvent, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure } from '@/lib/tauri';
+import { testSshConnection, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { configStore } from '@/lib/configStore';
@@ -14,7 +14,7 @@ import { pushToast, dismissToast } from '@/composables/useToast';
 
 defineOptions({ name: 'SyncConfigurationEditor' });
 
-export type SyncConfigurationSection = 'all' | 'tasks' | 'strategy' | 'delivery';
+export type SyncConfigurationSection = 'all' | 'tasks' | 'strategy' | 'tasks-strategy' | 'delivery';
 
 const props = withDefaults(defineProps<{
   section?: SyncConfigurationSection;
@@ -38,8 +38,10 @@ const intervalError = computed(() => config.value.interval_minutes < 5 ? t('sett
 const stabilityCheckError = computed(() => config.value.stability_check_secs < 60 ? t('settings.minStabilityCheckError', { min: 60 }) : '');
 const recentFileGuardError = computed(() => config.value.recent_file_guard_mins < 3 ? t('settings.minRecentFileGuardError', { min: 3 }) : '');
 const hasConfigErrors = computed(() => Boolean(intervalError.value || stabilityCheckError.value || recentFileGuardError.value));
-function shows(section: Exclude<SyncConfigurationSection, 'all'>) {
-    return props.section === 'all' || props.section === section;
+function shows(section: 'tasks' | 'strategy' | 'delivery') {
+    return props.section === 'all'
+        || props.section === section
+        || (props.section === 'tasks-strategy' && (section === 'tasks' || section === 'strategy'));
 }
 
 function serverDisplayName(server: DeployServer) {
@@ -630,7 +632,6 @@ async function handleManualDeploy() {
 
         appStore.manualDeployMsg = t('settings.deploySuccess', { count: validBindings.length });
         manualDeployMsgType.value = 'success';
-        addSystemEvent('MANUAL_DEPLOY', t('settings.deploySuccessEvent', { count: validBindings.length }));
     } catch (e) {
         appStore.manualDeployMsg = t('settings.deployError', { error: String(e) });
         manualDeployMsgType.value = 'error';
@@ -734,16 +735,28 @@ onMounted(load);
 
 <template>
   <div class="h-full min-h-0 overflow-y-auto overscroll-y-none bg-slate-50">
-  <div v-if="config" class="sync-console-workspace min-h-full w-full space-y-6 p-6 pb-24">
+  <div
+    v-if="config"
+    class="sync-console-workspace min-h-full w-full p-6 pb-24"
+    :class="props.section === 'tasks-strategy'
+      ? 'sync-tasks-strategy-stack grid grid-cols-1 items-start gap-4'
+      : props.section === 'delivery'
+        ? 'sync-delivery-grid grid grid-cols-1 items-start gap-4 xl:grid-cols-2'
+        : 'space-y-6'"
+  >
     <!-- Local Path -->
-    <div v-if="shows('strategy')" class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+    <div
+      v-if="shows('strategy')"
+      class="sync-strategy-card overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
+      :class="{ 'row-start-2 rounded-b-none border-b-0': props.section === 'tasks-strategy' }"
+    >
+      <div class="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-5 py-4">
         <div class="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
           <FolderOpen class="w-4 h-4" />
         </div>
-        <h3 class="text-base font-semibold text-slate-700">{{ t('settings.localStorage') }}</h3>
+        <h3 class="text-base font-semibold text-slate-800">{{ t('sync.tabs.strategy') }}</h3>
       </div>
-      <div class="p-6 space-y-4">
+      <div class="space-y-4 p-5">
       <div>
         <span class="block text-sm font-medium text-slate-600 mb-1">
           {{ t('settings.localPath') }}
@@ -760,7 +773,11 @@ onMounted(load);
     </div>
 
     <!-- Tasks Management -->
-    <div v-if="shows('tasks')" class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+    <div
+      v-if="shows('tasks')"
+      class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
+      :class="{ 'row-start-1': props.section === 'tasks-strategy' }"
+    >
       <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
         <div class="flex items-center gap-3">
           <div class="w-8 h-8 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center shrink-0">
@@ -1041,20 +1058,24 @@ onMounted(load);
     </div>
 
     <!-- Scan Timing -->
-    <div v-if="shows('strategy')" class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-      <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+    <div
+      v-if="shows('strategy')"
+      class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
+      :class="{ '-mt-4 row-start-3 rounded-t-none': props.section === 'tasks-strategy' }"
+    >
+      <div class="flex items-center gap-3 border-b border-slate-200 bg-white px-5 py-3">
         <div class="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
           <Clock class="w-4 h-4" />
         </div>
-        <h3 class="text-base font-semibold text-slate-700">{{ t('settings.scanTime') }}</h3>
+        <h3 class="text-sm font-semibold text-slate-700">{{ t('settings.scanTime') }}</h3>
       </div>
-      <div class="grid grid-cols-1 gap-6 p-6 xl:grid-cols-2 xl:gap-x-8">
+      <div class="sync-scan-timing-stack space-y-5 p-5">
       <div class="space-y-3">
-        <label for="settings-scan-interval" class="block text-base font-medium text-slate-700">
+        <label for="settings-scan-interval" class="block text-sm font-semibold text-slate-700">
           {{ t('settings.scanInterval') }}
           <span class="text-rose-500" :aria-label="t('settings.required.indicator')">*</span>
         </label>
-        <div class="flex items-center gap-3">
+        <div class="flex flex-wrap items-center gap-2">
           <input
             id="settings-scan-interval"
             v-model.number="config.interval_minutes" type="number" min="5"
@@ -1068,13 +1089,15 @@ onMounted(load);
         <p v-if="intervalError" class="text-xs leading-5 text-red-500" role="alert">{{ intervalError }}</p>
       </div>
 
-      <div class="space-y-4 xl:border-l xl:border-slate-100 xl:pl-8">
-        <h4 class="text-base font-medium text-slate-700">{{ t('settings.stabilityCheck') }}</h4>
-        <p class="text-sm leading-6 text-slate-500">{{ t('settings.stabilityCheckDesc') }}</p>
-        <div class="grid grid-cols-1 gap-5 2xl:grid-cols-2">
-          <div class="space-y-3">
-            <label for="settings-recent-file-guard" class="block text-base font-medium text-slate-700">{{ t('settings.recentFileGuard') }}</label>
-            <div class="flex items-center gap-3">
+      <div class="space-y-4 border-t border-slate-100 pt-5">
+        <div>
+          <h4 class="text-sm font-semibold text-slate-700">{{ t('settings.stabilityCheck') }}</h4>
+          <p class="mt-1 text-xs leading-5 text-slate-500">{{ t('settings.stabilityCheckDesc') }}</p>
+        </div>
+        <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-5">
+          <div class="min-w-0 space-y-3">
+            <label for="settings-recent-file-guard" class="block text-sm font-medium text-slate-700">{{ t('settings.recentFileGuard') }}</label>
+            <div class="flex flex-wrap items-center gap-2">
               <input
                 id="settings-recent-file-guard"
                 v-model.number="config.recent_file_guard_mins" type="number" min="3"
@@ -1086,12 +1109,12 @@ onMounted(load);
               <span class="text-xs leading-5 text-slate-400">{{ t('settings.field.guard.helpMin') }}</span>
             </div>
             <p v-if="recentFileGuardError" class="text-xs leading-5 text-red-500" role="alert">{{ recentFileGuardError }}</p>
-            <p id="settings-recent-file-guard-help" class="text-sm leading-6 text-slate-500">{{ t('settings.recentFileGuardDesc') }}</p>
+            <p id="settings-recent-file-guard-help" class="text-xs leading-5 text-slate-500">{{ t('settings.recentFileGuardDesc') }}</p>
             <p class="text-xs leading-5 text-slate-400">{{ t('settings.recentFileGuardHint') }}</p>
           </div>
-          <div class="space-y-3">
-            <label for="settings-stability-check-secs" class="block text-base font-medium text-slate-700">{{ t('settings.stabilityCheckSeconds') }}</label>
-            <div class="flex items-center gap-3">
+          <div class="min-w-0 space-y-3">
+            <label for="settings-stability-check-secs" class="block text-sm font-medium text-slate-700">{{ t('settings.stabilityCheckSeconds') }}</label>
+            <div class="flex flex-wrap items-center gap-2">
               <input
                 id="settings-stability-check-secs"
                 v-model.number="config.stability_check_secs" type="number" min="60"
@@ -1110,8 +1133,8 @@ onMounted(load);
 
       <div class="space-y-3 border-t border-slate-100 pt-5">
         <div>
-          <label for="settings-copy-buffer-size" class="block text-base font-medium text-slate-700">{{ t('settings.copyBufferSize') }}</label>
-          <p class="text-sm leading-6 text-slate-500 mt-1">{{ t('settings.copyBufferSizeDesc') }}</p>
+          <label for="settings-copy-buffer-size" class="block text-sm font-semibold text-slate-700">{{ t('settings.copyBufferSize') }}</label>
+          <p class="mt-1 text-xs leading-5 text-slate-500">{{ t('settings.copyBufferSizeDesc') }}</p>
         </div>
         <select id="settings-copy-buffer-size" v-model.number="config.copy_buffer_size_kb"
                 class="w-44 h-10 px-3 border border-slate-300 rounded-lg text-slate-700 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white">
@@ -1125,8 +1148,8 @@ onMounted(load);
       </div>
 
       <div class="space-y-4 border-t border-slate-100 pt-5">
-        <h4 class="text-base font-medium text-slate-700">{{ t('settings.timeRanges') }}</h4>
-        <p class="text-sm leading-6 text-slate-500">{{ t('settings.timeRangesDesc') }}</p>
+        <h4 class="text-sm font-semibold text-slate-700">{{ t('settings.timeRanges') }}</h4>
+        <p class="text-xs leading-5 text-slate-500">{{ t('settings.timeRangesDesc') }}</p>
         <div class="flex items-center gap-3">
           <label for="settings-new-time-range" class="sr-only">{{ t('settings.timeRanges') }}</label>
           <input id="settings-new-time-range" v-model="newTimeRange" @keyup.enter="addTimeRange" placeholder="09:00-18:00"
@@ -1152,7 +1175,11 @@ onMounted(load);
     </div>
 
     <!-- File Filters -->
-    <div v-if="shows('strategy')" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <div
+      v-if="shows('strategy')"
+      class="grid grid-cols-1 gap-4 md:grid-cols-2"
+      :class="{ 'row-start-4': props.section === 'tasks-strategy' }"
+    >
       <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
           <div class="w-8 h-8 rounded-lg bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0">

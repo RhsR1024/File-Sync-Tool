@@ -2,11 +2,9 @@ import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-rou
 import SyncOverviewPage from '@/pages/sync/SyncOverviewPage.vue'
 import RuntimeLogsPage from '@/pages/RuntimeLogsPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
-import HistoryPage from '@/pages/HistoryPage.vue'
 import EnableApplianceSshPage from '@/pages/EnableApplianceSshPage.vue'
 import SyncConsolePage from '@/pages/sync/SyncConsolePage.vue'
 import SyncTasksPage from '@/pages/sync/SyncTasksPage.vue'
-import SyncStrategyPage from '@/pages/sync/SyncStrategyPage.vue'
 import SyncDeliveryPage from '@/pages/sync/SyncDeliveryPage.vue'
 
 const routes: RouteRecordRaw[] = [
@@ -44,7 +42,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'strategy',
         name: 'sync-strategy',
-        component: SyncStrategyPage,
+        redirect: '/sync/tasks',
       },
       {
         path: 'delivery',
@@ -52,11 +50,6 @@ const routes: RouteRecordRaw[] = [
         component: SyncDeliveryPage,
       },
     ],
-  },
-  {
-    path: '/history',
-    name: 'history',
-    component: HistoryPage,
   },
   {
     path: '/settings',

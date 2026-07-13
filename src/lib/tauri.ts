@@ -446,35 +446,6 @@ export async function removeFromScanQueue(folder: string): Promise<void> {
   await invoke('remove_from_scan_queue', { folder });
 }
 
-export async function addSystemEvent(action: string, desc: string): Promise<void> {
-  await invoke('add_system_event', { action, desc });
-}
-
-export interface HistoryEntry {
-  id: string;
-  timestamp: string;
-  action_type: string;
-  description: string;
-  folder_name: string;
-  source_path: string;
-  target_path: string;
-  copied_files_count: number;
-  total_size: number;
-  files: string[];
-}
-
-export interface HistoryStore {
-  entries: HistoryEntry[];
-}
-
-export async function getHistory(): Promise<HistoryStore> {
-  return await invoke('get_history');
-}
-
-export async function clearHistory(): Promise<void> {
-  await invoke('clear_history');
-}
-
 export async function testSshConnection(server: DeployServer): Promise<string> {
   return await invoke('test_ssh_connection', { server });
 }

@@ -8,7 +8,6 @@ export interface ConfigStoreDependencies {
   updateSyncConfig(patch: SyncConfigPatch): Promise<void>;
   updateAppConfig(patch: AppDomainConfigPatch): Promise<void>;
   restartSchedulerInterval(): Promise<void>;
-  addConfigEvent(): void;
   setMaxLogLines(value: number): void;
 }
 
@@ -51,7 +50,6 @@ export function createConfigStore(dependencies: ConfigStoreDependencies) {
         await dependencies.updateSyncConfig(buildSyncPatch(store.config));
         await store.refresh();
         await dependencies.restartSchedulerInterval();
-        dependencies.addConfigEvent();
       } finally {
         store.isSaving = false;
       }
@@ -69,7 +67,6 @@ export function createConfigStore(dependencies: ConfigStoreDependencies) {
         if (store.config && store.config.max_log_lines > 0) {
           dependencies.setMaxLogLines(store.config.max_log_lines);
         }
-        dependencies.addConfigEvent();
       } finally {
         store.isSaving = false;
       }

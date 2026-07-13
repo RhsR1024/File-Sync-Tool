@@ -444,3 +444,121 @@ Load `trellis-check`, verify spec compliance, and record any remaining manual-on
 2. Sync configuration layout can be reverted without touching config-store behavior.
 3. Remote Package Replacement markup/style can be reverted without data migration.
 4. Appliance Access option order can be reverted independently; backend/request contracts remain untouched.
+
+---
+
+## 2026-07-11 sync-console redesign execution amendment
+
+This section is the active execution plan for the new handoff. Earlier Tasks 1-5 describe already completed work and remain as history.
+
+### Task 6: Lock the three-tab route and shell contract
+
+**Files:**
+- Modify: `src/router/syncRoutes.test.mjs`
+- Modify: `src/pages/sync/SyncConsoleLayout.test.mjs`
+- Modify: `src/router/index.ts`
+- Modify: `src/pages/sync/SyncConsolePage.vue`
+- Modify: `src/pages/sync/SyncStrategyPage.vue` only if the compatibility redirect cannot fully replace it
+
+**Interfaces:**
+- Consumes: `appStore.isRunning`, `appStore.nextRunTime`, `startScheduler()`, `stopScheduler()`.
+- Produces: three visible tabs and `/sync/strategy` compatibility redirect to `/sync/tasks`.
+
+- [ ] Add failing source tests requiring three visible shell tabs, shared scheduler controls, and the strategy redirect.
+- [ ] Run `node --test src/router/syncRoutes.test.mjs src/pages/sync/SyncConsoleLayout.test.mjs` and confirm failure is caused by the four-tab shell and component-backed strategy route.
+- [ ] Implement the compact shared header and route compatibility without changing scheduler functions.
+- [ ] Re-run the two tests and require zero failures.
+
+### Task 7: Merge Tasks and Strategy without losing configuration fields
+
+**Files:**
+- Modify: `src/components/sync/SyncConfigurationEditor.test.mjs`
+- Modify: `src/pages/sync/SyncConsoleLayout.test.mjs`
+- Modify: `src/pages/sync/SyncTasksPage.vue`
+- Modify: `src/components/sync/SyncConfigurationEditor.vue`
+
+**Interfaces:**
+- Consumes: `configStore.config`, `configStore.ensureLoaded()`, and `configStore.saveSync()`.
+- Produces: `SyncConfigurationSection = 'all' | 'tasks' | 'strategy' | 'tasks-strategy' | 'delivery'` and a combined wide-screen grid.
+
+- [ ] Add failing tests for the `tasks-strategy` section, combined page wrapper, wide task/strategy columns, and retained task/strategy feature markers.
+- [ ] Run `node --test src/components/sync/SyncConfigurationEditor.test.mjs src/pages/sync/SyncConsoleLayout.test.mjs` and confirm the grouped section is absent.
+- [ ] Extend `shows()` so the grouped section reveals tasks and strategy only, then place tasks left and strategy/storage/filter cards right at `xl` widths.
+- [ ] Preserve all task modal bindings, validation, filters, time ranges, and the single save button.
+- [ ] Re-run the targeted tests and `pnpm check`.
+
+### Task 8: Recreate the overview hierarchy with production actions
+
+**Files:**
+- Modify: `src/pages/sync/SyncConsoleLayout.test.mjs`
+- Modify: `src/pages/sync/SyncOverviewPage.vue`
+
+**Interfaces:**
+- Consumes: `appStore.progress.speed`, `taskStateStore.groups`, existing task action handlers, and existing manual-copy dialogs.
+- Produces: four-cell summary strip plus the compact task-record panel.
+
+- [ ] Add failing source assertions for four summary metrics, real speed data, and retained manual-copy/detail/action components.
+- [ ] Run the layout test and confirm it fails on the current three-card summary and overview-local scheduler toggle.
+- [ ] Move scheduler start/stop ownership to the shell, add the real-speed metric, and restyle the record panel/action bar to match the handoff.
+- [ ] Keep every `TaskGroupsTable` event binding and every manual-copy/retry conflict branch unchanged.
+- [ ] Re-run layout, task-status, and manual-copy tests.
+
+### Task 9: Align Delivery with the handoff while preserving advanced controls
+
+**Files:**
+- Modify: `src/components/sync/SyncConfigurationEditor.test.mjs`
+- Modify: `src/components/sync/SyncConfigurationEditor.vue`
+
+**Interfaces:**
+- Consumes: existing server, command-group, manual-deploy, and local-script state/functions.
+- Produces: responsive delivery columns with no changed persistence or Tauri contract.
+
+- [ ] Add failing source assertions for delivery column markers and retained server timeout, batch test, manual binding, command group, and local script controls.
+- [ ] Run the editor test and confirm the delivery column markers are absent.
+- [ ] Introduce presentation wrappers/classes only; do not rename or duplicate handlers, refs, or config fields.
+- [ ] Re-run the editor test and `pnpm check`.
+
+### Task 10: Synchronize Codex guidance safely
+
+**Files:**
+- Modify: `AGENTS.md`
+
+**Interfaces:**
+- Consumes: the useful project rules from `CLAUDE.md` and the existing Trellis managed block.
+- Produces: Codex-readable repository guidance with current sync-console paths.
+
+- [ ] Preserve the complete `<!-- TRELLIS:START -->` through `<!-- TRELLIS:END -->` block.
+- [ ] Add the project overview, commands, current Vue/Tauri architecture, i18n rules, and required versioned build command from `CLAUDE.md`.
+- [ ] Replace stale `MainConsole` / `TaskStatusPage` / standalone manual-copy descriptions with the current sync-console route structure.
+- [ ] Verify `git diff -- AGENTS.md` contains no accidental loss of Trellis or worktree dependency rules.
+
+### Task 11: Full verification and versioned bare EXE build
+
+**Files:**
+- Verify all files changed by Tasks 6-10.
+
+**Interfaces:**
+- Produces: passing checks and a timestamped bare executable.
+
+- [ ] Run all targeted sync route, layout, editor, task-state, and manual-copy tests with `node --test`.
+- [ ] Run `pnpm check` and `pnpm lint`.
+- [ ] Run `git diff --check` and inspect the complete diff, preserving the user's existing `src-tauri/Cargo.toml` change and untracked `.codegraph/` / visual artifacts.
+- [ ] Run exactly `cmd /c pnpm tauri:build:versioned-exe`.
+- [ ] Confirm exit code 0 and report the exact generated EXE path and size from `src-tauri/target/release`.
+
+### 2026-07-11 execution record
+
+- Tasks 6-10 implemented inline on the user-requested `main` branch.
+- RED evidence: the new route/layout/editor suite initially reported 6 failures for the missing grouped section, three-tab shell, overview speed metric, delivery marker, and strategy redirect.
+- GREEN evidence: 35 targeted sync/config/task/manual-copy tests passed with 0 failures.
+- `pnpm check`: exit 0.
+- `pnpm lint`: exit 0.
+- `git diff --check`: exit 0.
+- Removed the stale `src/lib/taskRecordElapsed.test.mjs`; commit `5c25cd2` intentionally deleted its production module during the task-state hard cut but left the obsolete test behind.
+- `cmd /c pnpm tauri:build:versioned-exe`: exit 0 after a complete frontend, file-share-web, and Rust release build.
+- Final stacked-layout EXE: `D:\Rust\target\release\file-sync-tool-1.1.2-202607111342.exe` (28,996,096 bytes).
+- Final SHA-256: `7101CBF72206D9F99924F9A488BDE6A35672DF4B89EE4337EC3BFA8DB33D84CF`.
+- The build command updated `scripts/release-server/manifest.json` to the generated filename and hash.
+- No browser rendering or screenshots were performed because the handoff explicitly instructed source-based implementation unless the user asks for visual rendering.
+- Screenshot follow-up: corrected the combined strategy panel after the initial implementation nested `xl:grid-cols-2` and `2xl:grid-cols-2` inside a half-width column, which compressed fields and caused text overlap. Added a regression test that forbids those nested viewport grids, joins Local Storage and Scan Timing into the prototype's Scan Strategy surface, and moves retained file filters to a full-width row below the primary cards.
+- Second screenshot follow-up: the remaining task/strategy desktop split still produced a large blank region whenever the task list was empty or shorter than the strategy form. The final layout therefore removes the parallel columns completely and uses a full-width sequence: Scan Tasks, Scan Strategy, then filter cards. Regression tests now require `sync-tasks-strategy-stack` and reject the former `minmax(0,1.15fr) minmax(360px,1fr)` grid.

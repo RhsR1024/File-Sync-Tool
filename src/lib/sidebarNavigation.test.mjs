@@ -10,8 +10,8 @@ assert.deepEqual(
 
 assert.deepEqual(
   SIDEBAR_NAV_SECTIONS[0].items.map((item) => item.path),
-  ['/sync', '/', '/history'],
-  'common navigation should expose sync console, global logs, and history',
+  ['/sync', '/'],
+  'common navigation should expose only the sync console and global logs',
 );
 assert.equal(
   isSidebarItemActive('/sync/delivery', SIDEBAR_NAV_SECTIONS[0].items[0]),

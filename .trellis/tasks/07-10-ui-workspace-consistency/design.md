@@ -113,3 +113,59 @@ Run tests red before implementation, then green after the minimal layout changes
 - Reuse strategy: shared conventions and tests, not a new wrapper component.
 - Remote step layout: preserve workflow order, widen complex steps instead of inventing new content to fill space.
 - Appliance whitelist source: reorder the existing radio labels directly and keep the existing `'all'` initialization and CIDR mapping.
+
+## 10. 2026-07-11 sync-console handoff amendment
+
+This amendment supersedes Sections 3 and 7 only. The sidebar, Remote Package Replacement, and Appliance Access decisions above remain completed historical context.
+
+### 10.1 Source of truth and scope
+
+The visual source of truth is `C:\Users\Z4973\Downloads\同步控制台功能重设计\同步控制台落地稿.dc.html`. Its only import, `support.js`, is the generated Design Component runtime and contributes no product components. The production implementation recreates the prototype's information hierarchy and visual language in Vue/Tailwind while preserving every existing store, Tauri command, persisted configuration field, modal workflow, and task action.
+
+The prototype's 232 px sample sidebar is not part of this change. The previously approved responsive 288/320 px application sidebar remains authoritative.
+
+### 10.2 Navigation and route compatibility
+
+The sync console uses three visible tabs:
+
+1. Overview at `/sync`
+2. Tasks and Strategy at `/sync/tasks`
+3. Delivery Configuration at `/sync/delivery`
+
+The former `/sync/strategy` URL remains as a named compatibility redirect to `/sync/tasks`. No stored link is allowed to land on a blank or removed page. `SyncTasksPage` owns the combined configuration surface and renders `SyncConfigurationEditor` with a grouped `tasks-strategy` section.
+
+### 10.3 Shared console header
+
+The shell header follows the handoff layout: title and description on the left; scheduler status, next-scan value, and start/stop action on the right; three compact tabs below. Scheduler start/stop moves out of the overview action row so it remains available on every tab. The header reads `appStore.isRunning` and `appStore.nextRunTime` directly and calls the existing `startScheduler()` / `stopScheduler()` functions.
+
+The next-scan indicator does not invent a percentage because the runtime exposes a formatted next-run value, not a stable interval-progress contract. Current transfer speed remains an overview metric and reads the real `appStore.progress.speed`; the empty value is an em dash.
+
+### 10.4 Overview layout and behavior
+
+The overview uses a dense four-cell summary strip for scheduler state, next scan, current transfer speed, and task-record count. The task-record panel retains the existing `TaskGroupsTable` and `TaskGroupDetailPanel`, so pause, resume, cancel, retry run, retry deployment, clear, path inspection, live progress, elapsed time, and detail loading remain intact.
+
+The overview action row contains Scan now, Manual copy, and Clear finished. Manual copy continues to use the production modal, target-existence preview, overwrite/skip decision, queue acknowledgement, and keyboard focus restoration. The prototype's simplified manual-copy form is not copied.
+
+### 10.5 Combined Tasks and Strategy layout
+
+The page uses one full-width vertical workflow at every viewport width. Scan Tasks comes first, followed by the continuous Scan Strategy panel (Local Storage, Scan Timing, and Stability), then Time Ranges and File Filters. Tasks and strategy must not be placed in parallel desktop columns: their content heights vary independently, and an empty or short task list otherwise creates a large unusable blank region beside the longer strategy form. The surface has no horizontal page scrolling.
+
+The compact task rows keep enable/disable, rule summary, remote path, deployment summary, edit, and delete. The existing task modal keeps task-local path override, rule configuration, per-server command-group ordering, local-script binding, and local/remote/parallel post-copy order. The combined page uses the existing cross-route `configStore` object and one shared save action; it does not create a second configuration copy.
+
+The strategy panel must not reuse viewport-based nested `xl`/`2xl` grids from the former page. Local Storage and Scan Timing form one visually continuous full-width Scan Strategy panel. Scan Timing is a vertical stack; only the two stability fields use an intrinsic `auto-fit/minmax(220px, 1fr)` grid, so they wrap from the panel's real width rather than the window width. File-extension and filename-keyword filters remain available below the primary sections and span the full combined workspace.
+
+### 10.6 Delivery layout
+
+Delivery uses the handoff's two-column rhythm while retaining production depth. The left stack owns Remote Deployment and Manual Deployment. The right stack owns Command Groups and Local Post-Copy Scripts. Server detail management, enablement, SSH timeout, individual/batch connection tests, manual server bindings, command ordering, progress, local-script failure policy, and all existing edit dialogs remain available.
+
+### 10.7 Accessibility and responsive rules
+
+- Use semantic buttons and navigation; do not copy the prototype's clickable `div` elements.
+- Preserve visible focus rings, translated accessible names, 44 px primary touch targets, and `motion-reduce` behavior.
+- Use Lucide icons only; prototype emoji/glyph icons are replaced with the existing icon set.
+- Keep slate/blue/emerald/amber/red tokens from the prototype and application; do not use the unrelated gold palette suggested by the generic dashboard search.
+- Verify the layout at 1024, 1440, and 1920 px. Tables may scroll inside their panel, but the page must not scroll horizontally.
+
+### 10.8 Documentation handoff
+
+Codex reads repository `AGENTS.md` instructions. `CLAUDE.md` is not an automatic substitute for Codex. The implementation keeps the Trellis-managed block in `AGENTS.md`, then synchronizes the useful project guidance from `CLAUDE.md` and corrects stale sync-console paths instead of deleting Trellis instructions or copying obsolete architecture verbatim.
