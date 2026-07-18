@@ -15,6 +15,7 @@ export function buildSyncPatch(config: AppConfig): SyncConfigPatch {
     stability_check_secs: config.stability_check_secs,
     recent_file_guard_mins: config.recent_file_guard_mins,
     copy_buffer_size_kb: config.copy_buffer_size_kb,
+    copy_mode: config.copy_mode,
   };
 }
 
@@ -23,6 +24,7 @@ export function buildAppPatch(config: AppConfig): AppDomainConfigPatch {
     launch_and_auto_scan: config.launch_and_auto_scan,
     launch_and_auto_start_file_share: config.launch_and_auto_start_file_share,
     close_to_tray: config.close_to_tray,
+    sync_task_notifications_enabled: config.sync_task_notifications_enabled,
     max_log_lines: config.max_log_lines,
     max_task_records: config.max_task_records,
     appliance_ssh_api_timeout_secs: config.appliance_ssh_api_timeout_secs,
@@ -32,5 +34,6 @@ export function buildAppPatch(config: AppConfig): AppDomainConfigPatch {
     update_server_url: config.update_server_url,
     notify_on_new_version: config.notify_on_new_version,
     clipboard: config.clipboard,
+    device_simulator: config.device_simulator,
   };
 }

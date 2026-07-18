@@ -7,6 +7,31 @@ import type {
 } from './tauri';
 
 export const REMOTE_PACKAGE_PATCH_DEFAULT_SSH_PORT = 23333;
+export const REMOTE_PACKAGE_PATCH_DEFAULT_PASSWORD = 'admin_123';
+export const REMOTE_PACKAGE_PATCH_HOST_HISTORY_LIMIT = 8;
+
+export function updateRemotePackagePatchHostHistory(
+  history: unknown,
+  host: string,
+  limit = REMOTE_PACKAGE_PATCH_HOST_HISTORY_LIMIT,
+): string[] {
+  const nextHost = host.trim();
+  const entries = Array.isArray(history) ? history : [];
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of [nextHost, ...entries]) {
+    if (typeof value !== 'string') continue;
+    const normalized = value.trim();
+    const key = normalized.toLocaleLowerCase();
+    if (!normalized || seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+    if (result.length >= limit) break;
+  }
+
+  return result;
+}
 
 function isValidIpv4Address(value: string): boolean {
   const parts = value.split('.');
@@ -36,7 +61,7 @@ export function buildRemotePackagePatchEnableSshRequest(config: RemoteSshConfig)
     applianceVersion: 'componentized',
     whitelistScope: 'allTcp',
     sshUsername: config.username.trim(),
-    sshPassword: config.auth.kind === 'password' ? config.auth.password : '',
+    sshPassword: config.auth.password,
     addWhitelistRule: false,
   };
 }

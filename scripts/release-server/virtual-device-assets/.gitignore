@@ -1,0 +1,7 @@
+# Generated release artifacts are uploaded by the controlled release process.
+catalog-v1.json
+catalog-v1.json.sig
+packs/
+staging/
+*.key
+*.pem

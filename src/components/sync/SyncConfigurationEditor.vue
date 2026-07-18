@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw } from 'lucide-vue-next';
+import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw, Cpu, Monitor, Check } from 'lucide-vue-next';
 import { testSshConnection, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
@@ -1128,13 +1128,63 @@ onMounted(load);
         </div>
       </div>
 
-      <div class="space-y-3 border-t border-slate-100 pt-5">
+      <fieldset class="space-y-3 border-t border-slate-100 pt-5" aria-describedby="settings-copy-mode-desc">
+        <legend class="text-sm font-semibold text-slate-700">{{ t('settings.copyMode') }}</legend>
+        <p id="settings-copy-mode-desc" class="text-xs leading-5 text-slate-500">{{ t('settings.copyModeDesc') }}</p>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <label
+            class="relative flex min-h-24 cursor-pointer items-start gap-3 rounded-xl border p-4 transition-colors"
+            :class="config.copy_mode === 'built_in' ? 'border-blue-500 bg-blue-50/70' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'"
+          >
+            <input v-model="config.copy_mode" type="radio" name="copy-mode" value="built_in" class="peer sr-only">
+            <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-100 text-blue-600" aria-hidden="true">
+              <Cpu class="h-4 w-4" />
+            </span>
+            <span class="min-w-0">
+              <span class="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-800">
+                {{ t('settings.copyModeBuiltIn') }}
+                <span class="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-700">{{ t('settings.copyModeRecommended') }}</span>
+              </span>
+              <span class="mt-1 block text-xs leading-5 text-slate-500">{{ t('settings.copyModeBuiltInDesc') }}</span>
+            </span>
+            <span class="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-full border" :class="config.copy_mode === 'built_in' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 text-transparent'" aria-hidden="true">
+              <Check class="h-3 w-3" />
+            </span>
+            <span class="pointer-events-none absolute inset-0 rounded-xl peer-focus-visible:ring-2 peer-focus-visible:ring-blue-500 peer-focus-visible:ring-offset-2"></span>
+          </label>
+
+          <label
+            class="relative flex min-h-24 cursor-pointer items-start gap-3 rounded-xl border p-4 transition-colors"
+            :class="config.copy_mode === 'windows_shell' ? 'border-blue-500 bg-blue-50/70' : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'"
+          >
+            <input v-model="config.copy_mode" type="radio" name="copy-mode" value="windows_shell" class="peer sr-only">
+            <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-600" aria-hidden="true">
+              <Monitor class="h-4 w-4" />
+            </span>
+            <span class="min-w-0">
+              <span class="block text-sm font-semibold text-slate-800">{{ t('settings.copyModeWindows') }}</span>
+              <span class="mt-1 block text-xs leading-5 text-slate-500">{{ t('settings.copyModeWindowsDesc') }}</span>
+            </span>
+            <span class="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-full border" :class="config.copy_mode === 'windows_shell' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 text-transparent'" aria-hidden="true">
+              <Check class="h-3 w-3" />
+            </span>
+            <span class="pointer-events-none absolute inset-0 rounded-xl peer-focus-visible:ring-2 peer-focus-visible:ring-blue-500 peer-focus-visible:ring-offset-2"></span>
+          </label>
+        </div>
+        <p v-if="config.copy_mode === 'windows_shell'" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+          {{ t('settings.copyModeWindowsNote') }}
+        </p>
+      </fieldset>
+
+      <div class="space-y-3 border-t border-slate-100 pt-5" :class="config.copy_mode === 'windows_shell' ? 'opacity-60' : ''">
         <div>
           <label for="settings-copy-buffer-size" class="block text-sm font-semibold text-slate-700">{{ t('settings.copyBufferSize') }}</label>
           <p class="mt-1 text-xs leading-5 text-slate-500">{{ t('settings.copyBufferSizeDesc') }}</p>
+          <p v-if="config.copy_mode === 'windows_shell'" class="mt-1 text-xs leading-5 text-slate-500">{{ t('settings.copyBufferSizeBuiltInOnly') }}</p>
         </div>
         <select id="settings-copy-buffer-size" v-model.number="config.copy_buffer_size_kb"
-                class="w-44 h-10 px-3 border border-slate-300 rounded-lg text-slate-700 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white">
+                :disabled="config.copy_mode === 'windows_shell'"
+                class="w-44 h-10 px-3 border border-slate-300 rounded-lg text-slate-700 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white disabled:cursor-not-allowed">
           <option :value="64">64 KB</option>
           <option :value="256">256 KB</option>
           <option :value="1024">1 MB</option>

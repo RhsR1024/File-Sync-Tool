@@ -90,6 +90,10 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../pages/ScreenSharePage.vue'),
   },
   {
+    path: '/tools/video-device-simulator',
+    component: () => import('../pages/VideoDeviceSimulatorPage.vue'),
+  },
+  {
     path: '/tools/file-share',
     component: () => import('../pages/FileSharePage.vue'),
   },
@@ -104,6 +108,10 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/tools/error-code-lookup',
     component: () => import('../pages/ErrorCodeLookupPage.vue'),
+  },
+  {
+    path: '/tools/notepad-extensions',
+    component: () => import('../pages/NotepadExtensionsPage.vue'),
   },
   {
     path: '/clipboard-panel',

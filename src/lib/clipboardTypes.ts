@@ -56,6 +56,9 @@ export interface ClipboardAppFilterSettings {
 export interface ClipboardSettings {
   enabled: boolean;
   hotkey: string;
+  image_copy_hotkey_enabled: boolean;
+  image_copy_hotkey: string;
+  explorer_context_menu_enabled: boolean;
   max_items: number;
   retain_days: number;
   max_item_bytes: number;
@@ -85,6 +88,9 @@ export type DeepPartial<T> = {
 const DEFAULT_CLIPBOARD_SETTINGS: ClipboardSettings = {
   enabled: true,
   hotkey: 'Alt+C',
+  image_copy_hotkey_enabled: false,
+  image_copy_hotkey: 'Ctrl+Alt+C',
+  explorer_context_menu_enabled: false,
   max_items: 1000,
   retain_days: 30,
   max_item_bytes: 10 * 1024 * 1024,
@@ -166,6 +172,11 @@ export function normalizeClipboardSettings(
   const next: ClipboardSettings = {
     enabled: input?.enabled ?? defaults.enabled,
     hotkey: input?.hotkey ?? defaults.hotkey,
+    image_copy_hotkey_enabled:
+      input?.image_copy_hotkey_enabled ?? defaults.image_copy_hotkey_enabled,
+    image_copy_hotkey: input?.image_copy_hotkey ?? defaults.image_copy_hotkey,
+    explorer_context_menu_enabled:
+      input?.explorer_context_menu_enabled ?? defaults.explorer_context_menu_enabled,
     max_items: input?.max_items ?? defaults.max_items,
     retain_days: input?.retain_days ?? defaults.retain_days,
     max_item_bytes: input?.max_item_bytes ?? defaults.max_item_bytes,

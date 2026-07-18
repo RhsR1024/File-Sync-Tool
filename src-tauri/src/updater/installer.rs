@@ -34,7 +34,11 @@ pub fn build_helper_args(
     ]
 }
 
-pub fn spawn_helper(src: &Path, current_path: &Path, target_path: &Path) -> Result<(), UpdaterError> {
+pub fn spawn_helper(
+    src: &Path,
+    current_path: &Path,
+    target_path: &Path,
+) -> Result<(), UpdaterError> {
     let bat_path = write_helper()?;
     let args = build_helper_args(
         &bat_path,

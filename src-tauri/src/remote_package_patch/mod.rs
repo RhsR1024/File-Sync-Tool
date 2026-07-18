@@ -37,13 +37,7 @@ fn reserve_busy() -> Result<BusyGuard, String> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum RemoteAuth {
-    Password {
-        password: String,
-    },
-    KeyFile {
-        key_path: String,
-        passphrase: Option<String>,
-    },
+    Password { password: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,7 +77,10 @@ pub struct PickedLocalFile {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "mode")]
 pub enum PatchOutputPolicy {
-    NewFile { output_path: String },
+    NewFile {
+        #[serde(rename = "outputPath")]
+        output_path: String,
+    },
     Overwrite,
 }
 
@@ -141,9 +138,6 @@ fn validate_config(config: &RemoteSshConfig) -> Result<(), String> {
     match &config.auth {
         RemoteAuth::Password { password } if password.is_empty() => {
             Err("Password is required".into())
-        }
-        RemoteAuth::KeyFile { key_path, .. } if key_path.trim().is_empty() => {
-            Err("Private key path is required".into())
         }
         _ => Ok(()),
     }
@@ -381,19 +375,11 @@ pub async fn remote_package_list_dir(
 #[tauri::command]
 pub async fn remote_package_pick_local_file(
     window: WebviewWindow,
-    kind: String,
 ) -> Result<Option<PickedLocalFile>, String> {
-    let title = if kind == "privateKey" {
-        "Select SSH Private Key"
-    } else {
-        "Select Replacement File"
-    };
     let picked: Option<PathBuf> = crate::run_dialog_task_on_main_thread(&window, move || {
-        let mut dialog = rfd::FileDialog::new().set_title(title);
-        if kind == "privateKey" {
-            dialog = dialog.add_filter("SSH private key", &["pem", "key", "ppk"]);
-        }
-        Ok(dialog.pick_file())
+        Ok(rfd::FileDialog::new()
+            .set_title("Select Replacement File")
+            .pick_file())
     })
     .await?;
 
@@ -544,13 +530,17 @@ pub async fn remote_package_start_patch(
 
         let mut result_pairs = vec![("workdir".to_string(), workdir.clone())];
         let mut script_error = None;
+        let mut active_stage = "upload".to_string();
         let command = format!("bash {}", script::sh_quote(&remote_script));
         let exit_code =
             ssh::exec_stream(
                 &session,
                 &command,
                 |line| match protocol::parse_script_line(line) {
-                    ScriptLine::Stage(stage) => emit_stage(&app_handle, &stage),
+                    ScriptLine::Stage(stage) => {
+                        active_stage = stage.clone();
+                        emit_stage(&app_handle, &stage);
+                    }
                     ScriptLine::Log { level, message } => emit_log(&app_handle, &level, message),
                     ScriptLine::Result { key, value } => {
                         result_pairs.push((key.clone(), value.clone()));
@@ -566,7 +556,12 @@ pub async fn remote_package_start_patch(
                     }
                     ScriptLine::Plain(_) => {}
                 },
-            )?;
+            )
+            .map_err(|error| {
+                format!(
+                    "{error}. Last remote stage: {active_stage}. Remote workdir kept at {workdir}"
+                )
+            })?;
         if exit_code != 0 {
             return Err(
                 script_error.unwrap_or_else(|| format!("Patch script exited with {exit_code}"))
@@ -607,19 +602,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_password_and_key_path() {
+    fn rejects_empty_password() {
         let mut config = password_config();
         config.auth = RemoteAuth::Password {
             password: "".into(),
         };
         assert!(validate_config(&config).unwrap_err().contains("Password"));
-        config.auth = RemoteAuth::KeyFile {
-            key_path: "".into(),
-            passphrase: None,
-        };
-        assert!(validate_config(&config)
-            .unwrap_err()
-            .contains("Private key"));
     }
 
     #[test]
@@ -645,6 +633,33 @@ mod tests {
         assert_eq!(result.target_md5, "abc");
         assert_eq!(result.workdir, "/tmp/work");
         assert_eq!(result.updated_manifests, vec!["md5"]);
+    }
+
+    #[test]
+    fn deserializes_new_file_output_path_from_frontend_request() {
+        let request: PackagePatchRequest = serde_json::from_value(serde_json::json!({
+            "config": {
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "root",
+                "auth": { "kind": "password", "password": "secret" }
+            },
+            "packagePath": "/tmp/a.tar.gz",
+            "replacementLocalPath": "C:\\tmp\\replacement.bin",
+            "targetInternalPath": "app/bin/replacement.bin",
+            "targetLayer": null,
+            "output": {
+                "mode": "newFile",
+                "outputPath": "/tmp/a.patched.tar.gz"
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            request.output,
+            PatchOutputPolicy::NewFile { output_path }
+                if output_path == "/tmp/a.patched.tar.gz"
+        ));
     }
 
     #[test]

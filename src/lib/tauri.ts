@@ -13,6 +13,7 @@ import type {
   ClipboardImagePreviewPayload,
   ClipboardTextPreviewPayload,
 } from './clipboardPreviewHelpers';
+import type { DeviceSimulatorSettings } from './deviceSimulator';
 
 export type {
   ClipboardGroup,
@@ -67,6 +68,8 @@ export interface MatchRule {
 
 export type DiskCleanupLinuxMode = 'componentized' | 'mainline';
 
+export type CopyMode = 'built_in' | 'windows_shell';
+
 export interface ScanTask {
   id: string;
   enabled: boolean;
@@ -113,11 +116,17 @@ export interface AppConfig {
   /** When enabled, clicking the window close button hides to tray instead of exiting. */
   close_to_tray: boolean;
 
+  /** Show native system notifications for scanned sync task milestones. Default: true. */
+  sync_task_notifications_enabled: boolean;
+
   /** Maximum number of log lines to display in the console. Default: 200. */
   max_log_lines: number;
 
   /** Copy buffer size in KB. Controls read/write chunk size when copying files. Default: 4096 (4 MB). */
   copy_buffer_size_kb: number;
+
+  /** Copy implementation used after filters and stability checks. Default: built_in. */
+  copy_mode: CopyMode;
 
   /** Maximum number of task records to persist and display. Default: 100. */
   max_task_records: number;
@@ -148,6 +157,9 @@ export interface AppConfig {
 
   /** Clipboard manager settings mirrored from Rust AppConfig. */
   clipboard: ClipboardSettings;
+
+  /** Video device simulator application-domain preferences. */
+  device_simulator: DeviceSimulatorSettings;
 }
 
 export interface SyncConfigPatch extends Pick<
@@ -165,6 +177,7 @@ export interface SyncConfigPatch extends Pick<
   | 'stability_check_secs'
   | 'recent_file_guard_mins'
   | 'copy_buffer_size_kb'
+  | 'copy_mode'
 > {}
 
 export interface AppDomainConfigPatch extends Pick<
@@ -172,6 +185,7 @@ export interface AppDomainConfigPatch extends Pick<
   | 'launch_and_auto_scan'
   | 'launch_and_auto_start_file_share'
   | 'close_to_tray'
+  | 'sync_task_notifications_enabled'
   | 'max_log_lines'
   | 'max_task_records'
   | 'appliance_ssh_api_timeout_secs'
@@ -181,6 +195,7 @@ export interface AppDomainConfigPatch extends Pick<
   | 'update_server_url'
   | 'notify_on_new_version'
   | 'clipboard'
+  | 'device_simulator'
 > {}
 
 export interface ManifestVersion {
@@ -742,9 +757,7 @@ export async function enableApplianceSsh(request: EnableApplianceSshRequest): Pr
 }
 
 // Remote Package Patch
-export type RemoteAuth =
-  | { kind: 'password'; password: string }
-  | { kind: 'keyFile'; keyPath: string; passphrase: string | null };
+export type RemoteAuth = { kind: 'password'; password: string };
 
 export interface RemoteSshConfig {
   host: string;
@@ -829,8 +842,7 @@ export const remotePackagePatchApi = {
     invoke<string>('remote_package_test_connection', { config }),
   listDir: (config: RemoteSshConfig, path: string) =>
     invoke<RemoteDirListing>('remote_package_list_dir', { config, path }),
-  pickLocalFile: (kind: 'replacement' | 'privateKey') =>
-    invoke<PickedLocalFile | null>('remote_package_pick_local_file', { kind }),
+  pickLocalFile: () => invoke<PickedLocalFile | null>('remote_package_pick_local_file'),
   scanPackage: (config: RemoteSshConfig, packagePath: string) =>
     invoke<PackageInventory>('remote_package_scan_package', { config, packagePath }),
   startPatch: (request: PackagePatchRequest) =>
@@ -1384,6 +1396,153 @@ export interface ClipboardImportReport {
   backup_path: string | null;
 }
 
+export type NotepadArchitecture = 'x86' | 'x64' | 'arm64' | 'unknown';
+
+export interface NotepadPluginStatus {
+  installed: boolean;
+  dll_path: string;
+  config_path: string;
+  config_exists: boolean;
+}
+
+export interface InstalledNotepadPlugin {
+  name: string;
+  dll_path: string;
+}
+
+export interface NotepadInstance {
+  exe_path: string;
+  install_dir: string;
+  settings_dir: string;
+  architecture: NotepadArchitecture;
+  architecture_key: NotepadArchitecture;
+  source: string;
+  portable: boolean;
+  running: boolean;
+  requires_elevation: boolean;
+  installed_plugins: InstalledNotepadPlugin[];
+  enhance_any_lexer: NotepadPluginStatus;
+}
+
+export interface NotepadPluginPackage {
+  url: string;
+  sha256: string;
+  size: number;
+  install_dir: string;
+  entry_dll: string;
+}
+
+export interface NotepadPluginRelease {
+  version: string;
+  notepad_compatible: string;
+  packages: Partial<Record<NotepadArchitecture, NotepadPluginPackage>>;
+}
+
+export interface NotepadPluginCatalogEntry {
+  id: string;
+  name: string;
+  publisher: string;
+  description_zh: string;
+  description_en: string;
+  homepage: string;
+  license: string;
+  adapter: string;
+  releases: NotepadPluginRelease[];
+}
+
+export interface NotepadPluginCatalog {
+  schema_version: number;
+  generated_at: string;
+  plugins: NotepadPluginCatalogEntry[];
+}
+
+export interface NotepadPluginInstallProgress {
+  plugin_id: string;
+  phase: 'downloading' | 'verifying' | 'extracting' | 'installing' | 'complete';
+}
+
+export interface NotepadPluginInstallResult {
+  target_path: string;
+  restart_required: boolean;
+  backup_path: string | null;
+}
+
+export interface EnhanceAnyLexerGlobal {
+  indicator_id: number;
+  offset: number;
+  regex_error_style_id: number;
+  regex_error_color: string;
+}
+
+export interface EnhanceAnyLexerRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  color: string;
+  pattern: string;
+  whitelist_styles: number[];
+}
+
+export interface EnhanceAnyLexerSection {
+  lexer: string;
+  excluded_styles: number[];
+  rules: EnhanceAnyLexerRule[];
+}
+
+export interface EnhanceAnyLexerConfig {
+  global: EnhanceAnyLexerGlobal;
+  sections: EnhanceAnyLexerSection[];
+}
+
+export interface EnhanceAnyLexerSaveResult {
+  config_path: string;
+  backup_path: string | null;
+  restart_required: boolean;
+}
+
+export const notepadExtensionsApi = {
+  detectInstances: () =>
+    invoke<NotepadInstance[]>('notepad_extensions_detect_instances'),
+  validateInstance: (exePath: string) =>
+    invoke<NotepadInstance>('notepad_extensions_validate_instance', { exePath }),
+  pickExecutable: () => invoke<string | null>('notepad_extensions_pick_executable'),
+  fetchCatalog: (serverUrl: string) =>
+    invoke<NotepadPluginCatalog>('notepad_extensions_fetch_catalog', { serverUrl }),
+  installPlugin: (
+    serverUrl: string,
+    exePath: string,
+    pluginId: string,
+    packageInfo: NotepadPluginPackage,
+  ) =>
+    invoke<NotepadPluginInstallResult>('notepad_extensions_install_plugin', {
+      serverUrl,
+      exePath,
+      pluginId,
+      package: packageInfo,
+    }),
+  readEnhanceConfig: (exePath: string) =>
+    invoke<EnhanceAnyLexerConfig>('notepad_extensions_read_enhance_config', { exePath }),
+  saveEnhanceConfig: (exePath: string, config: EnhanceAnyLexerConfig) =>
+    invoke<EnhanceAnyLexerSaveResult>('notepad_extensions_save_enhance_config', {
+      exePath,
+      config,
+    }),
+};
+
+export interface ImageCopyCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ImageCopyResult {
+  path: string;
+  width: number;
+  height: number;
+  cropped: boolean;
+}
+
 // ─── Clipboard Manager ────────────────────────────────────
 
 export const clipboardApi = {
@@ -1411,6 +1570,11 @@ export const clipboardApi = {
     invoke<ClipboardItem>('cb_move_to_group', { itemId, groupId }),
   setActiveGroup: (groupId: number | null) =>
     invoke<void>('cb_set_active_group', { groupId }),
+  pickImageFile: () => invoke<string | null>('cb_pick_image_file'),
+  copyImageFile: (path: string, crop?: ImageCopyCrop | null) =>
+    invoke<ImageCopyResult>('cb_copy_image_file', { path, crop: crop ?? null }),
+  isExplorerContextMenuRegistered: () =>
+    invoke<boolean>('cb_is_explorer_context_menu_registered'),
   reorderFavorites: (ids: number[]) => invoke<void>('cb_reorder_favorites', { ids }),
   paste: (id: number) => invoke<void>('cb_paste', { id }),
   pastePlain: (id: number) => invoke<void>('cb_paste_plain', { id }),

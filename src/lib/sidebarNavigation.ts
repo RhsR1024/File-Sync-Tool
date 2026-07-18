@@ -9,13 +9,15 @@ export type SidebarIconKey =
   | 'codeStatistics'
   | 'networkTools'
   | 'screenShare'
+  | 'videoDeviceSimulator'
   | 'fileShare'
   | 'diskCacheCleanup'
   | 'clipboardManager'
-  | 'errorCodeLookup';
+  | 'errorCodeLookup'
+  | 'notepadExtensions';
 
 export type SidebarMatchMode = 'exact' | 'prefix';
-export type SidebarRuntimeKey = 'screenShare' | 'fileShare';
+export type SidebarRuntimeKey = 'screenShare' | 'fileShare' | 'deviceSimulator';
 
 export interface SidebarNavItem {
   key: string;
@@ -108,6 +110,14 @@ export const SIDEBAR_NAV_SECTIONS = [
         runtimeKey: 'screenShare',
       },
       {
+        key: 'video-device-simulator',
+        labelKey: 'sidebar.videoDeviceSimulator',
+        path: '/tools/video-device-simulator',
+        iconKey: 'videoDeviceSimulator',
+        matchMode: 'prefix',
+        runtimeKey: 'deviceSimulator',
+      },
+      {
         key: 'file-share',
         labelKey: 'sidebar.fileShare',
         path: '/tools/file-share',
@@ -134,6 +144,13 @@ export const SIDEBAR_NAV_SECTIONS = [
         labelKey: 'sidebar.errorCodeLookup',
         path: '/tools/error-code-lookup',
         iconKey: 'errorCodeLookup',
+        matchMode: 'prefix',
+      },
+      {
+        key: 'notepad-extensions',
+        labelKey: 'sidebar.notepadExtensions',
+        path: '/tools/notepad-extensions',
+        iconKey: 'notepadExtensions',
         matchMode: 'prefix',
       },
     ],

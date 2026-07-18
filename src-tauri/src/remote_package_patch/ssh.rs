@@ -3,12 +3,15 @@ use ssh2::{FileStat, PtyModeOpcode, PtyModes, Session};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::thread;
 use std::time::{Duration, Instant};
 
 const S_IFMT: u32 = 0o170000;
 const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
+const STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const SSH_KEEPALIVE_INTERVAL_SECS: u32 = 10;
 
 pub fn connect(config: &RemoteSshConfig) -> Result<Session, String> {
     super::validate_config(config)?;
@@ -29,22 +32,10 @@ pub fn connect(config: &RemoteSshConfig) -> Result<Session, String> {
     session
         .handshake()
         .map_err(|error| format!("SSH handshake failed: {error}"))?;
-    match &config.auth {
-        RemoteAuth::Password { password } => session
-            .userauth_password(config.username.trim(), password)
-            .map_err(|error| format!("SSH password authentication failed: {error}"))?,
-        RemoteAuth::KeyFile {
-            key_path,
-            passphrase,
-        } => session
-            .userauth_pubkey_file(
-                config.username.trim(),
-                None,
-                Path::new(key_path),
-                passphrase.as_deref(),
-            )
-            .map_err(|error| format!("SSH private-key authentication failed: {error}"))?,
-    }
+    let RemoteAuth::Password { password } = &config.auth;
+    session
+        .userauth_password(config.username.trim(), password)
+        .map_err(|error| format!("SSH password authentication failed: {error}"))?;
     if !session.authenticated() {
         return Err("SSH authentication failed".into());
     }
@@ -122,7 +113,12 @@ fn prepare_command_channel(
                 .shell()
                 .map_err(|error| format!("Shell start failed: {error}"))?;
             channel
-                .write_all(format!("printf '\\n'\n{command}\nexit $?\n").as_bytes())
+                .write_all(
+                    format!(
+                        "PS1=; PS2=; PROMPT_COMMAND=; bind 'set enable-bracketed-paste off' 2>/dev/null || true\n{command}\nexit $?\n"
+                    )
+                    .as_bytes(),
+                )
                 .map_err(|error| format!("Shell command write failed: {error}"))?;
         }
     }
@@ -156,8 +152,10 @@ where
     F: FnMut(&str),
 {
     // Remote scan/patch scripts may stay silent for minutes (gzip/zstd on
-    // large archives), so streaming reads must not hit the session timeout.
+    // large archives). Disable the ordinary command timeout and arrange for
+    // exec_stream_mode to actively drive libssh2 keepalives while it waits.
     session.set_timeout(0);
+    session.set_keepalive(true, SSH_KEEPALIVE_INTERVAL_SECS);
     match exec_stream_mode(session, command, CommandMode::Exec, &mut on_line) {
         Ok((exit_code, false)) | Ok((exit_code @ 0, true)) => Ok(exit_code),
         Ok((_exit_code, true)) => {
@@ -206,9 +204,13 @@ where
     let mut pending = String::new();
     let mut buffer = [0_u8; 8192];
     let mut restriction_seen = false;
-    loop {
+    // A blocking libssh2 read cannot send keepalive packets while a remote
+    // compressor is silent. Poll in non-blocking mode instead so appliances
+    // and intermediate firewalls do not reap an otherwise healthy channel.
+    session.set_blocking(false);
+    let read_result = loop {
         match channel.read(&mut buffer) {
-            Ok(0) => break,
+            Ok(0) => break Ok(()),
             Ok(count) => {
                 pending.push_str(&String::from_utf8_lossy(&buffer[..count]));
                 while let Some(index) = pending.find('\n') {
@@ -218,9 +220,27 @@ where
                     pending = pending[index + 1..].to_string();
                 }
             }
-            Err(error) => return Err(format!("Remote command read failed: {error}")),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                match session.keepalive_send() {
+                    Ok(_) => {}
+                    Err(error) if matches!(error.code(), ssh2::ErrorCode::Session(-37)) => {}
+                    Err(error) => {
+                        break Err(format!(
+                            "SSH keepalive failed while remote command was running: {error}"
+                        ));
+                    }
+                }
+                thread::sleep(STREAM_POLL_INTERVAL);
+            }
+            Err(error) => {
+                break Err(format!(
+                    "Remote command connection was lost while waiting for output: {error}"
+                ))
+            }
         }
-    }
+    };
+    session.set_blocking(true);
+    read_result?;
     if !pending.trim().is_empty() {
         let line = pending.trim_end_matches('\r');
         restriction_seen |= is_exec_restriction(line);

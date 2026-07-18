@@ -2,6 +2,7 @@
 import { useI18n } from 'vue-i18n';
 
 import ClipboardSettingsPanel from '@/components/clipboard/ClipboardSettingsPanel.vue';
+import ImageToClipboardCard from '@/components/clipboard/ImageToClipboardCard.vue';
 
 defineOptions({ name: 'ClipboardManagerPage' });
 
@@ -18,6 +19,7 @@ const { t } = useI18n();
         <p class="text-sm text-slate-500">{{ t('clipboard.tool.description') }}</p>
       </header>
 
+      <ImageToClipboardCard />
       <ClipboardSettingsPanel />
     </div>
   </div>

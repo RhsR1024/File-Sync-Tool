@@ -401,13 +401,19 @@ fn insert_imported_item(
     let group_id = item
         .group_id
         .and_then(|value| group_map.get(&value).copied());
+    let semantic_hash = db::semantic_hash_for_content(
+        &item.kind,
+        item.content_full.as_deref(),
+        &item.content_preview,
+        &item.hash,
+    );
 
     conn.execute(
         "INSERT INTO clipboard_items
           (kind, content_preview, content_full, rtf_content, html, image_path, image_width, image_height,
-           file_paths_json, byte_size, char_count, hash, source_app, source_app_icon, from_self,
+           file_paths_json, byte_size, char_count, hash, semantic_hash, source_app, source_app_icon, from_self,
            group_id, is_favorite, is_pinned, favorite_sort_index, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
         params![
             item.kind.as_sql(),
             item.content_preview,
@@ -421,6 +427,7 @@ fn insert_imported_item(
             item.byte_size,
             item.char_count,
             item.hash,
+            semantic_hash,
             item.source_app,
             icon_path,
             item.from_self,

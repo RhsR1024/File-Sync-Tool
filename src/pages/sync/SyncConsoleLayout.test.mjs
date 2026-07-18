@@ -23,15 +23,15 @@ test('sync console shell and overview share the same full-width workspace', () =
   assert.match(overviewSource, /sync-console-workspace/);
 });
 
-test('sync console exposes three tabs and keeps scheduler controls in the shared header', () => {
+test('sync console exposes three tabs without duplicating scheduler status in the shared header', () => {
   assert.match(consoleSource, /key: 'overview'/);
   assert.match(consoleSource, /key: 'tasks'/);
   assert.match(consoleSource, /key: 'delivery'/);
   assert.doesNotMatch(consoleSource, /key: 'strategy'/);
-  assert.match(consoleSource, /appStore\.isRunning/);
+  assert.doesNotMatch(consoleSource, /appStore\.isRunning/);
   assert.doesNotMatch(consoleSource, /appStore\.nextRunTime/);
-  assert.match(consoleSource, /startScheduler\(\)/);
-  assert.match(consoleSource, /stopScheduler\(\)/);
+  assert.doesNotMatch(consoleSource, /startScheduler\(\)/);
+  assert.doesNotMatch(consoleSource, /stopScheduler\(\)/);
   assert.doesNotMatch(consoleSource, /SyncStrategyPage/);
 });
 
@@ -58,7 +58,10 @@ test('sync overview keeps production actions and renders all four handoff metric
   assert.match(overviewSource, /<TaskGroupsTable/);
   assert.match(overviewSource, /<TaskGroupDetailPanel/);
   assert.match(overviewSource, /<ManualCopyModal/);
-  assert.doesNotMatch(overviewSource, /appStore\.isRunning \? stopScheduler\(\) : startScheduler\(\)/);
+  assert.match(overviewSource, /function toggleScheduler\(\)/);
+  assert.match(overviewSource, /stopScheduler\(\)/);
+  assert.match(overviewSource, /startScheduler\(\)/);
+  assert.match(overviewSource, /role="group"[^>]*>[\s\S]*@click="toggleScheduler"[\s\S]*@click="handleScanClick"/);
 });
 
 test('sync configuration tabs use the full-width console workspace', () => {

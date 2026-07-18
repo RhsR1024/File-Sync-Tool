@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorUp, PackageSearch, Share2, Shield, type LucideIcon } from 'lucide-vue-next';
+import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorUp, PackageSearch, Puzzle, Share2, Shield, Video, type LucideIcon } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
 import { appStore } from '@/lib/store';
 
@@ -103,6 +103,15 @@ const toolCards = computed<ToolCard[]>(() => [
     chipKey: 'toolsHub.cards.screenShare.chip',
   },
   {
+    key: 'video-device-simulator',
+    titleKey: 'sidebar.videoDeviceSimulator',
+    descriptionKey: 'toolsHub.cards.videoDeviceSimulator.description',
+    path: '/tools/video-device-simulator',
+    icon: markRaw(Video as LucideIcon),
+    iconClasses: 'from-sky-500 to-cyan-600 shadow-sky-500/20',
+    chipKey: 'toolsHub.cards.videoDeviceSimulator.chip',
+  },
+  {
     key: 'file-share',
     titleKey: 'sidebar.fileShare',
     descriptionKey: 'toolsHub.cards.fileShare.description',
@@ -137,6 +146,15 @@ const toolCards = computed<ToolCard[]>(() => [
     icon: markRaw(FileSearch as LucideIcon),
     iconClasses: 'from-indigo-500 to-blue-600 shadow-indigo-500/20',
     chipKey: 'toolsHub.cards.errorCodeLookup.chip',
+  },
+  {
+    key: 'notepad-extensions',
+    titleKey: 'sidebar.notepadExtensions',
+    descriptionKey: 'notepadExtensions.description',
+    path: '/tools/notepad-extensions',
+    icon: markRaw(Puzzle as LucideIcon),
+    iconClasses: 'from-violet-500 to-indigo-600 shadow-violet-500/20',
+    chipKey: 'toolsHub.cards.notepadExtensions.chip',
   },
 ]);
 </script>

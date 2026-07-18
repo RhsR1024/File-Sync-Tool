@@ -2,13 +2,27 @@
 
 use std::path::{Path, PathBuf};
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
 use crate::clipboard::models::{ClipboardAppFilterMode, ClipboardAppFilterSettings};
+
+const RTF_BASE64_PREFIX: &str = "base64:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceAppInfo {
     pub app_name: String,
     pub exe_path: PathBuf,
     pub icon_cache_key: String,
+}
+
+#[cfg(target_os = "windows")]
+pub fn clipboard_sequence_number() -> u32 {
+    unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn clipboard_sequence_number() -> u32 {
+    0
 }
 
 pub fn compute_icon_cache_key(exe_path: &Path) -> String {
@@ -139,6 +153,25 @@ fn decode_clipboard_text_bytes(bytes: &[u8]) -> Option<String> {
             Some(decoded.into_owned())
         }
     }
+}
+
+pub(crate) fn encode_rtf_storage(bytes: &[u8]) -> String {
+    format!("{RTF_BASE64_PREFIX}{}", BASE64_STANDARD.encode(bytes))
+}
+
+pub(crate) fn decode_rtf_storage(value: &str) -> Vec<u8> {
+    if let Some(encoded) = value.strip_prefix(RTF_BASE64_PREFIX) {
+        if let Ok(bytes) = BASE64_STANDARD.decode(encoded) {
+            return bytes;
+        }
+    }
+
+    let (encoded, _, _) = encoding_rs::WINDOWS_1252.encode(value);
+    encoded.into_owned()
+}
+
+pub(crate) fn rtf_storage_byte_len(value: &str) -> usize {
+    decode_rtf_storage(value).len()
 }
 
 fn is_application_frame_host_exe(exe_path: &Path) -> bool {
@@ -303,9 +336,14 @@ pub fn read_clipboard_rtf() -> Option<String> {
         }
 
         let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), size);
-        let text = decode_clipboard_text_bytes(bytes);
+        let payload_end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        let payload = &bytes[..payload_end];
+        let stored = (!payload.is_empty()).then(|| encode_rtf_storage(payload));
         let _ = GlobalUnlock(memory);
-        text
+        stored
     }
 }
 
@@ -659,6 +697,24 @@ mod tests {
     fn decode_clipboard_text_bytes_preserves_non_utf8_rtf_payload() {
         let decoded = decode_clipboard_text_bytes(b"{\\rtf1\\ansi caf\xe9}\0");
         assert_eq!(decoded.as_deref(), Some("{\\rtf1\\ansi caf\u{00e9}}"));
+    }
+
+    #[test]
+    fn rtf_storage_roundtrip_preserves_original_bytes() {
+        let original = b"{\\rtf1\\ansi caf\xe9}";
+        let stored = encode_rtf_storage(original);
+
+        assert!(stored.starts_with(RTF_BASE64_PREFIX));
+        assert_eq!(decode_rtf_storage(&stored), original);
+        assert_eq!(rtf_storage_byte_len(&stored), original.len());
+    }
+
+    #[test]
+    fn rtf_storage_keeps_legacy_plain_text_compatible() {
+        assert_eq!(
+            decode_rtf_storage("{\\rtf1\\ansi caf\u{00e9}}"),
+            b"{\\rtf1\\ansi caf\xe9}"
+        );
     }
 
     #[test]

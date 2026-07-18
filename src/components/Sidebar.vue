@@ -9,12 +9,14 @@ import {
   KeyRound,
   MonitorUp,
   PackageSearch,
+  Puzzle,
   Server,
   Settings,
   Share2,
   Shield,
   ShieldCheck,
   Terminal,
+  Video,
 } from 'lucide-vue-next';
 import { computed, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -42,10 +44,12 @@ const iconMap: Record<SidebarIconKey, Component> = {
   codeStatistics: BarChart3,
   networkTools: Globe,
   screenShare: MonitorUp,
+  videoDeviceSimulator: Video,
   fileShare: Share2,
   diskCacheCleanup: HardDrive,
   clipboardManager: Clipboard,
   errorCodeLookup: FileSearch,
+  notepadExtensions: Puzzle,
 };
 
 const sections = computed(() =>

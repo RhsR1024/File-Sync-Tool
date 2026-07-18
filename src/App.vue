@@ -4,12 +4,25 @@ import ToastContainer from '@/components/ToastContainer.vue';
 import UpdateDialog from '@/components/UpdateDialog.vue';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { onMounted, onUnmounted, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { RouterView, useRouter } from 'vue-router';
 
 import { ensureUpdaterInitialized } from '@/composables/useUpdater';
+import { configStore } from '@/lib/configStore';
+import {
+  DEVICE_SIMULATOR_EVENTS,
+  deviceSimulatorApi,
+  isDeviceSimulatorRuntimeActive,
+  type SimulatorStatus,
+} from '@/lib/deviceSimulator';
 import { startScheduler } from '@/lib/scheduler';
 import { appStore, addLog, setToolRuntime, startLiveTicker, stopLiveTicker } from '@/lib/store';
+import {
+  createSyncTaskNotificationTracker,
+  type SyncTaskNotificationEvent,
+} from '@/lib/syncTaskNotifications';
 import { taskStateStore } from '@/lib/taskStateStore';
 import {
   confirmQuit,
@@ -28,16 +41,55 @@ import {
 
 let unlistenLog: (() => void) | null = null;
 let unlistenProgress: (() => void) | null = null;
+let unlistenScanQueued: (() => void) | null = null;
 let unlistenTaskGroups: (() => void) | null = null;
 let unlistenTaskDetail: (() => void) | null = null;
 let unlistenTaskLog: (() => void) | null = null;
 let unlistenBeforeQuit: (() => void) | null = null;
 let unlistenScreenShareStatus: (() => void) | null = null;
 let unlistenFileShareStatus: (() => void) | null = null;
+let unlistenDeviceSimulatorStatus: (() => void) | null = null;
 let unlistenOpenClipboardSettings: (() => void) | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let notificationPermissionPromise: Promise<boolean> | null = null;
+let initialSyncTaskNotificationsEnabled = true;
+let syncTaskNotificationTracker = createSyncTaskNotificationTracker();
 
 const router = useRouter();
+const { t } = useI18n();
+
+interface ScanQueuedEvent {
+  folder: string;
+  local_path: string;
+  remote_path: string;
+}
+
+function syncTaskNotificationsEnabled(): boolean {
+  return configStore.config?.sync_task_notifications_enabled
+    ?? initialSyncTaskNotificationsEnabled;
+}
+
+async function ensureNotificationPermission(): Promise<boolean> {
+  notificationPermissionPromise ??= (async () => {
+    if (await isPermissionGranted()) return true;
+    return (await requestPermission()) === 'granted';
+  })();
+  return notificationPermissionPromise;
+}
+
+async function showSyncTaskNotification(event: SyncTaskNotificationEvent): Promise<void> {
+  if (!syncTaskNotificationsEnabled()) return;
+
+  try {
+    if (!await ensureNotificationPermission()) return;
+    sendNotification({
+      title: t(`sync.notifications.${event.kind}Title`),
+      body: t(`sync.notifications.${event.kind}Body`, { task: event.taskName }),
+    });
+  } catch (error) {
+    addLog(`System notification failed: ${error}`, 'error');
+  }
+}
 
 function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
@@ -54,12 +106,17 @@ watch(() => appStore.logs.length, scheduleSave);
 
 async function hydrateToolRuntime() {
   try {
-    const [screenShareStatus, fileShareStatus] = await Promise.all([
+    const [screenShareStatus, fileShareStatus, deviceSimulatorStatus] = await Promise.all([
       screenShareGetStatus(),
       fileShareGetStatus(),
+      deviceSimulatorApi.getStatus(),
     ]);
     setToolRuntime('screenShare', screenShareStatus.is_active);
     setToolRuntime('fileShare', fileShareStatus.is_active);
+    setToolRuntime(
+      'deviceSimulator',
+      isDeviceSimulatorRuntimeActive(deviceSimulatorStatus.state),
+    );
   } catch (error) {
     addLog(`Tool runtime status load failed: ${error}`, 'error');
   }
@@ -82,6 +139,7 @@ onMounted(async () => {
   let cfg = null;
   try {
     cfg = await getConfig();
+    initialSyncTaskNotificationsEnabled = cfg.sync_task_notifications_enabled;
     if (cfg.max_log_lines > 0) appStore.maxLogLines = cfg.max_log_lines;
   } catch (e) {
     addLog(`Config load failed: ${e}`, 'error');
@@ -140,9 +198,21 @@ onMounted(async () => {
   });
 
   await taskStateStore.hydrateTaskState();
+  syncTaskNotificationTracker = createSyncTaskNotificationTracker(taskStateStore.groups);
+
+  unlistenScanQueued = await listen<ScanQueuedEvent>('scan-queued', (event) => {
+    void showSyncTaskNotification({
+      kind: 'queued',
+      taskName: event.payload.folder,
+    });
+  });
 
   unlistenTaskGroups = await listen('task-groups-snapshot', (event) => {
-    taskStateStore.applyGroupsSnapshot(event.payload as TaskGroupsSnapshot);
+    const snapshot = event.payload as TaskGroupsSnapshot;
+    for (const notification of syncTaskNotificationTracker.collect(snapshot.groups)) {
+      void showSyncTaskNotification(notification);
+    }
+    taskStateStore.applyGroupsSnapshot(snapshot);
   });
 
   unlistenTaskDetail = await listen('task-group-detail-snapshot', (event) => {
@@ -163,7 +233,13 @@ onMounted(async () => {
     } catch {
       // silent
     }
-    await confirmQuit();
+    try {
+      await confirmQuit();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      addLog(`Simulator cleanup blocked exit: ${message}`, 'error');
+      window.alert(t('deviceSimulator.exit.blocked', { error: message }));
+    }
   });
 
   await hydrateToolRuntime();
@@ -175,6 +251,16 @@ onMounted(async () => {
   unlistenFileShareStatus = await listen<FileShareStatus>('file-share-status', (event) => {
     setToolRuntime('fileShare', event.payload.is_active);
   });
+
+  unlistenDeviceSimulatorStatus = await listen<SimulatorStatus>(
+    DEVICE_SIMULATOR_EVENTS.status,
+    (event) => {
+      setToolRuntime(
+        'deviceSimulator',
+        isDeviceSimulatorRuntimeActive(event.payload.state),
+      );
+    },
+  );
 
   unlistenOpenClipboardSettings = await listen('clipboard-open-settings', () => {
     if (router.currentRoute.value.path !== '/tools/clipboard') {
@@ -207,12 +293,14 @@ onUnmounted(() => {
   }
   if (unlistenLog) unlistenLog();
   if (unlistenProgress) unlistenProgress();
+  if (unlistenScanQueued) unlistenScanQueued();
   if (unlistenTaskGroups) unlistenTaskGroups();
   if (unlistenTaskDetail) unlistenTaskDetail();
   if (unlistenTaskLog) unlistenTaskLog();
   if (unlistenBeforeQuit) unlistenBeforeQuit();
   if (unlistenScreenShareStatus) unlistenScreenShareStatus();
   if (unlistenFileShareStatus) unlistenFileShareStatus();
+  if (unlistenDeviceSimulatorStatus) unlistenDeviceSimulatorStatus();
   if (unlistenOpenClipboardSettings) unlistenOpenClipboardSettings();
 });
 </script>

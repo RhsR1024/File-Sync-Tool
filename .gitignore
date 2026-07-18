@@ -37,3 +37,7 @@ vite.config.ts.timestamp-*.mjs
 /.trellis/
 /design_handoff_share_web_redesign/
 
+# Generated Python bytecode
+__pycache__/
+*.py[cod]
+

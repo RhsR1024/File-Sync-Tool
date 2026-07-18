@@ -259,7 +259,10 @@ mod tests {
             download_file_name_from_url("bad:name.exe"),
             Some("bad_name.exe".to_string())
         );
-        assert_eq!(download_file_name_from_url("http://srv:8080/releases/"), None);
+        assert_eq!(
+            download_file_name_from_url("http://srv:8080/releases/"),
+            None
+        );
     }
 
     #[test]

@@ -1,13 +1,49 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
 
 use crate::clipboard::models::ClipboardSettings;
+use app_lib::device_simulator::api::{DeviceGroupDraft, RtspPorts};
+use app_lib::device_simulator::profiles::identity::MAX_PREVIEW_DEVICES;
+use app_lib::device_simulator::profiles::scope::{
+    validate_nvr_channel_count, TargetPlatform, DEFAULT_NVR_CHANNEL_COUNT,
+};
 
 pub const MIN_SCAN_INTERVAL_MINS: u64 = 5;
 pub const MIN_STABILITY_CHECK_SECS: u64 = 60;
 pub const MIN_RECENT_FILE_GUARD_MINS: u64 = 3;
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct DeviceSimulatorSettings {
+    pub asset_server_url_override: Option<String>,
+    pub selected_interface_id: Option<String>,
+    pub last_platform: Option<TargetPlatform>,
+    pub last_start_ip: Option<std::net::Ipv4Addr>,
+    pub last_device_groups: Vec<DeviceGroupDraft>,
+    pub last_http_port: u16,
+    pub last_rtsp_ports: RtspPorts,
+    pub auto_check_asset_updates: bool,
+    pub manage_firewall: bool,
+}
+
+impl Default for DeviceSimulatorSettings {
+    fn default() -> Self {
+        Self {
+            asset_server_url_override: None,
+            selected_interface_id: None,
+            last_platform: None,
+            last_start_ip: None,
+            last_device_groups: vec![],
+            last_http_port: 81,
+            last_rtsp_ports: RtspPorts::default(),
+            auto_check_asset_updates: true,
+            manage_firewall: true,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CommandGroup {
@@ -45,6 +81,14 @@ pub enum DiskCleanupLinuxMode {
     #[default]
     Componentized,
     Mainline,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyMode {
+    #[default]
+    BuiltIn,
+    WindowsShell,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
@@ -152,6 +196,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub close_to_tray: bool,
 
+    /// Show native system notifications for scanned sync task milestones.
+    #[serde(default = "default_sync_task_notifications_enabled")]
+    pub sync_task_notifications_enabled: bool,
+
     #[serde(default = "default_max_log_lines")]
     pub max_log_lines: u32,
 
@@ -159,6 +207,10 @@ pub struct AppConfig {
     /// Larger values improve throughput on fast network shares. Default: 4096 (4 MB).
     #[serde(default = "default_copy_buffer_size_kb")]
     pub copy_buffer_size_kb: u32,
+
+    /// Copy implementation used after filtering and stability checks.
+    #[serde(default)]
+    pub copy_mode: CopyMode,
 
     /// Maximum number of task records to persist and display. Default: 100.
     #[serde(default = "default_max_task_records")]
@@ -197,6 +249,11 @@ pub struct AppConfig {
     /// Clipboard manager settings (spec §2026-04-19-clipboard-manager §7.1).
     #[serde(default)]
     pub clipboard: ClipboardSettings,
+
+    /// Video device simulator preferences only. Runtime platform credentials,
+    /// Worker/PID state, session journals, and metrics are deliberately absent.
+    #[serde(default)]
+    pub device_simulator: DeviceSimulatorSettings,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -214,6 +271,7 @@ pub struct SyncConfigPatch {
     pub stability_check_secs: u64,
     pub recent_file_guard_mins: u64,
     pub copy_buffer_size_kb: u32,
+    pub copy_mode: CopyMode,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -221,6 +279,7 @@ pub struct AppDomainConfigPatch {
     pub launch_and_auto_scan: bool,
     pub launch_and_auto_start_file_share: bool,
     pub close_to_tray: bool,
+    pub sync_task_notifications_enabled: bool,
     pub max_log_lines: u32,
     pub max_task_records: u32,
     pub appliance_ssh_api_timeout_secs: u64,
@@ -230,6 +289,7 @@ pub struct AppDomainConfigPatch {
     pub update_server_url: String,
     pub notify_on_new_version: bool,
     pub clipboard: ClipboardSettings,
+    pub device_simulator: DeviceSimulatorSettings,
 }
 
 pub fn apply_sync_patch(config: &mut AppConfig, patch: SyncConfigPatch) {
@@ -246,12 +306,14 @@ pub fn apply_sync_patch(config: &mut AppConfig, patch: SyncConfigPatch) {
     config.stability_check_secs = patch.stability_check_secs;
     config.recent_file_guard_mins = patch.recent_file_guard_mins;
     config.copy_buffer_size_kb = patch.copy_buffer_size_kb;
+    config.copy_mode = patch.copy_mode;
 }
 
 pub fn apply_app_patch(config: &mut AppConfig, patch: AppDomainConfigPatch) {
     config.launch_and_auto_scan = patch.launch_and_auto_scan;
     config.launch_and_auto_start_file_share = patch.launch_and_auto_start_file_share;
     config.close_to_tray = patch.close_to_tray;
+    config.sync_task_notifications_enabled = patch.sync_task_notifications_enabled;
     config.max_log_lines = patch.max_log_lines;
     config.max_task_records = patch.max_task_records;
     config.appliance_ssh_api_timeout_secs = patch.appliance_ssh_api_timeout_secs;
@@ -261,6 +323,7 @@ pub fn apply_app_patch(config: &mut AppConfig, patch: AppDomainConfigPatch) {
     config.update_server_url = patch.update_server_url;
     config.notify_on_new_version = patch.notify_on_new_version;
     config.clipboard = patch.clipboard;
+    config.device_simulator = patch.device_simulator;
 }
 
 fn default_stability_secs() -> u64 {
@@ -271,6 +334,9 @@ fn default_recent_file_guard_mins() -> u64 {
 }
 fn default_max_log_lines() -> u32 {
     200
+}
+fn default_sync_task_notifications_enabled() -> bool {
+    true
 }
 fn default_copy_buffer_size_kb() -> u32 {
     4096
@@ -340,8 +406,10 @@ impl Default for AppConfig {
             launch_and_auto_scan: false,
             launch_and_auto_start_file_share: false,
             close_to_tray: false,
+            sync_task_notifications_enabled: true,
             max_log_lines: 200,
             copy_buffer_size_kb: 4096,
+            copy_mode: CopyMode::BuiltIn,
             max_task_records: 100,
             appliance_ssh_api_timeout_secs: 5,
             framework_password_api_timeout_secs: 5,
@@ -352,6 +420,7 @@ impl Default for AppConfig {
             last_update_check_at: None,
             pending_update: None,
             clipboard: default_clipboard_settings(),
+            device_simulator: DeviceSimulatorSettings::default(),
         }
     }
 }
@@ -367,6 +436,7 @@ pub fn normalize_config(mut config: AppConfig) -> AppConfig {
         config.recent_file_guard_mins = MIN_RECENT_FILE_GUARD_MINS;
     }
     config.update_server_url = normalize_update_server_url(&config.update_server_url);
+    config.device_simulator = normalize_device_simulator_settings(config.device_simulator);
     config
 }
 
@@ -390,7 +460,163 @@ pub fn validate_config(config: &AppConfig) -> Result<(), String> {
         ));
     }
     validate_update_server_url(&config.update_server_url)?;
+    validate_device_simulator_settings(&config.device_simulator)?;
     Ok(())
+}
+
+pub fn normalize_device_simulator_settings(
+    mut settings: DeviceSimulatorSettings,
+) -> DeviceSimulatorSettings {
+    settings.asset_server_url_override = settings
+        .asset_server_url_override
+        .take()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+        .filter(|value| validate_asset_server_override(value).is_ok());
+    settings.selected_interface_id = settings
+        .selected_interface_id
+        .take()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| is_safe_interface_id(value));
+
+    let mut seen = HashSet::new();
+    let mut remaining = u32::from(MAX_PREVIEW_DEVICES);
+    settings.last_device_groups.retain_mut(|group| {
+        group.id = group.id.trim().to_owned();
+        group.profile_id = group.profile_id.trim().to_owned();
+        if !is_safe_group_id(&group.id)
+            || !seen.insert(group.id.clone())
+            || !is_first_release_profile(&group.profile_id)
+            || group.count == 0
+            || remaining == 0
+        {
+            return false;
+        }
+        group.count = group.count.min(remaining);
+        remaining -= group.count;
+        match group.profile_id.as_str() {
+            "nvr-common" | "nvr-vehicle" => {
+                group.nvr_channel_count = Some(
+                    group
+                        .nvr_channel_count
+                        .filter(|value| validate_nvr_channel_count(*value).is_ok())
+                        .unwrap_or(DEFAULT_NVR_CHANNEL_COUNT),
+                );
+            }
+            _ => group.nvr_channel_count = None,
+        }
+        true
+    });
+
+    if validate_simulator_ports(settings.last_http_port, settings.last_rtsp_ports).is_err() {
+        settings.last_http_port = 81;
+        settings.last_rtsp_ports = RtspPorts::default();
+    }
+    settings
+}
+
+pub fn validate_device_simulator_settings(
+    settings: &DeviceSimulatorSettings,
+) -> Result<(), String> {
+    if let Some(url) = &settings.asset_server_url_override {
+        validate_asset_server_override(url)?;
+    }
+    if settings
+        .selected_interface_id
+        .as_deref()
+        .is_some_and(|value| !is_safe_interface_id(value))
+    {
+        return Err("Device simulator interface id is invalid".into());
+    }
+    validate_simulator_ports(settings.last_http_port, settings.last_rtsp_ports)?;
+    let mut ids = HashSet::new();
+    let mut total = 0_u32;
+    for group in &settings.last_device_groups {
+        if !is_safe_group_id(&group.id) || !ids.insert(group.id.as_str()) {
+            return Err(format!(
+                "Device simulator group id '{}' is invalid or duplicated",
+                group.id
+            ));
+        }
+        if !is_first_release_profile(&group.profile_id) {
+            return Err(format!(
+                "Device simulator profile '{}' is not in the first-release scope",
+                group.profile_id
+            ));
+        }
+        if group.count == 0 {
+            return Err("Device simulator group count must be non-zero".into());
+        }
+        total = total
+            .checked_add(group.count)
+            .ok_or_else(|| "Device simulator group count overflowed".to_string())?;
+        match group.profile_id.as_str() {
+            "nvr-common" | "nvr-vehicle" => {
+                let channels = group.nvr_channel_count.ok_or_else(|| {
+                    "Device simulator NVR group requires a channel count".to_string()
+                })?;
+                validate_nvr_channel_count(channels)
+                    .map_err(|code| format!("Invalid device simulator NVR channels: {code}"))?;
+            }
+            _ if group.nvr_channel_count.is_some() => {
+                return Err("Device simulator IPC group cannot declare NVR channels".into());
+            }
+            _ => {}
+        }
+    }
+    if total > u32::from(MAX_PREVIEW_DEVICES) {
+        return Err(format!(
+            "Device simulator total device count exceeds {MAX_PREVIEW_DEVICES}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_asset_server_override(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 2048 {
+        return Err("Device simulator asset server URL is empty or too long".into());
+    }
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|_| "Device simulator asset server URL is invalid".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("Device simulator asset server URL must be http(s) with a host".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Device simulator asset server URL must not contain credentials".into());
+    }
+    Ok(())
+}
+
+fn validate_simulator_ports(http: u16, rtsp: RtspPorts) -> Result<(), String> {
+    let ports = [http, rtsp.main, rtsp.sub, rtsp.third];
+    if ports.contains(&0) || ports.into_iter().collect::<HashSet<_>>().len() != ports.len() {
+        return Err("Device simulator HTTP/RTSP ports must be non-zero and distinct".into());
+    }
+    Ok(())
+}
+
+fn is_safe_interface_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_' | b'.'))
+}
+
+fn is_safe_group_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn is_first_release_profile(value: &str) -> bool {
+    matches!(
+        value,
+        "ipc-custom" | "ipc-smart" | "nvr-common" | "nvr-vehicle"
+    )
 }
 
 pub fn load_config(app_handle: &tauri::AppHandle) -> AppConfig {
@@ -602,6 +828,7 @@ mod tests {
             "stability_check_secs": config.stability_check_secs,
             "recent_file_guard_mins": config.recent_file_guard_mins,
             "copy_buffer_size_kb": config.copy_buffer_size_kb,
+            "copy_mode": config.copy_mode,
         })
     }
 
@@ -610,6 +837,7 @@ mod tests {
             "launch_and_auto_scan": config.launch_and_auto_scan,
             "launch_and_auto_start_file_share": config.launch_and_auto_start_file_share,
             "close_to_tray": config.close_to_tray,
+            "sync_task_notifications_enabled": config.sync_task_notifications_enabled,
             "max_log_lines": config.max_log_lines,
             "max_task_records": config.max_task_records,
             "appliance_ssh_api_timeout_secs": config.appliance_ssh_api_timeout_secs,
@@ -621,6 +849,7 @@ mod tests {
             "clipboard": config.clipboard,
             "last_update_check_at": config.last_update_check_at,
             "pending_update": config.pending_update,
+            "device_simulator": config.device_simulator,
         })
     }
 
@@ -655,12 +884,14 @@ mod tests {
                 stability_check_secs: 180,
                 recent_file_guard_mins: 5,
                 copy_buffer_size_kb: 8192,
+                copy_mode: CopyMode::WindowsShell,
             },
         );
 
         assert_eq!(config.local_path, r"D:\sync");
         assert_eq!(config.interval_minutes, 15);
         assert!(config.deploy_enabled);
+        assert_eq!(config.copy_mode, CopyMode::WindowsShell);
         assert_eq!(app_and_backend_domain_snapshot(&config), preserved);
     }
 
@@ -683,6 +914,7 @@ mod tests {
                 launch_and_auto_scan: true,
                 launch_and_auto_start_file_share: true,
                 close_to_tray: true,
+                sync_task_notifications_enabled: false,
                 max_log_lines: 500,
                 max_task_records: 250,
                 appliance_ssh_api_timeout_secs: 10,
@@ -692,10 +924,15 @@ mod tests {
                 update_server_url: "http://new-updates.example.test/".into(),
                 notify_on_new_version: true,
                 clipboard,
+                device_simulator: DeviceSimulatorSettings {
+                    selected_interface_id: Some("adapter-1".into()),
+                    ..DeviceSimulatorSettings::default()
+                },
             },
         );
 
         assert!(config.launch_and_auto_scan);
+        assert!(!config.sync_task_notifications_enabled);
         assert_eq!(config.max_log_lines, 500);
         assert!(!config.clipboard.enabled);
         assert_eq!(sync_domain_snapshot(&config), preserved_sync);
@@ -759,6 +996,8 @@ mod tests {
         let cfg: AppConfig = serde_json::from_str(legacy_json).expect("parse");
         assert_eq!(cfg.update_server_url, "http://192.115.1.3:8080");
         assert!(!cfg.notify_on_new_version);
+        assert!(cfg.sync_task_notifications_enabled);
+        assert_eq!(cfg.copy_mode, CopyMode::BuiltIn);
         assert!(cfg.last_update_check_at.is_none());
         assert!(cfg.pending_update.is_none());
     }

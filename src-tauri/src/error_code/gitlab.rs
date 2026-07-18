@@ -107,7 +107,12 @@ where
                 let files = collect_csv_files_from_checkout(&checkout_dir)?;
                 emit_log(
                     "info",
-                    format!("已收集 {} 个 CSV 文件：branch={} <- {}", files.len(), branch, repo_url),
+                    format!(
+                        "已收集 {} 个 CSV 文件：branch={} <- {}",
+                        files.len(),
+                        branch,
+                        repo_url
+                    ),
                 );
 
                 return Ok((files, format!("{repo_url}#{branch}")));
@@ -151,10 +156,7 @@ where
     }
 
     if saw_missing_branch {
-        emit_log(
-            "error",
-            "所有错误码仓库候选分支都不存在".to_string(),
-        );
+        emit_log("error", "所有错误码仓库候选分支都不存在".to_string());
     }
 
     Err(last_error.unwrap_or_else(|| SyncError::Http(404)))
@@ -199,8 +201,9 @@ fn collect_csv_files_from_checkout(root: &Path) -> Result<Vec<(String, Vec<u8>)>
             .map_err(|error| SyncError::Io(format!("read_dir({}): {error}", dir.display())))?;
 
         for entry in entries {
-            let entry = entry
-                .map_err(|error| SyncError::Io(format!("read_dir_entry({}): {error}", dir.display())))?;
+            let entry = entry.map_err(|error| {
+                SyncError::Io(format!("read_dir_entry({}): {error}", dir.display()))
+            })?;
             let path = entry.path();
 
             if path.is_dir() {
@@ -220,8 +223,9 @@ fn collect_csv_files_from_checkout(root: &Path) -> Result<Vec<(String, Vec<u8>)>
                 continue;
             }
 
-            let bytes = fs::read(&path)
-                .map_err(|error| SyncError::Io(format!("read_file({}): {error}", path.display())))?;
+            let bytes = fs::read(&path).map_err(|error| {
+                SyncError::Io(format!("read_file({}): {error}", path.display()))
+            })?;
             files.push((name, bytes));
         }
     }
@@ -273,8 +277,9 @@ struct TempCheckout {
 impl TempCheckout {
     fn new(prefix: &str) -> Result<Self, SyncError> {
         let path = std::env::temp_dir().join(format!("{}-{}", prefix, Uuid::new_v4()));
-        fs::create_dir_all(&path)
-            .map_err(|error| SyncError::Io(format!("create_temp_dir({}): {error}", path.display())))?;
+        fs::create_dir_all(&path).map_err(|error| {
+            SyncError::Io(format!("create_temp_dir({}): {error}", path.display()))
+        })?;
         Ok(Self { path })
     }
 
@@ -309,9 +314,9 @@ mod tests {
         let urls = build_archive_urls();
 
         assert!(!urls.is_empty());
-        assert!(urls
-            .iter()
-            .all(|url| url == "http://igcode.uniview.com/RD-UNIVIEW/public/pubResList/errorcode.git"));
+        assert!(urls.iter().all(
+            |url| url == "http://igcode.uniview.com/RD-UNIVIEW/public/pubResList/errorcode.git"
+        ));
     }
 
     #[test]
@@ -340,10 +345,7 @@ mod tests {
     fn fetch_archive_with_local_repo_falls_back_to_master() {
         let repo_dir = init_test_repo(
             "master",
-            &[(
-                "20w.csv",
-                b"code,cn,en,solution,module,remark\n200,B,B,,,",
-            )],
+            &[("20w.csv", b"code,cn,en,solution,module,remark\n200,B,B,,,")],
         );
         let repo_url = repo_dir.path().to_string_lossy().to_string();
         let mut logs = Vec::<(String, String)>::new();

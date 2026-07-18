@@ -1,0 +1,1209 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>远程产品包替换 · 优化预览</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css"
+    />
+    <style>
+      :root {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", "Noto Sans", Helvetica, Arial, sans-serif;
+        font-synthesis: none;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+      }
+      html,
+      body,
+      #app {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: #f1f5f9;
+        color: #0f172a;
+        font-size: 14px;
+      }
+
+      /* 自定义滚动条 */
+      .nice-scroll::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      .nice-scroll::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 4px;
+      }
+      .nice-scroll::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
+      }
+      .nice-scroll::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      /* 仿真 Tauri 主窗口的外壳 */
+      .window-chrome {
+        background: #0f172a;
+      }
+      .window-chrome .titlebar {
+        height: 32px;
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        gap: 8px;
+        color: #cbd5e1;
+        font-size: 12px;
+        user-select: none;
+      }
+      .window-chrome .titlebar .traffic {
+        display: flex;
+        gap: 6px;
+      }
+      .window-chrome .titlebar .traffic span {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+      .window-chrome .titlebar .traffic .m {
+        background: #fbbf24;
+      }
+      .window-chrome .titlebar .traffic .n {
+        background: #22c55e;
+      }
+      .window-chrome .titlebar .traffic .c {
+        background: #ef4444;
+      }
+
+      /* 步骤条 */
+      .step-item {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .step-item .num {
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        font-weight: 700;
+        transition: all 0.2s;
+        flex-shrink: 0;
+      }
+      .step-item .lbl {
+        font-size: 12px;
+        font-weight: 600;
+        color: #64748b;
+        white-space: nowrap;
+        transition: color 0.2s;
+      }
+      .step-item .num-idle {
+        background: #e2e8f0;
+        color: #94a3b8;
+      }
+      .step-item .num-active {
+        background: #2563eb;
+        color: #fff;
+        box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.15);
+      }
+      .step-item .num-done {
+        background: #10b981;
+        color: #fff;
+      }
+      .step-item .lbl-active {
+        color: #0f172a;
+      }
+      .step-item .lbl-done {
+        color: #059669;
+      }
+      .step-divider {
+        flex: 1;
+        height: 2px;
+        background: #e2e8f0;
+        border-radius: 1px;
+        margin: 0 4px;
+        min-width: 12px;
+      }
+      .step-divider-done {
+        background: linear-gradient(90deg, #10b981 0%, #10b981 100%);
+      }
+      .step-divider-active {
+        background: linear-gradient(90deg, #10b981 0%, #cbd5e1 50%, #cbd5e1 100%);
+      }
+
+      /* 高亮卡片 */
+      .elev {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        box-shadow:
+          0 1px 2px rgba(15, 23, 42, 0.04),
+          0 1px 3px rgba(15, 23, 42, 0.06);
+      }
+      .elev-pad {
+        padding: 18px 20px;
+      }
+
+      /* 输入控件 */
+      .ipt {
+        width: 100%;
+        height: 38px;
+        padding: 0 12px;
+        font-size: 13px;
+        color: #0f172a;
+        background: #fff;
+        border: 1px solid #cbd5e1;
+        border-radius: 9px;
+        outline: none;
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s,
+          background 0.15s;
+      }
+      .ipt::placeholder {
+        color: #94a3b8;
+      }
+      .ipt:focus {
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 4px rgba(59, 130, 235, 0.12);
+      }
+      .ipt:disabled {
+        background: #f8fafc;
+        color: #94a3b8;
+        cursor: not-allowed;
+      }
+      .ipt-err {
+        border-color: #ef4444 !important;
+        background: #fef2f2 !important;
+      }
+      .ipt-err:focus {
+        box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12) !important;
+      }
+
+      /* 按钮 */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        height: 38px;
+        padding: 0 14px;
+        font-size: 13px;
+        font-weight: 600;
+        border-radius: 9px;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition: all 0.15s;
+        white-space: nowrap;
+      }
+      .btn:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+      .btn-pri {
+        background: #2563eb;
+        color: #fff;
+      }
+      .btn-pri:hover:not(:disabled) {
+        background: #1d4ed8;
+      }
+      .btn-sec {
+        background: #fff;
+        color: #334155;
+        border-color: #e2e8f0;
+      }
+      .btn-sec:hover:not(:disabled) {
+        background: #f8fafc;
+        border-color: #cbd5e1;
+      }
+      .btn-ghost {
+        background: transparent;
+        color: #475569;
+        border-color: transparent;
+      }
+      .btn-ghost:hover:not(:disabled) {
+        background: #f1f5f9;
+      }
+      .btn-danger {
+        background: #fff;
+        color: #b91c1c;
+        border-color: #fecaca;
+        background: #fef2f2;
+      }
+
+      /* Toggle */
+      .toggle {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        width: 40px;
+        height: 22px;
+        border-radius: 999px;
+        background: #cbd5e1;
+        cursor: pointer;
+        transition: background 0.2s;
+        flex-shrink: 0;
+      }
+      .toggle::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 18px;
+        height: 18px;
+        background: #fff;
+        border-radius: 50%;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+        transition: transform 0.2s;
+      }
+      .toggle-on {
+        background: #f59e0b;
+      }
+      .toggle-on::after {
+        transform: translateX(18px);
+      }
+
+      /* 摘要条 */
+      .summary-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        background: #f1f5f9;
+        color: #64748b;
+      }
+      .summary-pill-ok {
+        background: #dcfce7;
+        color: #166534;
+      }
+      .summary-pill-warn {
+        background: #fef3c7;
+        color: #92400e;
+      }
+      .summary-pill-err {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+
+      /* 日志 */
+      .log-line {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        padding: 1px 4px;
+        border-radius: 3px;
+        font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.55;
+      }
+      .log-line .lvl {
+        flex-shrink: 0;
+        width: 4px;
+        align-self: stretch;
+        border-radius: 2px;
+        margin-top: 1px;
+        margin-bottom: 1px;
+      }
+      .log-line .msg {
+        white-space: pre-wrap;
+        word-break: break-word;
+        flex: 1;
+      }
+      .lvl-info {
+        background: #38bdf8;
+      }
+      .lvl-warn {
+        background: #f59e0b;
+      }
+      .lvl-error {
+        background: #ef4444;
+      }
+      .lvl-success {
+        background: #10b981;
+      }
+
+      /* 动画 */
+      .pulse-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #2563eb;
+        box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.6);
+        animation: pulse 1.6s infinite;
+      }
+      @keyframes pulse {
+        0% {
+          box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.6);
+        }
+        70% {
+          box-shadow: 0 0 0 6px rgba(37, 99, 235, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+        }
+      }
+      .spinner {
+        width: 14px;
+        height: 14px;
+        border: 2px solid rgba(255, 255, 255, 0.35);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+      }
+      .spinner-dark {
+        border-color: rgba(15, 23, 42, 0.15);
+        border-top-color: #0f172a;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* 状态切换器（顶部 tab） */
+      .state-tabs {
+        display: flex;
+        gap: 4px;
+        background: #e2e8f0;
+        border-radius: 999px;
+        padding: 3px;
+      }
+      .state-tabs button {
+        padding: 4px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #475569;
+        border-radius: 999px;
+        background: transparent;
+        cursor: pointer;
+        border: none;
+        transition: all 0.15s;
+      }
+      .state-tabs button.active {
+        background: #fff;
+        color: #0f172a;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      }
+
+      /* 目录浏览器面板 */
+      .dir-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        border-radius: 7px;
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+      .dir-row:hover {
+        background: #eff6ff;
+      }
+      .dir-row .ico {
+        color: #f59e0b;
+        font-size: 16px;
+      }
+      .dir-row .nm {
+        font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+        font-size: 12px;
+        color: #334155;
+      }
+
+      /* 目录面包屑 */
+      .crumb {
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px;
+        color: #475569;
+        cursor: pointer;
+      }
+      .crumb:hover {
+        background: #f1f5f9;
+        color: #1d4ed8;
+      }
+      .crumb-active {
+        color: #0f172a;
+        font-weight: 600;
+      }
+
+      /* key-value 摘要 */
+      .kv {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 10px 12px;
+        background: #f8fafc;
+        border-radius: 8px;
+        min-width: 0;
+      }
+      .kv .k {
+        font-size: 11px;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .kv .v {
+        font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+        font-size: 12px;
+        color: #0f172a;
+        word-break: break-all;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* 折叠指示 */
+      details > summary {
+        list-style: none;
+        cursor: pointer;
+      }
+      details > summary::-webkit-details-marker {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app" class="window-chrome">
+      <!-- 模拟 Tauri 窗口标题栏 -->
+      <div class="titlebar">
+        <div class="traffic">
+          <span class="m"></span><span class="n"></span><span class="c"></span>
+        </div>
+        <span class="ml-2 opacity-70">File Sync Tool · 远程产品包替换</span>
+      </div>
+
+      <div class="flex h-[calc(100%-32px)]">
+        <!-- ============== 仿真侧边栏 ============== -->
+        <aside class="w-60 shrink-0 bg-slate-900 text-slate-200 flex flex-col">
+          <div class="px-4 py-3 flex items-center gap-2 border-b border-slate-800">
+            <div
+              class="h-7 w-7 rounded-lg bg-blue-500 flex items-center justify-center"
+            >
+              <i class="ri-refresh-line text-white"></i>
+            </div>
+            <div class="text-sm font-semibold">文件同步工具</div>
+          </div>
+          <div class="flex-1 overflow-y-auto nice-scroll py-2 text-[13px]">
+            <div class="px-3 py-2 text-[11px] text-slate-500 font-semibold tracking-wider">
+              常用功能
+            </div>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-dashboard-line"></i>同步控制台
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-file-list-3-line"></i>运行日志
+            </a>
+            <div class="px-3 py-2 text-[11px] text-slate-500 font-semibold tracking-wider mt-2">
+              其他工具 (11)
+            </div>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-apps-2-line"></i>工具总览
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-link"></i>一体机访问控制
+            </a>
+            <a
+              class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-blue-600/20 text-white border-l-2 border-blue-500"
+            >
+              <i class="ri-stack-line text-blue-300"></i>远程产品包替换
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-stack-overflow-line"></i>框架密码修改
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-edit-2-line"></i>代码修改统计
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-wifi-line"></i>网络工具
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-book-line"></i>屏幕共享
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-file-2-line"></i>文件共享
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-hard-drive-2-line"></i>硬盘缓存清理
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-clipboard-line"></i>剪贴板管理
+            </a>
+            <a class="flex items-center gap-2 px-3 py-1.5 text-slate-300">
+              <i class="ri-error-warning-line"></i>错误码查询
+            </a>
+          </div>
+          <div class="px-3 py-2 border-t border-slate-800 text-[11px] text-slate-500">
+            v 3.1.2 · 2026-07-03
+          </div>
+        </aside>
+
+        <!-- ============== 主区 ============== -->
+        <main class="flex-1 overflow-y-auto nice-scroll">
+          <div class="max-w-[1440px] mx-auto px-8 py-6 space-y-5">
+            <!-- 顶部标题 + 状态切换 -->
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex items-center gap-3">
+                <div
+                  class="h-10 w-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center"
+                >
+                  <i class="ri-stack-line text-xl"></i>
+                </div>
+                <div>
+                  <h1 class="text-lg font-bold text-slate-900">远程产品包替换</h1>
+                  <p class="text-xs text-slate-500">
+                    在远程 Linux 服务器本机替换 tar.gz 产品包内文件，并更新 md5 清单
+                  </p>
+                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-slate-500">预览状态：</span>
+                <div class="state-tabs" id="stateTabs">
+                  <button data-s="1" class="active">未连接</button>
+                  <button data-s="2">配置中</button>
+                  <button data-s="3">执行中</button>
+                  <button data-s="4">完成</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 步骤进度条 -->
+            <div class="elev elev-pad">
+              <div class="flex items-center" id="stepBar">
+                <div class="step-item" data-step="1">
+                  <div class="num num-active">1</div>
+                  <div class="lbl lbl-active">SSH 连接</div>
+                </div>
+                <div class="step-divider"></div>
+                <div class="step-item" data-step="2">
+                  <div class="num num-idle">2</div>
+                  <div class="lbl">选择远程包</div>
+                </div>
+                <div class="step-divider"></div>
+                <div class="step-item" data-step="3">
+                  <div class="num num-idle">3</div>
+                  <div class="lbl">替换文件与目标</div>
+                </div>
+                <div class="step-divider"></div>
+                <div class="step-item" data-step="4">
+                  <div class="num num-idle">4</div>
+                  <div class="lbl">执行</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 摘要条 (Sticky 思想) -->
+            <div class="elev elev-pad flex items-center gap-2 flex-wrap" id="summaryBar">
+              <span class="text-xs text-slate-500 font-semibold">本次任务：</span>
+              <span class="summary-pill" id="sumHost">
+                <i class="ri-server-line"></i>192.115.1.155:23333
+              </span>
+              <i class="ri-arrow-right-line text-slate-300"></i>
+              <span class="summary-pill" id="sumPkg">
+                <i class="ri-archive-2-line"></i>尚未选择远程包
+              </span>
+              <i class="ri-arrow-right-line text-slate-300"></i>
+              <span class="summary-pill" id="sumFile">
+                <i class="ri-file-upload-line"></i>尚未选择替换文件
+              </span>
+              <i class="ri-arrow-right-line text-slate-300"></i>
+              <span class="summary-pill" id="sumTarget">
+                <i class="ri-crosshair-2-line"></i>尚未配置目标
+              </span>
+              <span class="ml-auto summary-pill summary-pill-ok" id="sumResult">
+                <i class="ri-checkbox-circle-line"></i>就绪
+              </span>
+            </div>
+
+            <!-- 主体两列 -->
+            <div class="grid grid-cols-12 gap-5">
+              <!-- 左：3 张配置卡 -->
+              <div class="col-span-12 xl:col-span-8 space-y-5">
+                <!-- ============== 1. SSH 连接 ============== -->
+                <section class="elev">
+                  <div class="flex items-center gap-3 px-5 py-4 border-b border-slate-100">
+                    <div
+                      class="h-7 w-7 rounded-md bg-blue-50 text-blue-600 flex items-center justify-center text-sm font-bold"
+                    >
+                      1
+                    </div>
+                    <i class="ri-shield-keyhole-line text-blue-600 text-lg"></i>
+                    <h2 class="text-sm font-semibold text-slate-900">SSH 连接</h2>
+                    <span class="ml-2 inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">
+                      <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                      已连接
+                    </span>
+                    <div class="ml-auto text-xs text-slate-500">
+                      <i class="ri-user-line"></i> root · 192.115.1.155:23333
+                    </div>
+                  </div>
+                  <div class="p-5 grid grid-cols-12 gap-3">
+                    <div class="col-span-12">
+                      <label class="text-xs font-semibold text-slate-600 mb-1.5 block">从已保存服务器预填</label>
+                      <select class="ipt">
+                        <option>请选择已保存的部署服务器</option>
+                        <option>研发一体机-A · 192.115.1.155</option>
+                        <option>测试一体机-B · 10.20.30.40</option>
+                      </select>
+                    </div>
+                    <div class="col-span-12 md:col-span-8">
+                      <label class="text-xs font-semibold text-slate-600 mb-1.5 block">服务器地址</label>
+                      <input class="ipt font-mono" value="192.115.1.155" />
+                    </div>
+                    <div class="col-span-12 md:col-span-4">
+                      <label class="text-xs font-semibold text-slate-600 mb-1.5 block">端口</label>
+                      <input class="ipt font-mono" value="23333" />
+                    </div>
+                    <div class="col-span-12 md:col-span-6">
+                      <label class="text-xs font-semibold text-slate-600 mb-1.5 block">用户名</label>
+                      <input class="ipt" value="root" />
+                    </div>
+                    <div class="col-span-12 md:col-span-6">
+                      <label class="text-xs font-semibold text-slate-600 mb-1.5 block">密码</label>
+                      <div class="relative">
+                        <input class="ipt pr-10" type="password" value="admin_123" />
+                        <button
+                          class="absolute right-1 top-1 h-9 w-9 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                        >
+                          <i class="ri-eye-line"></i>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="col-span-12 flex items-center gap-3 pt-1">
+                      <button class="btn btn-pri">
+                        <i class="ri-plug-line"></i> 测试连接
+                      </button>
+                      <span class="inline-flex items-center gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-md">
+                        <i class="ri-checkbox-circle-fill"></i>
+                        SSH authentication succeeded on 192.115.1.55:23333
+                      </span>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- ============== 2. 选择远程包 ============== -->
+                <section class="elev">
+                  <div class="flex items-center gap-3 px-5 py-4 border-b border-slate-100">
+                    <div
+                      class="h-7 w-7 rounded-md bg-blue-50 text-blue-600 flex items-center justify-center text-sm font-bold"
+                    >
+                      2
+                    </div>
+                    <i class="ri-archive-stack-line text-blue-600 text-lg"></i>
+                    <h2 class="text-sm font-semibold text-slate-900">选择远程安装包</h2>
+                    <span class="ml-2 inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">
+                      <i class="ri-check-line"></i>已选择
+                    </span>
+                  </div>
+                  <div class="p-5 space-y-3">
+                    <button class="w-full h-11 rounded-lg border border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 text-sm font-semibold text-slate-700 flex items-center justify-center gap-2">
+                      <i class="ri-folder-open-line text-blue-600"></i>
+                      点击浏览远程安装包
+                    </button>
+                    <div class="rounded-lg border border-slate-200 bg-white p-3 flex items-start gap-3">
+                      <div class="h-9 w-9 rounded-md bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                        <i class="ri-file-zip-line text-lg"></i>
+                      </div>
+                      <div class="min-w-0 flex-1">
+                        <div class="text-[11px] font-semibold text-slate-500 mb-0.5">远程安装包</div>
+                        <div class="font-mono text-xs text-slate-900 break-all">
+                          /VMS_US00_H16-B2101.10.0.260424_x86.tar.gz
+                        </div>
+                        <div class="font-mono text-xs text-slate-500 break-all mt-1">
+                          远端安装包：/VMS_US00_H16-B2101.10.0.260424_x86.tar.gz
+                        </div>
+                      </div>
+                      <button class="h-8 px-2 text-slate-500 hover:text-slate-800">
+                        <i class="ri-close-line"></i>
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- ============== 3. 替换文件与目标 ============== -->
+                <section class="elev">
+                  <div class="flex items-center gap-3 px-5 py-4 border-b border-slate-100">
+                    <div
+                      class="h-7 w-7 rounded-md bg-blue-50 text-blue-600 flex items-center justify-center text-sm font-bold"
+                    >
+                      3
+                    </div>
+                    <i class="ri-file-upload-line text-blue-600 text-lg"></i>
+                    <h2 class="text-sm font-semibold text-slate-900">替换文件与目标</h2>
+                  </div>
+                  <div class="p-5 space-y-4">
+                    <!-- 上排：选本地 + 选目录 -->
+                    <div class="grid grid-cols-12 gap-4">
+                      <!-- 选本地替换 -->
+                      <div class="col-span-12 lg:col-span-5">
+                        <div class="text-xs font-semibold text-slate-600 mb-1.5 flex items-center gap-1.5">
+                          <i class="ri-file-3-line text-blue-600"></i> 本地替换文件
+                        </div>
+                        <button class="btn btn-sec w-full">
+                          <i class="ri-upload-2-line"></i> 选择本地替换文件
+                        </button>
+                        <div class="mt-2 rounded-md border border-slate-200 bg-white p-2.5 text-xs">
+                          <div class="font-semibold text-slate-800 truncate">disk_configurator</div>
+                          <div class="font-mono text-slate-500 break-all mt-0.5">
+                            C:\WorkSpace\branches\YQ_VMS\200880188920007\uDisk-configurator\diskConfigurator\uDisk-configurator
+                          </div>
+                          <div class="text-slate-400 mt-0.5">37 MB</div>
+                        </div>
+                      </div>
+
+                      <!-- 中间分隔 -->
+                      <div class="hidden lg:flex col-span-2 items-center justify-center text-slate-300">
+                        <i class="ri-arrow-right-line text-2xl"></i>
+                      </div>
+
+                      <!-- 选目标包内路径 -->
+                      <div class="col-span-12 lg:col-span-5">
+                        <div class="text-xs font-semibold text-slate-600 mb-1.5 flex items-center gap-1.5">
+                          <i class="ri-folder-2-line text-blue-600"></i> 包内目标路径
+                        </div>
+                        <button class="btn btn-sec w-full justify-between font-mono text-xs">
+                          <span class="flex items-center gap-2 min-w-0">
+                            <i class="ri-folder-open-line text-amber-500"></i>
+                            <span class="truncate text-slate-700">disk_configurator</span>
+                          </span>
+                          <i class="ri-arrow-right-s-line text-slate-400"></i>
+                        </button>
+                        <div class="mt-2 text-[11px] text-slate-500 leading-relaxed">
+                          目标文件：VMS_US00_H16-B2101.10.0.260424_x86/app/func-diskConfigurator-2.0.10.260422_x86/bin/disk_configurator<br />
+                          tar.zst：VMS_US00_H16-B2101.10.0.260424_x86/VMS_US00_H16-B2101.10.0.260424_x86.tar.zst
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 扫描按钮 + 进度 -->
+                    <div class="flex items-center gap-3 pt-1">
+                      <button class="btn btn-pri">
+                        <i class="ri-search-eye-line"></i> 扫描包结构
+                      </button>
+                      <span class="text-xs text-slate-500 inline-flex items-center gap-1.5">
+                        <span class="pulse-dot"></span>正在扫描：扫描中层
+                      </span>
+                      <div class="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                        <div class="h-full bg-blue-500 rounded-full" style="width: 62%"></div>
+                      </div>
+                      <span class="text-xs text-slate-500 tabular-nums">62%</span>
+                    </div>
+
+                    <!-- 目标配置 + 输出 -->
+                    <div class="rounded-xl border border-slate-200 overflow-hidden">
+                      <div class="px-4 py-2.5 bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-700 flex items-center gap-2">
+                        <i class="ri-crosshair-2-line text-blue-600"></i> 当前目标
+                      </div>
+                      <div class="p-4 grid grid-cols-12 gap-3">
+                        <div class="col-span-12 md:col-span-6">
+                          <div class="text-[11px] text-slate-500 font-semibold mb-1">目标文件</div>
+                          <div class="font-mono text-xs text-slate-900 break-all bg-slate-50 rounded-md px-2.5 py-2">
+                            /VMS_US00_H16-B2101.10.0.260424_x86/app/func-diskConfigurator-2.0.10.260422_x86/bin/disk_configurator
+                          </div>
+                        </div>
+                        <div class="col-span-12 md:col-span-3">
+                          <div class="text-[11px] text-slate-500 font-semibold mb-1">所在层</div>
+                          <div class="text-xs text-slate-700 bg-slate-50 rounded-md px-2.5 py-2 flex items-center gap-1.5">
+                            <i class="ri-stack-line text-blue-600"></i> 中层 tar
+                          </div>
+                        </div>
+                        <div class="col-span-12 md:col-span-3">
+                          <div class="text-[11px] text-slate-500 font-semibold mb-1">所在 zst</div>
+                          <div class="text-xs text-slate-700 bg-slate-50 rounded-md px-2.5 py-2 font-mono truncate">
+                            …/VMS_US00_H16-B2101.10.0.260424_x86.tar.zst
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="px-4 py-3 border-t border-slate-200 bg-white space-y-2.5">
+                        <div class="flex items-center justify-between">
+                          <div>
+                            <div class="text-sm font-semibold text-slate-800">默认生成旁路新包</div>
+                            <div class="text-[11px] text-slate-500 mt-0.5">在原包旁生成新包，覆盖原包需单独确认</div>
+                          </div>
+                          <div class="toggle toggle-on" id="ovToggle"></div>
+                        </div>
+                        <div class="grid grid-cols-12 gap-3" id="ovOutputBox">
+                          <div class="col-span-12 md:col-span-9">
+                            <label class="text-[11px] text-slate-500 font-semibold mb-1 block">输出包路径</label>
+                            <input class="ipt font-mono" value="/VMS_US00_H16-B2101.10.0.260424_x86.patched.tar.gz" />
+                          </div>
+                          <div class="col-span-12 md:col-span-3 flex items-end">
+                            <button class="btn btn-ghost w-full">还原默认</button>
+                          </div>
+                        </div>
+                        <div class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900 flex items-start gap-2" id="ovWarn">
+                          <i class="ri-error-warning-fill text-amber-600 text-base shrink-0 mt-0.5"></i>
+                          <div class="flex-1">
+                            <div class="font-semibold mb-0.5">覆盖模式需勾选确认后才能执行</div>
+                            <label class="inline-flex items-center gap-2 mt-1 text-amber-800">
+                              <input type="checkbox" />
+                              我确认先备份原包，校验通过后才覆盖原包路径
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 高级：手动模式 -->
+                    <details class="rounded-lg border border-slate-200 bg-white">
+                      <summary class="px-3 py-2.5 text-xs font-semibold text-slate-600 flex items-center gap-2 hover:bg-slate-50">
+                        <i class="ri-settings-2-line text-slate-400"></i> 高级：手动指定完整包内路径
+                        <span class="ml-auto text-[11px] text-slate-400">通常无需修改</span>
+                      </summary>
+                      <div class="px-3 pb-3">
+                        <input class="ipt font-mono" placeholder="完整包内路径" />
+                      </div>
+                    </details>
+                  </div>
+                </section>
+              </div>
+
+              <!-- 右：执行 + 日志 + 结果 sticky -->
+              <div class="col-span-12 xl:col-span-4">
+                <div class="space-y-5 xl:sticky xl:top-5">
+                  <!-- 执行卡 -->
+                  <section class="elev">
+                    <div class="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+                      <div
+                        class="h-7 w-7 rounded-md bg-blue-50 text-blue-600 flex items-center justify-center text-sm font-bold"
+                      >
+                        4
+                      </div>
+                      <h2 class="text-sm font-semibold text-slate-900">执行</h2>
+                      <span class="ml-auto summary-pill summary-pill-warn" id="execBadge">
+                        <span class="pulse-dot" style="background:#f59e0b; box-shadow:0 0 0 0 rgba(245,158,11,.6); animation: pulse 1.6s infinite"></span>
+                        执行中
+                      </span>
+                    </div>
+                    <div class="p-5 space-y-3">
+                      <button class="btn btn-pri w-full h-11" id="startBtn">
+                        <i class="ri-play-fill"></i> 开始替换
+                      </button>
+                      <!-- 步骤状态 -->
+                      <ol class="space-y-1 text-xs">
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-emerald-50 text-emerald-700">
+                          <i class="ri-check-line"></i> 上传替换文件
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-emerald-50 text-emerald-700">
+                          <i class="ri-check-line"></i> 预检
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-emerald-50 text-emerald-700">
+                          <i class="ri-check-line"></i> 解包外层
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-sky-50 text-sky-700">
+                          <span class="spinner spinner-dark" style="width:12px;height:12px;border-width:2px;border-color:rgba(2,132,199,.2);border-top-color:#0284c7"></span>
+                          提取中层 tar
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 定位目标
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 解包内层
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 替换目标文件
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 更新 md5 清单
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 重打内层
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 重打中层
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 压缩外层
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 校验
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 输出新包
+                        </li>
+                        <li class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-slate-50 text-slate-400">
+                          <i class="ri-circle-line"></i> 清理
+                        </li>
+                      </ol>
+                    </div>
+                  </section>
+
+                  <!-- 日志卡 -->
+                  <section class="elev">
+                    <div class="px-4 py-2.5 border-b border-slate-100 flex items-center gap-2">
+                      <h2 class="text-xs font-semibold text-slate-700">
+                        <i class="ri-terminal-box-line mr-1 text-slate-500"></i>实时日志
+                      </h2>
+                      <span class="text-[11px] text-slate-400">14 行</span>
+                      <div class="ml-auto flex items-center gap-1">
+                        <label class="text-[11px] text-slate-500 inline-flex items-center gap-1 mr-1">
+                          <input type="checkbox" checked /> 自动滚动
+                        </label>
+                        <button class="h-7 w-7 rounded-md text-slate-500 hover:bg-slate-100" title="复制全部">
+                          <i class="ri-file-copy-line text-sm"></i>
+                        </button>
+                        <button class="h-7 w-7 rounded-md text-slate-500 hover:bg-slate-100" title="清空">
+                          <i class="ri-delete-bin-line text-sm"></i>
+                        </button>
+                      </div>
+                    </div>
+                    <div
+                      class="bg-slate-950 text-slate-100 p-3 h-72 overflow-y-auto nice-scroll font-mono text-[12px] space-y-0.5"
+                    >
+                      <div class="log-line"><span class="lvl lvl-info"></span><span class="msg">[info] Remote workdir: ./file-sync-tool-patch-1754014842-22112</span></div>
+                      <div class="log-line"><span class="lvl lvl-info"></span><span class="msg">[info] Uploaded replacement file and patch script</span></div>
+                      <div class="log-line"><span class="lvl lvl-info"></span><span class="msg">[info] free space check: need 1004086740 KB, 10418452 KB</span></div>
+                      <div class="log-line"><span class="lvl lvl-info"></span><span class="msg">[info] No nested middle-tar found, patching the outer tar directly</span></div>
+                      <div class="log-line"><span class="lvl lvl-info"></span><span class="msg">[info] Updated md5 manifest VMS_US00_H16-B2101.10.0.260424_x86/md5</span></div>
+                      <div class="log-line"><span class="lvl lvl-warn"></span><span class="msg">[warn] No md5 manifest found in middle layer</span></div>
+                      <div class="log-line"><span class="lvl lvl-info"></span><span class="msg">[info] Remote package patch complete</span></div>
+                      <div class="log-line"><span class="lvl lvl-success"></span><span class="msg">[ok] 替换完成：/VMS_US00_H16-B2101.10.0.260424_x86.patched.tar.gz</span></div>
+                    </div>
+                  </section>
+
+                  <!-- 结果摘要 -->
+                  <section class="elev border-emerald-200">
+                    <div class="px-4 py-2.5 bg-emerald-50 border-b border-emerald-200 flex items-center gap-2">
+                      <i class="ri-checkbox-circle-fill text-emerald-600"></i>
+                      <h2 class="text-xs font-semibold text-emerald-900">替换完成</h2>
+                      <span class="ml-auto text-[11px] text-emerald-700">14.2s</span>
+                    </div>
+                    <div class="p-4 space-y-2.5">
+                      <div class="kv">
+                        <div class="k">输出</div>
+                        <div class="v">/VMS_US00_H16-B2101.10.0.260424_x86.patched.tar.gz</div>
+                      </div>
+                      <div class="grid grid-cols-2 gap-2.5">
+                        <div class="kv">
+                          <div class="k">目标 MD5</div>
+                          <div class="v">73342160e5773f51c198a6ea0d3e668</div>
+                        </div>
+                        <div class="kv">
+                          <div class="k">已更新清单</div>
+                          <div class="v">md5 清单</div>
+                        </div>
+                      </div>
+                      <div class="kv">
+                        <div class="k">工作目录</div>
+                        <div class="v">./file-sync-tool-patch-1754014842-22112</div>
+                      </div>
+                      <div class="grid grid-cols-2 gap-2.5">
+                        <button class="btn btn-sec">
+                          <i class="ri-folder-open-line"></i>打开所在目录
+                        </button>
+                        <button class="btn btn-sec">
+                          <i class="ri-file-copy-line"></i>复制结果摘要
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              </div>
+            </div>
+
+            <!-- 底部：优化对比说明 -->
+            <div class="elev elev-pad">
+              <h3 class="text-sm font-bold text-slate-900 mb-3">
+                <i class="ri-sparkling-2-line text-amber-500"></i> 本次优化要点
+              </h3>
+              <div class="grid grid-cols-12 gap-3 text-xs text-slate-600">
+                <div class="col-span-12 md:col-span-6 lg:col-span-3">
+                  <div class="font-semibold text-slate-800 mb-1">① 顶部步骤进度条</div>
+                  4 步可视化进度，状态一目了然，避免"卡在哪一步"疑惑。
+                </div>
+                <div class="col-span-12 md:col-span-6 lg:col-span-3">
+                  <div class="font-semibold text-slate-800 mb-1">② 实时任务摘要条</div>
+                  配置变化时实时显示本次任务关键参数，随时确认"我要做什么"。
+                </div>
+                <div class="col-span-12 md:col-span-6 lg:col-span-3">
+                  <div class="font-semibold text-slate-800 mb-1">③ 左右两列布局</div>
+                  左：3 张配置卡紧凑堆叠；右：执行+日志+结果 sticky 同屏可见。
+                </div>
+                <div class="col-span-12 md:col-span-6 lg:col-span-3">
+                  <div class="font-semibold text-slate-800 mb-1">④ 危险操作 Toggle</div>
+                  "覆盖原包"做成醒目的开关，激活时强制弹确认卡片，不再是普通 checkbox。
+                </div>
+                <div class="col-span-12 md:col-span-6 lg:col-span-3">
+                  <div class="font-semibold text-slate-800 mb-1">⑤ 手动模式折叠</div>
+                  99% 用不到的手动模式进"高级"折叠，主流界面更干净。
+                </div>
+                <div class="col-span-12 md:col-span-6 lg:col-span-3">
+                  <div class="font-semibold text-slate-800 mb-1">⑥ 目标路径大块展示</div>
+                  目标文件/所在层/所在 zst 拆成 3 列独立卡片，关键信息不再被压在一行。
+                </div>
+                <div class="col-span-12 md:col-span-6 lg:col-span-3">
+                  <div class="font-semibold text-slate-800 mb-1">⑦ 日志颜色边条</div>
+                  日志级别用左侧色条区分（info=蓝 warn=黄 error=红 success=绿），扫读更快。
+                </div>
+                <div class="col-span-12 md:col-span-6 lg:col-span-3">
+                  <div class="font-semibold text-slate-800 mb-1">⑧ 结果摘要化</div>
+                  输出/MD5/工作目录/清单 改成卡片网格，关键信息一次看完。
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <script>
+      // 简单的状态切换演示
+      const tabs = document.querySelectorAll("#stateTabs button");
+      const summary = {
+        sumHost: document.getElementById("sumHost"),
+        sumPkg: document.getElementById("sumPkg"),
+        sumFile: document.getElementById("sumFile"),
+        sumTarget: document.getElementById("sumTarget"),
+        sumResult: document.getElementById("sumResult"),
+      };
+      function applyState(s) {
+        // 更新步骤条样式
+        const items = document.querySelectorAll("#stepBar .step-item");
+        const dividers = document.querySelectorAll("#stepBar .step-divider");
+        const states = [
+          { num: "num-active", lbl: "lbl-active" },
+          { num: "num-done", lbl: "lbl-done" },
+          { num: "num-idle", lbl: "" },
+          { num: "num-idle", lbl: "" },
+        ];
+        for (let i = 0; i < 4; i++) {
+          const it = items[i];
+          const st = states[i];
+          it.querySelector(".num").className = "num " + st.num;
+          it.querySelector(".num").textContent =
+            st.num === "num-done" ? "✓" : i + 1;
+          it.querySelector(".lbl").className = "lbl " + st.lbl;
+        }
+        for (let i = 0; i < dividers.length; i++) {
+          dividers[i].classList.remove("step-divider-done", "step-divider-active");
+        }
+        // 状态 1：未连接
+        if (s === 1) {
+          items[0].querySelector(".num").className = "num num-active";
+          items[0].querySelector(".num").textContent = "1";
+          items[0].querySelector(".lbl").className = "lbl lbl-active";
+          summary.sumHost.innerHTML = '<i class="ri-server-line"></i>请填写 SSH 连接';
+          summary.sumHost.className = "summary-pill summary-pill-err";
+          summary.sumPkg.innerHTML = '<i class="ri-archive-2-line"></i>尚未选择';
+          summary.sumPkg.className = "summary-pill";
+          summary.sumFile.innerHTML = '<i class="ri-file-upload-line"></i>尚未选择';
+          summary.sumFile.className = "summary-pill";
+          summary.sumTarget.innerHTML = '<i class="ri-crosshair-2-line"></i>尚未配置';
+          summary.sumTarget.className = "summary-pill";
+          summary.sumResult.innerHTML = '<i class="ri-error-warning-line"></i>未就绪';
+          summary.sumResult.className = "summary-pill summary-pill-err";
+        }
+        // 状态 2：配置中
+        else if (s === 2) {
+          items[0].querySelector(".num").className = "num num-done";
+          items[0].querySelector(".num").textContent = "✓";
+          items[0].querySelector(".lbl").className = "lbl lbl-done";
+          items[1].querySelector(".num").className = "num num-active";
+          items[1].querySelector(".num").textContent = "2";
+          items[1].querySelector(".lbl").className = "lbl lbl-active";
+          dividers[0].classList.add("step-divider-done");
+          summary.sumHost.innerHTML = '<i class="ri-server-line"></i>192.115.1.155:23333';
+          summary.sumHost.className = "summary-pill summary-pill-ok";
+          summary.sumPkg.innerHTML =
+            '<i class="ri-archive-2-line"></i>/VMS_…tar.gz';
+          summary.sumPkg.className = "summary-pill summary-pill-ok";
+          summary.sumFile.innerHTML = '<i class="ri-file-upload-line"></i>disk_configurator';
+          summary.sumFile.className = "summary-pill summary-pill-ok";
+          summary.sumTarget.innerHTML = '<i class="ri-crosshair-2-line"></i>配置中…';
+          summary.sumTarget.className = "summary-pill summary-pill-warn";
+          summary.sumResult.innerHTML = '<i class="ri-time-line"></i>配置中';
+          summary.sumResult.className = "summary-pill summary-pill-warn";
+        }
+        // 状态 3：执行中
+        else if (s === 3) {
+          items[0].querySelector(".num").className = "num num-done";
+          items[0].querySelector(".num").textContent = "✓";
+          items[0].querySelector(".lbl").className = "lbl lbl-done";
+          items[1].querySelector(".num").className = "num num-done";
+          items[1].querySelector(".num").textContent = "✓";
+          items[1].querySelector(".lbl").className = "lbl lbl-done";
+          items[2].querySelector(".num").className = "num num-active";
+          items[2].querySelector(".num").textContent = "3";
+          items[2].querySelector(".lbl").className = "lbl lbl-active";
+          dividers[0].classList.add("step-divider-done");
+          dividers[1].classList.add("step-divider-done");
+          summary.sumHost.innerHTML = '<i class="ri-server-line"></i>192.115.1.155:23333';
+          summary.sumHost.className = "summary-pill summary-pill-ok";
+          summary.sumPkg.innerHTML = '<i class="ri-archive-2-line"></i>/VMS_…tar.gz';
+          summary.sumPkg.className = "summary-pill summary-pill-ok";
+          summary.sumFile.innerHTML = '<i class="ri-file-upload-line"></i>disk_configurator';
+          summary.sumFile.className = "summary-pill summary-pill-ok";
+          summary.sumTarget.innerHTML =
+            '<i class="ri-crosshair-2-line"></i>disk_configurator (中层)';
+          summary.sumTarget.className = "summary-pill summary-pill-ok";
+          summary.sumResult.innerHTML =
+            '<span class="pulse-dot" style="background:#2563eb;width:8px;height:8px;display:inline-block;border-radius:50%"></span>执行中 62%';
+          summary.sumResult.className = "summary-pill summary-pill-warn";
+        }
+        // 状态 4：完成
+        else if (s === 4) {
+          items.forEach((it, i) => {
+            it.querySelector(".num").className = "num num-done";
+            it.querySelector(".num").textContent = "✓";
+            it.querySelector(".lbl").className = "lbl lbl-done";
+          });
+          dividers.forEach((d) => d.classList.add("step-divider-done"));
+          summary.sumHost.innerHTML = '<i class="ri-server-line"></i>192.115.1.155:23333';
+          summary.sumHost.className = "summary-pill summary-pill-ok";
+          summary.sumPkg.innerHTML = '<i class="ri-archive-2-line"></i>/VMS_…tar.gz';
+          summary.sumPkg.className = "summary-pill summary-pill-ok";
+          summary.sumFile.innerHTML = '<i class="ri-file-upload-line"></i>disk_configurator';
+          summary.sumFile.className = "summary-pill summary-pill-ok";
+          summary.sumTarget.innerHTML =
+            '<i class="ri-crosshair-2-line"></i>disk_configurator (中层)';
+          summary.sumTarget.className = "summary-pill summary-pill-ok";
+          summary.sumResult.innerHTML = '<i class="ri-checkbox-circle-line"></i>替换完成 14.2s';
+          summary.sumResult.className = "summary-pill summary-pill-ok";
+        }
+      }
+      tabs.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          tabs.forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          applyState(parseInt(btn.dataset.s, 10));
+        });
+      });
+      // 默认状态 3（执行中）
+      applyState(3);
+
+      // 覆盖 toggle 简单交互
+      const ovToggle = document.getElementById("ovToggle");
+      const ovOutputBox = document.getElementById("ovOutputBox");
+      const ovWarn = document.getElementById("ovWarn");
+      let overwriteOn = true;
+      function syncOv() {
+        if (overwriteOn) {
+          ovToggle.classList.add("toggle-on");
+          ovOutputBox.style.display = "none";
+          ovWarn.style.display = "flex";
+        } else {
+          ovToggle.classList.remove("toggle-on");
+          ovOutputBox.style.display = "grid";
+          ovWarn.style.display = "none";
+        }
+      }
+      ovToggle.addEventListener("click", () => {
+        overwriteOn = !overwriteOn;
+        syncOv();
+      });
+      syncOv();
+    </script>
+  </body>
+</html>

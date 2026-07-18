@@ -1154,8 +1154,7 @@ mod tests {
             }
         }"#;
 
-        let parsed =
-            parse_api_payload::<IpsanResourceGroupListData>(StatusCode::OK, body).unwrap();
+        let parsed = parse_api_payload::<IpsanResourceGroupListData>(StatusCode::OK, body).unwrap();
         assert_eq!(parsed.group_info_list.len(), 1);
         assert_eq!(parsed.group_info_list[0].resource_info_list.len(), 1);
         assert_eq!(parsed.group_info_list[0].usage, 2);

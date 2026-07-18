@@ -6,12 +6,14 @@ mod clipboard;
 mod code_count;
 mod config;
 mod deploy;
+mod device_simulator_commands;
 mod disk_cleanup;
 mod download_verify;
 mod error_code;
 mod fileshare;
 mod local_exec;
 mod network;
+mod notepad_extensions;
 mod persist;
 mod remote_package_patch;
 mod scanner;
@@ -25,6 +27,7 @@ mod task_persist;
 mod task_runtime;
 mod updater;
 mod webview2_bootstrap;
+mod windows_copy;
 
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
@@ -131,6 +134,26 @@ fn now_unix_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn run_image_copy_command_line() -> bool {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(argument) = args.next() {
+        if argument != "--copy-image-data" {
+            continue;
+        }
+        let Some(path) = args.next() else {
+            startup_log("error", "image copy command is missing a file path");
+            return true;
+        };
+        if let Err(error) =
+            clipboard::image_copy::copy_image_file(std::path::Path::new(&path), None)
+        {
+            startup_log("error", &format!("image copy command failed: {error}"));
+        }
+        return true;
+    }
+    false
 }
 
 /// Watch the main thread: tray clicks, window restore and every sync command all
@@ -1051,8 +1074,35 @@ fn get_config(state: State<AppState>) -> AppConfig {
 }
 
 #[tauri::command]
-fn confirm_quit(app_handle: tauri::AppHandle) {
-    app_handle.exit(0);
+async fn confirm_quit(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    simulator_state: State<'_, device_simulator_commands::DeviceSimulatorCommandState>,
+) -> Result<(), String> {
+    let cleanup = tokio::time::timeout(
+        Duration::from_secs(20),
+        device_simulator_commands::shutdown_for_exit(&app_handle, simulator_state.inner()),
+    )
+    .await;
+    match cleanup {
+        Ok(Ok(())) => {
+            state.clipboard.shutdown();
+            app_handle.exit(0);
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            state.is_quitting.store(false, Ordering::SeqCst);
+            Err(format!(
+                "{}: {}",
+                error.code,
+                error.details.unwrap_or(error.message_key)
+            ))
+        }
+        Err(_) => {
+            state.is_quitting.store(false, Ordering::SeqCst);
+            Err("device_simulator.exit.cleanup_timeout: simulator cleanup did not finish within 20 seconds".into())
+        }
+    }
 }
 
 // Async so it runs on the tokio pool instead of the main thread: it spawns reg.exe
@@ -3704,7 +3754,19 @@ async fn enable_appliance_ssh(
 }
 
 fn main() {
+    // The elevated simulator worker must branch before WebView2, single-instance,
+    // Tauri, tray, clipboard, scheduler, or any other desktop subsystem starts.
+    if let Some(exit_code) = app_lib::device_simulator::worker_entry::try_run_from_env() {
+        std::process::exit(exit_code);
+    }
+
     install_panic_log_hook();
+
+    // Explorer context-menu invocations use a lightweight command mode: no WebView2 check,
+    // Tauri windows, tray icon, or success prompt.
+    if run_image_copy_command_line() {
+        return;
+    }
 
     // WebView2 bootstrap must run before the single-instance guard. The guard
     // mutex lives until process exit, so a post-install child could otherwise
@@ -3762,7 +3824,8 @@ fn main() {
                     .unwrap_or(false);
 
                 if is_quitting {
-                    // Already confirmed quit (via confirm_quit command) — allow close
+                    // A second close request must not bypass asynchronous cleanup.
+                    api.prevent_close();
                 } else if should_close_to_tray(window.app_handle()) {
                     api.prevent_close();
                     hide_main_window(window.app_handle());
@@ -3773,11 +3836,6 @@ fn main() {
                         state.is_quitting.store(true, Ordering::SeqCst);
                     }
                     let _ = window.app_handle().emit("before-quit", ());
-                    let app_clone = window.app_handle().clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_secs(2));
-                        app_clone.exit(0);
-                    });
                 }
             }
         })
@@ -3861,9 +3919,20 @@ fn main() {
             let clipboard_state_for_startup = clipboard_state.clone();
             let clipboard_enabled_at_start = config.clipboard.enabled;
             let clipboard_hotkey_at_start = config.clipboard.hotkey.clone();
+            let image_copy_hotkey_enabled_at_start = config.clipboard.image_copy_hotkey_enabled;
+            let image_copy_hotkey_at_start = config.clipboard.image_copy_hotkey.clone();
+            let explorer_context_menu_enabled_at_start =
+                config.clipboard.explorer_context_menu_enabled;
             let config_show_startup_notification = config.clipboard.show_startup_notification;
 
+            if explorer_context_menu_enabled_at_start {
+                if let Err(error) = clipboard::explorer_menu::set_enabled(true) {
+                    log::warn!("[clipboard] failed to refresh Explorer context menu: {error}");
+                }
+            }
+
             app.manage(network::NetworkState::default());
+            app.manage(device_simulator_commands::DeviceSimulatorCommandState::default());
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
                 updater: Arc::new(updater::UpdaterState::new()),
@@ -3968,6 +4037,20 @@ fn main() {
                 }
             }
 
+            if image_copy_hotkey_enabled_at_start {
+                match clipboard::hotkey::register_image_copy(
+                    app.handle().clone(),
+                    &image_copy_hotkey_at_start,
+                ) {
+                    Ok(handle) => {
+                        *clipboard_state_for_startup.image_copy_hotkey_handle.lock() = Some(handle);
+                    }
+                    Err(error) => {
+                        eprintln!("[clipboard] image-copy hotkey register failed: {error}");
+                    }
+                }
+            }
+
             // Create the tray icon last, after every fallible init above succeeded,
             // so a failed startup never leaves a ghost tray icon behind.
             let tray_menu = MenuBuilder::new(app)
@@ -3989,16 +4072,12 @@ fn main() {
                     }
                     TRAY_QUIT_ID => {
                         if let Some(state) = app.try_state::<AppState>() {
-                            state.is_quitting.store(true, Ordering::SeqCst);
+                            if state.is_quitting.swap(true, Ordering::SeqCst) {
+                                return;
+                            }
                         }
                         // Notify frontend to save state before exiting
                         let _ = app.emit("before-quit", ());
-                        // Fallback: force exit after 2 seconds if frontend doesn't respond
-                        let app_clone = app.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_secs(2));
-                            app_clone.exit(0);
-                        });
                     }
                     _ => {}
                 })
@@ -4070,6 +4149,22 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            device_simulator_commands::device_simulator_get_settings,
+            device_simulator_commands::device_simulator_save_settings,
+            device_simulator_commands::device_simulator_list_interfaces,
+            device_simulator_commands::device_simulator_list_profiles,
+            device_simulator_commands::device_simulator_get_asset_status,
+            device_simulator_commands::device_simulator_prepare_assets,
+            device_simulator_commands::device_simulator_cancel_asset_download,
+            device_simulator_commands::device_simulator_preview_devices,
+            device_simulator_commands::device_simulator_preflight,
+            device_simulator_commands::device_simulator_start,
+            device_simulator_commands::device_simulator_stop,
+            device_simulator_commands::device_simulator_get_status,
+            device_simulator_commands::device_simulator_start_alarm,
+            device_simulator_commands::device_simulator_trigger_alarm_once,
+            device_simulator_commands::device_simulator_stop_alarm,
+            device_simulator_commands::device_simulator_recover,
             get_config,
             mark_frontend_ready,
             save_config_cmd,
@@ -4139,6 +4234,13 @@ fn main() {
             network::test_ports,
             network::cancel_port_test,
             network::send_wol,
+            notepad_extensions::notepad_extensions_detect_instances,
+            notepad_extensions::notepad_extensions_validate_instance,
+            notepad_extensions::notepad_extensions_pick_executable,
+            notepad_extensions::notepad_extensions_fetch_catalog,
+            notepad_extensions::notepad_extensions_install_plugin,
+            notepad_extensions::notepad_extensions_read_enhance_config,
+            notepad_extensions::notepad_extensions_save_enhance_config,
             screenshare::screen_share_list_monitors,
             screenshare::screen_share_list_interfaces,
             screenshare::screen_share_start,
@@ -4174,6 +4276,9 @@ fn main() {
             clipboard::commands::cb_set_active_group,
             clipboard::commands::cb_toggle_panel,
             clipboard::commands::cb_set_hotkey,
+            clipboard::commands::cb_pick_image_file,
+            clipboard::commands::cb_copy_image_file,
+            clipboard::commands::cb_is_explorer_context_menu_registered,
             clipboard::commands::cb_paste,
             clipboard::commands::cb_paste_plain,
             clipboard::commands::cb_copy,

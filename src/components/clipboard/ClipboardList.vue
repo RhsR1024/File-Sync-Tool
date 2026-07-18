@@ -47,6 +47,7 @@ const emit = defineEmits<{
   toggle: [payload: { id: number; shiftKey: boolean }];
   menu: [payload: { item: ClipboardItem; x: number; y: number }];
   hoverLeave: [];
+  endReached: [];
 }>();
 
 const { t } = useI18n();
@@ -419,6 +420,7 @@ function onReorderEnd() {
     :min-item-size="72"
     key-field="id"
     class="h-full w-full"
+    @scroll-end="emit('endReached')"
   >
     <template #default="{ item, active }">
       <DynamicScrollerItem

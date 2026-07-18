@@ -38,16 +38,26 @@ assert.deepEqual(toolPaths, [
   '/tools/code-statistics',
   '/tools/network',
   '/tools/screen-share',
+  '/tools/video-device-simulator',
   '/tools/file-share',
   '/tools/disk-cache-cleanup',
   '/tools/clipboard',
   '/tools/error-code-lookup',
+  '/tools/notepad-extensions',
 ]);
 
 assert.equal(
   isSidebarItemActive('/tools', SIDEBAR_NAV_SECTIONS[1].items[0]),
   true,
   'tools overview should match the overview route exactly',
+);
+assert.equal(
+  isSidebarItemActive(
+    '/tools/video-device-simulator/session',
+    SIDEBAR_NAV_SECTIONS[1].items.find((item) => item.key === 'video-device-simulator'),
+  ),
+  true,
+  'the simulator entry should remain active for nested simulator routes',
 );
 assert.equal(
   isSidebarItemActive('/tools/appliance-ssh', SIDEBAR_NAV_SECTIONS[1].items[0]),

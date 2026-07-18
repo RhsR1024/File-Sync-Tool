@@ -166,7 +166,7 @@ fn write_to_clipboard(
             } else if let Some(rich_text) =
                 item.rtf_content.as_deref().filter(|rtf| !rtf.is_empty())
             {
-                write_rtf_to_clipboard(text, rich_text)
+                write_rtf_to_clipboard(text, rich_text, item.html.as_deref())
             } else {
                 write_text_to_clipboard(text)?;
                 Ok(())
@@ -255,7 +255,10 @@ fn clipboard_write_hash(item: &ClipboardItem, plain_text: bool) -> Result<String
             } else if let Some(rich_text) =
                 item.rtf_content.as_deref().filter(|rtf| !rtf.is_empty())
             {
-                Ok(crate::clipboard::capture_hash(b"rtf", rich_text.as_bytes()))
+                Ok(crate::clipboard::capture_hash(
+                    b"rtf",
+                    &crate::clipboard::source::decode_rtf_storage(rich_text),
+                ))
             } else {
                 Ok(crate::clipboard::capture_hash(b"text", text.as_bytes()))
             }
@@ -339,8 +342,7 @@ fn resolve_file_list_paths(item: &ClipboardItem) -> Result<Vec<PathBuf>, String>
 }
 
 #[cfg(target_os = "windows")]
-fn write_rtf_to_clipboard(text: &str, rtf: &str) -> Result<(), String> {
-    use encoding_rs::WINDOWS_1252;
+fn write_rtf_to_clipboard(text: &str, rtf: &str, html: Option<&str>) -> Result<(), String> {
     use windows::core::w;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::DataExchange::{
@@ -393,34 +395,45 @@ fn write_rtf_to_clipboard(text: &str, rtf: &str) -> Result<(), String> {
         Ok(())
     }
 
-    unsafe fn set_rtf_data(rtf: &str) -> Result<(), String> {
-        let format = RegisterClipboardFormatW(w!("Rich Text Format"));
-        if format == 0 {
-            return Err("register RTF format".to_string());
-        }
-
-        let (encoded, _, _) = WINDOWS_1252.encode(rtf);
-        let mut bytes = encoded.into_owned();
+    unsafe fn set_bytes_data(format: u32, mut bytes: Vec<u8>, label: &str) -> Result<(), String> {
         bytes.push(0);
-
         let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len())
-            .map_err(|e| format!("alloc clipboard rtf: {e}"))?;
+            .map_err(|e| format!("alloc clipboard {label}: {e}"))?;
         if handle.is_invalid() {
-            return Err("alloc clipboard rtf".to_string());
+            return Err(format!("alloc clipboard {label}"));
         }
 
         let ptr = GlobalLock(handle).cast::<u8>();
         if ptr.is_null() {
-            return Err("lock clipboard rtf".to_string());
+            return Err(format!("lock clipboard {label}"));
         }
 
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
         let _ = GlobalUnlock(handle);
 
         SetClipboardData(format, HANDLE(handle.0))
-            .map_err(|e| format!("set clipboard rtf: {e}"))?;
-
+            .map_err(|e| format!("set clipboard {label}: {e}"))?;
         Ok(())
+    }
+
+    unsafe fn set_rtf_data(rtf: &str) -> Result<(), String> {
+        let format = RegisterClipboardFormatW(w!("Rich Text Format"));
+        if format == 0 {
+            return Err("register RTF format".to_string());
+        }
+        set_bytes_data(
+            format,
+            crate::clipboard::source::decode_rtf_storage(rtf),
+            "rtf",
+        )
+    }
+
+    unsafe fn set_html_data(html: &str) -> Result<(), String> {
+        let format = RegisterClipboardFormatW(w!("HTML Format"));
+        if format == 0 {
+            return Err("register HTML format".to_string());
+        }
+        set_bytes_data(format, build_cf_html(html).into_bytes(), "html")
     }
 
     open_clipboard_with_retry()?;
@@ -430,15 +443,32 @@ fn write_rtf_to_clipboard(text: &str, rtf: &str) -> Result<(), String> {
         EmptyClipboard().map_err(|e| format!("empty clipboard: {e}"))?;
         set_text_data(text)?;
         set_rtf_data(rtf)?;
+        if let Some(html) = html.filter(|value| !value.is_empty()) {
+            set_html_data(html)?;
+        }
     }
 
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn write_rtf_to_clipboard(text: &str, _rtf: &str) -> Result<(), String> {
+fn write_rtf_to_clipboard(text: &str, _rtf: &str, _html: Option<&str>) -> Result<(), String> {
     let mut cb = Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
     cb.set_text(text).map_err(|e| format!("set rtf text: {e}"))
+}
+
+fn build_cf_html(fragment: &str) -> String {
+    const HEADER_TEMPLATE: &str = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n";
+    const HTML_PREFIX: &str = "<html><body><!--StartFragment-->";
+    const HTML_SUFFIX: &str = "<!--EndFragment--></body></html>";
+
+    let start_html = HEADER_TEMPLATE.len();
+    let start_fragment = start_html + HTML_PREFIX.len();
+    let end_fragment = start_fragment + fragment.len();
+    let end_html = end_fragment + HTML_SUFFIX.len();
+    format!(
+        "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:{start_fragment:010}\r\nEndFragment:{end_fragment:010}\r\n{HTML_PREFIX}{fragment}{HTML_SUFFIX}"
+    )
 }
 
 fn simulate_paste() -> Result<(), String> {
@@ -526,6 +556,27 @@ mod tests {
         assert_eq!(
             clipboard_write_hash(&item, true).unwrap(),
             crate::clipboard::capture_hash(b"text", b"C:\\alpha.txt\nD:\\beta.png")
+        );
+    }
+
+    #[test]
+    fn cf_html_offsets_point_to_utf8_fragment_boundaries() {
+        let fragment = "<b>中文</b>";
+        let payload = build_cf_html(fragment);
+        let read_offset = |label: &str| {
+            payload
+                .lines()
+                .find_map(|line| line.strip_prefix(label))
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        };
+
+        let start_fragment = read_offset("StartFragment:");
+        let end_fragment = read_offset("EndFragment:");
+        assert_eq!(
+            &payload.as_bytes()[start_fragment..end_fragment],
+            fragment.as_bytes()
         );
     }
 

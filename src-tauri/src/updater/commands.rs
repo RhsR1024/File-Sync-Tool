@@ -391,10 +391,7 @@ fn restore_pending_update(
     }
 }
 
-fn should_skip_auto_check(
-    config_state: &SharedConfig,
-    updater_state: &SharedUpdaterState,
-) -> bool {
+fn should_skip_auto_check(config_state: &SharedConfig, updater_state: &SharedUpdaterState) -> bool {
     let config = match config_state.lock() {
         Ok(config) => config.clone(),
         Err(_) => return true,
@@ -528,7 +525,8 @@ async fn run_download_task(
     )
     .await;
 
-    let finalize_result = result.and_then(|()| finalize_part_file(&download_part_path, &final_path));
+    let finalize_result =
+        result.and_then(|()| finalize_part_file(&download_part_path, &final_path));
 
     finish_download_task(
         &app_handle,
@@ -654,7 +652,10 @@ fn latest_entry(manifest: &Manifest) -> Option<ManifestVersion> {
         .or_else(|| manifest.versions.first().cloned())
 }
 
-fn resolve_apply_target_path(current_exe: &Path, target_file_name: &str) -> Result<PathBuf, String> {
+fn resolve_apply_target_path(
+    current_exe: &Path,
+    target_file_name: &str,
+) -> Result<PathBuf, String> {
     let parent = current_exe
         .parent()
         .ok_or_else(|| "io: current_exe_has_no_parent".to_string())?;
@@ -805,7 +806,8 @@ mod tests {
 
     #[test]
     fn finalize_part_file_is_noop_when_part_equals_final() {
-        let path = std::env::temp_dir().join(format!("fst-finalize-same-{}.tmp", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("fst-finalize-same-{}.tmp", std::process::id()));
         std::fs::write(&path, b"identical").expect("write");
         finalize_part_file(&path, &path).expect("noop");
         assert!(path.exists());

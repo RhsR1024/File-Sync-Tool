@@ -1,0 +1,5 @@
+# Signing secrets must stay outside this repository. These patterns are a
+# second line of defence; the CLI also refuses an in-repository private key.
+*.key
+*.pem
+staging/

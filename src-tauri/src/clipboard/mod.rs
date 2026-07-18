@@ -5,9 +5,11 @@ pub mod admin;
 pub mod commands;
 pub mod data_transfer;
 pub mod db;
+pub mod explorer_menu;
 pub mod groups;
 pub mod hotkey;
 pub mod icon_store;
+pub mod image_copy;
 pub mod image_store;
 pub mod models;
 pub mod paste;
@@ -44,6 +46,7 @@ pub struct ClipboardState {
     pub pending_self_write: Mutex<Option<(String, std::time::Instant)>>,
     pub watcher_handle: Mutex<Option<watcher::WatcherHandle>>,
     pub hotkey_handle: Mutex<Option<hotkey::HotkeyHandle>>,
+    pub image_copy_hotkey_handle: Mutex<Option<hotkey::HotkeyHandle>>,
 }
 
 impl ClipboardState {
@@ -76,6 +79,7 @@ impl ClipboardState {
             pending_self_write: parking_lot::Mutex::new(None),
             watcher_handle: parking_lot::Mutex::new(None),
             hotkey_handle: parking_lot::Mutex::new(None),
+            image_copy_hotkey_handle: parking_lot::Mutex::new(None),
         });
 
         state.cleanup_orphan_assets();
@@ -88,6 +92,9 @@ impl ClipboardState {
             h.stop();
         }
         if let Some(h) = self.hotkey_handle.lock().take() {
+            h.unregister();
+        }
+        if let Some(h) = self.image_copy_hotkey_handle.lock().take() {
             h.unregister();
         }
     }

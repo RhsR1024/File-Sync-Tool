@@ -615,6 +615,7 @@ onBeforeUnmount(() => {
             @remove="onRemoveItem"
             @menu="onListMenu"
             @hover-leave="preview.onLeave"
+            @end-reached="store.loadMore"
           />
         </div>
 
@@ -659,6 +660,7 @@ onBeforeUnmount(() => {
               @menu="onListMenu"
               @reorder="onReorder"
               @hover-leave="preview.onLeave"
+              @end-reached="store.loadMore"
             />
           </div>
         </div>

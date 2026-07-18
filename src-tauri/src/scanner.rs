@@ -1,13 +1,14 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::config::{
-    AppConfig, LocalScriptBinding, MatchRule, PostCopyExecutionOrder, TaskServerBinding,
+    AppConfig, CopyMode, LocalScriptBinding, MatchRule, PostCopyExecutionOrder, TaskServerBinding,
 };
 use crate::deploy::deploy_to_remote;
 use crate::local_exec::{self, LocalExecContext, LocalExecResult};
 use crate::task_domain::{TaskSourceType, TaskTriggerSource};
 use crate::task_manager::{TaskManager, TaskRunHandle, TaskStartRequest};
 use crate::task_runtime::{ActiveRunExecution, TaskRuntimeRegistry};
+use crate::windows_copy::{copy_files_with_dialog, WindowsCopyError, WindowsCopyRequest};
 use chrono::{Duration, Local, NaiveDateTime, NaiveTime, Timelike};
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -1113,6 +1114,21 @@ async fn perform_copy<R: tauri::Runtime>(
     let stability_check_secs = config.stability_check_secs;
     let recent_file_guard_mins = config.recent_file_guard_mins;
     let copy_buffer_size = (config.copy_buffer_size_kb as usize).max(64) * 1024;
+    let copy_mode = config.copy_mode.clone();
+    if let Some(handle) = task_handle.as_ref() {
+        let mode_label = match &copy_mode {
+            CopyMode::BuiltIn => "Built-in copy engine",
+            CopyMode::WindowsShell => "Windows native copy dialog",
+        };
+        let _ = task_manager.record_task_log(
+            &handle.task_group_id,
+            &handle.run_id,
+            None,
+            None,
+            "info",
+            &format!("Copy mode: {mode_label}"),
+        );
+    }
     let should_cancel_clone = should_cancel.clone();
     let should_skip_clone = should_skip.clone();
     let is_paused_clone = is_paused.clone();
@@ -1544,88 +1560,131 @@ async fn perform_copy<R: tauri::Runtime>(
             "info",
         );
 
-        // Create target directory structure and Copy
-        let mut copied_bytes_total = 0;
-        let mut copied_files_list = Vec::new();
-        let mut copy_failures = Vec::new();
+        // Keep filtering, stability checks and task orchestration identical between modes;
+        // only the final file-transfer engine changes here.
+        let copied_bytes_total = match copy_mode {
+            CopyMode::BuiltIn => {
+                let mut copied_bytes_total = 0;
+                let mut copy_failures = Vec::new();
 
-        for (src, _size, overwrite_this_file) in filtered_files {
-            // Check skip before starting file
-            if should_skip_clone.load(Ordering::SeqCst) {
-                return Err(fs_extra::error::Error::new(
-                    fs_extra::error::ErrorKind::Interrupted,
-                    "Skipped by user",
-                ));
-            }
-
-            // Check cancel before starting file
-            if should_cancel_clone.load(Ordering::SeqCst) {
-                return Err(fs_extra::error::Error::new(
-                    fs_extra::error::ErrorKind::Interrupted,
-                    "Cancelled by user",
-                ));
-            }
-
-            // Calculate relative path
-            let rel_path = src.strip_prefix(&source_path_clone).unwrap_or(&src);
-            let dst = target_full_path_clone.join(rel_path);
-
-            // Create parent dir
-            if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-
-            let file_name_display = src
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-
-            // Copy with chunking
-            let copy_res = copy_file_with_overwrite_mode(
-                &src,
-                &dst,
-                overwrite_this_file,
-                &should_cancel_clone,
-                &should_skip_clone,
-                &is_paused_clone,
-                copy_buffer_size,
-                &mut |delta| {
-                    copied_bytes_total += delta;
-                    update_stats(copied_bytes_total, total_filtered_bytes);
-                },
-            );
-
-            match copy_res {
-                Ok(_) => {
-                    copied_files_list.push(file_name_display);
-                }
-                Err(e) => {
-                    if e.contains("Skipped") {
+                for (src, _size, overwrite_this_file) in filtered_files {
+                    if should_skip_clone.load(Ordering::SeqCst) {
                         return Err(fs_extra::error::Error::new(
                             fs_extra::error::ErrorKind::Interrupted,
                             "Skipped by user",
                         ));
-                    } else if e.contains("Cancelled") {
+                    }
+                    if should_cancel_clone.load(Ordering::SeqCst) {
                         return Err(fs_extra::error::Error::new(
                             fs_extra::error::ErrorKind::Interrupted,
                             "Cancelled by user",
                         ));
-                    } else {
-                        let failure = format!("Failed to copy {}: {}", file_name_display, e);
+                    }
+
+                    let rel_path = src.strip_prefix(&source_path_clone).unwrap_or(&src);
+                    let dst = target_full_path_clone.join(rel_path);
+                    if let Some(parent) = dst.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+
+                    let file_name_display = src
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let copy_res = copy_file_with_overwrite_mode(
+                        &src,
+                        &dst,
+                        overwrite_this_file,
+                        &should_cancel_clone,
+                        &should_skip_clone,
+                        &is_paused_clone,
+                        copy_buffer_size,
+                        &mut |delta| {
+                            copied_bytes_total += delta;
+                            update_stats(copied_bytes_total, total_filtered_bytes);
+                        },
+                    );
+
+                    if let Err(error) = copy_res {
+                        if error.contains("Skipped") {
+                            return Err(fs_extra::error::Error::new(
+                                fs_extra::error::ErrorKind::Interrupted,
+                                "Skipped by user",
+                            ));
+                        }
+                        if error.contains("Cancelled") {
+                            return Err(fs_extra::error::Error::new(
+                                fs_extra::error::ErrorKind::Interrupted,
+                                "Cancelled by user",
+                            ));
+                        }
+                        let failure = format!("Failed to copy {}: {}", file_name_display, error);
                         emit_log(&handle, failure.clone(), "error");
                         copy_failures.push(failure);
                     }
                 }
-            }
-        }
 
-        if !copy_failures.is_empty() {
-            return Err(fs_extra::error::Error::new(
-                fs_extra::error::ErrorKind::Other,
-                &copy_failures.join("; "),
-            ));
-        }
+                if !copy_failures.is_empty() {
+                    return Err(fs_extra::error::Error::new(
+                        fs_extra::error::ErrorKind::Other,
+                        &copy_failures.join("; "),
+                    ));
+                }
+                copied_bytes_total
+            }
+            CopyMode::WindowsShell => {
+                if should_skip_clone.load(Ordering::SeqCst) {
+                    return Err(fs_extra::error::Error::new(
+                        fs_extra::error::ErrorKind::Interrupted,
+                        "Skipped by user",
+                    ));
+                }
+                if should_cancel_clone.load(Ordering::SeqCst) {
+                    return Err(fs_extra::error::Error::new(
+                        fs_extra::error::ErrorKind::Interrupted,
+                        "Cancelled by user",
+                    ));
+                }
+
+                emit_log(
+                    &handle,
+                    "Using the Windows native copy dialog. Pause or cancel from the Windows copy window."
+                        .to_string(),
+                    "info",
+                );
+                let requests = filtered_files
+                    .into_iter()
+                    .map(|(source, expected_size, _overwrite)| {
+                        let relative = source.strip_prefix(&source_path_clone).unwrap_or(&source);
+                        WindowsCopyRequest {
+                            target: target_full_path_clone.join(relative),
+                            source,
+                            expected_size,
+                        }
+                    })
+                    .collect();
+
+                match copy_files_with_dialog(requests) {
+                    Ok(copied_bytes) => {
+                        update_stats(copied_bytes, total_filtered_bytes);
+                        copied_bytes
+                    }
+                    Err(WindowsCopyError::Cancelled) => {
+                        return Err(fs_extra::error::Error::new(
+                            fs_extra::error::ErrorKind::Interrupted,
+                            "Cancelled in Windows copy dialog",
+                        ));
+                    }
+                    Err(WindowsCopyError::Failed(message)) => {
+                        return Err(fs_extra::error::Error::new(
+                            fs_extra::error::ErrorKind::Other,
+                            &message,
+                        ));
+                    }
+                }
+            }
+        };
 
         // Post-copy orchestration: local scripts + remote deploy
         // Re-read the latest config so that enabling deploy after scheduler
@@ -2134,10 +2193,16 @@ async fn temporary_copy_file<R: tauri::Runtime>(
             .map(|metadata| metadata.len())
             .unwrap_or(0);
         if target_size != file_size {
+            let action = if config.copy_mode == CopyMode::WindowsShell {
+                "will re-copy it with Windows"
+            } else {
+                "will resume copy"
+            };
             emit_log(
                 app_handle,
                 format!(
-                    "Detected incomplete local file, will resume copy: {} (local {} bytes, remote {} bytes)",
+                    "Detected incomplete local file, {}: {} (local {} bytes, remote {} bytes)",
+                    action,
                     target_file.display(),
                     target_size,
                     file_size
@@ -2250,6 +2315,21 @@ async fn temporary_copy_file<R: tauri::Runtime>(
     let target_file_display = target_file.to_string_lossy().to_string();
     let source_display = source_path.to_string_lossy().to_string();
     let copy_buffer_size = (config.copy_buffer_size_kb as usize).max(64) * 1024;
+    let copy_mode = config.copy_mode.clone();
+    if let Some(handle) = task_handle.as_ref() {
+        let mode_label = match &copy_mode {
+            CopyMode::BuiltIn => "Built-in copy engine",
+            CopyMode::WindowsShell => "Windows native copy dialog",
+        };
+        let _ = task_manager.record_task_log(
+            &handle.task_group_id,
+            &handle.run_id,
+            None,
+            None,
+            "info",
+            &format!("Copy mode: {mode_label}"),
+        );
+    }
 
     let copy_result = tauri::async_runtime::spawn_blocking(move || {
         let start_time = Instant::now();
@@ -2287,16 +2367,46 @@ async fn temporary_copy_file<R: tauri::Runtime>(
             }
         };
 
-        copy_file_with_overwrite_mode(
-            &source_clone,
-            &target_file_clone,
-            overwrite_existing,
-            &should_cancel,
-            &should_skip,
-            &is_paused,
-            copy_buffer_size,
-            &mut on_progress,
-        )
+        match copy_mode {
+            CopyMode::BuiltIn => copy_file_with_overwrite_mode(
+                &source_clone,
+                &target_file_clone,
+                overwrite_existing,
+                &should_cancel,
+                &should_skip,
+                &is_paused,
+                copy_buffer_size,
+                &mut on_progress,
+            ),
+            CopyMode::WindowsShell => {
+                if should_cancel.load(Ordering::SeqCst) {
+                    return Err("Cancelled by user".to_string());
+                }
+                if should_skip.load(Ordering::SeqCst) {
+                    return Err("Skipped by user".to_string());
+                }
+                emit_log(
+                    &app_handle_clone,
+                    "Using the Windows native copy dialog. Pause or cancel from the Windows copy window."
+                        .to_string(),
+                    "info",
+                );
+                match copy_files_with_dialog(vec![WindowsCopyRequest {
+                    source: source_clone,
+                    target: target_file_clone,
+                    expected_size: file_size,
+                }]) {
+                    Ok(bytes_copied) => {
+                        on_progress(bytes_copied);
+                        Ok(bytes_copied)
+                    }
+                    Err(WindowsCopyError::Cancelled) => {
+                        Err("Cancelled in Windows copy dialog".to_string())
+                    }
+                    Err(WindowsCopyError::Failed(message)) => Err(message),
+                }
+            }
+        }
     })
     .await;
 

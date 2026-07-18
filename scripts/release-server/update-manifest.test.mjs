@@ -78,9 +78,11 @@ function todayDateString() {
 
 function runUpdateManifestScript(cwd) {
   return new Promise((resolve) => {
+    const env = { ...process.env };
+    delete env.CARGO_TARGET_DIR;
     const child = spawn(process.execPath, [scriptPath], {
       cwd,
-      env: process.env,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onActivated } from 'vue';
-import { RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, Gauge, ListChecks, Trash2 } from 'lucide-vue-next';
+import { RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, Gauge, ListChecks, Play, Square, Trash2 } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
@@ -19,7 +19,7 @@ import { useI18n } from 'vue-i18n';
 import { appStore, addLog } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { buildTaskRows } from '@/lib/taskStatusView';
-import { executeScan, startScheduler } from '@/lib/scheduler';
+import { executeScan, startScheduler, stopScheduler } from '@/lib/scheduler';
 import { pushToast, type ToastTone } from '@/composables/useToast';
 
 defineOptions({
@@ -237,6 +237,14 @@ async function handleScanClick() {
   await executeScan();
 }
 
+function toggleScheduler() {
+  if (appStore.isRunning) {
+    stopScheduler();
+  } else {
+    startScheduler();
+  }
+}
+
 async function loadConfig() {
   try {
     config.value = await getConfig();
@@ -351,17 +359,34 @@ function handleManualCopyClose() {
           </div>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <button
-            @click="handleScanClick"
-            class="flex min-h-11 items-center gap-2 rounded-lg border border-blue-200 bg-white px-3.5 py-2 text-sm font-semibold text-blue-700 shadow-sm transition-colors hover:border-blue-300 hover:bg-blue-50 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:hover:border-blue-200 disabled:hover:bg-white"
-            :disabled="appStore.isRunning"
-            :class="{ 'opacity-50 cursor-not-allowed': appStore.isRunning }"
-            :aria-label="t('console.scanNow')"
-            :title="t('console.scanNow')"
-          >
-            <RefreshCw class="h-4 w-4 motion-reduce:animate-none" :class="{ 'animate-spin': appStore.isRunning }" aria-hidden="true" />
-            {{ t('console.scanNow') }}
-          </button>
+          <div class="flex flex-wrap items-center gap-2" role="group" :aria-label="t('sync.title')">
+            <button
+              type="button"
+              class="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border px-4 py-2 text-sm font-bold shadow-sm transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+              :class="appStore.isRunning
+                ? 'border-red-200 bg-red-50 text-red-600 hover:bg-red-100 focus-visible:ring-red-500/50'
+                : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700 focus-visible:ring-emerald-500/50'"
+              :aria-label="appStore.isRunning ? t('console.stop') : t('console.start')"
+              :title="appStore.isRunning ? t('console.stop') : t('console.start')"
+              @click="toggleScheduler"
+            >
+              <component :is="appStore.isRunning ? Square : Play" class="h-4 w-4 fill-current" aria-hidden="true" />
+              {{ appStore.isRunning ? t('console.stop') : t('console.start') }}
+            </button>
+
+            <button
+              type="button"
+              @click="handleScanClick"
+              class="flex min-h-11 items-center gap-2 rounded-lg border border-blue-200 bg-white px-3.5 py-2 text-sm font-semibold text-blue-700 shadow-sm transition-colors hover:border-blue-300 hover:bg-blue-50 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:hover:border-blue-200 disabled:hover:bg-white"
+              :disabled="appStore.isRunning"
+              :class="{ 'cursor-not-allowed opacity-50': appStore.isRunning }"
+              :aria-label="t('console.scanNow')"
+              :title="t('console.scanNow')"
+            >
+              <RefreshCw class="h-4 w-4 motion-reduce:animate-none" :class="{ 'animate-spin': appStore.isRunning }" aria-hidden="true" />
+              {{ t('console.scanNow') }}
+            </button>
+          </div>
 
           <button
             ref="manualCopyTriggerRef"

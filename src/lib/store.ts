@@ -27,6 +27,7 @@ export interface ProgressState {
 export interface ToolRuntimeState {
     screenShare: boolean;
     fileShare: boolean;
+    deviceSimulator: boolean;
 }
 
 export const appStore = reactive({
@@ -41,6 +42,7 @@ export const appStore = reactive({
     toolRuntime: {
         screenShare: false,
         fileShare: false,
+        deviceSimulator: false,
     } as ToolRuntimeState,
 });
 

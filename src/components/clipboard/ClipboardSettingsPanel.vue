@@ -95,6 +95,11 @@ function buildNextSettings(patch: DeepPartial<ClipboardSettings>): ClipboardSett
   return normalizeClipboardSettings({
     enabled: patch.enabled ?? model.enabled,
     hotkey: patch.hotkey ?? model.hotkey,
+    image_copy_hotkey_enabled:
+      patch.image_copy_hotkey_enabled ?? model.image_copy_hotkey_enabled,
+    image_copy_hotkey: patch.image_copy_hotkey ?? model.image_copy_hotkey,
+    explorer_context_menu_enabled:
+      patch.explorer_context_menu_enabled ?? model.explorer_context_menu_enabled,
     max_items: patch.max_items ?? model.max_items,
     retain_days: patch.retain_days ?? model.retain_days,
     max_item_bytes: patch.max_item_bytes ?? model.max_item_bytes,

@@ -9,6 +9,9 @@ import type {
 export const clipboardSettingsContract: ClipboardSettings = {
   enabled: true,
   hotkey: 'Alt+C',
+  image_copy_hotkey_enabled: false,
+  image_copy_hotkey: 'Ctrl+Alt+C',
+  explorer_context_menu_enabled: false,
   max_items: 1000,
   retain_days: 30,
   max_item_bytes: 10 * 1024 * 1024,

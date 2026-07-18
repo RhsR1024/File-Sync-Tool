@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-18T12:00:00+08:00",
+  "engine_api": 1,
+  "packs": [
+    {
+      "id": "ipc-custom",
+      "version": "1.0.0",
+      "kind": "device-profile",
+      "dependencies": [],
+      "min_app_version": "1.1.2"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "ipc-custom",
+      "device_kind": "ipc",
+      "required_packs": [
+        "ipc-custom@1.0.0"
+      ]
+    }
+  ]
+}

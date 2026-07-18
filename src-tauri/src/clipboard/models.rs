@@ -197,6 +197,9 @@ impl Default for ClipboardAppFilterSettings {
 pub struct ClipboardSettings {
     pub enabled: bool,
     pub hotkey: String,
+    pub image_copy_hotkey_enabled: bool,
+    pub image_copy_hotkey: String,
+    pub explorer_context_menu_enabled: bool,
     pub max_items: u32,
     pub retain_days: u32,
     pub max_item_bytes: u64,
@@ -227,6 +230,9 @@ impl Default for ClipboardSettings {
         Self {
             enabled: true,
             hotkey: "Alt+C".to_string(),
+            image_copy_hotkey_enabled: false,
+            image_copy_hotkey: "Ctrl+Alt+C".to_string(),
+            explorer_context_menu_enabled: false,
             max_items: 1000,
             retain_days: 30,
             max_item_bytes: 10 * 1024 * 1024,

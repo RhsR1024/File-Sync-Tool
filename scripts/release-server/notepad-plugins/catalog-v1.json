@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "generated_at": "",
+  "plugins": [
+    {
+      "id": "enhance-any-lexer",
+      "name": "EnhanceAnyLexer",
+      "publisher": "Ekopalypse",
+      "description_zh": "为任意 Notepad++ Lexer 增加基于正则表达式的前景色高亮。File Sync Tool 提供中文可视化规则配置。",
+      "description_en": "Adds regular-expression foreground highlighting to any Notepad++ lexer, with visual configuration provided by File Sync Tool.",
+      "homepage": "https://github.com/Ekopalypse/EnhanceAnyLexer",
+      "license": "MIT",
+      "adapter": "enhance-any-lexer",
+      "releases": []
+    }
+  ]
+}

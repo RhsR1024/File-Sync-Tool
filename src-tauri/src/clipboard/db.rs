@@ -9,7 +9,7 @@ use crate::clipboard::models::{
     ClipboardListResult, ContentKind,
 };
 
-const CLIPBOARD_SCHEMA_VERSION: i64 = 4;
+const CLIPBOARD_SCHEMA_VERSION: i64 = 5;
 const WRITE_CACHE_SIZE_KIB: i64 = -65_536;
 const READ_CACHE_SIZE_KIB: i64 = -32_768;
 const MMAP_SIZE_BYTES: i64 = 268_435_456;
@@ -74,6 +74,13 @@ pub fn migrate(conn: &Connection) -> SqlResult<()> {
             [],
         )?;
     }
+    if !table_has_column(conn, "clipboard_items", "semantic_hash")? {
+        conn.execute(
+            "ALTER TABLE clipboard_items ADD COLUMN semantic_hash TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    backfill_semantic_hashes(conn)?;
     if version < CLIPBOARD_SCHEMA_VERSION {
         set_schema_version(conn, CLIPBOARD_SCHEMA_VERSION)?;
     }
@@ -114,6 +121,8 @@ fn ensure_clipboard_indexes(conn: &Connection) -> SqlResult<()> {
         CREATE INDEX IF NOT EXISTS idx_cb_group      ON clipboard_items(group_id) WHERE group_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_cb_hash_default ON clipboard_items(hash) WHERE group_id IS NULL;
         CREATE INDEX IF NOT EXISTS idx_cb_hash_group ON clipboard_items(group_id, hash) WHERE group_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_cb_semantic_default ON clipboard_items(semantic_hash) WHERE group_id IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_cb_semantic_group ON clipboard_items(group_id, semantic_hash) WHERE group_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_cb_created_at ON clipboard_items(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_cb_fav_sort   ON clipboard_items(favorite_sort_index) WHERE is_favorite = 1;
         "#,
@@ -206,6 +215,7 @@ fn create_clipboard_items_table(conn: &Connection) -> SqlResult<()> {
             byte_size           INTEGER NOT NULL DEFAULT 0,
             char_count          INTEGER NOT NULL DEFAULT 0,
             hash                TEXT NOT NULL,
+            semantic_hash       TEXT NOT NULL DEFAULT '',
             source_app          TEXT,
             source_app_icon     TEXT,
             from_self           INTEGER NOT NULL DEFAULT 0,
@@ -238,6 +248,7 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
     let legacy_has_from_self = table_has_column(conn, "clipboard_items", "from_self")?;
     let legacy_has_group_id = table_has_column(conn, "clipboard_items", "group_id")?;
     let legacy_has_is_pinned = table_has_column(conn, "clipboard_items", "is_pinned")?;
+    let legacy_has_semantic_hash = table_has_column(conn, "clipboard_items", "semantic_hash")?;
 
     let rtf_select = if legacy_has_rtf {
         "rtf_content"
@@ -269,6 +280,11 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
     } else {
         "COALESCE(LENGTH(COALESCE(content_full, content_preview)), 0)"
     };
+    let semantic_hash_select = if legacy_has_semantic_hash {
+        "COALESCE(semantic_hash, '')"
+    } else {
+        "''"
+    };
 
     let migrate_sql = format!(
         r#"
@@ -288,6 +304,7 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
             byte_size           INTEGER NOT NULL DEFAULT 0,
             char_count          INTEGER NOT NULL DEFAULT 0,
             hash                TEXT NOT NULL,
+            semantic_hash       TEXT NOT NULL DEFAULT '',
             source_app          TEXT,
             source_app_icon     TEXT,
             from_self           INTEGER NOT NULL DEFAULT 0,
@@ -300,7 +317,7 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
         );
         INSERT INTO clipboard_items (
             id, kind, content_preview, content_full, rtf_content, html, image_path,
-            image_width, image_height, file_paths_json, byte_size, char_count, hash,
+            image_width, image_height, file_paths_json, byte_size, char_count, hash, semantic_hash,
             source_app, source_app_icon, from_self, group_id, is_favorite, is_pinned,
             favorite_sort_index, created_at, updated_at
         )
@@ -308,7 +325,7 @@ fn migrate_clipboard_items_v2(conn: &Connection) -> SqlResult<()> {
             id, kind, content_preview, content_full, {rtf_select}, html, image_path,
             image_width, image_height, file_paths_json, byte_size,
             {char_count_select},
-            hash, source_app, {source_app_icon_select}, {from_self_select}, {group_id_select},
+            hash, {semantic_hash_select}, source_app, {source_app_icon_select}, {from_self_select}, {group_id_select},
             is_favorite, {is_pinned_select},
             favorite_sort_index, created_at, updated_at
         FROM clipboard_items_legacy;
@@ -338,6 +355,85 @@ pub struct NewItem {
     pub from_self: bool,
 }
 
+fn normalize_semantic_text(value: &str) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn semantic_hash(kind: &ContentKind, text: Option<&str>, strict_hash: &str) -> String {
+    if !matches!(
+        kind,
+        ContentKind::Text | ContentKind::Html | ContentKind::Rtf
+    ) {
+        return strict_hash.to_string();
+    }
+    let normalized = text.map(normalize_semantic_text).unwrap_or_default();
+    if normalized.is_empty() {
+        return strict_hash.to_string();
+    }
+    compute_hash(kind, normalized.as_bytes())
+}
+
+pub(crate) fn semantic_hash_for_item(item: &NewItem) -> String {
+    semantic_hash_for_content(
+        &item.kind,
+        item.content_full.as_deref(),
+        &item.content_preview,
+        &item.hash,
+    )
+}
+
+pub(crate) fn semantic_hash_for_content(
+    kind: &ContentKind,
+    content_full: Option<&str>,
+    content_preview: &str,
+    strict_hash: &str,
+) -> String {
+    semantic_hash(kind, content_full.or(Some(content_preview)), strict_hash)
+}
+
+fn backfill_semantic_hashes(conn: &Connection) -> SqlResult<()> {
+    let rows = {
+        let mut statement = conn.prepare(
+            "SELECT id, kind, content_full, content_preview, hash
+             FROM clipboard_items
+             WHERE semantic_hash = ''",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                let kind: String = row.get(1)?;
+                let full: Option<String> = row.get(2)?;
+                let preview: String = row.get(3)?;
+                let strict: String = row.get(4)?;
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    semantic_hash(
+                        &ContentKind::from_sql(&kind),
+                        full.as_deref().or(Some(preview.as_str())),
+                        &strict,
+                    ),
+                ))
+            })?
+            .collect::<SqlResult<Vec<_>>>()?;
+        rows
+    };
+
+    for (id, hash) in rows {
+        conn.execute(
+            "UPDATE clipboard_items SET semantic_hash = ?1 WHERE id = ?2",
+            params![hash, id],
+        )?;
+    }
+    Ok(())
+}
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -359,12 +455,13 @@ fn insert_item_with_hash(
         .or(Some(&item.content_preview))
         .map(|s| s.chars().count() as i64)
         .unwrap_or(0);
+    let semantic_hash = semantic_hash_for_item(item);
     conn.execute(
         "INSERT INTO clipboard_items
           (kind, content_preview, content_full, rtf_content, html, image_path, image_width, image_height,
-           file_paths_json, byte_size, char_count, hash, source_app, source_app_icon, from_self,
+           file_paths_json, byte_size, char_count, hash, semantic_hash, source_app, source_app_icon, from_self,
            group_id, is_favorite, is_pinned, favorite_sort_index, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,0,NULL,?17,?17)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,0,0,NULL,?18,?18)",
         params![
             item.kind.as_sql(),
             item.content_preview,
@@ -378,6 +475,7 @@ fn insert_item_with_hash(
             item.byte_size,
             char_count,
             stored_hash,
+            semantic_hash,
             item.source_app,
             item.source_app_icon,
             item.from_self,
@@ -406,12 +504,34 @@ pub fn item_exists_by_hash(conn: &Connection, hash: &str) -> SqlResult<bool> {
     Ok(rows.next()?.is_some())
 }
 
+pub fn item_exists_for_dedup(
+    conn: &Connection,
+    item: &NewItem,
+    group_id: Option<i64>,
+) -> SqlResult<bool> {
+    let semantic_hash = semantic_hash_for_item(item);
+    let count: i64 = match group_id {
+        Some(group_id) => conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_items WHERE semantic_hash = ?1 AND group_id = ?2",
+            params![semantic_hash, group_id],
+            |row| row.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_items WHERE semantic_hash = ?1 AND group_id IS NULL",
+            params![semantic_hash],
+            |row| row.get(0),
+        )?,
+    };
+    Ok(count > 0)
+}
+
 fn refresh_duplicate_item_by_hash(
     conn: &Connection,
     item: &NewItem,
     touch_updated_at: bool,
     group_id: Option<i64>,
 ) -> SqlResult<bool> {
+    let semantic_hash = semantic_hash_for_item(item);
     let (group_sql, group_params): (&str, Vec<&dyn ToSql>) = match group_id {
         Some(ref id) => ("group_id = ?", vec![id]),
         None => ("group_id IS NULL", vec![]),
@@ -421,14 +541,19 @@ fn refresh_duplicate_item_by_hash(
         let sql = format!(
             "UPDATE clipboard_items
              SET updated_at = ?1, source_app = ?2, source_app_icon = ?3, from_self = ?4
-             WHERE hash = ?5 AND {group_sql}"
+             WHERE id = (
+                 SELECT id FROM clipboard_items
+                 WHERE semantic_hash = ?5 AND {group_sql}
+                 ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+                 LIMIT 1
+             )"
         );
         let mut params: Vec<&dyn ToSql> = vec![
             &now,
             &item.source_app,
             &item.source_app_icon,
             &item.from_self,
-            &item.hash,
+            &semantic_hash,
         ];
         params.extend(group_params);
         conn.execute(&sql, params_from_iter(params))?
@@ -436,13 +561,18 @@ fn refresh_duplicate_item_by_hash(
         let sql = format!(
             "UPDATE clipboard_items
              SET source_app = ?1, source_app_icon = ?2, from_self = ?3
-             WHERE hash = ?4 AND {group_sql}"
+             WHERE id = (
+                 SELECT id FROM clipboard_items
+                 WHERE semantic_hash = ?4 AND {group_sql}
+                 ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+                 LIMIT 1
+             )"
         );
         let mut params: Vec<&dyn ToSql> = vec![
             &item.source_app,
             &item.source_app_icon,
             &item.from_self,
-            &item.hash,
+            &semantic_hash,
         ];
         params.extend(group_params);
         conn.execute(&sql, params_from_iter(params))?
@@ -724,7 +854,7 @@ pub fn get_item(conn: &Connection, id: i64) -> SqlResult<ClipboardItem> {
     )
 }
 
-fn get_item_by_hash(
+pub(crate) fn get_item_by_hash(
     conn: &Connection,
     hash: &str,
     group_id: Option<i64>,
@@ -752,6 +882,40 @@ fn get_item_by_hash(
              ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
              LIMIT 1",
             params![hash],
+            row_to_item,
+        ),
+    }
+}
+
+pub(crate) fn get_item_for_dedup(
+    conn: &Connection,
+    item: &NewItem,
+    group_id: Option<i64>,
+) -> SqlResult<ClipboardItem> {
+    let semantic_hash = semantic_hash_for_item(item);
+    match group_id {
+        Some(group_id) => conn.query_row(
+            "SELECT id, kind, content_preview, content_full, rtf_content, html, image_path, image_width,
+                    image_height, file_paths_json, byte_size, char_count, hash, source_app,
+                    source_app_icon, from_self, group_id, is_favorite, is_pinned, favorite_sort_index,
+                    created_at, updated_at
+             FROM clipboard_items
+             WHERE semantic_hash = ?1 AND group_id = ?2
+             ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+             LIMIT 1",
+            params![semantic_hash, group_id],
+            row_to_item,
+        ),
+        None => conn.query_row(
+            "SELECT id, kind, content_preview, content_full, rtf_content, html, image_path, image_width,
+                    image_height, file_paths_json, byte_size, char_count, hash, source_app,
+                    source_app_icon, from_self, group_id, is_favorite, is_pinned, favorite_sort_index,
+                    created_at, updated_at
+             FROM clipboard_items
+             WHERE semantic_hash = ?1 AND group_id IS NULL
+             ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+             LIMIT 1",
+            params![semantic_hash],
             row_to_item,
         ),
     }
@@ -788,14 +952,14 @@ pub fn upsert_item_with_dedup_in_group(
     match strategy {
         ClipboardDedupStrategy::MoveToTop => {
             if refresh_duplicate_item_by_hash(conn, item, true, group_id)? {
-                return get_item_by_hash(conn, &item.hash, group_id);
+                return get_item_for_dedup(conn, item, group_id);
             }
             let id = insert_item_in_group(conn, item, group_id)?;
             get_item(conn, id)
         }
         ClipboardDedupStrategy::Ignore => {
             if refresh_duplicate_item_by_hash(conn, item, false, group_id)? {
-                return get_item_by_hash(conn, &item.hash, group_id);
+                return get_item_for_dedup(conn, item, group_id);
             }
             let id = insert_item_in_group(conn, item, group_id)?;
             get_item(conn, id)
@@ -827,7 +991,11 @@ pub fn clear_group(
     keep_favorites: bool,
     group_id: Option<i64>,
 ) -> SqlResult<u64> {
-    let favorite_clause = if keep_favorites { "is_favorite=0 AND " } else { "" };
+    let favorite_clause = if keep_favorites {
+        "is_favorite=0 AND "
+    } else {
+        ""
+    };
     let affected = match group_id {
         Some(group_id) => conn.execute(
             &format!("DELETE FROM clipboard_items WHERE {favorite_clause}group_id=?1"),
@@ -878,6 +1046,8 @@ pub fn update_text_content(conn: &Connection, id: i64, new_text: &str) -> SqlRes
     let byte_size = new_text.len() as i64;
     let char_count = new_text.chars().count() as i64;
     let hash = compute_hash(&ContentKind::Text, new_text.as_bytes());
+    let semantic_hash =
+        semantic_hash_for_content(&ContentKind::Text, Some(new_text), &preview, &hash);
     let affected = conn.execute(
         "UPDATE clipboard_items
          SET kind = 'text',
@@ -888,9 +1058,19 @@ pub fn update_text_content(conn: &Connection, id: i64, new_text: &str) -> SqlRes
              byte_size = ?3,
              char_count = ?4,
              hash = ?5,
-             updated_at = ?6
-         WHERE id = ?7",
-        params![preview, new_text, byte_size, char_count, hash, now_ms(), id],
+             semantic_hash = ?6,
+             updated_at = ?7
+         WHERE id = ?8",
+        params![
+            preview,
+            new_text,
+            byte_size,
+            char_count,
+            hash,
+            semantic_hash,
+            now_ms(),
+            id
+        ],
     )?;
     if affected == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -1065,7 +1245,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(v, "4");
+        assert_eq!(v, "5");
 
         let group_tables: i64 = conn
             .query_row(
@@ -1126,7 +1306,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
 
         let has_rtf_column: i64 = conn
             .query_row(
@@ -1350,7 +1530,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 10);
+        assert_eq!(count, 12);
     }
 
     #[test]
@@ -1386,6 +1566,25 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(first.id, second.id);
         assert!(second.updated_at >= first.updated_at);
+    }
+
+    #[test]
+    fn semantic_dedup_normalizes_line_endings_and_trailing_space() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = sample_text_item("strict-a", "alpha  \r\nbeta");
+        let second = sample_text_item("strict-b", "alpha\nbeta");
+
+        let first =
+            upsert_item_with_dedup(&conn, &first, ClipboardDedupStrategy::MoveToTop).unwrap();
+        let second =
+            upsert_item_with_dedup(&conn, &second, ClipboardDedupStrategy::MoveToTop).unwrap();
+
+        assert_eq!(first.id, second.id);
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clipboard_items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
     }
 
     #[test]
@@ -1589,7 +1788,10 @@ mod tests {
 
         let default_id = insert_item(&conn, &sample_text_item("shared-hash", "default")).unwrap();
 
-        assert_eq!(get_item(&conn, grouped_id).unwrap().group_id, Some(group.id));
+        assert_eq!(
+            get_item(&conn, grouped_id).unwrap().group_id,
+            Some(group.id)
+        );
         assert_eq!(get_item(&conn, default_id).unwrap().group_id, None);
     }
 

@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n';
 
 import type { DeepPartial, ClipboardSettings } from '@/lib/clipboardTypes';
 import { clipboardApi, type AdminTaskStatus } from '@/lib/tauri';
+import ClipboardHotkeyInput from '@/components/clipboard/ClipboardHotkeyInput.vue';
 
 const props = defineProps<{
   settings: ClipboardSettings;
@@ -19,6 +20,10 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const taskLoading = ref(false);
 const taskStatus = ref<AdminTaskStatus | null>(null);
+const imageCopyHotkey = computed({
+  get: () => props.settings.image_copy_hotkey,
+  set: (value: string) => patch({ image_copy_hotkey: value }),
+});
 
 const taskStatusLabelKey = computed(() => {
   if (taskLoading.value && !taskStatus.value) {
@@ -144,6 +149,67 @@ watch(
             type="checkbox"
             :checked="props.settings.show_startup_notification"
             @change="patch({ show_startup_notification: ($event.target as HTMLInputElement).checked })"
+          >
+        </label>
+      </div>
+    </div>
+
+    <div class="rounded-2xl border border-sky-200 bg-sky-50/50 p-4">
+      <div>
+        <h4 class="text-sm font-semibold text-slate-900">
+          {{ t('clipboard.settings.imageCopy.title') }}
+        </h4>
+        <p class="mt-1 text-xs leading-5 text-slate-500">
+          {{ t('clipboard.settings.imageCopy.description') }}
+        </p>
+      </div>
+
+      <div class="mt-4 grid gap-3 lg:grid-cols-2">
+        <div class="rounded-xl border border-sky-100 bg-white p-3 shadow-sm">
+          <label class="flex min-h-11 items-start justify-between gap-4">
+            <span>
+              <span class="block text-sm font-medium text-slate-800">
+                {{ t('clipboard.settings.imageCopy.hotkeyLabel') }}
+              </span>
+              <span class="mt-1 block text-xs leading-5 text-slate-500">
+                {{ t('clipboard.settings.imageCopy.hotkeyHint') }}
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              :checked="props.settings.image_copy_hotkey_enabled"
+              @change="patch({ image_copy_hotkey_enabled: ($event.target as HTMLInputElement).checked })"
+            >
+          </label>
+
+          <label class="mt-3 block">
+            <span class="mb-1.5 block text-xs font-medium text-slate-600">
+              {{ t('clipboard.settings.imageCopy.hotkeyInput') }}
+            </span>
+            <ClipboardHotkeyInput
+              v-model="imageCopyHotkey"
+              :disabled="!props.settings.image_copy_hotkey_enabled"
+              :aria-label="t('clipboard.settings.imageCopy.hotkeyLabel')"
+              :allow-clear="false"
+              class="min-h-11 w-full justify-between"
+              :class="!props.settings.image_copy_hotkey_enabled ? 'opacity-50' : ''"
+            />
+          </label>
+        </div>
+
+        <label class="flex min-h-11 items-start justify-between gap-4 rounded-xl border border-sky-100 bg-white p-3 shadow-sm">
+          <span>
+            <span class="block text-sm font-medium text-slate-800">
+              {{ t('clipboard.settings.imageCopy.contextMenuLabel') }}
+            </span>
+            <span class="mt-1 block text-xs leading-5 text-slate-500">
+              {{ t('clipboard.settings.imageCopy.contextMenuHint') }}
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            :checked="props.settings.explorer_context_menu_enabled"
+            @change="patch({ explorer_context_menu_enabled: ($event.target as HTMLInputElement).checked })"
           >
         </label>
       </div>

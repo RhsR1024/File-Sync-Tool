@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 
 import {
   REMOTE_PACKAGE_PATCH_DEFAULT_SSH_PORT,
+  REMOTE_PACKAGE_PATCH_DEFAULT_PASSWORD,
   buildRemotePackagePatchEnableSshRequest,
   composeInternalTargetPath,
   defaultPatchedPath,
@@ -11,6 +12,7 @@ import {
   resolveRemotePackagePatchSshPort,
   shouldAttemptRemotePackagePatchAutoEnable,
   targetCandidates,
+  updateRemotePackagePatchHostHistory,
   validateInternalTargetPath,
   visibleStages,
 } from './remotePackagePatch.ts';
@@ -52,6 +54,12 @@ const inventory = {
 
 assert.equal(replacementName(String.raw`C:\libs\libdemo.so`), 'libdemo.so');
 assert.equal(REMOTE_PACKAGE_PATCH_DEFAULT_SSH_PORT, 23333);
+assert.equal(REMOTE_PACKAGE_PATCH_DEFAULT_PASSWORD, 'admin_123');
+assert.deepEqual(
+  updateRemotePackagePatchHostHistory(['10.0.0.2', ' 10.0.0.1 ', '10.0.0.2'], '10.0.0.1'),
+  ['10.0.0.1', '10.0.0.2'],
+);
+assert.deepEqual(updateRemotePackagePatchHostHistory('invalid', 'server.local'), ['server.local']);
 assert.equal(resolveRemotePackagePatchSshPort(undefined), 23333);
 assert.equal(resolveRemotePackagePatchSshPort(0), 23333);
 assert.equal(resolveRemotePackagePatchSshPort('abc'), 23333);

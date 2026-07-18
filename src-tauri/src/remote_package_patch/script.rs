@@ -84,14 +84,22 @@ stage scan_outer
 gzip -dc "$PKG" > "$WORK/outer.tar"
 tar -tvf "$WORK/outer.tar" | raw outer
 mapfile -t middle_members < <(tar -tf "$WORK/outer.tar" | awk '/\.tar$/ {{print}}')
-if [ "${{#middle_members[@]}}" -ne 1 ]; then
-  printf '##LOG:error:Expected exactly one middle .tar, found %s\n' "${{#middle_members[@]}}"
+if [ "${{#middle_members[@]}}" -gt 1 ]; then
+  printf '##LOG:error:Expected at most one middle .tar, found %s\n' "${{#middle_members[@]}}"
   for member in ${{middle_members[@]+"${{middle_members[@]}}"}}; do printf '##LOG:error:middle candidate: %s\n' "$member"; done
   fail "Package structure is not supported"
 fi
-MIDDLE_TAR_PATH="${{middle_members[0]}}"
+if [ "${{#middle_members[@]}}" -eq 1 ]; then
+  MIDDLE_TAR_PATH="${{middle_members[0]}}"
+  tar -xOf "$WORK/outer.tar" "$MIDDLE_TAR_PATH" > "$WORK/middle.tar"
+else
+  # Some product packages are conventional tar.gz archives whose decompressed
+  # tar directly contains the product files and optional *.tar.zst members.
+  MIDDLE_TAR_PATH=""
+  cp "$WORK/outer.tar" "$WORK/middle.tar"
+  log info "No nested middle .tar found; scanning the outer tar directly"
+fi
 result middle_tar_path "$MIDDLE_TAR_PATH"
-tar -xOf "$WORK/outer.tar" "$MIDDLE_TAR_PATH" > "$WORK/middle.tar"
 
 stage scan_middle
 tar -tvf "$WORK/middle.tar" | raw middle
@@ -100,7 +108,7 @@ stage scan_inner
 mapfile -t zst_members < <(tar -tf "$WORK/middle.tar" | awk '/\.tar\.zst$/ {{print}}')
 for zst_path in ${{zst_members[@]+"${{zst_members[@]}}"}}; do
   log info "Scanning $zst_path"
-  tar -xOf "$WORK/middle.tar" "$zst_path" | zstd -dc | tar -tvf - | raw "zst:$zst_path"
+  tar -xOf "$WORK/middle.tar" "$zst_path" | zstd --long=31 -dc | tar -tvf - | raw "zst:$zst_path"
 done
 
 stage scan_done
@@ -320,7 +328,7 @@ resolve_auto_target() {{
   local zst_matches=()
   local zst_path
   for zst_path in ${{zst_members[@]+"${{zst_members[@]}}"}}; do
-    if tar -xOf "$WORK/middle.tar" "$zst_path" | zstd -dc | tar -tf - | while IFS= read -r member; do
+    if tar -xOf "$WORK/middle.tar" "$zst_path" | zstd --long=31 -dc | tar -tf - | while IFS= read -r member; do
       if [[ "$(normalize_member "$member")" == "$(normalize_member "$TARGET_INTERNAL_PATH")" ]]; then
         printf '%s\t%s\n' "$zst_path" "$member"
       fi
@@ -352,10 +360,14 @@ resolve_auto_target() {{
 verify_final_target() {{
   stage verify
   gzip -dc "$WORK/output.tar.gz" > "$WORK/verify_outer.tar"
-  tar -xOf "$WORK/verify_outer.tar" "$MIDDLE_TAR_PATH" > "$WORK/verify_middle.tar"
+  if [ "$MIDDLE_IS_OUTER" -eq 1 ]; then
+    cp "$WORK/verify_outer.tar" "$WORK/verify_middle.tar"
+  else
+    tar -xOf "$WORK/verify_outer.tar" "$MIDDLE_TAR_PATH" > "$WORK/verify_middle.tar"
+  fi
   local actual_md5
   if [ "$RESOLVED_LAYER_KIND" = "zst" ]; then
-    tar -xOf "$WORK/verify_middle.tar" "$RESOLVED_ZST" | zstd -dc > "$WORK/verify_inner.tar"
+    tar -xOf "$WORK/verify_middle.tar" "$RESOLVED_ZST" | zstd --long=31 -dc > "$WORK/verify_inner.tar"
     actual_md5=$(tar -xOf "$WORK/verify_inner.tar" "$RESOLVED_TARGET" | md5sum | awk '{{print $1}}')
   else
     actual_md5=$(tar -xOf "$WORK/verify_middle.tar" "$RESOLVED_TARGET" | md5sum | awk '{{print $1}}')
@@ -399,14 +411,21 @@ result workdir "$WORK"
 stage unpack_outer
 gzip -dc "$PKG" > "$WORK/outer.tar"
 mapfile -t middle_members < <(tar -tf "$WORK/outer.tar" | awk '/\.tar$/ {{print}}')
-if [ "${{#middle_members[@]}}" -ne 1 ]; then
-  fail "Expected exactly one middle .tar, found ${{#middle_members[@]}}"
+if [ "${{#middle_members[@]}}" -gt 1 ]; then
+  fail "Expected at most one middle .tar, found ${{#middle_members[@]}}"
 fi
-MIDDLE_TAR_PATH="${{middle_members[0]}}"
+if [ "${{#middle_members[@]}}" -eq 1 ]; then
+  MIDDLE_IS_OUTER=0
+  MIDDLE_TAR_PATH="${{middle_members[0]}}"
+  stage extract_middle
+  tar -xOf "$WORK/outer.tar" "$MIDDLE_TAR_PATH" > "$WORK/middle.tar"
+else
+  MIDDLE_IS_OUTER=1
+  MIDDLE_TAR_PATH=""
+  cp "$WORK/outer.tar" "$WORK/middle.tar"
+  log info "No nested middle .tar found; patching the outer tar directly"
+fi
 result middle_tar_path "$MIDDLE_TAR_PATH"
-
-stage extract_middle
-tar -xOf "$WORK/outer.tar" "$MIDDLE_TAR_PATH" > "$WORK/middle.tar"
 
 stage resolve_target
 RESOLVED_LAYER_KIND="$TARGET_LAYER_KIND"
@@ -435,7 +454,7 @@ result resolved_target "$RESOLVED_TARGET"
 if [ "$RESOLVED_LAYER_KIND" = "zst" ]; then
   stage extract_inner
   tar -xOf "$WORK/middle.tar" "$RESOLVED_ZST" > "$WORK/inner.tar.zst"
-  zstd -d -q -f "$WORK/inner.tar.zst" -o "$WORK/inner.tar"
+  zstd --long=31 -d -q -f "$WORK/inner.tar.zst" -o "$WORK/inner.tar"
   rc=0
   RESOLVED_TARGET=$(resolve_one_member "$WORK/inner.tar" "$RESOLVED_TARGET") || rc=$?
   [ "$rc" -ne 2 ] || fail "Target path is ambiguous in inner tar: $TARGET_INTERNAL_PATH"
@@ -449,7 +468,7 @@ if [ "$RESOLVED_LAYER_KIND" = "zst" ]; then
   update_md5_manifests_in_tar "$WORK/inner.tar" "$RESOLVED_TARGET" "$REPLACEMENT_MD5"
 
   stage repack_inner
-  zstd -q -T0 -f "$WORK/inner.tar" -o "$WORK/new-inner.tar.zst"
+  zstd -19 -T0 --long=31 -q -f "$WORK/inner.tar" -o "$WORK/new-inner.tar.zst"
   ZST_MD5=$(md5sum "$WORK/new-inner.tar.zst" | awk '{{print $1}}')
   replace_tar_member "$WORK/middle.tar" "$RESOLVED_ZST" "$WORK/new-inner.tar.zst"
   update_md5_manifests_in_tar "$WORK/middle.tar" "$RESOLVED_ZST" "$ZST_MD5"
@@ -462,9 +481,13 @@ else
 fi
 
 stage repack_middle
-MIDDLE_MD5=$(md5sum "$WORK/middle.tar" | awk '{{print $1}}')
-replace_tar_member "$WORK/outer.tar" "$MIDDLE_TAR_PATH" "$WORK/middle.tar"
-update_md5_manifests_in_tar "$WORK/outer.tar" "$MIDDLE_TAR_PATH" "$MIDDLE_MD5"
+if [ "$MIDDLE_IS_OUTER" -eq 1 ]; then
+  cp "$WORK/middle.tar" "$WORK/outer.tar"
+else
+  MIDDLE_MD5=$(md5sum "$WORK/middle.tar" | awk '{{print $1}}')
+  replace_tar_member "$WORK/outer.tar" "$MIDDLE_TAR_PATH" "$WORK/middle.tar"
+  update_md5_manifests_in_tar "$WORK/outer.tar" "$MIDDLE_TAR_PATH" "$MIDDLE_MD5"
+fi
 
 stage compress_outer
 gzip -c "$WORK/outer.tar" > "$WORK/output.tar.gz"
@@ -530,12 +553,15 @@ mod tests {
         let script = build_scan_script("/tmp/pkg.tar.gz");
         assert!(script.contains("##RAW:%s\\t%s"));
         assert!(script.contains("gzip -dc"));
-        assert!(script.contains("zstd -dc"));
+        assert!(script.contains("zstd --long=31 -dc"));
+        assert_eq!(script.matches("zstd --long=31 -dc").count(), 1);
         assert!(script.contains("scan_done"));
         assert!(!script.contains("@PACKAGE_PATH@"));
         // Uncompressed-size based space estimate and bash<4.4 empty-array guard.
         assert!(script.contains("gzip -l"));
         assert!(script.contains("${zst_members[@]+"));
+        assert!(script.contains("scanning the outer tar directly"));
+        assert!(script.contains("Expected at most one middle .tar"));
     }
 
     #[test]
@@ -560,5 +586,10 @@ mod tests {
         assert!(script.contains("gzip -l"));
         assert!(script.contains("${zst_members[@]+"));
         assert!(script.contains("is ambiguous"));
+        assert!(script.contains("MIDDLE_IS_OUTER=1"));
+        assert!(script.contains("patching the outer tar directly"));
+        assert_eq!(script.matches("zstd --long=31 -dc").count(), 2);
+        assert!(script.contains("zstd --long=31 -d -q -f"));
+        assert!(script.contains("zstd -19 -T0 --long=31 -q -f"));
     }
 }

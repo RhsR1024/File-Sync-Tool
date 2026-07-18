@@ -15,6 +15,38 @@ use crate::clipboard::models::{
 };
 use crate::AppState;
 
+#[tauri::command]
+pub async fn cb_pick_image_file(app: AppHandle) -> Result<Option<String>, String> {
+    let selected = rfd::AsyncFileDialog::new()
+        .add_filter("Images", &["png", "jpg", "jpeg"])
+        .pick_file()
+        .await;
+    let Some(file) = selected else {
+        return Ok(None);
+    };
+    app.asset_protocol_scope()
+        .allow_file(file.path())
+        .map_err(|error| format!("allow image preview: {error}"))?;
+    Ok(Some(file.path().to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn cb_copy_image_file(
+    path: String,
+    crop: Option<crate::clipboard::image_copy::ImageCrop>,
+) -> Result<crate::clipboard::image_copy::ImageCopyResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::clipboard::image_copy::copy_image_file(std::path::Path::new(&path), crop)
+    })
+    .await
+    .map_err(|error| format!("copy image task failed: {error}"))?
+}
+
+#[tauri::command]
+pub fn cb_is_explorer_context_menu_registered() -> bool {
+    crate::clipboard::explorer_menu::is_registered()
+}
+
 fn cleanup_assets_after_mutation<T>(
     clipboard: &crate::clipboard::ClipboardState,
     result: Result<T, String>,
@@ -161,6 +193,21 @@ fn reset_clipboard_config_internal(
     let old = state.clipboard.settings.read().clone();
     let defaults = ClipboardSettings::default();
 
+    if old.image_copy_hotkey_enabled != defaults.image_copy_hotkey_enabled
+        || old.image_copy_hotkey != defaults.image_copy_hotkey
+    {
+        crate::clipboard::hotkey::change_image_copy(
+            app.clone(),
+            &state.clipboard.image_copy_hotkey_handle,
+            defaults.image_copy_hotkey_enabled,
+            &defaults.image_copy_hotkey,
+        )?;
+    }
+
+    if old.explorer_context_menu_enabled != defaults.explorer_context_menu_enabled {
+        crate::clipboard::explorer_menu::set_enabled(defaults.explorer_context_menu_enabled)?;
+    }
+
     if old.hotkey != defaults.hotkey {
         crate::clipboard::hotkey::change(
             app.clone(),
@@ -230,20 +277,20 @@ pub fn cb_list(
     state: State<'_, AppState>,
     query: ClipboardListQuery,
 ) -> Result<ClipboardListResult, String> {
-    let conn = state.clipboard.db.lock();
+    let conn = state.clipboard.read_db.lock();
     db::list_items(&conn, &query).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn cb_get(state: State<'_, AppState>, id: i64) -> Result<ClipboardItem, String> {
-    let conn = state.clipboard.db.lock();
+    let conn = state.clipboard.read_db.lock();
     db::get_item(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn cb_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let result = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.write_db.lock();
         db::delete_item(&conn, id).map_err(|e| e.to_string())
     };
     cleanup_assets_after_mutation(state.clipboard.as_ref(), result)
@@ -252,7 +299,7 @@ pub fn cb_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
 #[tauri::command]
 pub fn cb_delete_batch(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
     let result = {
-        let mut conn = state.clipboard.db.lock();
+        let mut conn = state.clipboard.write_db.lock();
         db::delete_batch(&mut conn, &ids).map_err(|e| e.to_string())
     };
     cleanup_assets_after_mutation(state.clipboard.as_ref(), result)
@@ -265,7 +312,7 @@ pub fn cb_clear(
     group_id: Option<i64>,
 ) -> Result<u64, String> {
     let result = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.write_db.lock();
         db::clear_group(&conn, keep_favorites, group_id).map_err(|e| e.to_string())
     };
     cleanup_assets_after_mutation(state.clipboard.as_ref(), result)
@@ -274,7 +321,7 @@ pub fn cb_clear(
 #[tauri::command]
 pub fn cb_clear_all(state: State<'_, AppState>, keep_favorites: bool) -> Result<u64, String> {
     let result = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.write_db.lock();
         db::clear_all(&conn, keep_favorites).map_err(|e| e.to_string())
     };
     cleanup_assets_after_mutation(state.clipboard.as_ref(), result)
@@ -282,7 +329,7 @@ pub fn cb_clear_all(state: State<'_, AppState>, keep_favorites: bool) -> Result<
 
 #[tauri::command]
 pub fn cb_toggle_favorite(state: State<'_, AppState>, id: i64) -> Result<ClipboardItem, String> {
-    let conn = state.clipboard.db.lock();
+    let conn = state.clipboard.write_db.lock();
     db::toggle_favorite(&conn, id).map_err(|e| e.to_string())
 }
 
@@ -445,6 +492,10 @@ pub fn cb_save_settings(
 ) -> Result<ClipboardSettings, String> {
     let old = state.clipboard.settings.read().clone();
 
+    if settings.image_copy_hotkey_enabled && settings.image_copy_hotkey == settings.hotkey {
+        return Err("image-copy hotkey conflicts with the clipboard-panel hotkey".to_string());
+    }
+
     // If hotkey changed, re-register the global shortcut first so we fail early on bad input.
     if settings.hotkey != old.hotkey {
         crate::clipboard::hotkey::change(
@@ -452,6 +503,21 @@ pub fn cb_save_settings(
             &state.clipboard.hotkey_handle,
             &settings.hotkey,
         )?;
+    }
+
+    if settings.image_copy_hotkey_enabled != old.image_copy_hotkey_enabled
+        || settings.image_copy_hotkey != old.image_copy_hotkey
+    {
+        crate::clipboard::hotkey::change_image_copy(
+            app.clone(),
+            &state.clipboard.image_copy_hotkey_handle,
+            settings.image_copy_hotkey_enabled,
+            &settings.image_copy_hotkey,
+        )?;
+    }
+
+    if settings.explorer_context_menu_enabled != old.explorer_context_menu_enabled {
+        crate::clipboard::explorer_menu::set_enabled(settings.explorer_context_menu_enabled)?;
     }
 
     // If the enabled flag changed, start or stop the watcher.
@@ -556,7 +622,7 @@ pub fn cb_reset_all(
 #[tauri::command]
 pub fn cb_paste(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let item = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.read_db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
     crate::clipboard::paste::paste_item(&app, state.clipboard.as_ref(), &item, false)
@@ -565,7 +631,7 @@ pub fn cb_paste(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(
 #[tauri::command]
 pub fn cb_paste_plain(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let item = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.read_db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
     crate::clipboard::paste::paste_item(&app, state.clipboard.as_ref(), &item, true)
@@ -576,7 +642,7 @@ pub fn cb_paste_plain(app: AppHandle, state: State<'_, AppState>, id: i64) -> Re
 #[tauri::command]
 pub fn cb_copy(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let item = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.read_db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
     crate::clipboard::paste::copy_item(state.clipboard.as_ref(), &item)
@@ -589,7 +655,7 @@ pub fn cb_paste_as_files(
     id: i64,
 ) -> Result<(), String> {
     let item = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.read_db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
     crate::clipboard::paste::paste_file_item(&app, state.clipboard.as_ref(), &item)
@@ -598,7 +664,7 @@ pub fn cb_paste_as_files(
 #[tauri::command]
 pub fn cb_paste_as_path(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let item = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.read_db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
     crate::clipboard::paste::paste_file_paths_as_text(&app, state.clipboard.as_ref(), &item)
@@ -611,7 +677,7 @@ pub fn cb_check_file_paths(
 ) -> Result<Vec<FilePathStatus>, String> {
     let requested_ids = ids.len();
     let items = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.read_db.lock();
         load_items_by_ids(&conn, &ids)?
     };
     collect_file_path_statuses_for_selection(&items, requested_ids)
@@ -624,7 +690,7 @@ pub fn cb_save_image_as(
     target_path: String,
 ) -> Result<(), String> {
     let item = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.read_db.lock();
         db::get_item(&conn, id).map_err(|e| e.to_string())?
     };
     crate::clipboard::paste::save_image_item_to_path(&item, &target_path)
@@ -647,7 +713,7 @@ pub fn cb_merge_paste(
     }
 
     let items = {
-        let conn = state.clipboard.db.lock();
+        let conn = state.clipboard.read_db.lock();
         load_items_by_ids(&conn, &ids)?
     };
 
@@ -657,7 +723,7 @@ pub fn cb_merge_paste(
 
 #[tauri::command]
 pub fn cb_reorder_favorites(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
-    let mut conn = state.clipboard.db.lock();
+    let mut conn = state.clipboard.write_db.lock();
     db::reorder_favorites(&mut conn, &ids).map_err(|e| e.to_string())
 }
 
@@ -735,7 +801,7 @@ pub fn cb_toggle_preview_fullscreen(app: AppHandle, label: String) -> Result<boo
 
 #[tauri::command]
 pub fn cb_stats(state: State<'_, AppState>) -> Result<ClipboardStats, String> {
-    let conn = state.clipboard.db.lock();
+    let conn = state.clipboard.read_db.lock();
     let total: i64 = conn
         .query_row("SELECT COUNT(*) FROM clipboard_items", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;

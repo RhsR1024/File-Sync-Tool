@@ -7,23 +7,28 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
 use clipboard_master::{CallbackResult, ClipboardHandler, Master, Shutdown};
 use parking_lot::Mutex;
 use regex::Regex;
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::clipboard::db::{self, NewItem};
-use crate::clipboard::models::ContentKind;
+use crate::clipboard::models::{ClipboardItem, ContentKind};
 use crate::clipboard::{icon_store, image_store, source, ClipboardState};
 
 const PREVIEW_LIMIT: usize = 200;
 const SELF_WRITE_WINDOW_MS: u64 = 500;
+const CAPTURE_DEBOUNCE_MS: u64 = 30;
+const WATCHER_MAX_BACKOFF_MS: u64 = 5_000;
+const CAPTURE_RETRY_DELAYS_MS: [u64; 5] = [0, 20, 50, 100, 200];
 
 pub struct WatcherHandle {
     stop_flag: Arc<AtomicBool>,
-    shutdown: Mutex<Option<Shutdown>>,
+    shutdown: Arc<Mutex<Option<Shutdown>>>,
 }
 
 impl WatcherHandle {
@@ -38,9 +43,31 @@ impl WatcherHandle {
 }
 
 struct Handler {
-    app: AppHandle,
     state: Arc<ClipboardState>,
     stop_flag: Arc<AtomicBool>,
+    work_tx: mpsc::Sender<CaptureSignal>,
+}
+
+#[derive(Debug, Clone)]
+struct CaptureSignal {
+    source_info: Option<source::SourceAppInfo>,
+    sequence: u32,
+}
+
+#[derive(Debug, Clone)]
+struct CaptureWorkItem {
+    source_info: Option<source::SourceAppInfo>,
+    rtf: Option<String>,
+    html: Option<String>,
+    text: Option<String>,
+    files: Option<Vec<String>>,
+    image: Option<CapturedImage>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct ClipboardItemAddedEvent {
+    id: i64,
+    is_new: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,8 +122,24 @@ impl ClipboardHandler for Handler {
         if !self.state.is_enabled.load(Ordering::Acquire) {
             return CallbackResult::Next;
         }
-        if let Err(err) = try_capture(&self.app, &self.state) {
-            eprintln!("[clipboard] capture failed: {err}");
+        let source_info = source::get_clipboard_source_app();
+        let has_pending_self_write = self.state.pending_self_write.lock().is_some();
+        if !has_pending_self_write {
+            let app_filter = self.state.settings.read().app_filter.clone();
+            if !source::should_capture_source_app(source_info.as_ref(), &app_filter) {
+                return CallbackResult::Next;
+            }
+        }
+
+        if self
+            .work_tx
+            .send(CaptureSignal {
+                source_info,
+                sequence: source::clipboard_sequence_number(),
+            })
+            .is_err()
+        {
+            return CallbackResult::Stop;
         }
         CallbackResult::Next
     }
@@ -107,8 +150,52 @@ impl ClipboardHandler for Handler {
     }
 }
 
-fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
-    let source_info = source::get_clipboard_source_app();
+fn read_capture_work_item(
+    mut source_info: Option<source::SourceAppInfo>,
+    expected_sequence: u32,
+) -> Result<Option<CaptureWorkItem>, String> {
+    let mut last_error = None;
+
+    for (attempt, delay_ms) in CAPTURE_RETRY_DELAYS_MS.iter().copied().enumerate() {
+        if delay_ms > 0 {
+            thread::sleep(Duration::from_millis(delay_ms));
+        }
+
+        let sequence_before = source::clipboard_sequence_number();
+        if expected_sequence != 0 && sequence_before != expected_sequence {
+            source_info = source::get_clipboard_source_app();
+        }
+
+        match read_capture_work_item_once(source_info.clone()) {
+            Ok(item) => {
+                let sequence_after = source::clipboard_sequence_number();
+                if sequence_before == 0 || sequence_before == sequence_after {
+                    if item.is_none() && attempt + 1 < CAPTURE_RETRY_DELAYS_MS.len() {
+                        last_error = Some(format!(
+                            "clipboard formats were temporarily unavailable (attempt {}/{})",
+                            attempt + 1,
+                            CAPTURE_RETRY_DELAYS_MS.len()
+                        ));
+                        continue;
+                    }
+                    return Ok(item);
+                }
+                last_error = Some(format!(
+                    "clipboard changed during read (attempt {}/{})",
+                    attempt + 1,
+                    CAPTURE_RETRY_DELAYS_MS.len()
+                ));
+            }
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "clipboard read failed".to_string()))
+}
+
+fn read_capture_work_item_once(
+    source_info: Option<source::SourceAppInfo>,
+) -> Result<Option<CaptureWorkItem>, String> {
     let rtf = source::read_clipboard_rtf().and_then(normalize_optional_text);
 
     let mut clipboard = Clipboard::new().map_err(|err| format!("clipboard init: {err}"))?;
@@ -148,6 +235,34 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
             })
         });
 
+    if rtf.is_none() && text.is_none() && html.is_none() && files.is_none() && image.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(CaptureWorkItem {
+        source_info,
+        rtf,
+        html,
+        text,
+        files,
+        image,
+    }))
+}
+
+fn process_capture(
+    app: &AppHandle,
+    state: &ClipboardState,
+    work: CaptureWorkItem,
+) -> Result<(), String> {
+    let CaptureWorkItem {
+        source_info,
+        rtf,
+        html,
+        text,
+        files,
+        image,
+    } = work;
+
     let snapshot = CaptureSnapshot {
         rtf: rtf.clone(),
         html: html.clone(),
@@ -162,9 +277,18 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
         return Ok(());
     };
 
+    let max_item_bytes = state.settings.read().max_item_bytes;
+    if !capture_kind_fits_limit(kind, &rtf, &html, &text, image.as_ref(), max_item_bytes) {
+        eprintln!(
+            "[clipboard] capture skipped: payload exceeds configured max item size ({max_item_bytes} bytes)"
+        );
+        return Ok(());
+    }
+
     let hash_hex = match kind {
         CaptureKind::Rtf => {
-            crate::clipboard::capture_hash(b"rtf", rtf.as_deref().unwrap().as_bytes())
+            let bytes = source::decode_rtf_storage(rtf.as_deref().unwrap());
+            crate::clipboard::capture_hash(b"rtf", &bytes)
         }
         CaptureKind::Html => {
             crate::clipboard::capture_hash(b"html", html.as_deref().unwrap().as_bytes())
@@ -198,7 +322,6 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
     if matches!(self_write_decision, SelfWriteDecision::None) {
         let app_filter = state.settings.read().app_filter.clone();
         if !source::should_capture_source_app(source_info.as_ref(), &app_filter) {
-            // Skip before touching heavier clipboard payload APIs when the source app is excluded.
             return Ok(());
         }
     }
@@ -212,7 +335,13 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
         build_source_capture(state, source_info)
     };
     let mut item = match kind {
-        CaptureKind::Rtf => build_rtf_item(rtf.unwrap(), text.clone(), hash_hex, &source_capture),
+        CaptureKind::Rtf => build_rtf_item(
+            rtf.unwrap(),
+            html.clone(),
+            text.clone(),
+            hash_hex,
+            &source_capture,
+        ),
         CaptureKind::Html => {
             build_html_item(html.unwrap(), text.clone(), hash_hex, &source_capture)
         }
@@ -242,9 +371,40 @@ fn try_capture(app: &AppHandle, state: &ClipboardState) -> Result<(), String> {
     }
 
     let group_id = *state.active_group_id.lock();
-    upsert_item(state, item, group_id)?;
-    notify_added(app);
+    let (stored, is_new) = upsert_item(state, item, group_id)?;
+    notify_added(app, stored.id, is_new);
     Ok(())
+}
+
+fn capture_kind_fits_limit(
+    kind: CaptureKind,
+    rtf: &Option<String>,
+    html: &Option<String>,
+    text: &Option<String>,
+    image: Option<&CapturedImage>,
+    max_item_bytes: u64,
+) -> bool {
+    if max_item_bytes == 0 {
+        return true;
+    }
+
+    let payload_bytes = match kind {
+        CaptureKind::Rtf => rtf.as_deref().map_or(0, source::rtf_storage_byte_len) as u64,
+        CaptureKind::Html => html.as_ref().map_or(0, String::len) as u64,
+        CaptureKind::Image => image
+            .map(|value| {
+                u64::from(value.width)
+                    .saturating_mul(u64::from(value.height))
+                    .saturating_mul(4)
+                    .max(value.rgba.len() as u64)
+            })
+            .unwrap_or(0),
+        CaptureKind::Text => text.as_ref().map_or(0, String::len) as u64,
+        // File entries store metadata and paths. File contents use a separate staging quota.
+        CaptureKind::File => return true,
+    };
+
+    payload_bytes <= max_item_bytes
 }
 
 fn choose_capture_kind(snapshot: &CaptureSnapshot) -> Option<CaptureKind> {
@@ -352,6 +512,7 @@ fn build_html_item(
 
 fn build_rtf_item(
     rtf: String,
+    html: Option<String>,
     plain_text: Option<String>,
     hash: String,
     source: &CaptureSource,
@@ -364,12 +525,12 @@ fn build_rtf_item(
         content_preview: clip_preview(&preview_text, PREVIEW_LIMIT),
         content_full: plain_text,
         rtf_content: Some(rtf.clone()),
-        html: None,
+        html,
         image_path: None,
         image_width: None,
         image_height: None,
         file_paths: None,
-        byte_size: rtf.len() as i64,
+        byte_size: source::rtf_storage_byte_len(&rtf) as i64,
         hash,
         source_app: source.source_app.clone(),
         source_app_icon: source.source_app_icon.clone(),
@@ -477,63 +638,211 @@ fn upsert_item(
     state: &ClipboardState,
     item: NewItem,
     group_id: Option<i64>,
-) -> Result<(), String> {
+) -> Result<(ClipboardItem, bool), String> {
     let settings = state.settings.read().clone();
-    let needs_asset_cleanup = {
+    let candidate_image_path = item.image_path.clone();
+    let (stored, is_new, duplicate_asset_candidate, needs_asset_cleanup) = {
         let conn = state.write_db.lock();
-        let duplicate_asset_candidate = (item.image_path.is_some()
-            || item.source_app_icon.is_some())
-            && db::item_exists_by_hash(&conn, &item.hash).map_err(|err| err.to_string())?;
-        db::upsert_item_with_dedup_in_group(&conn, &item, settings.dedup_strategy.clone(), group_id)
-            .map_err(|err| err.to_string())?;
+        let existed =
+            db::item_exists_for_dedup(&conn, &item, group_id).map_err(|err| err.to_string())?;
+        let previous_icon = if existed {
+            db::get_item_for_dedup(&conn, &item, group_id)
+                .ok()
+                .and_then(|item| item.source_app_icon)
+        } else {
+            None
+        };
+        let is_new = matches!(
+            settings.dedup_strategy,
+            crate::clipboard::models::ClipboardDedupStrategy::AlwaysNew
+        ) || !existed;
+        let duplicate_asset_candidate =
+            (item.image_path.is_some() || item.source_app_icon.is_some()) && existed;
+        let stored = db::upsert_item_with_dedup_in_group(
+            &conn,
+            &item,
+            settings.dedup_strategy.clone(),
+            group_id,
+        )
+        .map_err(|err| err.to_string())?;
         let cleanup_stats = crate::clipboard::retention::run_cleanup(&conn, &settings)
             .map_err(|err| err.to_string())?;
-        duplicate_asset_candidate || cleanup_stats.0 > 0 || cleanup_stats.1 > 0
+        let replaced_icon = previous_icon.is_some() && previous_icon != stored.source_app_icon;
+        (
+            stored,
+            is_new,
+            duplicate_asset_candidate,
+            replaced_icon || cleanup_stats.0 > 0 || cleanup_stats.1 > 0,
+        )
     };
 
+    if duplicate_asset_candidate && candidate_image_path != stored.image_path {
+        remove_generated_candidate(&state.image_dir, candidate_image_path.as_deref());
+    }
     if needs_asset_cleanup {
         state.cleanup_orphan_assets();
     }
-    Ok(())
+    Ok((stored, is_new))
 }
 
-fn notify_added(app: &AppHandle) {
-    let _ = app.emit("clipboard-item-added", ());
+fn remove_generated_candidate(root: &std::path::Path, candidate: Option<&str>) {
+    let Some(candidate) = candidate.map(std::path::Path::new) else {
+        return;
+    };
+    if candidate.strip_prefix(root).is_ok() {
+        if let Err(err) = std::fs::remove_file(candidate) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "[clipboard] remove duplicate image candidate {}: {err}",
+                    candidate.display()
+                );
+            }
+        }
+    }
+}
+
+fn notify_added(app: &AppHandle, id: i64, is_new: bool) {
+    let _ = app.emit(
+        "clipboard-item-added",
+        ClipboardItemAddedEvent { id, is_new },
+    );
 }
 
 pub fn start(app: AppHandle, state: Arc<ClipboardState>) -> WatcherHandle {
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_flag_clone = stop_flag.clone();
-    let (shutdown_tx, shutdown_rx) = mpsc::sync_channel::<Shutdown>(1);
-    let app_clone = app;
-    let state_clone = state;
+    let shutdown = Arc::new(Mutex::new(None));
+    let (work_tx, work_rx) = mpsc::channel::<CaptureSignal>();
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(1);
 
-    thread::spawn(move || {
-        let handler = Handler {
-            app: app_clone,
-            state: state_clone,
-            stop_flag: stop_flag_clone,
+    let worker_stop = stop_flag.clone();
+    let worker_app = app.clone();
+    let worker_state = state.clone();
+    let worker = thread::Builder::new()
+        .name("clipboard-worker".to_string())
+        .spawn(move || run_capture_worker(work_rx, worker_app, worker_state, worker_stop));
+    if let Err(err) = worker {
+        eprintln!("[clipboard] worker init failed: {err}");
+        stop_flag.store(true, Ordering::Release);
+        return WatcherHandle {
+            stop_flag,
+            shutdown,
         };
-        let mut master = match Master::new(handler) {
-            Ok(master) => master,
-            Err(err) => {
-                eprintln!("[clipboard] master init failed: {err}");
-                return;
+    }
+
+    let watcher_stop = stop_flag.clone();
+    let watcher_shutdown = shutdown.clone();
+    let watcher_state = state;
+    let watcher = thread::Builder::new()
+        .name("clipboard-watcher".to_string())
+        .spawn(move || {
+            let mut failures = 0u32;
+            let mut ready_tx = Some(ready_tx);
+
+            while !watcher_stop.load(Ordering::Acquire) {
+                let handler = Handler {
+                    state: watcher_state.clone(),
+                    stop_flag: watcher_stop.clone(),
+                    work_tx: work_tx.clone(),
+                };
+                let mut master = match Master::new(handler) {
+                    Ok(master) => master,
+                    Err(err) => {
+                        failures = failures.saturating_add(1);
+                        eprintln!("[clipboard] master init failed: {err}");
+                        sleep_with_stop(&watcher_stop, watcher_backoff_ms(failures));
+                        continue;
+                    }
+                };
+
+                *watcher_shutdown.lock() = Some(master.shutdown_channel());
+                if let Some(sender) = ready_tx.take() {
+                    let _ = sender.send(());
+                }
+
+                let started_at = Instant::now();
+                let result = master.run();
+                watcher_shutdown.lock().take();
+                if watcher_stop.load(Ordering::Acquire) {
+                    break;
+                }
+
+                if started_at.elapsed() >= Duration::from_secs(30) {
+                    failures = 0;
+                }
+                failures = failures.saturating_add(1);
+                match result {
+                    Ok(()) => eprintln!("[clipboard] watcher exited unexpectedly"),
+                    Err(err) => eprintln!("[clipboard] watcher exit: {err}"),
+                }
+                sleep_with_stop(&watcher_stop, watcher_backoff_ms(failures));
             }
-        };
-        let _ = shutdown_tx.send(master.shutdown_channel());
-        if let Err(err) = master.run() {
-            eprintln!("[clipboard] watcher exit: {err}");
-        }
-    });
 
-    let shutdown = shutdown_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .ok();
+            drop(work_tx);
+        });
+
+    if let Err(err) = watcher {
+        eprintln!("[clipboard] watcher init failed: {err}");
+        stop_flag.store(true, Ordering::Release);
+        return WatcherHandle {
+            stop_flag,
+            shutdown,
+        };
+    }
+
+    let _ = ready_rx.recv_timeout(Duration::from_secs(2));
 
     WatcherHandle {
         stop_flag,
-        shutdown: Mutex::new(shutdown),
+        shutdown,
+    }
+}
+
+fn run_capture_worker(
+    work_rx: mpsc::Receiver<CaptureSignal>,
+    app: AppHandle,
+    state: Arc<ClipboardState>,
+    stop_flag: Arc<AtomicBool>,
+) {
+    while !stop_flag.load(Ordering::Acquire) {
+        let mut signal = match work_rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(signal) => signal,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        thread::sleep(Duration::from_millis(CAPTURE_DEBOUNCE_MS));
+        while let Ok(newer) = work_rx.try_recv() {
+            signal = newer;
+        }
+
+        if stop_flag.load(Ordering::Acquire) || !state.is_enabled.load(Ordering::Acquire) {
+            continue;
+        }
+
+        match read_capture_work_item(signal.source_info, signal.sequence) {
+            Ok(Some(work)) => {
+                if let Err(err) = process_capture(&app, state.as_ref(), work) {
+                    eprintln!("[clipboard] capture failed: {err}");
+                }
+            }
+            Ok(None) => {}
+            Err(err) => eprintln!("[clipboard] read failed: {err}"),
+        }
+    }
+}
+
+fn watcher_backoff_ms(failures: u32) -> u64 {
+    100u64
+        .saturating_mul(2u64.saturating_pow(failures.min(6)))
+        .min(WATCHER_MAX_BACKOFF_MS)
+}
+
+fn sleep_with_stop(stop_flag: &AtomicBool, total_ms: u64) {
+    let mut remaining = total_ms;
+    while remaining > 0 && !stop_flag.load(Ordering::Acquire) {
+        let slice = remaining.min(50);
+        thread::sleep(Duration::from_millis(slice));
+        remaining -= slice;
     }
 }
 
@@ -563,6 +872,61 @@ mod tests {
         };
 
         assert_eq!(choose_capture_kind(&snapshot), Some(CaptureKind::Rtf));
+    }
+
+    #[test]
+    fn capture_size_limit_uses_decoded_rtf_and_rgba_bytes() {
+        let rtf = Some(source::encode_rtf_storage(b"12345"));
+        assert!(capture_kind_fits_limit(
+            CaptureKind::Rtf,
+            &rtf,
+            &None,
+            &None,
+            None,
+            5,
+        ));
+        assert!(!capture_kind_fits_limit(
+            CaptureKind::Rtf,
+            &rtf,
+            &None,
+            &None,
+            None,
+            4,
+        ));
+
+        let image = CapturedImage {
+            width: 2,
+            height: 2,
+            rgba: vec![0; 16],
+        };
+        assert!(!capture_kind_fits_limit(
+            CaptureKind::Image,
+            &None,
+            &None,
+            &None,
+            Some(&image),
+            15,
+        ));
+    }
+
+    #[test]
+    fn watcher_restart_backoff_is_exponential_and_capped() {
+        assert_eq!(watcher_backoff_ms(0), 100);
+        assert_eq!(watcher_backoff_ms(1), 200);
+        assert_eq!(watcher_backoff_ms(2), 400);
+        assert_eq!(watcher_backoff_ms(6), WATCHER_MAX_BACKOFF_MS);
+        assert_eq!(watcher_backoff_ms(u32::MAX), WATCHER_MAX_BACKOFF_MS);
+    }
+
+    #[test]
+    fn duplicate_candidate_cleanup_stays_inside_asset_root() {
+        let root = TempDir::new().unwrap();
+        let candidate = root.path().join("candidate.png");
+        std::fs::write(&candidate, b"candidate").unwrap();
+
+        remove_generated_candidate(root.path(), candidate.to_str());
+
+        assert!(!candidate.exists());
     }
 
     #[test]
@@ -633,6 +997,7 @@ mod tests {
         let source = sample_source();
         let with_text = build_rtf_item(
             "{\\rtf1\\ansi Hello}".to_string(),
+            Some("<b>Hello</b>".to_string()),
             Some("Hello".to_string()),
             "hash".to_string(),
             &source,
@@ -640,6 +1005,7 @@ mod tests {
         assert_eq!(with_text.kind, ContentKind::Rtf);
         assert_eq!(with_text.content_preview, "Hello");
         assert_eq!(with_text.content_full.as_deref(), Some("Hello"));
+        assert_eq!(with_text.html.as_deref(), Some("<b>Hello</b>"));
         assert_eq!(
             with_text.rtf_content.as_deref(),
             Some("{\\rtf1\\ansi Hello}")
@@ -648,6 +1014,7 @@ mod tests {
 
         let fallback = build_rtf_item(
             "{\\rtf1\\ansi}".to_string(),
+            None,
             None,
             "hash".to_string(),
             &source,

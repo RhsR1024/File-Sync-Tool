@@ -1,0 +1,433 @@
+import { invoke } from '@tauri-apps/api/core';
+
+export type DeviceSimulatorPlatform = 'vms' | 'ums';
+export type DeviceSimulatorDeviceKind = 'ipc' | 'nvr';
+export type DeviceSimulatorStreamKind = 'main' | 'sub' | 'third';
+
+export type SimulatorSessionState =
+  | 'idle'
+  | 'validating'
+  | 'assets_required'
+  | 'downloading_assets'
+  | 'preflighting'
+  | 'starting_worker'
+  | 'adding_ips'
+  | 'starting_services'
+  | 'running'
+  | 'stopping_alarms'
+  | 'stopping_services'
+  | 'removing_firewall'
+  | 'removing_ips'
+  | 'stopped'
+  | 'failed'
+  | 'recovery_required'
+  | 'recovering';
+
+export type SimulatorAssetState =
+  | 'unknown'
+  | 'checking'
+  | 'missing'
+  | 'downloading'
+  | 'verifying'
+  | 'installing'
+  | 'ready'
+  | 'update_available'
+  | 'failed';
+
+export type SimulatorAlarmJobState =
+  | 'idle'
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'completed'
+  | 'failed';
+
+export type SimulatorCheckSeverity = 'info' | 'warning' | 'error';
+export type SimulatorCheckStatus = 'passed' | 'warning' | 'failed' | 'skipped';
+export type SimulatorLogLevel = 'trace' | 'debug' | 'info' | 'warning' | 'error';
+export type AlarmDispatchMode = 'configured' | 'random' | 'sequential';
+
+export interface RtspPorts {
+  main: number;
+  sub: number;
+  third: number;
+}
+
+export interface DeviceGroupDraft {
+  id: string;
+  profile_id: string;
+  count: number;
+  nvr_channel_count: number | null;
+}
+
+/** Persisted application-domain settings. Runtime credentials never belong here. */
+export interface DeviceSimulatorSettings {
+  asset_server_url_override: string | null;
+  selected_interface_id: string | null;
+  last_platform: DeviceSimulatorPlatform | null;
+  last_start_ip: string | null;
+  last_device_groups: DeviceGroupDraft[];
+  last_http_port: number;
+  last_rtsp_ports: RtspPorts;
+  auto_check_asset_updates: boolean;
+  manage_firewall: boolean;
+}
+
+export interface TargetPlatformServer {
+  id: string;
+  host: string;
+  port: number;
+}
+
+export interface TargetPlatformConfig {
+  kind: DeviceSimulatorPlatform;
+  servers: TargetPlatformServer[];
+  alarm_receiver_url: string | null;
+}
+
+export interface DeviceGroupConfig extends DeviceGroupDraft {}
+
+/** The approved first-release media policy: TCP interleaving, three streams, no audio. */
+export interface StreamRuntimeConfig {
+  transport: 'tcp_interleaved';
+  enabled_streams: DeviceSimulatorStreamKind[];
+  audio_enabled: false;
+}
+
+export interface SimulatorStartRequest {
+  platform: TargetPlatformConfig;
+  interface_id: string;
+  start_ip: string;
+  subnet_prefix: number;
+  device_http_port: number;
+  rtsp_ports: RtspPorts;
+  groups: DeviceGroupConfig[];
+  stream: StreamRuntimeConfig;
+}
+
+export interface SimulatorNetworkInterfaceInfo {
+  id: string;
+  name: string;
+  description: string;
+  is_enabled: boolean;
+  is_up: boolean;
+  ipv4_addresses: string[];
+}
+
+export type DeviceProfileAvailability =
+  | 'local'
+  | 'remote'
+  | 'update_available'
+  | 'unavailable';
+
+export interface DeviceProfileSummary {
+  id: string;
+  display_name_key: string;
+  device_kind: DeviceSimulatorDeviceKind;
+  supported_platforms: DeviceSimulatorPlatform[];
+  availability: DeviceProfileAvailability;
+  installed_version: string | null;
+  available_version: string | null;
+  verified_platforms: DeviceSimulatorPlatform[];
+}
+
+export interface AssetPackStatus {
+  id: string;
+  required_version: string;
+  installed_version: string | null;
+  size: number;
+  state: SimulatorAssetState;
+  error_code: string | null;
+}
+
+export interface AssetStatus {
+  state: SimulatorAssetState;
+  profile_ids: string[];
+  packs: AssetPackStatus[];
+  update_available: boolean;
+  error_code: string | null;
+}
+
+export interface DeviceStreamAddress {
+  device_id: string;
+  channel_id: string | null;
+  stream: DeviceSimulatorStreamKind;
+  url: string;
+}
+
+export interface DeviceIdentityPreview {
+  device_id: string;
+  group_id: string;
+  profile_id: string;
+  device_kind: DeviceSimulatorDeviceKind;
+  ip: string;
+  mac: string;
+  serial_number: string;
+  hardware_id: string;
+  channel_count: number | null;
+  streams: DeviceStreamAddress[];
+}
+
+export interface DevicePreview {
+  total_devices: number;
+  total_channels: number;
+  devices: DeviceIdentityPreview[];
+}
+
+export interface PreflightCheck {
+  id: string;
+  severity: SimulatorCheckSeverity;
+  status: SimulatorCheckStatus;
+  message_key: string;
+  details: string | null;
+}
+
+export interface PreflightReport {
+  ok: boolean;
+  checks: PreflightCheck[];
+  device_preview: DevicePreview;
+}
+
+export interface SimulatorErrorInfo {
+  code: string;
+  message_key: string;
+  details: string | null;
+}
+
+export interface SimulatorMetrics {
+  total_devices: number;
+  online_devices: number;
+  total_channels: number;
+  active_rtsp_clients: number;
+  outbound_bitrate_kbps: number;
+  active_alarm_jobs: number;
+}
+
+export interface SimulatorStatus {
+  state: SimulatorSessionState;
+  session_id: string | null;
+  started_at: string | null;
+  phase_progress: number | null;
+  metrics: SimulatorMetrics;
+  cleanup_stage: string | null;
+  recovery_session_id: string | null;
+  last_error: SimulatorErrorInfo | null;
+}
+
+export interface AlarmJobRequest {
+  target_device_ids: string[];
+  alarm_profile_id: string;
+  alarm_type_ids: string[];
+  mode: AlarmDispatchMode;
+  interval_ms: number;
+  /** Null means that the job continues until explicitly stopped. */
+  send_count: number | null;
+  recovery_delay_secs: number | null;
+  image_variant: string | null;
+  user_image_id: string | null;
+}
+
+export interface AlarmTriggerResult {
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  duration_ms: number;
+  errors: SimulatorErrorInfo[];
+}
+
+export interface AlarmJobStats {
+  job_id: string;
+  state: SimulatorAlarmJobState;
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  in_flight: number;
+  average_duration_ms: number;
+  last_error: SimulatorErrorInfo | null;
+}
+
+export interface RecoveryResult {
+  session_id: string;
+  recovered: boolean;
+  remaining_resources: string[];
+  error: SimulatorErrorInfo | null;
+}
+
+export interface AssetProgress {
+  job_id: string;
+  state: SimulatorAssetState;
+  current_pack_id: string | null;
+  downloaded: number;
+  total: number | null;
+  speed_bps: number;
+  error: SimulatorErrorInfo | null;
+}
+
+export interface DeviceRuntimeStatus {
+  device_id: string;
+  online: boolean;
+  active_http_connections: number;
+  active_rtsp_clients: number;
+  last_error_code: string | null;
+}
+
+export interface DeviceStatusBatch {
+  session_id: string;
+  sequence: number;
+  devices: DeviceRuntimeStatus[];
+}
+
+export interface RtspStats {
+  session_id: string;
+  active_clients: number;
+  bitrate_kbps: number;
+  bytes_sent: number;
+  disconnected_clients: number;
+}
+
+export interface CleanupProgress {
+  session_id: string;
+  stage: string;
+  completed: number;
+  total: number;
+  message_key: string;
+  error: SimulatorErrorInfo | null;
+}
+
+export interface SimulatorLogEvent {
+  timestamp: string;
+  level: SimulatorLogLevel;
+  session_id: string | null;
+  component: string;
+  profile_id: string | null;
+  device_id: string | null;
+  device_ip: string | null;
+  channel_id: string | null;
+  alarm_job_id: string | null;
+  rtsp_session_id: string | null;
+  error_code: string | null;
+  message: string;
+}
+
+export const DEVICE_SIMULATOR_COMMANDS = {
+  getSettings: 'device_simulator_get_settings',
+  saveSettings: 'device_simulator_save_settings',
+  listInterfaces: 'device_simulator_list_interfaces',
+  listProfiles: 'device_simulator_list_profiles',
+  getAssetStatus: 'device_simulator_get_asset_status',
+  prepareAssets: 'device_simulator_prepare_assets',
+  cancelAssetDownload: 'device_simulator_cancel_asset_download',
+  previewDevices: 'device_simulator_preview_devices',
+  preflight: 'device_simulator_preflight',
+  start: 'device_simulator_start',
+  stop: 'device_simulator_stop',
+  getStatus: 'device_simulator_get_status',
+  startAlarm: 'device_simulator_start_alarm',
+  triggerAlarmOnce: 'device_simulator_trigger_alarm_once',
+  stopAlarm: 'device_simulator_stop_alarm',
+  recover: 'device_simulator_recover',
+} as const;
+
+export const DEVICE_SIMULATOR_EVENTS = {
+  status: 'device-simulator-status',
+  log: 'device-simulator-log',
+  assetProgress: 'device-simulator-asset-progress',
+  deviceStatus: 'device-simulator-device-status',
+  rtspStats: 'device-simulator-rtsp-stats',
+  alarmStats: 'device-simulator-alarm-stats',
+  cleanupProgress: 'device-simulator-cleanup-progress',
+} as const;
+
+export interface DeviceSimulatorEventPayloads {
+  [DEVICE_SIMULATOR_EVENTS.status]: SimulatorStatus;
+  [DEVICE_SIMULATOR_EVENTS.log]: SimulatorLogEvent;
+  [DEVICE_SIMULATOR_EVENTS.assetProgress]: AssetProgress;
+  [DEVICE_SIMULATOR_EVENTS.deviceStatus]: DeviceStatusBatch;
+  [DEVICE_SIMULATOR_EVENTS.rtspStats]: RtspStats;
+  [DEVICE_SIMULATOR_EVENTS.alarmStats]: AlarmJobStats;
+  [DEVICE_SIMULATOR_EVENTS.cleanupProgress]: CleanupProgress;
+}
+
+export type DeviceSimulatorInvoke = <T>(
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<T>;
+
+export interface DeviceSimulatorApi {
+  getSettings(): Promise<DeviceSimulatorSettings>;
+  saveSettings(settings: DeviceSimulatorSettings): Promise<DeviceSimulatorSettings>;
+  listInterfaces(): Promise<SimulatorNetworkInterfaceInfo[]>;
+  listProfiles(): Promise<DeviceProfileSummary[]>;
+  getAssetStatus(profileIds: string[]): Promise<AssetStatus>;
+  prepareAssets(profileIds: string[]): Promise<string>;
+  cancelAssetDownload(jobId: string): Promise<void>;
+  previewDevices(request: SimulatorStartRequest): Promise<DevicePreview>;
+  preflight(request: SimulatorStartRequest): Promise<PreflightReport>;
+  start(request: SimulatorStartRequest): Promise<SimulatorStatus>;
+  stop(): Promise<void>;
+  getStatus(): Promise<SimulatorStatus>;
+  startAlarm(request: AlarmJobRequest): Promise<string>;
+  triggerAlarmOnce(request: AlarmJobRequest): Promise<AlarmTriggerResult>;
+  stopAlarm(jobId: string): Promise<void>;
+  recover(sessionId: string): Promise<RecoveryResult>;
+}
+
+export function createDeviceSimulatorApi(invokeCommand: DeviceSimulatorInvoke): DeviceSimulatorApi {
+  return {
+    getSettings: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getSettings),
+    saveSettings: (settings) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.saveSettings, { settings }),
+    listInterfaces: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listInterfaces),
+    listProfiles: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listProfiles),
+    getAssetStatus: (profileIds) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getAssetStatus, { profileIds }),
+    prepareAssets: (profileIds) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.prepareAssets, { profileIds }),
+    cancelAssetDownload: (jobId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.cancelAssetDownload, { jobId }),
+    previewDevices: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.previewDevices, { request }),
+    preflight: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.preflight, { request }),
+    start: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.start, { request }),
+    stop: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.stop),
+    getStatus: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getStatus),
+    startAlarm: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.startAlarm, { request }),
+    triggerAlarmOnce: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.triggerAlarmOnce, { request }),
+    stopAlarm: (jobId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.stopAlarm, { jobId }),
+    recover: (sessionId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.recover, { sessionId }),
+  };
+}
+
+const tauriInvoke: DeviceSimulatorInvoke = (command, args) => invoke(command, args);
+
+export const deviceSimulatorApi = createDeviceSimulatorApi(tauriInvoke);
+
+const RUNTIME_ACTIVE_STATES = new Set<SimulatorSessionState>([
+  'starting_worker',
+  'adding_ips',
+  'starting_services',
+  'running',
+  'stopping_alarms',
+  'stopping_services',
+  'removing_firewall',
+  'removing_ips',
+  'recovery_required',
+  'recovering',
+]);
+
+const TOPOLOGY_EDITABLE_STATES = new Set<SimulatorSessionState>([
+  'idle',
+  'stopped',
+  'failed',
+]);
+
+/** True while a Worker may be active or session-owned OS resources may remain. */
+export function isDeviceSimulatorRuntimeActive(state: SimulatorSessionState): boolean {
+  return RUNTIME_ACTIVE_STATES.has(state);
+}
+
+/** Topology edits are unsafe during validation, downloads, startup, cleanup, or recovery. */
+export function isDeviceSimulatorTopologyLocked(state: SimulatorSessionState): boolean {
+  return !TOPOLOGY_EDITABLE_STATES.has(state);
+}
+
+export function hasBlockingPreflightFailure(report: PreflightReport): boolean {
+  return !report.ok || report.checks.some((check) => (
+    check.severity === 'error' && check.status === 'failed'
+  ));
+}

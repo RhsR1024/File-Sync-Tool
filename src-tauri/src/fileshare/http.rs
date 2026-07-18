@@ -3129,9 +3129,12 @@ mod tests {
         let saved = persist::load_persisted_file_share_config_from_path(&config_path)
             .expect("saved config should reload");
         assert_eq!(saved.roots[0].alias, "soft-renamed");
+        let saved_root_path = fs::canonicalize(&saved.roots[0].path)
+            .expect("saved root path should resolve after rename");
+        let expected_root_path =
+            fs::canonicalize(&renamed_path).expect("renamed root path should resolve");
         assert_eq!(
-            PathBuf::from(&saved.roots[0].path),
-            renamed_path,
+            saved_root_path, expected_root_path,
             "saved root path should be updated"
         );
     }

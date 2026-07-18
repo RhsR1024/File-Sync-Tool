@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { Copy, Edit, FileText, FolderOpen, Globe, RefreshCw, Save, Settings2 } from 'lucide-vue-next';
+import { BellRing, Copy, Edit, FileText, FolderOpen, Globe, RefreshCw, Save, Settings2 } from 'lucide-vue-next';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useI18n } from 'vue-i18n';
 
@@ -137,6 +137,28 @@ onMounted(load);
             <span class="relative inline-flex shrink-0 cursor-pointer items-center">
               <input v-model="config.close_to_tray" type="checkbox" class="peer sr-only" @change="save">
               <span class="h-6 w-11 rounded-full bg-slate-200 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-all peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></span>
+            </span>
+          </label>
+
+          <label class="flex items-center justify-between gap-4 border-t border-slate-100 pt-5" :title="t('settings.tooltip.syncTaskNotifications')">
+            <span class="flex min-w-0 items-start gap-3">
+              <span class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600" aria-hidden="true">
+                <BellRing class="h-4 w-4" />
+              </span>
+              <span>
+                <span class="block text-sm font-medium text-slate-700">{{ t('settings.syncTaskNotifications') }}</span>
+                <span id="settings-sync-task-notifications-desc" class="mt-1 block text-xs leading-5 text-slate-400">{{ t('settings.syncTaskNotificationsDesc') }}</span>
+              </span>
+            </span>
+            <span class="relative inline-flex shrink-0 cursor-pointer items-center">
+              <input
+                v-model="config.sync_task_notifications_enabled"
+                type="checkbox"
+                class="peer sr-only"
+                aria-describedby="settings-sync-task-notifications-desc"
+                @change="save"
+              >
+              <span class="h-6 w-11 rounded-full bg-slate-200 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-all peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus-visible:ring-2 peer-focus-visible:ring-blue-500 peer-focus-visible:ring-offset-2"></span>
             </span>
           </label>
 
