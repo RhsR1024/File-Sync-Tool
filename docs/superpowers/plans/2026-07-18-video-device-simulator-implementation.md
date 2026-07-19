@@ -2,7 +2,7 @@
 
 > 依据：`docs/superpowers/specs/2026-07-18-video-device-simulator-design.md`
 >
-> 状态：应用 `1.2.1` 与正式签名素材 Pack `1.0.2` 的本地可实现、可自动验证范围已完成；仅保留隔离 Windows VM 和真实 VMS/UMS 验收项。
+> 状态：应用 `1.2.2` 与正式签名素材 Pack `1.0.2` 的本地可实现、可自动验证范围已完成；旧项目智能/车辆复合告警流程已按静态源码补齐，仅保留隔离 Windows VM 和真实 VMS/UMS 验收项。
 
 ## 目标
 
@@ -51,7 +51,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 | `LOCAL_COMPLETE` | Schema、正式签名素材发布工具与 `1.0.2` 六个不可变 Pack、AssetStore、Worker 协议与 Manager、会话 journal/recovery、稳定网卡标识、原生 IP/防火墙后端、身份预览、发现/HTTP/RTSP/RTP/告警运行时、内容寻址用户图片、Tauri/配置/UI/退出保护 | 已实现并由本地自动化与正式素材运行时门禁覆盖；不以此宣称厂商平台兼容 |
 | `EXTERNAL_VM_REQUIRED` | UAC、真实次要 IP 与防火墙创建/删除、部分失败回滚、主进程/Worker 崩溃、断电恢复、主 IP/DHCP/网关/DNS 不变 | 只能在隔离 Windows VM 执行，当前主机只做原生 API 编译与只读枚举验证 |
 | `REAL_PLATFORM_REQUIRED` | VMS/UMS 发现、添加/在线、keepalive、HTTP/LAPI/ONVIF、RTSP 录像/检索/回放、告警/图片/恢复及 10/100/500 规模 | 必须由真实平台反馈关闭；所有未测组合继续显示“未验证” |
-| `EVIDENCE_GATED` | NVR 多通道 RTSP URL、车辆/智能复合多请求语义、各平台精确 Content-Type/boundary 与成功判定 | 当前静态证据可运行部分已实现；冲突或未获真实平台证据的候选继续 fail closed 或标记“未验证” |
+| `LEGACY_PARITY_BOUNDARY` | NVR 配置通道数进入 HTTP/ONVIF 元数据，RTSP 保持旧项目仅 c1 三码流 | c2～cN 独立 RTSP 在旧项目中不存在，属于未来新增能力，不再列为本次迁移缺口 |
 
 ---
 
@@ -234,7 +234,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 **依赖**：Task 2、Task 10、Task 12
 
 - [x] 按旧源码和批准 fixtures 实现所需 RTSP 方法、状态转换和 TCP interleaved 会话；真实平台方法序列继续保留 `REAL_PLATFORM_REQUIRED`。
-- [x] 支持已批准的 IPC 与设备级主、辅、第三码流 URL；NVR 多通道 URL/control 映射仍为 `EVIDENCE_GATED` / `REAL_PLATFORM_REQUIRED`。
+- [x] 支持旧项目已确认的 IPC 三码流和 NVR c1 三码流；配置的 NVR 多通道数用于 HTTP/ONVIF 元数据。旧 SDP control 别名同时注册，c2～cN 独立 RTSP 明确属于范围外新增能力。
 - [x] 首版以已确认的 RTSP/TCP interleaved 为基线；UDP/Digest/音频不得无证据扩展。
 - [x] 每客户端独立 SSRC/sequence/timestamp，共享媒体时钟和只读帧。
 - [x] 循环点保持时间戳/序列连续；慢客户端使用有界队列隔离。
@@ -252,7 +252,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 - [x] 静态核实并实现 method、URL、源 IP、Content-Type、boundary 和时间戳；真实平台成功判定继续只计 `unverified`，保留 `REAL_PLATFORM_REQUIRED`。
 - [x] 图片在任务开始时校验并共享，不在每次发送时读盘。
 - [x] 普通 NVR 不增加旧业务不存在的带图告警。
-- [x] 使用旧模板/源码和正式 Pack fixtures 校验固定身份、时间、图片、尺寸变体与 multipart/raw 请求；车辆/智能复合多请求语义仍需真实平台验收。
+- [x] 使用旧模板/源码和正式 Pack fixtures 校验固定身份、时间、图片、尺寸变体与 multipart/raw 请求；智能 V1.0 和车辆匹配/不匹配均按旧源码顺序发送结构化/图片请求后再发送关联 `Alarm`，恢复请求使用原告警端点。真实平台只负责兼容结果验收，不再阻塞静态已确认流程。
 
 ### Task 15：实现告警调度与统计
 
@@ -322,7 +322,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 
 ### Task 19：自动化与隔离 Windows 验证
 
-- [x] Rust 单元、静态 golden 与集成测试全部通过：正式 `1.0.2` Pack 门禁启用时 `cargo test` 为 app_lib 190 项、app 437 项，0 失败。
+- [x] Rust 单元、静态 golden 与集成测试全部通过：正式 `1.0.2` Pack 门禁启用时 `cargo test` 为 app_lib 192 项、app 437 项，0 失败。
 - [ ] Windows VM 验证 UAC、IP、防火墙、主进程/Worker 崩溃和断电恢复。
 - [x] 验证停止后 HTTP/RTSP 端口可立即复用（本地 loopback 自动化测试）。
 - [x] 前端相关测试、`pnpm check`、`pnpm lint`、`git diff --check` 通过。
@@ -333,7 +333,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 - [ ] 平台连续录像、检索、回放、拖动和断流重连通过；VLC 仅作为辅助测试。
 - [ ] 在记录硬件/网卡/码率/并发条件下完成 10/100/500 台档位。
 - [x] 未实测组合显示“未验证”，不宣称支持。
-- [x] 确认 EXE 不含旧项目素材、旧 Python 工具或私钥（`file-sync-tool-1.2.1-202607190838.exe`，SHA-256 `041b52b537a2d19ffda68438e787d4b842b02f46640c44e9396bc0d710f0bf6a`；369 个正式素材样本、3 种私钥表示和 26 个旧工具/路径标记均无命中；bundle 资源仅含既有 `restore-win-v.ps1`）。
+- [x] 确认 EXE 不含旧项目素材、旧 Python 工具或私钥（`file-sync-tool-1.2.2-202607191002.exe`，SHA-256 `46b065e35be9b26d6ab927467df7eb24fe5dff5828c6a455725ac649b1371aca`；369 个正式素材样本、3 种私钥表示和 26 个旧工具/路径标记均无命中；bundle 资源仅含既有 `restore-win-v.ps1`）。
 
 ## 每阶段交付检查
 

@@ -47,12 +47,11 @@ pub enum RtspRouteRole {
 pub enum RtspRouteEvidence {
     LegacySourceConfirmedPlatformUnverified,
     LegacyConflictPreservedPlatformUnverified,
-    UnresolvedNvrChannelCandidate,
 }
 
 impl RtspRouteEvidence {
     pub fn runtime_activation_allowed(self) -> bool {
-        !matches!(self, Self::UnresolvedNvrChannelCandidate)
+        true
     }
 }
 
@@ -74,16 +73,6 @@ pub struct PlannedRtspListener {
 
 impl PlannedRtspListener {
     pub fn runtime_paths(&self) -> Result<BTreeSet<&str>, RtspRoutePlanError> {
-        if self
-            .routes
-            .iter()
-            .any(|route| !route.evidence.runtime_activation_allowed())
-        {
-            return Err(route_error(
-                "device_simulator.rtsp.nvr_channel_mapping_unverified",
-                "NVR channels beyond c1 are route candidates only and cannot be activated without approved evidence",
-            ));
-        }
         Ok(self
             .routes
             .iter()
@@ -120,19 +109,17 @@ pub fn plan_rtsp_routes(
                 path: format!("/media/video{}", stream.index() + 1),
                 evidence: RtspRouteEvidence::LegacySourceConfirmedPlatformUnverified,
             }],
-            DeviceKind::Nvr => (1..=nvr_channel_count.expect("validated NVR channels"))
-                .map(|channel| PlannedRtspRoute {
-                    stream,
-                    channel: Some(channel),
-                    role: RtspRouteRole::Aggregate,
-                    path: format!("/unicast/c{channel}/s{}/live", stream.index()),
-                    evidence: if channel == 1 {
-                        RtspRouteEvidence::LegacySourceConfirmedPlatformUnverified
-                    } else {
-                        RtspRouteEvidence::UnresolvedNvrChannelCandidate
-                    },
-                })
-                .collect(),
+            // The legacy implementation exposes the configured NVR channel
+            // count through HTTP/ONVIF metadata but only starts c1 RTSP for
+            // main/sub/third streams. Preserve that observable behavior;
+            // c2..cN would be a new feature, not a language-porting detail.
+            DeviceKind::Nvr => vec![PlannedRtspRoute {
+                stream,
+                channel: Some(1),
+                role: RtspRouteRole::Aggregate,
+                path: format!("/unicast/c1/s{}/live", stream.index()),
+                evidence: RtspRouteEvidence::LegacySourceConfirmedPlatformUnverified,
+            }],
         };
         routes.push(PlannedRtspRoute {
             stream,
@@ -224,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn exposes_but_refuses_unresolved_multi_channel_nvr_candidates() {
+    fn nvr_plan_preserves_legacy_c1_streaming_with_multi_channel_metadata() {
         let plan = plan_rtsp_routes(
             DeviceKind::Nvr,
             "198.51.100.20".parse().unwrap(),
@@ -237,11 +224,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan[0].routes[0].path, "/unicast/c1/s0/live");
-        assert_eq!(plan[0].routes[7].path, "/unicast/c8/s0/live");
         assert_eq!(
-            plan[0].runtime_paths().unwrap_err().code,
-            "device_simulator.rtsp.nvr_channel_mapping_unverified"
+            plan[0]
+                .routes
+                .iter()
+                .filter(|route| route.role == RtspRouteRole::Aggregate)
+                .count(),
+            1
         );
+        assert!(plan[0].runtime_paths().is_ok());
     }
 
     #[test]

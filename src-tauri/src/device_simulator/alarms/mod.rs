@@ -138,7 +138,13 @@ pub enum DynamicField {
     SubscriptionId,
     AlarmState,
     ImageBase64,
+    ImageBase642,
+    ImageBase643,
+    ImageBase644,
     ImageSize,
+    ImageSize2,
+    ImageSize3,
+    ImageSize4,
 }
 
 impl DynamicField {
@@ -152,7 +158,13 @@ impl DynamicField {
             Self::SubscriptionId => "subscription_id",
             Self::AlarmState => "alarm_state",
             Self::ImageBase64 => "image_base64",
+            Self::ImageBase642 => "image_base64_2",
+            Self::ImageBase643 => "image_base64_3",
+            Self::ImageBase644 => "image_base64_4",
             Self::ImageSize => "image_size",
+            Self::ImageSize2 => "image_size_2",
+            Self::ImageSize3 => "image_size_3",
+            Self::ImageSize4 => "image_size_4",
         }
     }
 
@@ -166,13 +178,39 @@ impl DynamicField {
             "subscription_id" => Ok(Self::SubscriptionId),
             "alarm_state" => Ok(Self::AlarmState),
             "image_base64" => Ok(Self::ImageBase64),
+            "image_base64_2" => Ok(Self::ImageBase642),
+            "image_base64_3" => Ok(Self::ImageBase643),
+            "image_base64_4" => Ok(Self::ImageBase644),
             "image_size" => Ok(Self::ImageSize),
+            "image_size_2" => Ok(Self::ImageSize2),
+            "image_size_3" => Ok(Self::ImageSize3),
+            "image_size_4" => Ok(Self::ImageSize4),
             _ => Err(AlarmError::new(
                 "device_simulator.alarm.template_field_unknown",
                 format!("unknown alarm template field '{token}'"),
             )),
         }
     }
+}
+
+const IMAGE_BASE64_FIELDS: [DynamicField; 4] = [
+    DynamicField::ImageBase64,
+    DynamicField::ImageBase642,
+    DynamicField::ImageBase643,
+    DynamicField::ImageBase644,
+];
+const IMAGE_SIZE_FIELDS: [DynamicField; 4] = [
+    DynamicField::ImageSize,
+    DynamicField::ImageSize2,
+    DynamicField::ImageSize3,
+    DynamicField::ImageSize4,
+];
+
+pub(crate) fn embedded_image_count(template: &CompiledTemplate) -> usize {
+    IMAGE_BASE64_FIELDS
+        .iter()
+        .filter(|field| template.fields().contains(field))
+        .count()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,6 +562,14 @@ pub struct TransportDefinition {
     pub success_rule: ResponseSuccessRule,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlarmRequestDefinition {
+    pub template: CompiledTemplate,
+    pub image_policy: ImagePolicy,
+    pub images: Vec<ImageAttachmentDefinition>,
+    pub transport: TransportDefinition,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryTrigger {
     RequestedDelay,
@@ -534,6 +580,7 @@ pub enum RecoveryDefinition {
     None,
     RenderWith {
         template: CompiledTemplate,
+        transport: TransportDefinition,
         trigger: RecoveryTrigger,
         include_images: bool,
     },
@@ -587,6 +634,9 @@ pub struct AlarmHandlerDefinition {
     pub image_policy: ImagePolicy,
     pub images: Vec<ImageAttachmentDefinition>,
     pub transport: TransportDefinition,
+    /// Additional HTTP requests emitted after the primary request for one
+    /// logical legacy alarm. Their order is part of the migrated contract.
+    pub follow_up_requests: Vec<AlarmRequestDefinition>,
     pub recovery: RecoveryDefinition,
     pub evidence: HandlerEvidence,
 }
@@ -642,6 +692,12 @@ impl AlarmHandlerRegistry {
                 definition
                     .images
                     .iter()
+                    .chain(
+                        definition
+                            .follow_up_requests
+                            .iter()
+                            .flat_map(|request| request.images.iter()),
+                    )
                     .map(|image| image.reference.clone())
             })
             .collect()
@@ -685,6 +741,27 @@ pub fn build_alarm_request(
     build_request_with_template(definition, &definition.template, context, image_cache)
 }
 
+pub fn build_alarm_requests(
+    definition: &AlarmHandlerDefinition,
+    context: &AlarmBuildContext,
+    image_cache: &ImageCache,
+) -> AlarmResult<Vec<HttpAlarmRequest>> {
+    let mut requests = Vec::with_capacity(1 + definition.follow_up_requests.len());
+    requests.push(build_alarm_request(definition, context, image_cache)?);
+    for follow_up in &definition.follow_up_requests {
+        requests.push(build_request_from_parts(
+            definition.profile_id,
+            &follow_up.template,
+            follow_up.image_policy,
+            &follow_up.images,
+            &follow_up.transport,
+            context,
+            image_cache,
+        )?);
+    }
+    Ok(requests)
+}
+
 pub fn build_recovery_request(
     definition: &AlarmHandlerDefinition,
     context: &AlarmBuildContext,
@@ -694,18 +771,20 @@ pub fn build_recovery_request(
         RecoveryDefinition::None => Ok(None),
         RecoveryDefinition::RenderWith {
             template,
+            transport,
             include_images,
             ..
         } => {
-            if *include_images {
-                build_request_with_template(definition, template, context, image_cache).map(Some)
-            } else {
-                let mut recovery_definition = definition.clone();
+            let mut recovery_definition = definition.clone();
+            recovery_definition.template = template.clone();
+            recovery_definition.transport = transport.clone();
+            recovery_definition.follow_up_requests.clear();
+            if !*include_images {
                 recovery_definition.images.clear();
                 recovery_definition.image_policy = ImagePolicy::Forbidden;
-                build_request_with_template(&recovery_definition, template, context, image_cache)
-                    .map(Some)
             }
+            build_request_with_template(&recovery_definition, template, context, image_cache)
+                .map(Some)
         }
     }
 }
@@ -717,7 +796,28 @@ fn build_request_with_template(
     image_cache: &ImageCache,
 ) -> AlarmResult<HttpAlarmRequest> {
     validate_definition(definition)?;
-    validate_template_image_mapping(definition, template)?;
+    build_request_from_parts(
+        definition.profile_id,
+        template,
+        definition.image_policy,
+        &definition.images,
+        &definition.transport,
+        context,
+        image_cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_request_from_parts(
+    profile_id: FirstReleaseProfileId,
+    template: &CompiledTemplate,
+    image_policy: ImagePolicy,
+    images: &[ImageAttachmentDefinition],
+    transport: &TransportDefinition,
+    context: &AlarmBuildContext,
+    image_cache: &ImageCache,
+) -> AlarmResult<HttpAlarmRequest> {
+    validate_request_definition(profile_id, template, image_policy, images, transport)?;
     let source_ip = context.source_ip.ok_or_else(|| {
         AlarmError::new(
             "device_simulator.alarm.source_ip_missing",
@@ -725,31 +825,21 @@ fn build_request_with_template(
         )
     })?;
     let mut fields = context.fields.clone();
-    if template.fields().contains(&DynamicField::ImageBase64) {
-        if definition.images.len() != 1 {
-            return Err(AlarmError::new(
-                "device_simulator.alarm.embedded_image_count_invalid",
-                "embedded Base64 templates require exactly one image",
-            ));
+    for (index, attachment) in images.iter().enumerate() {
+        let image = image_cache.get(&attachment.reference)?;
+        if let Some(field) = IMAGE_BASE64_FIELDS.get(index) {
+            if template.fields().contains(field) {
+                fields.insert(*field, BASE64_STANDARD.encode(&image.bytes));
+            }
         }
-        let image = image_cache.get(&definition.images[0].reference)?;
-        fields.insert(
-            DynamicField::ImageBase64,
-            BASE64_STANDARD.encode(&image.bytes),
-        );
-        fields.insert(DynamicField::ImageSize, image.bytes.len().to_string());
-    } else if template.fields().contains(&DynamicField::ImageSize) {
-        if definition.images.len() != 1 {
-            return Err(AlarmError::new(
-                "device_simulator.alarm.embedded_image_count_invalid",
-                "image-size templates require exactly one image",
-            ));
+        if let Some(field) = IMAGE_SIZE_FIELDS.get(index) {
+            if template.fields().contains(field) {
+                fields.insert(*field, image.bytes.len().to_string());
+            }
         }
-        let image = image_cache.get(&definition.images[0].reference)?;
-        fields.insert(DynamicField::ImageSize, image.bytes.len().to_string());
     }
     let metadata = template.render(&fields)?;
-    let (body, content_type) = match &definition.transport.body_encoding {
+    let (body, content_type) = match &transport.body_encoding {
         BodyEncoding::Raw { content_type } => (metadata, content_type.clone()),
         BodyEncoding::Multipart {
             metadata_name,
@@ -767,7 +857,7 @@ fn build_request_with_template(
                 metadata_name,
                 metadata_content_type,
                 &metadata,
-                &definition.images,
+                images,
                 image_cache,
             )?;
             (body, format!("multipart/form-data; boundary={boundary}"))
@@ -783,12 +873,12 @@ fn build_request_with_template(
     headers.insert("Content-Type".into(), content_type);
     headers.insert("Content-Length".into(), body.len().to_string());
     Ok(HttpAlarmRequest {
-        method: definition.transport.method,
-        path: definition.transport.path.clone(),
+        method: transport.method,
+        path: transport.path.clone(),
         source_ip,
         headers,
         body: Arc::from(body),
-        success_rule: definition.transport.success_rule.clone(),
+        success_rule: transport.success_rule.clone(),
     })
 }
 
@@ -852,26 +942,44 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
             "alarm handler is registered for the wrong profile",
         ));
     }
-    validate_http_path(&definition.transport.path)?;
-    if definition.profile_id == FirstReleaseProfileId::NvrCommon
-        && (definition.image_policy != ImagePolicy::Forbidden || !definition.images.is_empty())
+    validate_request_definition(
+        definition.profile_id,
+        &definition.template,
+        definition.image_policy,
+        &definition.images,
+        &definition.transport,
+    )?;
+    for follow_up in &definition.follow_up_requests {
+        validate_request_definition(
+            definition.profile_id,
+            &follow_up.template,
+            follow_up.image_policy,
+            &follow_up.images,
+            &follow_up.transport,
+        )?;
+    }
+    if let RecoveryDefinition::RenderWith {
+        template,
+        transport,
+        include_images,
+        ..
+    } = &definition.recovery
     {
-        return Err(AlarmError::new(
-            "device_simulator.alarm.nvr_common_image_forbidden",
-            "ordinary NVR alarms cannot acquire image behavior without approved evidence",
-        ));
-    }
-    if definition.image_policy == ImagePolicy::Forbidden && !definition.images.is_empty() {
-        return Err(AlarmError::new(
-            "device_simulator.alarm.image_policy_invalid",
-            "image attachments exist while the handler forbids images",
-        ));
-    }
-    if definition.image_policy == ImagePolicy::Required && definition.images.is_empty() {
-        return Err(AlarmError::new(
-            "device_simulator.alarm.image_policy_invalid",
-            "image handler requires at least one declared image",
-        ));
+        validate_request_definition(
+            definition.profile_id,
+            template,
+            if *include_images {
+                definition.image_policy
+            } else {
+                ImagePolicy::Forbidden
+            },
+            if *include_images {
+                &definition.images
+            } else {
+                &[]
+            },
+            transport,
+        )?;
     }
     if definition.evidence.legacy_sources.is_empty()
         || definition.evidence.template_source.trim().is_empty()
@@ -894,22 +1002,49 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
             "a synthetic fixture cannot claim platform verification",
         ));
     }
-    for image in &definition.images {
+    Ok(())
+}
+
+fn validate_request_definition(
+    profile_id: FirstReleaseProfileId,
+    template: &CompiledTemplate,
+    image_policy: ImagePolicy,
+    images: &[ImageAttachmentDefinition],
+    transport: &TransportDefinition,
+) -> AlarmResult<()> {
+    validate_http_path(&transport.path)?;
+    if profile_id == FirstReleaseProfileId::NvrCommon
+        && (image_policy != ImagePolicy::Forbidden || !images.is_empty())
+    {
+        return Err(AlarmError::new(
+            "device_simulator.alarm.nvr_common_image_forbidden",
+            "ordinary NVR alarms cannot acquire image behavior without approved evidence",
+        ));
+    }
+    if image_policy == ImagePolicy::Forbidden && !images.is_empty() {
+        return Err(AlarmError::new(
+            "device_simulator.alarm.image_policy_invalid",
+            "image attachments exist while the handler forbids images",
+        ));
+    }
+    if image_policy == ImagePolicy::Required && images.is_empty() {
+        return Err(AlarmError::new(
+            "device_simulator.alarm.image_policy_invalid",
+            "image handler requires at least one declared image",
+        ));
+    }
+    for image in images {
         validate_multipart_token(&image.field_name, "image field name")?;
         validate_file_name(&image.file_name)?;
     }
-    match &definition.transport.body_encoding {
+    let embedded_images = embedded_image_count(template);
+    match &transport.body_encoding {
         BodyEncoding::Raw { content_type } => {
             validate_header_value(content_type, "content type")?;
-            if !definition.images.is_empty()
-                && !definition
-                    .template
-                    .fields()
-                    .contains(&DynamicField::ImageBase64)
-            {
+            if embedded_images != images.len() && (!images.is_empty() || embedded_images != 0) {
                 return Err(AlarmError::new(
                     "device_simulator.alarm.image_mapping_missing",
-                    "raw alarm images require an explicit image_base64 template field",
+                    "raw alarm image attachments must match the explicit Base64 template slots",
                 ));
             }
         }
@@ -919,11 +1054,7 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
         } => {
             validate_multipart_token(metadata_name, "metadata name")?;
             validate_header_value(metadata_content_type, "metadata content type")?;
-            if definition
-                .template
-                .fields()
-                .contains(&DynamicField::ImageBase64)
-            {
+            if embedded_images != 0 {
                 return Err(AlarmError::new(
                     "device_simulator.alarm.image_mapping_ambiguous",
                     "multipart images cannot also use the image_base64 template field",
@@ -931,8 +1062,7 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
             }
         }
     }
-    if let ResponseSuccessRule::StatusRange { minimum, maximum } = definition.transport.success_rule
-    {
+    if let ResponseSuccessRule::StatusRange { minimum, maximum } = transport.success_rule {
         if minimum < 100 || maximum > 599 || minimum > maximum {
             return Err(AlarmError::new(
                 "device_simulator.alarm.success_rule_invalid",
@@ -941,32 +1071,6 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
         }
     }
     Ok(())
-}
-
-fn validate_template_image_mapping(
-    definition: &AlarmHandlerDefinition,
-    template: &CompiledTemplate,
-) -> AlarmResult<()> {
-    match &definition.transport.body_encoding {
-        BodyEncoding::Raw { .. }
-            if !definition.images.is_empty()
-                && !template.fields().contains(&DynamicField::ImageBase64) =>
-        {
-            Err(AlarmError::new(
-                "device_simulator.alarm.image_mapping_missing",
-                "raw alarm images require an explicit image_base64 template field",
-            ))
-        }
-        BodyEncoding::Multipart { .. }
-            if template.fields().contains(&DynamicField::ImageBase64) =>
-        {
-            Err(AlarmError::new(
-                "device_simulator.alarm.image_mapping_ambiguous",
-                "multipart images cannot also use the image_base64 template field",
-            ))
-        }
-        _ => Ok(()),
-    }
 }
 
 /// Provides one non-golden scaffold for each approved first-release handler.
@@ -1005,6 +1109,7 @@ pub fn synthetic_unverified_first_release_registry() -> AlarmResult<AlarmHandler
                 },
                 success_rule: ResponseSuccessRule::Unverified,
             },
+            follow_up_requests: vec![],
             recovery: RecoveryDefinition::None,
             evidence: HandlerEvidence {
                 legacy_sources: legacy_alarm_sources(profile_id)
@@ -1302,6 +1407,7 @@ mod tests {
                 },
                 success_rule: ResponseSuccessRule::Unverified,
             },
+            follow_up_requests: vec![],
             recovery: RecoveryDefinition::None,
             evidence: evidence(),
         }
@@ -1621,6 +1727,7 @@ mod tests {
         );
         definition.recovery = RecoveryDefinition::RenderWith {
             template: CompiledTemplate::compile(br#"{"state":"{{alarm_state}}"}"#).unwrap(),
+            transport: definition.transport.clone(),
             trigger: RecoveryTrigger::RequestedDelay,
             include_images: false,
         };

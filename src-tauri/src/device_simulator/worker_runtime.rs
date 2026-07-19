@@ -127,6 +127,7 @@ impl WorkerServiceRuntime for SystemWorkerServices {
                 platform: config.request.platform.kind,
                 target: config.request.platform.clone(),
                 preview: config.preview.clone(),
+                device_http_port: config.request.device_http_port,
                 assets: Arc::clone(&assets),
                 app_data_dir: config.app_data_dir,
             };

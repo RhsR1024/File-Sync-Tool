@@ -17,9 +17,9 @@
 | 新 Profile | 旧项目设备类型 | 设计目标 | 源码证据 | 平台实测 | 当前状态 |
 | --- | --- | --- | --- | --- | --- |
 | `ipc-custom` | 自定义报警相机 | IPC 上线、RTSP、带图自定义告警 | 静态源码已定位，`1.0.2` Pack/fixture 已发布并通过运行时门禁 | 未验证 | 本地静态实现完成/平台待验 |
-| `ipc-smart` | 智能相机 | IPC 上线、RTSP、VMS/UMS 智能告警 | 静态源码已定位，`1.0.2` Pack/fixture 已发布并通过运行时门禁 | 未验证 | 本地静态实现完成/平台待验 |
-| `nvr-common` | 普通NVR | 多通道、常规通道/设备告警 | 静态源码已定位，`1.0.2` Pack/fixture 已发布并通过运行时门禁 | 未验证 | 本地静态实现完成/NVR 多通道与平台待验 |
-| `nvr-vehicle` | 车辆识别NVR | 多通道、带图车辆告警 | 静态源码已定位，`1.0.2` Pack/fixture 已发布并通过运行时门禁 | 未验证 | 本地静态实现完成/复合告警与平台待验 |
+| `ipc-smart` | 智能相机 | IPC 上线、RTSP、VMS/UMS 智能告警 | 静态源码已定位，`1.0.2` Pack/fixture 已发布；Structure/Alarm 顺序复合请求和恢复流程已进入运行时 | 未验证 | 旧业务静态实现完成/平台待验 |
+| `nvr-common` | 普通NVR | 多通道元数据、c1 三码流、常规通道/设备告警 | 静态源码已定位，`1.0.2` Pack/fixture 已发布并通过运行时门禁 | 未验证 | 旧业务静态实现完成/平台待验 |
+| `nvr-vehicle` | 车辆识别NVR | 多通道元数据、c1 三码流、带图车辆告警 | 静态源码已定位，`1.0.2` Pack/fixture 已发布；VehicleEventInfo/Alarm 关联流程已进入运行时 | 未验证 | 旧业务静态实现完成/平台待验 |
 
 ## 3. 逐 Profile 证据
 
@@ -73,7 +73,7 @@
 | HTTP/RTSP 端口 | HTTP 可配置，旧示例为 `81`；RTSP 三个 listener 固定 `554/555/556` | `config/VSIConfig.ini:10-17`、`script/Vsocket_ip.py:206-230` | 源码确认 | HTTP 默认仍需审查；RTSP profile 例外需核实 |
 | 发现协议 | WS-Discovery `239.255.255.252:3702`，响应端口 `3705/3706/3707`，NVR 使用 `xml/Common/search-aibox.xml` | `script/Vsocket_ip.py:108-175` | 源码确认/平台未验证 | 作为 golden fixture 候选，不等于真实平台兼容 |
 | HTTP/LAPI/ONVIF | NVR 分派 `HTTPServer.handle_client_aibox`，默认模板目录 `xml/AIBOX/` | `script/HTTPServer.py:63-80,578-718` | 源码确认 | 需继续按实际路由最小化素材依赖 |
-| RTSP URL/通道/码流 | 广告主/辅/第三码流为 `rtsp://<ip>:554/unicast/c1/s0/live`、`:555/.../s1/live`、`:556/.../s2/live`；旧服务绑定 `0.0.0.0` 且只起三条全局 listener | `script/Vsocket_ip.py:206-250` | 源码确认/存在冲突 | 新实现不能照搬全局绑定；多通道 URL 映射仍未闭合 |
+| RTSP URL/通道/码流 | 广告主/辅/第三码流为 `rtsp://<ip>:554/unicast/c1/s0/live`、`:555/.../s1/live`、`:556/.../s2/live`；旧服务绑定 `0.0.0.0` 且只起三条全局 listener，未实现 c2～cN 独立 RTSP | `script/Vsocket_ip.py:206-250` | 源码确认 | 新实现改为按虚拟 IP 隔离 listener，并保持 c1 三码流；多通道数仅进入旧 HTTP/ONVIF 元数据 |
 | RTSP 状态/SDP | 可见 handler 为 `OPTIONS/SETUP/PLAY/GET_PARAMETER`，其他请求进入 SDP；SETUP 固定 TCP interleaved；SDP 为 H264 PT=105 + ONVIF metadata PT=107 | `script/IPCRtspLib.py:210-326,1439-1463` | 源码确认/存在冲突 | 方法集合、SDP control 与广告 URL 需真实平台确认 |
 | 常规告警 | 旧清单含通道/设备类 V1.0 JSON 告警；POST `/LAPI/V1.0/System/Event/Notification/Alarm`，`application/json; charset=utf-8`；存在 `alarmTypeOff` 时延迟恢复 | `data/alarms_info.yml:189-214`、`script/NormalAlarm.py:40-123` | 源码确认/平台未验证 | 逐告警类型和 `serverSupport` 建 handler；成功判定仍需平台证据 |
 | 订阅端口 | 普通 NVR 分支直接读取订阅 JSON `Port`，静态代码未见 55000～55999 校验 | `script/HTTPServer.py:589-616` | 源码确认/待确认 | 是否保留此差异需平台证据 |
@@ -87,19 +87,19 @@
 | 支持平台 | 配置声明 `VMS系列/UMS`；未发现成功日志/抓包 | `data/dev_type.yml:114-120`、`script/YamlOperator.py:133-149` | 文档声称/未验证 | UI 不得显示“已支持” |
 | 通道数 | 与普通 NVR 共用动态通道模板逻辑；旧配置仅提供示例值，最大值未知 | `config/VSIConfig.ini:16-17`、`script/HTTPServer.py:227-231,729-757,1019-1042` | 源码确认/待确认 | 默认/最大通道数阻塞配置冻结 |
 | 发现和 HTTP | 共用 `search-aibox.xml` 与 `handle_client_aibox`；三个能力接口覆盖到 `xml/Vehicle/` | `script/Vsocket_ip.py:108-175`、`script/HTTPServer.py:63-80,578-718,652-657` | 源码确认/平台未验证 | 建立公共依赖 + profile 覆盖，不整目录复制 |
-| RTSP URL/通道/码流 | 与普通 NVR 共用三端口/三 URL 静态逻辑；类型名分支和 SDP control 存在不一致 | `script/Vsocket_ip.py:188-250`、`script/IPCRtspLib.py:1439-1463` | 冲突 | GetStreamUri 和 RTSP control 阻塞实现 |
-| 车辆告警 | 三类：匹配、不匹配、抓拍；匹配/不匹配先发 `VehicleEventInfo`，再发关联 `Alarm`；抓拍发 `Structure` | `data/alarms_info.yml:184-187`、`script/VehicleAlarm.py:40-227` | 源码确认/平台未验证 | 需三个强类型 handler/流程，并确认成功判定 |
-| 图片映射和上传 | JSON 中嵌 PlateImage/PanoImage Data 和 Picture URL；使用 5 个 `object/VehicleStruct` 模板及 `pic/VEHICLE` 21 张图片 | `script/VehicleAlarm.py:71-226`、`object/VehicleStruct/`、`pic/VEHICLE/` | 源码确认/非商用授权已批准/`nvr-vehicle@1.0.2` 已发布 | 图片共享缓存与静态 fixture 已落地；关联多请求平台语义仍需真实验收 |
+| RTSP URL/通道/码流 | 与普通 NVR 共用三端口/c1 三 URL 静态逻辑；SDP control 使用 `/media/video1/video` | `script/Vsocket_ip.py:188-250`、`script/IPCRtspLib.py:1439-1463` | 源码确认/平台未验证 | 运行时同时注册广告 URL 与旧 control 别名；不虚构旧项目不存在的 c2～cN 流 |
+| 车辆告警 | 三类：匹配、不匹配、抓拍；匹配/不匹配先发 `VehicleEventInfo`，再发共享关联 ID 的 `Alarm`；抓拍发 `Structure` | `data/alarms_info.yml:184-187`、`script/VehicleAlarm.py:40-227` | 源码确认/平台未验证 | 三个强类型流程和顺序复合请求已实现；平台成功判定仍待验 |
+| 图片映射和上传 | JSON 中嵌 PlateImage/PanoImage Data 和 Picture URL；使用 5 个 `object/VehicleStruct` 模板及 `pic/VEHICLE` 21 张图片 | `script/VehicleAlarm.py:71-226`、`object/VehicleStruct/`、`pic/VEHICLE/` | 源码确认/非商用授权已批准/`nvr-vehicle@1.0.2` 已发布 | 图片按模板槽位独立缓存/注入，匹配与不匹配的两步关联请求已实现 |
 | 订阅端口 | 车辆 NVR 走非普通分支，静态代码要求 `55000 <= port < 55999` | `script/HTTPServer.py:602-616` | 源码确认/待确认 | 与普通 NVR 的差异需平台验证后决定是否保留 |
 
 ## 3.5 已发现的跨 Profile 冲突
 
-1. `script/Vsocket_ip.py:188-196` 判断名称为 `车牌识别NVR`，但 `data/dev_type.yml:114-120` 的类型名是 `车辆识别NVR`；随后 `script/HTTPServer.py:103-112` 对真实类型索引 NVR URL 键。无法确认这是旧 bug、别名还是版本偏差，车辆 NVR 的 GetStreamUri 暂停实现。
-2. NVR 广告 URL 为 `/unicast/c1/s*/live`，而 `script/IPCRtspLib.py:1445-1452` 的 SDP control 为 `/media/video1/video|metadata`。需真实平台请求/响应或抓包决定兼容行为，不自行统一。
+1. `script/Vsocket_ip.py:188-196` 判断名称为 `车牌识别NVR`，但 `data/dev_type.yml:114-120` 的类型名是 `车辆识别NVR`。实际启动分支 `Vsocket_ip.py:242-245` 与 `HTTPServer.py:103-112` 均对真实类型返回 c1 三码流；新实现按真实类型执行该可达分支。
+2. NVR 广告 URL 为 `/unicast/c1/s*/live`，而 `script/IPCRtspLib.py:1445-1452` 的 SDP control 为 `/media/video1/video|metadata`。新运行时保留两者为同一媒体源的兼容别名，不把 control 差异误判为需要省略 RTSP。
 3. 两类 NVR 仅有 `serverSupport` 配置声明，未找到成功日志、抓包或验收记录；VMS/UMS 均标记“未验证”。
 4. 普通 NVR 与车辆 NVR 的订阅端口校验不同，是否为必要兼容行为未知。
 5. `xml/AIBOX/` 包含设计明确不迁移的录像/回放模板；素材依赖必须按实际路由最小化，不能整目录打包。
-6. 旧实现只启动三条绑定 `0.0.0.0` 的全局 RTSP listener，多 NVR 通道 URL/通道映射及最大通道数证据未闭合。
+6. 旧实现只启动三条绑定 `0.0.0.0` 的全局 RTSP listener，并仅实现 c1；新实现按虚拟 IP 隔离三条 listener。c2～cN 独立流属于新增能力，不是旧实现迁移门禁。
 
 ## 3.6 `ipc-custom` 专项冲突
 
@@ -119,9 +119,9 @@
 | --- | --- | --- | --- |
 | `protocol-core@1.0.2` | 公共 schema、经批准的公共模板/变量/handler 描述 | `xml/`、`object/`、HTTP/发现源码 | 已生成、签名、发布并通过运行时加载门禁 |
 | `ipc-custom@1.0.2` | IPC profile、订阅模板、自定义告警和 12 张三尺寸图片 | `data/dev_type.yml`、`data/alarms_info.yml`、最小 `xml/Common/` 闭包、`xml/Custom/`、`object/CustomStruct/`、`pic/CUSTOM/` | 已生成、签名、发布并通过 profile/alarm fixture 门禁 |
-| `ipc-smart@1.0.2` | 智能相机 profile、智能能力、V1.0/V1.1 告警和 57 张图片 | `data/dev_type.yml`、`data/alarms_info.yml`、`xml/Smart/`、`object/SmartStruct/`、`pic/SMART/` | 已生成、签名、发布并通过 profile/alarm fixture 门禁；复合语义平台待验 |
-| `nvr-common@1.0.2` | 普通 NVR profile、动态通道模板、常规 JSON 告警 | `data/dev_type.yml`、`data/alarms_info.yml`、`xml/Common/search-aibox.xml`、精确 `xml/AIBOX/` 路由闭包、`object/NormalStruct/` | 已生成、签名、发布并通过 profile/alarm fixture 门禁；多通道平台待验 |
-| `nvr-vehicle@1.0.2` | 车辆识别 NVR profile、能力覆盖、车辆告警和 21 张图片 | NVR 公共依赖、`xml/Vehicle/`、`object/VehicleStruct/`、`pic/VEHICLE/` | 已生成、签名、发布并通过 profile/alarm fixture 门禁；关联多请求平台待验 |
+| `ipc-smart@1.0.2` | 智能相机 profile、智能能力、V1.0/V1.1 告警和 57 张图片 | `data/dev_type.yml`、`data/alarms_info.yml`、`xml/Smart/`、`object/SmartStruct/`、`pic/SMART/` | 已生成、签名、发布；复合请求、独立图片槽位和指定恢复流程已通过运行时门禁 |
+| `nvr-common@1.0.2` | 普通 NVR profile、动态通道模板、常规 JSON 告警 | `data/dev_type.yml`、`data/alarms_info.yml`、`xml/Common/search-aibox.xml`、精确 `xml/AIBOX/` 路由闭包、`object/NormalStruct/` | 已生成、签名、发布；通道/设备 AlarmSrcType 与恢复请求已通过运行时门禁 |
+| `nvr-vehicle@1.0.2` | 车辆识别 NVR profile、能力覆盖、车辆告警和 21 张图片 | NVR 公共依赖、`xml/Vehicle/`、`object/VehicleStruct/`、`pic/VEHICLE/` | 已生成、签名、发布；VehicleEventInfo→Alarm 关联顺序及抓拍 Structure 已通过运行时门禁 |
 | `media-h264-live@1.0.2` | 三路经提取的 H.264 帧、SPS/PPS、关键帧索引与码率 | `mediafile/{mainstream,substream,thirdstream}.pcap`、RTSP 源码、旧 SDP | 已生成、签名、发布；差异记录为 `reviewed_static`，三路 runtime/loopback 门禁通过 |
 | `media-h265-live` | H.265 帧、VPS/SPS/PPS 和媒体索引 | `mediafile/`、RTSP 源码、旧 SDP | 不在首版已批准媒体范围；运行时仅保留通用校验能力，不发布 Pack |
 
@@ -133,12 +133,12 @@
 | --- | --- | --- | --- |
 | 设备发现 | 旧发现源码与模板；真实平台请求待验 | 旧模板 + 受限动态替换规则 | 正式静态 fixture 与路由测试完成/平台请求严格度待验 |
 | 设备信息/能力 | 旧 HTTP/LAPI/ONVIF 路由源码与模板 | 正式 Pack 模板 + 强类型 handler | 四 profile 静态 fixture/运行时加载完成/平台待验 |
-| GetStreamUri | 旧替换规则和广告 URL | IPC 三码流与 NVR 设备级候选 | IPC/设备级 fixture 完成；NVR 多通道映射继续 `EVIDENCE_GATED` |
+| GetStreamUri | 旧替换规则和广告 URL | IPC 三码流与 NVR c1 三码流 | 旧项目兼容行为已完成；c2～cN 独立 RTSP 明确为范围外新增能力 |
 | RTSP 会话 | 旧 RTSP 源码、PCAP 与 SDP | OPTIONS/SETUP/PLAY/GET_PARAMETER、TCP interleaved 响应与 RTP | 三路正式媒体 loopback 集成通过/真实平台序列待验 |
 | 普通 NVR 告警 | 固定设备身份/时间 | `NormalAlarm.py` + `object/NormalStruct/*.json` | 正式静态 fixture/registry/请求构造门禁完成/成功语义待验 |
 | 自定义 IPC 带图告警 | 固定设备身份/时间/图片 | `CustomAlarm.py` + `object/CustomStruct/*.json` + `pic/CUSTOM/` | VMS/UMS 静态 handler 与图片尺寸门禁完成；图片数量和成功语义平台待验 |
-| 智能相机告警 | 固定设备身份/时间/图片 | `SmartAlarm.py` + `object/SmartStruct/*` + `pic/SMART/` | VMS/UMS 静态 handler/registry 门禁完成；复合多请求语义平台待验 |
-| 车辆 NVR 带图告警 | 固定设备身份/时间/图片 | `VehicleAlarm.py` + `object/VehicleStruct/*.json` + `pic/VEHICLE/` | 三类静态 handler/registry 门禁完成；关联多请求语义平台待验 |
+| 智能相机告警 | 固定设备身份/时间/图片 | `SmartAlarm.py` + `object/SmartStruct/*` + `pic/SMART/` | VMS/UMS 静态 handler、Structure→Alarm 顺序、图片槽位和限定恢复流程已完成；平台接收结果待验 |
+| 车辆 NVR 带图告警 | 固定设备身份/时间/图片 | `VehicleAlarm.py` + `object/VehicleStruct/*.json` + `pic/VEHICLE/` | 匹配/不匹配 VehicleEventInfo→Alarm 与抓拍 Structure 已完成；平台接收结果待验 |
 
 ## 6. 审查决策表
 
@@ -166,7 +166,7 @@
 ## 7. 审计完成门禁
 
 - [x] 四个 profile 的拟实现范围均已有具体源码/模板证据，冲突已明确标注。
-- [x] 平台、端口、URL、RTSP/SDP/PT、鉴权、告警和成功判定均有静态结论或明确的 `EVIDENCE_GATED` / `REAL_PLATFORM_REQUIRED` 标记，无未标注猜测。
+- [x] 平台、端口、URL、RTSP/SDP/PT、鉴权、告警和成功判定均有静态结论或明确的 `REAL_PLATFORM_REQUIRED` / 范围外新增能力标记，无未标注猜测。
 - [x] 首版所需 XML/JSON/图片/媒体清单完整，并以 `1.0.2` 六个 Pack 区分公共与 profile 专属资产。
 - [x] 冲突证据和未知项已进入审查决策表。
 - [x] 素材/代码已获非商用测试、学习、复制和打包授权；商业使用仍被禁止。
@@ -179,10 +179,11 @@
 
 | 状态 | 验收范围 | 证据/行为 |
 | --- | --- | --- |
-| `LOCAL_COMPLETE` | 正式素材安全链、Worker/Manager、journal/recovery、Windows 原生后端、身份/模板/HTTP/RTSP/RTP/告警运行时、自定义图片、Tauri/配置/UI/退出保护 | 本地编译与自动化覆盖；正式 Pack 环境下 `cargo test` 为 app_lib 190 项、app 437 项，0 失败；只读网卡、邻居表与防火墙枚举已在当前 Windows 主机通过 |
+| `LOCAL_COMPLETE` | 正式素材安全链、Worker/Manager、journal/recovery、Windows 原生后端、身份/模板/HTTP/RTSP/RTP/告警运行时、自定义图片、Tauri/配置/UI/退出保护 | 本地编译与自动化覆盖；正式 Pack 环境下 `cargo test` 为 app_lib 192 项、app 437 项，0 失败；只读网卡、邻居表与防火墙枚举已在当前 Windows 主机通过 |
 | `LOCAL_SIGNED_ASSETS_READY` | Ed25519 公钥集、签名 catalog、四类 profile Pack、`protocol-core`、三路 H.264 媒体与静态 fixtures | `1.0.2` 六个不可变 ZIP 已生成并发布到本地素材服务目录；Key ID `device-assets-static-review-2026`，运行时 profile/alarm/HTTP/RTSP 门禁通过；发布产物和私钥不进入 EXE/项目提交 |
-| `LOCAL_RELEASE_READY` | 1.2.1 版本化裸 EXE | `D:\Rust\target\release\file-sync-tool-1.2.1-202607190838.exe`，SHA-256 `041b52b537a2d19ffda68438e787d4b842b02f46640c44e9396bc0d710f0bf6a`；manifest 哈希一致，369 个正式素材样本、3 种私钥表示和 26 个旧工具/路径标记均无命中 |
+| `LOCAL_RELEASE_READY` | 1.2.2 版本化裸 EXE | `D:\Rust\target\release\file-sync-tool-1.2.2-202607191002.exe`，SHA-256 `46b065e35be9b26d6ab927467df7eb24fe5dff5828c6a455725ac649b1371aca`；manifest 哈希一致，369 个正式素材样本、3 种私钥表示和 26 个旧工具/路径标记均无命中 |
 | `EXTERNAL_VM_REQUIRED` | UAC、IP alias/防火墙真实写入与精确回滚、崩溃/断电恢复、主网络配置不变 | 只允许在隔离 Windows VM 执行；当前主机未进行网络/防火墙写操作 |
 | `REAL_PLATFORM_REQUIRED` | VMS/UMS 发现、在线/保活、HTTP/LAPI/ONVIF、RTSP 录像/检索/回放/重连、告警/图片/恢复 | 必须记录真实平台请求、响应和验收结果后才能把组合从“未验证”升级 |
 | `REAL_PLATFORM_REQUIRED` | 10/100/500 台规模与 100 路 2 Mbps H.264、1 小时资源门禁 | 必须在批准硬件与独立网络中记录 CPU、RSS、码率、丢包和稳定性 |
-| `EVIDENCE_GATED` | NVR 多通道 URL/control、车辆/智能复合多请求、精确平台 Content-Type/boundary 与成功判定 | 静态可运行部分已实现；冲突候选保留拒绝/未验证状态，不从旧代码冲突中自行选择 |
+| `LEGACY_PARITY_BOUNDARY` | NVR 多通道元数据 + c1 三码流 | 与旧项目效果一致；c2～cN 独立 RTSP 未在旧实现中出现，作为未来新增能力单列 |
+| `REAL_PLATFORM_REQUIRED` | 平台是否接受现有 Content-Type/boundary、响应 body/status 的成功判定 | 请求仍会按旧业务完整发送并统计为“未验证”，不会再省略复合步骤或恢复步骤 |

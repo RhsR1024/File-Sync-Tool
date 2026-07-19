@@ -1,7 +1,7 @@
 # 视频设备模拟器设计规格
 
 - **日期**：2026-07-18
-- **状态**：首版范围已批准；本地通用基础设施已实现，签名素材、隔离 Windows VM 与真实平台验收待完成
+- **状态**：旧项目静态业务行为、本地运行时和签名素材已实现；仅隔离 Windows VM 与真实平台兼容验收待完成
 - **目标项目**：`D:\WorkSpace\File-Sync-Tool`
 - **旧实现参考项目**：`D:\WorkSpace\VirtualTools`
 - **目标平台**：Windows
@@ -149,7 +149,7 @@ device_simulator
 - Catalog 强制 Ed25519 离线签名；素材服务器首版不保存或发送应用层凭据。
 - 防火墙默认由提权 Worker 精确管理，启动前显式确认，只清理由 journal 证明归本会话所有的规则。
 - 自定义图片独立内容寻址存储；旧模板、图片和 PCAP 允许用于测试、学习、复制和打包，但禁止商用，生成物必须保留该限制。
-- 正式功能版本为 1.2.1，首批正式素材 Pack 版本为 1.0.2，素材 schema 与 engine API 首版均为 1。
+- 当前功能版本为 1.2.2，首批正式素材 Pack 版本为 1.0.2（最低应用版本仍为 1.2.1），素材 schema 与 engine API 首版均为 1。
 
 完整证据、冲突和验收值以 `2026-07-18-video-device-simulator-evidence-matrix.md` 为准。
 
@@ -190,7 +190,7 @@ Rust 协议处理器、状态机、解析器、校验器和 handler 枚举仍编
 4. 支持目标平台发现、添加并保持设备在线。
 5. 支持所选 profile 对应的 HTTP、LAPI、ONVIF 和订阅行为。
 6. 支持 RTSP over TCP 实况拉流，并满足平台连续录像需要。
-7. 支持 IPC/NVR 通道和主、辅、第三码流 URL。
+7. 保持旧项目 RTSP 行为：IPC 提供主、辅、第三码流；NVR 按配置生成多通道 HTTP/ONVIF 元数据，但实际 RTSP 为 c1 主、辅、第三码流。c2～cN 独立 RTSP 属于新增能力，不作为本次语言重写的兼容目标。
 8. 支持固定、随机、顺序告警模式以及带图告警。
 9. 支持单次触发、固定次数和持续发送。
 10. 支持告警开始、告警恢复和成功/失败统计。
@@ -223,8 +223,8 @@ Rust 协议处理器、状态机、解析器、校验器和 handler 枚举仍编
 | --- | --- | --- |
 | `ipc-custom` | 自定义报警相机 | IPC 上线、RTSP、带图自定义告警 |
 | `ipc-smart` | 智能相机 | IPC 上线、RTSP、VMS/UMS 智能告警 |
-| `nvr-common` | 普通NVR | 普通 NVR、多通道、常规通道/设备告警 |
-| `nvr-vehicle` | 车辆识别NVR | NVR 带图车辆告警 |
+| `nvr-common` | 普通NVR | 普通 NVR、多通道元数据、c1 三码流、常规通道/设备告警 |
+| `nvr-vehicle` | 车辆识别NVR | 多通道元数据、c1 三码流、带图车辆复合告警 |
 
 这些名称代表迁移范围，不代表可以自行定义具体型号或协议字段。实现必须从 `data\dev_type.yml`、`data\alarms_info.yml`、相关 `*Alarm.py`、XML/JSON 模板中提取真实业务事实。
 
@@ -813,13 +813,13 @@ FASTPLAY（若目标平台确实发送）
 
 ### 18.3 URL 路由
 
-RTSP URL 由 profile 定义，至少支持：
+RTSP URL 由 profile 定义，并按旧项目可观察行为支持：
 
 - IPC 主、辅、第三码流。
-- NVR 通道号。
-- NVR 每通道主、辅、第三码流。
+- NVR c1 主、辅、第三码流：`/unicast/c1/s0|s1|s2/live`。
+- NVR 配置通道数继续用于 HTTP/ONVIF 通道、视频源和设备信息元数据。
 
-旧项目中 IPC 与 NVR URL 格式不同。准确路径必须查阅 `Vsocket_ip.py`、HTTP `GetStreamUri` 替换逻辑和 RTSP 源码。
+旧项目中 IPC 与 NVR URL 格式不同。静态审计确认旧运行时只启动三条全局 RTSP listener，并始终返回 NVR c1；没有 c2～cN 独立 URL/control 实现。新运行时按每台虚拟 IP 隔离 listener，但保留相同 URL 效果，同时兼容旧 SDP 的 `/media/video1/video` control 别名。
 
 ### 18.4 媒体素材格式
 
@@ -1765,4 +1765,4 @@ Golden 结果必须来源于旧项目或真实平台抓包，不得由实现者�
 
 业务兼容以旧项目和真实目标平台为事实来源。任何协议细节不清楚时必须查阅 `D:\WorkSpace\VirtualTools`；仍无法确定时提交待确认问题。不得捏造、假装已经兼容或自行决定厂商协议行为。
 
-当前仓库交付的是 fail-closed 的首版基础设施：没有正式签名 catalog/public-key set 或真实平台证据时，素材准备、会话启动和告警命令必须返回结构化未就绪/预检失败，不得进入会修改主机网络或宣称平台成功的路径。外部验收状态以证据矩阵第 8 节为准。
+当前仓库对安全素材保持 fail-closed：没有正式签名 catalog/public-key set 时，素材准备和会话启动必须返回结构化未就绪/预检失败。真实平台证据不再阻塞旧源码已明确的业务流程；会话和告警可运行，但组合继续显示“未验证”，响应不会被计为平台已确认成功。外部验收状态以证据矩阵第 8 节为准。

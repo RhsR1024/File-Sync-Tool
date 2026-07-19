@@ -1,6 +1,13 @@
 {
-  "latest": "1.2.1",
+  "latest": "1.2.2",
   "versions": [
+    {
+      "version": "1.2.2",
+      "url": "file-sync-tool-1.2.2-202607191002.exe",
+      "sha256": "46b065e35be9b26d6ab927467df7eb24fe5dff5828c6a455725ac649b1371aca",
+      "released_at": "2026-07-19",
+      "changelog": []
+    },
     {
       "version": "1.2.1",
       "url": "file-sync-tool-1.2.1-202607190838.exe",

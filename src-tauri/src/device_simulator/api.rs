@@ -662,8 +662,8 @@ fn stream_addresses(
     .map(|(stream, port, number)| {
         let (channel_id, url) = match kind {
             DeviceKind::Ipc => (None, format!("rtsp://{ip}:{port}/media/video{number}")),
-            // Only channel 1 is advertised until real-platform evidence closes
-            // the legacy multi-channel URL conflict.
+            // Legacy parity: NVR channel metadata is configurable, while the
+            // old runtime only advertises c1 for its three actual RTSP streams.
             DeviceKind::Nvr => (
                 Some("1".to_owned()),
                 format!("rtsp://{ip}:{port}/unicast/c1/s{}/live", number - 1),

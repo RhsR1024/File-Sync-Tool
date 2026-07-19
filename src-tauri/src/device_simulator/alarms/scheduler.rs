@@ -1,6 +1,7 @@
 use super::{
-    build_alarm_request, build_recovery_request, AlarmBuildContext, AlarmError,
+    build_alarm_requests, build_recovery_request, AlarmBuildContext, AlarmError,
     AlarmHandlerDefinition, AlarmResult, HttpAlarmRequest, ImageCache, RecoveryDefinition,
+    ResponseSuccessRule,
 };
 use crate::device_simulator::profiles::scope::TargetPlatform;
 use std::collections::{BTreeMap, BTreeSet};
@@ -312,8 +313,11 @@ impl AlarmJobTracker {
                 timed_out,
                 ..
             } => {
-                stats.failed = stats.failed.saturating_add(1);
-                stats.unverified = stats.unverified.saturating_add(u64::from(unverified));
+                if unverified {
+                    stats.unverified = stats.unverified.saturating_add(1);
+                } else {
+                    stats.failed = stats.failed.saturating_add(1);
+                }
                 stats.timed_out = stats.timed_out.saturating_add(u64::from(timed_out));
                 stats.last_error_code = Some(code);
             }
@@ -668,63 +672,67 @@ impl AlarmScheduler {
             crate::device_simulator::alarms::DynamicField::Timestamp,
             self.clock.now_ms().to_string(),
         );
-        let request = match phase {
+        let requests = match phase {
             AlarmDeliveryPhase::Alarm => {
-                build_alarm_request(&invocation.definition, &context, &invocation.image_cache)
-                    .map(Some)
+                build_alarm_requests(&invocation.definition, &context, &invocation.image_cache)
             }
             AlarmDeliveryPhase::Recovery => {
                 build_recovery_request(&invocation.definition, &context, &invocation.image_cache)
+                    .map(|request| request.into_iter().collect())
             }
         };
-        let request = match request {
-            Ok(Some(request)) => request,
-            Ok(None) => return true,
+        let requests = match requests {
+            Ok(requests) => requests,
             Err(error) => {
                 tracker.reject(&target.device_id, error.code).await;
                 return false;
             }
         };
 
-        for attempt in 1..=self.limits.retry.max_attempts {
-            let outcome = self
-                .attempt(
-                    target,
-                    invocation,
-                    phase,
-                    request.clone(),
-                    tracker,
-                    cancellation,
-                )
-                .await;
-            match outcome {
-                AttemptResult::Succeeded => return true,
-                AttemptResult::Cancelled => return false,
-                AttemptResult::Failed {
-                    retryable: false, ..
-                } => return false,
-                AttemptResult::Failed { .. } if attempt >= self.limits.retry.max_attempts => {
-                    return false;
-                }
-                AttemptResult::Failed { .. } => {
-                    let backoff = self
-                        .limits
-                        .retry
-                        .backoff_ms
-                        .saturating_mul(u64::from(attempt));
-                    if !sleep_or_cancel(
-                        self.clock.as_ref(),
-                        Duration::from_millis(backoff),
+        'request: for request in requests {
+            for attempt in 1..=self.limits.retry.max_attempts {
+                let outcome = self
+                    .attempt(
+                        target,
+                        invocation,
+                        phase,
+                        request.clone(),
+                        tracker,
                         cancellation,
                     )
-                    .await
-                    {
-                        return false;
+                    .await;
+                match outcome {
+                    AttemptResult::Succeeded
+                    | AttemptResult::Failed {
+                        unverified: true, ..
+                    } => continue 'request,
+                    AttemptResult::Cancelled => return false,
+                    AttemptResult::Failed {
+                        retryable: false, ..
+                    } => continue 'request,
+                    AttemptResult::Failed { .. } if attempt >= self.limits.retry.max_attempts => {
+                        continue 'request;
+                    }
+                    AttemptResult::Failed { .. } => {
+                        let backoff = self
+                            .limits
+                            .retry
+                            .backoff_ms
+                            .saturating_mul(u64::from(attempt));
+                        if !sleep_or_cancel(
+                            self.clock.as_ref(),
+                            Duration::from_millis(backoff),
+                            cancellation,
+                        )
+                        .await
+                        {
+                            return false;
+                        }
                     }
                 }
             }
         }
-        false
+        true
     }
 
     async fn attempt(
@@ -758,6 +766,7 @@ impl AlarmScheduler {
 
         tracker.begin_attempt(&target.device_id).await;
         let started_at = self.clock.now_ms();
+        let success_rule = request.success_rule.clone();
         let outbound = OutboundAlarmRequest {
             destination_id: target.destination_id.clone(),
             device_id: target.device_id.clone(),
@@ -773,8 +782,8 @@ impl AlarmScheduler {
             _ = cancellation.cancelled() => AttemptResult::Cancelled,
             result = send => classify_sender_result(
                 result,
-                invocation,
-                target.platform,
+                invocation.definition.evidence.is_platform_verified(target.platform),
+                &success_rule,
                 &self.limits.retry.retryable_statuses,
             ),
             _ = timeout => AttemptResult::Failed {
@@ -885,8 +894,8 @@ enum AttemptResult {
 
 fn classify_sender_result(
     result: Result<AlarmSenderResponse, AlarmSendError>,
-    invocation: &AlarmInvocation,
-    platform: TargetPlatform,
+    platform_verified: bool,
+    success_rule: &ResponseSuccessRule,
     retryable_statuses: &BTreeSet<u16>,
 ) -> AttemptResult {
     match result {
@@ -897,11 +906,7 @@ fn classify_sender_result(
             timed_out: false,
         },
         Ok(response) => {
-            if !invocation
-                .definition
-                .evidence
-                .is_platform_verified(platform)
-            {
+            if !platform_verified {
                 return AttemptResult::Failed {
                     code: "device_simulator.alarm.success_evidence_unverified".into(),
                     retryable: false,
@@ -909,12 +914,7 @@ fn classify_sender_result(
                     timed_out: false,
                 };
             }
-            match invocation
-                .definition
-                .transport
-                .success_rule
-                .evaluate(response.status)
-            {
+            match success_rule.evaluate(response.status) {
                 None => AttemptResult::Failed {
                     code: "device_simulator.alarm.success_rule_unverified".into(),
                     retryable: false,
@@ -1077,10 +1077,10 @@ fn validate_job(
 mod tests {
     use super::*;
     use crate::device_simulator::alarms::{
-        AlarmHandlerId, AlarmTypeId, BodyEncoding, CompiledTemplate, FixtureProvenance,
-        HandlerEvidence, HttpMethod, ImagePolicy, PlatformEvidence, PlatformVerification,
-        RecoveryDefinition, RecoveryTrigger, ResponseSuccessRule, SourceBinding,
-        TransportDefinition,
+        AlarmHandlerId, AlarmRequestDefinition, AlarmTypeId, BodyEncoding, CompiledTemplate,
+        FixtureProvenance, HandlerEvidence, HttpMethod, ImagePolicy, PlatformEvidence,
+        PlatformVerification, RecoveryDefinition, RecoveryTrigger, ResponseSuccessRule,
+        SourceBinding, TransportDefinition,
     };
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -1188,14 +1188,24 @@ mod tests {
                 body_encoding: BodyEncoding::Raw {
                     content_type: "application/json".into(),
                 },
-                success_rule,
+                success_rule: success_rule.clone(),
             },
+            follow_up_requests: vec![],
             recovery: if with_recovery {
                 RecoveryDefinition::RenderWith {
                     template: CompiledTemplate::compile(
                         br#"{"device":"{{device_id}}","state":"recovered"}"#,
                     )
                     .unwrap(),
+                    transport: TransportDefinition {
+                        method: HttpMethod::Post,
+                        path: "/fixture/alarm".into(),
+                        source_binding: SourceBinding::DeviceIp,
+                        body_encoding: BodyEncoding::Raw {
+                            content_type: "application/json".into(),
+                        },
+                        success_rule: success_rule.clone(),
+                    },
                     trigger: RecoveryTrigger::RequestedDelay,
                     include_images: false,
                 }
@@ -1362,9 +1372,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(snapshot.succeeded, 0);
-        assert_eq!(snapshot.failed, 1);
+        assert_eq!(snapshot.failed, 0);
         assert_eq!(snapshot.unverified, 1);
         assert_eq!(snapshot.attempted, 1);
+    }
+
+    #[tokio::test]
+    async fn source_confirmed_compound_flow_preserves_order_and_still_sends_recovery() {
+        let clock: Arc<dyn AlarmClock> = Arc::new(TestClock::default());
+        let sender = Arc::new(ScriptedSender::successful(clock.clone()));
+        let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
+        let mut handler = (*definition(
+            AlarmHandlerId::SmartV1,
+            ResponseSuccessRule::Unverified,
+            false,
+            true,
+        ))
+        .clone();
+        handler.transport.path = "/legacy/structure".into();
+        handler.follow_up_requests.push(AlarmRequestDefinition {
+            template: CompiledTemplate::compile(br#"{"related":"{{device_id}}"}"#).unwrap(),
+            image_policy: ImagePolicy::Forbidden,
+            images: vec![],
+            transport: TransportDefinition {
+                method: HttpMethod::Post,
+                path: "/legacy/alarm".into(),
+                source_binding: SourceBinding::DeviceIp,
+                body_encoding: BodyEncoding::Raw {
+                    content_type: "application/json".into(),
+                },
+                success_rule: ResponseSuccessRule::Unverified,
+            },
+        });
+        let snapshot = scheduler
+            .trigger_once(OneShotAlarmJob {
+                job_id: "compound".into(),
+                targets: vec![target("one", vec![Arc::new(handler)])],
+                mode: AlarmDispatchMode::Specified,
+                recovery_delay_ms: Some(1),
+                random_seed: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(snapshot.attempted, 3);
+        assert_eq!(snapshot.unverified, 3);
+        let requests = sender.requests.lock().await;
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.request.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/legacy/structure", "/legacy/alarm", "/fixture/alarm"]
+        );
+        assert_eq!(requests[2].phase, AlarmDeliveryPhase::Recovery);
     }
 
     #[tokio::test]
