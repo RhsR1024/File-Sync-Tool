@@ -15,6 +15,7 @@ import {
   ChevronUp,
   ExternalLink,
   RefreshCw,
+  MonitorOff,
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -78,6 +79,7 @@ const status = ref<ScreenShareStatus>({
   all_urls: [],
   connected_ips: [],
   capture_paused: false,
+  capture_issue: null,
 });
 
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
@@ -118,6 +120,7 @@ const allUrls = computed(() => {
 });
 const connectedIps = computed(() => status.value.connected_ips || []);
 const connectionCount = computed(() => status.value.connection_count ?? connectedIps.value.length);
+const privacyModeDetected = computed(() => status.value.capture_issue === 'privacy_mode_or_display_off');
 const visibleConnIps = computed(() => showAllConnIps.value ? connectedIps.value : connectedIps.value.slice(0, 10));
 const hiddenConnIpCount = computed(() => Math.max(0, connectedIps.value.length - 10));
 
@@ -280,6 +283,7 @@ async function stopShare() {
     all_urls: [],
     connected_ips: [],
     capture_paused: false,
+    capture_issue: null,
   };
 }
 
@@ -672,10 +676,23 @@ onUnmounted(() => {
           <template v-if="isActive && serverUrl">
             <div
               v-if="status.capture_paused"
-              class="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 shadow-sm"
+              role="status"
+              aria-live="polite"
+              class="flex items-start gap-3 rounded-xl border px-4 py-3 text-sm shadow-sm"
+              :class="privacyModeDetected
+                ? 'border-red-200 bg-red-50 text-red-700'
+                : 'border-amber-200 bg-amber-50 text-amber-700'"
             >
-              <span class="h-2 w-2 animate-pulse rounded-full bg-amber-500"></span>
-              {{ t('tools.screenShare.capturePaused') }}
+              <MonitorOff v-if="privacyModeDetected" class="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+              <span v-else class="mt-1.5 h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-500"></span>
+              <span>
+                <strong class="block font-semibold">
+                  {{ privacyModeDetected ? t('tools.screenShare.privacyModeDetected') : t('tools.screenShare.capturePaused') }}
+                </strong>
+                <span v-if="privacyModeDetected" class="mt-1 block leading-5 text-red-600">
+                  {{ t('tools.screenShare.privacyModeHint') }}
+                </span>
+              </span>
             </div>
             <div class="ss-card">
               <p class="ss-section-label">{{ t('tools.screenShare.accessUrl') }}</p>

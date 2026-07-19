@@ -214,6 +214,13 @@ export interface SimulatorStatus {
   last_error: SimulatorErrorInfo | null;
 }
 
+export interface ImportedAlarmImage {
+  image_id: string;
+  file_name: string;
+  extension: 'jpg' | 'jpeg' | 'png';
+  size: number;
+}
+
 export interface AlarmJobRequest {
   target_device_ids: string[];
   alarm_profile_id: string;
@@ -231,6 +238,7 @@ export interface AlarmTriggerResult {
   attempted: number;
   succeeded: number;
   failed: number;
+  unverified: number;
   duration_ms: number;
   errors: SimulatorErrorInfo[];
 }
@@ -241,6 +249,7 @@ export interface AlarmJobStats {
   attempted: number;
   succeeded: number;
   failed: number;
+  unverified: number;
   in_flight: number;
   average_duration_ms: number;
   last_error: SimulatorErrorInfo | null;
@@ -322,6 +331,7 @@ export const DEVICE_SIMULATOR_COMMANDS = {
   start: 'device_simulator_start',
   stop: 'device_simulator_stop',
   getStatus: 'device_simulator_get_status',
+  importAlarmImage: 'device_simulator_import_alarm_image',
   startAlarm: 'device_simulator_start_alarm',
   triggerAlarmOnce: 'device_simulator_trigger_alarm_once',
   stopAlarm: 'device_simulator_stop_alarm',
@@ -366,6 +376,7 @@ export interface DeviceSimulatorApi {
   start(request: SimulatorStartRequest): Promise<SimulatorStatus>;
   stop(): Promise<void>;
   getStatus(): Promise<SimulatorStatus>;
+  importAlarmImage(): Promise<ImportedAlarmImage | null>;
   startAlarm(request: AlarmJobRequest): Promise<string>;
   triggerAlarmOnce(request: AlarmJobRequest): Promise<AlarmTriggerResult>;
   stopAlarm(jobId: string): Promise<void>;
@@ -386,6 +397,7 @@ export function createDeviceSimulatorApi(invokeCommand: DeviceSimulatorInvoke): 
     start: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.start, { request }),
     stop: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.stop),
     getStatus: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getStatus),
+    importAlarmImage: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.importAlarmImage),
     startAlarm: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.startAlarm, { request }),
     triggerAlarmOnce: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.triggerAlarmOnce, { request }),
     stopAlarm: (jobId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.stopAlarm, { jobId }),

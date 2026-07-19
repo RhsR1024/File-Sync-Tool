@@ -24,6 +24,7 @@ test('command and event names match the approved Tauri contract', () => {
     'device_simulator_start',
     'device_simulator_stop',
     'device_simulator_get_status',
+    'device_simulator_import_alarm_image',
     'device_simulator_start_alarm',
     'device_simulator_trigger_alarm_once',
     'device_simulator_stop_alarm',
@@ -62,6 +63,7 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
   await api.start(request);
   await api.stop();
   await api.getStatus();
+  await api.importAlarmImage();
   await api.startAlarm(alarmRequest);
   await api.triggerAlarmOnce(alarmRequest);
   await api.stopAlarm('alarm-1');
@@ -80,6 +82,7 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
     [DEVICE_SIMULATOR_COMMANDS.start, { request }],
     [DEVICE_SIMULATOR_COMMANDS.stop, undefined],
     [DEVICE_SIMULATOR_COMMANDS.getStatus, undefined],
+    [DEVICE_SIMULATOR_COMMANDS.importAlarmImage, undefined],
     [DEVICE_SIMULATOR_COMMANDS.startAlarm, { request: alarmRequest }],
     [DEVICE_SIMULATOR_COMMANDS.triggerAlarmOnce, { request: alarmRequest }],
     [DEVICE_SIMULATOR_COMMANDS.stopAlarm, { jobId: 'alarm-1' }],

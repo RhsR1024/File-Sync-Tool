@@ -1,13 +1,16 @@
+use crate::device_simulator::api::{AlarmJobRequest, DevicePreview, SimulatorStartRequest};
 use crate::device_simulator::errors::{
     worker_io_error, worker_json_error, SimulatorError, SimulatorErrorBody, SimulatorResult,
     WORKER_FRAME_TOO_LARGE, WORKER_FRAME_TRUNCATED, WORKER_HELLO_INVALID, WORKER_NOT_ELEVATED,
     WORKER_PROTOCOL_INCOMPATIBLE, WORKER_SESSION_MISMATCH,
 };
 use crate::device_simulator::events::WorkerEvent;
+use crate::device_simulator::runtime_assets::PinnedPackDirectory;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
+use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const WORKER_PROTOCOL_VERSION: u32 = 1;
@@ -111,8 +114,31 @@ pub enum WorkerCommandName {
     StopAlarmJob,
     TriggerAlarmOnce,
     GetStatus,
+    GetRuntimeTelemetry,
     Shutdown,
     RecoverSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitializeSessionPayload {
+    pub app_data_dir: PathBuf,
+    pub request: SimulatorStartRequest,
+    pub preview: DevicePreview,
+    pub pinned_packs: Vec<PinnedPackDirectory>,
+    pub manage_firewall: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlarmJobCommandPayload {
+    pub request: AlarmJobRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopAlarmJobPayload {
+    pub job_id: String,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

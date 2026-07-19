@@ -405,6 +405,178 @@ pub fn list_system_local_addresses() -> Result<HashSet<Ipv4Addr>, IpAliasBackend
         .map_err(|error| IpAliasBackendError::Native(error.to_string()))
 }
 
+pub fn assess_system_address_conflicts(
+    interface_id: &str,
+    addresses: &[Ipv4Addr],
+    local_addresses: &HashSet<Ipv4Addr>,
+) -> Result<Vec<AddressConflictAssessment>, IpAliasBackendError> {
+    let requested = addresses.iter().copied().collect::<HashSet<_>>();
+    let neighbors = list_system_neighbor_evidence(interface_id, &requested)?;
+    Ok(build_address_conflict_assessments(
+        addresses,
+        local_addresses,
+        &neighbors,
+        "no occupied neighbor-table entry was observed; no active network probe was sent",
+    ))
+}
+
+pub fn unknown_address_conflict_assessments(
+    addresses: &[Ipv4Addr],
+    local_addresses: &HashSet<Ipv4Addr>,
+    details: impl Into<String>,
+) -> Vec<AddressConflictAssessment> {
+    build_address_conflict_assessments(addresses, local_addresses, &HashMap::new(), &details.into())
+}
+
+fn build_address_conflict_assessments(
+    addresses: &[Ipv4Addr],
+    local_addresses: &HashSet<Ipv4Addr>,
+    neighbor_evidence: &HashMap<Ipv4Addr, ConflictEvidence>,
+    missing_details: &str,
+) -> Vec<AddressConflictAssessment> {
+    addresses
+        .iter()
+        .copied()
+        .map(|address| {
+            let mut evidence = Vec::with_capacity(2);
+            if local_addresses.contains(&address) {
+                evidence.push(ConflictEvidence {
+                    address,
+                    kind: ConflictEvidenceKind::Local,
+                    result: ConflictObservationResult::Occupied,
+                    details: Some("address is already assigned to a local interface".into()),
+                });
+            }
+            evidence.push(neighbor_evidence.get(&address).cloned().unwrap_or_else(|| {
+                ConflictEvidence {
+                    address,
+                    kind: ConflictEvidenceKind::Unknown,
+                    result: ConflictObservationResult::Inconclusive,
+                    details: Some(missing_details.to_owned()),
+                }
+            }));
+            assess_address_conflict(address, evidence)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn list_system_neighbor_evidence(
+    interface_id: &str,
+    requested: &HashSet<Ipv4Addr>,
+) -> Result<HashMap<Ipv4Addr, ConflictEvidence>, IpAliasBackendError> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetIpNetTable2, MIB_IPNET_TABLE2,
+    };
+    use windows::Win32::Networking::WinSock::{
+        NlnsDelay, NlnsIncomplete, NlnsPermanent, NlnsProbe, NlnsReachable, NlnsStale,
+        NlnsUnreachable, AF_INET,
+    };
+
+    let interface_index = super::interfaces::list_system_interfaces()
+        .map_err(|error| IpAliasBackendError::Native(error.to_string()))?
+        .into_iter()
+        .find(|interface| interface.id.as_str() == interface_id)
+        .map(|interface| interface.interface_index)
+        .ok_or_else(|| {
+            IpAliasBackendError::Native(format!(
+                "stable adapter id is not present for neighbor inspection: {interface_id}"
+            ))
+        })?;
+
+    struct MibTableGuard(*mut MIB_IPNET_TABLE2);
+    impl Drop for MibTableGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { FreeMibTable(self.0.cast()) };
+            }
+        }
+    }
+
+    let mut table = std::ptr::null_mut();
+    let status = unsafe { GetIpNetTable2(AF_INET, &mut table) };
+    if status != ERROR_SUCCESS {
+        return Err(IpAliasBackendError::Native(format!(
+            "GetIpNetTable2 failed with Win32 error {}",
+            status.0
+        )));
+    }
+    if table.is_null() {
+        return Err(IpAliasBackendError::Native(
+            "GetIpNetTable2 returned a null table".into(),
+        ));
+    }
+    let guard = MibTableGuard(table);
+    let table = unsafe { &*guard.0 };
+    let rows = unsafe {
+        std::slice::from_raw_parts(
+            table.Table.as_ptr(),
+            table.NumEntries.try_into().unwrap_or(0),
+        )
+    };
+    let mut evidence: HashMap<Ipv4Addr, ConflictEvidence> = HashMap::new();
+    for row in rows {
+        if row.InterfaceIndex != interface_index {
+            continue;
+        }
+        let socket = unsafe { row.Address.Ipv4 };
+        if socket.sin_family != AF_INET {
+            continue;
+        }
+        let bytes = unsafe { socket.sin_addr.S_un.S_un_b };
+        let address = Ipv4Addr::new(bytes.s_b1, bytes.s_b2, bytes.s_b3, bytes.s_b4);
+        if !requested.contains(&address) {
+            continue;
+        }
+        let physical_length = (row.PhysicalAddressLength as usize).min(row.PhysicalAddress.len());
+        let has_physical_address = physical_length > 0
+            && row.PhysicalAddress[..physical_length]
+                .iter()
+                .any(|byte| *byte != 0);
+        let (result, state) = if matches!(
+            row.State,
+            state if state == NlnsReachable
+                || state == NlnsStale
+                || state == NlnsDelay
+                || state == NlnsProbe
+                || state == NlnsPermanent
+        ) && has_physical_address
+        {
+            (ConflictObservationResult::Occupied, "resolved")
+        } else if row.State == NlnsIncomplete {
+            (ConflictObservationResult::Inconclusive, "incomplete")
+        } else if row.State == NlnsUnreachable {
+            (ConflictObservationResult::Inconclusive, "unreachable")
+        } else {
+            (ConflictObservationResult::Inconclusive, "unknown")
+        };
+        let candidate = ConflictEvidence {
+            address,
+            kind: ConflictEvidenceKind::Neighbor,
+            result,
+            details: Some(format!(
+                "Windows neighbor table state={state}, interface_index={interface_index}"
+            )),
+        };
+        match evidence.get(&address) {
+            Some(existing) if existing.result == ConflictObservationResult::Occupied => {}
+            _ => {
+                evidence.insert(address, candidate);
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn list_system_neighbor_evidence(
+    _interface_id: &str,
+    _requested: &HashSet<Ipv4Addr>,
+) -> Result<HashMap<Ipv4Addr, ConflictEvidence>, IpAliasBackendError> {
+    Err(IpAliasBackendError::UnsupportedPlatform)
+}
+
 #[cfg(target_os = "windows")]
 fn add_system_alias(
     interface_id: &str,
@@ -664,5 +836,59 @@ mod tests {
         let unknown = assess_address_conflict(address, []);
         assert_eq!(unknown.verdict, ConflictVerdict::Unknown);
         assert_eq!(unknown.strongest_evidence, ConflictEvidenceKind::Unknown);
+    }
+
+    #[test]
+    fn batch_conflict_assessment_preserves_local_neighbor_and_unknown_evidence() {
+        let local = ip("192.168.50.10");
+        let neighbor = ip("192.168.50.11");
+        let unknown = ip("192.168.50.12");
+        let local_addresses = HashSet::from([local]);
+        let neighbor_evidence = HashMap::from([(
+            neighbor,
+            ConflictEvidence {
+                address: neighbor,
+                kind: ConflictEvidenceKind::Neighbor,
+                result: ConflictObservationResult::Occupied,
+                details: Some("resolved neighbor".into()),
+            },
+        )]);
+
+        let assessments = build_address_conflict_assessments(
+            &[local, neighbor, unknown],
+            &local_addresses,
+            &neighbor_evidence,
+            "passive evidence is inconclusive",
+        );
+        assert_eq!(assessments[0].verdict, ConflictVerdict::Conflict);
+        assert_eq!(
+            assessments[0].strongest_evidence,
+            ConflictEvidenceKind::Local
+        );
+        assert_eq!(assessments[1].verdict, ConflictVerdict::Conflict);
+        assert_eq!(
+            assessments[1].strongest_evidence,
+            ConflictEvidenceKind::Neighbor
+        );
+        assert_eq!(assessments[2].verdict, ConflictVerdict::Unknown);
+        assert_eq!(
+            assessments[2].evidence[0].result,
+            ConflictObservationResult::Inconclusive
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn system_neighbor_table_enumeration_is_read_only_and_available() {
+        let Some(interface) = super::super::interfaces::list_system_interfaces()
+            .unwrap()
+            .into_iter()
+            .find(|interface| interface.is_enabled)
+        else {
+            return;
+        };
+        let evidence = list_system_neighbor_evidence(interface.id.as_str(), &HashSet::new())
+            .expect("read-only Windows neighbor table enumeration should succeed");
+        assert!(evidence.is_empty());
     }
 }

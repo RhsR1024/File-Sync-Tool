@@ -189,7 +189,13 @@ fn load_media_pack_from_path(
     })?;
 
     validate_manifest_metadata(&manifest, policy)?;
-    let media_path = resolve_pack_file(pack_dir, &manifest.media_file)?;
+    let manifest_dir = manifest_path.parent().ok_or_else(|| {
+        MediaPackError::new(
+            "device_simulator.media.unsafe_path",
+            "media manifest has no parent directory",
+        )
+    })?;
+    let media_path = resolve_pack_file_from(pack_dir, manifest_dir, &manifest.media_file)?;
     ensure_regular_bounded_file(&media_path, MAX_MEDIA_BYTES, "media")?;
     let media_metadata = fs::metadata(&media_path).map_err(|error| {
         MediaPackError::new(
@@ -344,12 +350,13 @@ fn validate_evidence(
             ))
         }
         EvidenceSourceKind::AuthorizedPcap => {
-            if evidence.compatibility != MediaCompatibility::PlatformVerified
-                || evidence.verified_platforms.is_empty()
-                || evidence
-                    .verified_platforms
-                    .iter()
-                    .any(|platform| platform.trim().is_empty())
+            if !matches!(
+                evidence.compatibility,
+                MediaCompatibility::ReviewedStatic | MediaCompatibility::PlatformVerified
+            ) || evidence
+                .verified_platforms
+                .iter()
+                .any(|platform| platform.trim().is_empty())
                 || evidence
                     .pcap_source_id
                     .as_deref()
@@ -361,22 +368,39 @@ fn validate_evidence(
             {
                 return Err(MediaPackError::new(
                     "device_simulator.media.compatibility_unverified",
-                    "authorized PCAP media must include SDP provenance and verified platforms",
+                    "authorized PCAP media must include reviewed static evidence and SDP provenance",
+                ));
+            }
+            if evidence.compatibility == MediaCompatibility::PlatformVerified
+                && evidence.verified_platforms.is_empty()
+            {
+                return Err(MediaPackError::new(
+                    "device_simulator.media.compatibility_unverified",
+                    "platform-verified media must name at least one verified platform",
                 ));
             }
             for difference in &evidence.differences {
                 if difference.field.trim().is_empty()
                     || difference.pcap_value.trim().is_empty()
                     || difference.sdp_value.trim().is_empty()
-                    || difference.resolution != EvidenceResolution::PlatformVerified
                     || difference
                         .selected_value
                         .as_deref()
                         .map_or(true, |value| value.trim().is_empty())
+                    || match evidence.compatibility {
+                        MediaCompatibility::ReviewedStatic => !matches!(
+                            difference.resolution,
+                            EvidenceResolution::UserApproved | EvidenceResolution::PlatformVerified
+                        ),
+                        MediaCompatibility::PlatformVerified => {
+                            difference.resolution != EvidenceResolution::PlatformVerified
+                        }
+                        MediaCompatibility::Unverified => true,
+                    }
                 {
                     return Err(MediaPackError::new(
                         "device_simulator.media.evidence_difference_unresolved",
-                        "PCAP and SDP differences must be explicitly platform-verified",
+                        "PCAP and SDP differences must be explicitly user-approved or platform-verified",
                     ));
                 }
             }
@@ -608,6 +632,14 @@ fn validate_parameter_sets(
 }
 
 fn resolve_pack_file(pack_dir: &Path, relative_path: &str) -> Result<PathBuf, MediaPackError> {
+    resolve_pack_file_from(pack_dir, pack_dir, relative_path)
+}
+
+fn resolve_pack_file_from(
+    pack_dir: &Path,
+    base_dir: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, MediaPackError> {
     validate_pack_path(relative_path).map_err(|error| {
         MediaPackError::new(
             "device_simulator.media.unsafe_path",
@@ -620,7 +652,19 @@ fn resolve_pack_file(pack_dir: &Path, relative_path: &str) -> Result<PathBuf, Me
             format!("failed to resolve media pack directory: {error}"),
         )
     })?;
-    let candidate = pack_root.join(relative_path);
+    let base_root = fs::canonicalize(base_dir).map_err(|error| {
+        MediaPackError::new(
+            "device_simulator.media.file_unavailable",
+            format!("failed to resolve media base directory: {error}"),
+        )
+    })?;
+    if !base_root.starts_with(&pack_root) {
+        return Err(MediaPackError::new(
+            "device_simulator.media.unsafe_path",
+            "media base directory escapes the pack directory",
+        ));
+    }
+    let candidate = base_root.join(relative_path);
     let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
         MediaPackError::new(
             "device_simulator.media.file_unavailable",
@@ -901,6 +945,27 @@ mod tests {
         .expect("adapt shared media to RTSP");
         assert_eq!(source.codec, Codec::H264);
         assert_eq!(source.scheduler.frames()[0].nals[0].as_ref(), &[0x67, 0x42]);
+    }
+
+    #[test]
+    fn resolves_media_file_relative_to_nested_manifest_directory() {
+        let fixture = Fixture::new(Codec::H264);
+        let nested = fixture.directory.path().join("media/main");
+        fs::create_dir_all(&nested).expect("create nested media directory");
+        fs::write(nested.join(&fixture.manifest.media_file), &fixture.bytes)
+            .expect("write nested media");
+        fs::write(
+            nested.join("media.json"),
+            serde_json::to_vec_pretty(&fixture.manifest).expect("serialize nested manifest"),
+        )
+        .expect("write nested manifest");
+        fs::remove_file(fixture.directory.path().join(&fixture.manifest.media_file))
+            .expect("remove root media copy");
+
+        let loaded = MediaPackCache::new()
+            .load_synthetic_fixture(fixture.directory.path(), "media/main/media.json")
+            .expect("load nested media fixture");
+        assert_eq!(loaded.bytes(), fixture.bytes.as_slice());
     }
 
     #[test]

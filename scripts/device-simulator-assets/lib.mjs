@@ -22,7 +22,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { pipeline } from "node:stream/promises";
 
 export const SCHEMA_VERSION = 1;
 export const ENGINE_API = 1;
@@ -422,7 +421,9 @@ async function createStoredZip(outputPath, entries) {
       if (entry.bytes) {
         await writeChunk(stream, entry.bytes);
       } else {
-        await pipeline(createReadStream(entry.absolute), stream, { end: false });
+        for await (const chunk of createReadStream(entry.absolute)) {
+          await writeChunk(stream, chunk);
+        }
       }
       offset += entry.size;
       central.push(centralHeader(nameBytes, entry, entryOffset));

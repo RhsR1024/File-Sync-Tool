@@ -138,6 +138,7 @@ pub enum DynamicField {
     SubscriptionId,
     AlarmState,
     ImageBase64,
+    ImageSize,
 }
 
 impl DynamicField {
@@ -151,6 +152,7 @@ impl DynamicField {
             Self::SubscriptionId => "subscription_id",
             Self::AlarmState => "alarm_state",
             Self::ImageBase64 => "image_base64",
+            Self::ImageSize => "image_size",
         }
     }
 
@@ -164,6 +166,7 @@ impl DynamicField {
             "subscription_id" => Ok(Self::SubscriptionId),
             "alarm_state" => Ok(Self::AlarmState),
             "image_base64" => Ok(Self::ImageBase64),
+            "image_size" => Ok(Self::ImageSize),
             _ => Err(AlarmError::new(
                 "device_simulator.alarm.template_field_unknown",
                 format!("unknown alarm template field '{token}'"),
@@ -204,12 +207,6 @@ impl CompiledTemplate {
             })?;
             fields.insert(DynamicField::parse(&rest[..end])?);
             rest = &rest[end + 2..];
-        }
-        if rest.contains("}}") {
-            return Err(AlarmError::new(
-                "device_simulator.alarm.template_syntax_invalid",
-                "alarm template contains an unmatched field terminator",
-            ));
         }
         Ok(Self {
             source: Arc::from(source),
@@ -421,6 +418,33 @@ impl ImageCache {
         })
     }
 
+    pub fn merged(&self, additional: Self) -> AlarmResult<Self> {
+        let mut merged = self.clone();
+        for (reference, image) in additional.images {
+            if merged.images.contains_key(&reference) {
+                continue;
+            }
+            merged.total_bytes = merged
+                .total_bytes
+                .checked_add(image.bytes.len() as u64)
+                .filter(|total| *total <= MAX_ALARM_IMAGE_CACHE_BYTES)
+                .ok_or_else(|| {
+                    AlarmError::new(
+                        "device_simulator.alarm.image_cache_size_exceeded",
+                        "alarm image cache exceeds 128 MiB",
+                    )
+                })?;
+            if merged.images.len() >= MAX_ALARM_IMAGES {
+                return Err(AlarmError::new(
+                    "device_simulator.alarm.image_count_exceeded",
+                    "alarm image cache contains more than 256 images",
+                ));
+            }
+            merged.images.insert(reference, image);
+        }
+        Ok(merged)
+    }
+
     pub fn len(&self) -> usize {
         self.images.len()
     }
@@ -511,6 +535,7 @@ pub enum RecoveryDefinition {
     RenderWith {
         template: CompiledTemplate,
         trigger: RecoveryTrigger,
+        include_images: bool,
     },
 }
 
@@ -667,8 +692,20 @@ pub fn build_recovery_request(
 ) -> AlarmResult<Option<HttpAlarmRequest>> {
     match &definition.recovery {
         RecoveryDefinition::None => Ok(None),
-        RecoveryDefinition::RenderWith { template, .. } => {
-            build_request_with_template(definition, template, context, image_cache).map(Some)
+        RecoveryDefinition::RenderWith {
+            template,
+            include_images,
+            ..
+        } => {
+            if *include_images {
+                build_request_with_template(definition, template, context, image_cache).map(Some)
+            } else {
+                let mut recovery_definition = definition.clone();
+                recovery_definition.images.clear();
+                recovery_definition.image_policy = ImagePolicy::Forbidden;
+                build_request_with_template(&recovery_definition, template, context, image_cache)
+                    .map(Some)
+            }
         }
     }
 }
@@ -700,6 +737,16 @@ fn build_request_with_template(
             DynamicField::ImageBase64,
             BASE64_STANDARD.encode(&image.bytes),
         );
+        fields.insert(DynamicField::ImageSize, image.bytes.len().to_string());
+    } else if template.fields().contains(&DynamicField::ImageSize) {
+        if definition.images.len() != 1 {
+            return Err(AlarmError::new(
+                "device_simulator.alarm.embedded_image_count_invalid",
+                "image-size templates require exactly one image",
+            ));
+        }
+        let image = image_cache.get(&definition.images[0].reference)?;
+        fields.insert(DynamicField::ImageSize, image.bytes.len().to_string());
     }
     let metadata = template.render(&fields)?;
     let (body, content_type) = match &definition.transport.body_encoding {
@@ -1261,6 +1308,16 @@ mod tests {
     }
 
     #[test]
+    fn template_compiler_accepts_adjacent_literal_json_object_terminators() {
+        let template = CompiledTemplate::compile(br#"{"outer":{"value":1}}"#).unwrap();
+        assert!(template.fields().is_empty());
+        assert_eq!(
+            template.render(&BTreeMap::new()).unwrap(),
+            br#"{"outer":{"value":1}}"#
+        );
+    }
+
+    #[test]
     fn registry_uses_compiled_handler_ids_and_exact_profile_binding() {
         let mut registry = AlarmHandlerRegistry::default();
         registry
@@ -1364,6 +1421,53 @@ mod tests {
         let second = cache.get(&reference).unwrap().bytes.clone();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(&*second, bytes);
+    }
+
+    #[test]
+    fn image_caches_merge_verified_user_assets_without_reloading_pack_images() {
+        let (root, manifests, pack_reference, pack_bytes) = pack_fixture();
+        let pack_cache = ImageCache::load_at_start(
+            [pack_reference.clone()],
+            &root.path().join("packs"),
+            &root.path().join("user-assets"),
+            &manifests,
+        )
+        .unwrap();
+        let original_pack_bytes = pack_cache.get(&pack_reference).unwrap().bytes.clone();
+        let user_bytes = b"user-image";
+        let image_id = format!("{:x}", Sha256::digest(user_bytes));
+        fs::write(
+            root.path()
+                .join("user-assets")
+                .join(format!("{image_id}.png")),
+            user_bytes,
+        )
+        .unwrap();
+        let user_reference = ImageAssetRef::UserAsset {
+            image_id: image_id.clone(),
+            extension: ImageExtension::Png,
+            sha256: image_id,
+            size: user_bytes.len() as u64,
+        };
+        let user_cache = ImageCache::load_at_start(
+            [user_reference.clone()],
+            &root.path().join("packs"),
+            &root.path().join("user-assets"),
+            &manifests,
+        )
+        .unwrap();
+
+        let merged = pack_cache.merged(user_cache).unwrap();
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            merged.total_bytes(),
+            (pack_bytes.len() + user_bytes.len()) as u64
+        );
+        assert!(Arc::ptr_eq(
+            &original_pack_bytes,
+            &merged.get(&pack_reference).unwrap().bytes
+        ));
+        assert_eq!(&*merged.get(&user_reference).unwrap().bytes, user_bytes);
     }
 
     #[test]
@@ -1518,6 +1622,7 @@ mod tests {
         definition.recovery = RecoveryDefinition::RenderWith {
             template: CompiledTemplate::compile(br#"{"state":"{{alarm_state}}"}"#).unwrap(),
             trigger: RecoveryTrigger::RequestedDelay,
+            include_images: false,
         };
         let request = build_recovery_request(&definition, &context, &ImageCache::default())
             .unwrap()

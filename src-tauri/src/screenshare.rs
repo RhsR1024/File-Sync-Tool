@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::io;
 #[cfg(target_os = "windows")]
@@ -108,6 +108,7 @@ const WGC_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 const BLACK_FRAME_RECREATE_AFTER: Duration = Duration::from_millis(1500);
 const BLACK_FRAME_RECOVERY_WINDOW: Duration = Duration::from_secs(8);
 const BLACK_FRAME_DESKTOP_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const BLACK_FRAME_PRIVACY_RESCAN_DELAY: Duration = Duration::from_secs(10);
 const BLACK_FRAME_BRIGHT_THRESHOLD: u8 = 12;
 const BLACK_FRAME_MAX_BRIGHT_PIXELS_PER_10K: usize = 35;
 type ViewerIpMap = HashMap<String, Instant>;
@@ -123,6 +124,13 @@ impl CaptureBackendKind {
         match self {
             Self::Dxgi => "DXGI",
             Self::Wgc => "WGC",
+        }
+    }
+
+    fn alternate(self) -> Self {
+        match self {
+            Self::Dxgi => Self::Wgc,
+            Self::Wgc => Self::Dxgi,
         }
     }
 }
@@ -227,6 +235,14 @@ pub struct ScreenShareStatus {
     /// True while the capture source is down and being rebuilt (e.g. lock
     /// screen); the HTTP server and viewer connections stay alive throughout.
     pub capture_paused: bool,
+    pub capture_issue: Option<ScreenShareCaptureIssue>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenShareCaptureIssue {
+    Retrying,
+    PrivacyModeOrDisplayOff,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +270,7 @@ pub struct ScreenShareHandle {
     start_time: Mutex<Option<Instant>>,
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
     capture_paused: Arc<AtomicBool>,
+    capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
     /// Completed by the server watcher once the HTTP server has fully exited
     /// (port released); screen_share_stop awaits it so "stop returned" means
     /// "the port is immediately reusable".
@@ -276,6 +293,7 @@ impl ScreenShareHandle {
             start_time: Mutex::new(None),
             viewer_ips: Arc::new(Mutex::new(HashMap::new())),
             capture_paused: Arc::new(AtomicBool::new(false)),
+            capture_issue: Arc::new(Mutex::new(None)),
             server_done_rx: Mutex::new(None),
         }
     }
@@ -321,6 +339,7 @@ fn inactive_status() -> ScreenShareStatus {
         all_urls: Vec::new(),
         connected_ips: Vec::new(),
         capture_paused: false,
+        capture_issue: None,
     }
 }
 
@@ -344,6 +363,7 @@ fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
     *handle.all_urls.lock().unwrap() = Vec::new();
     *handle.start_time.lock().unwrap() = None;
     handle.capture_paused.store(false, Ordering::SeqCst);
+    *handle.capture_issue.lock().unwrap() = None;
     *handle.server_done_rx.lock().unwrap() = None;
     if let Ok(mut ips) = handle.viewer_ips.lock() {
         ips.clear();
@@ -397,6 +417,17 @@ fn current_cancel_token(handle: &ScreenShareHandle) -> Arc<AtomicBool> {
     handle.cancel.lock().unwrap().clone()
 }
 
+fn set_capture_issue(handle: &ScreenShareHandle, issue: Option<ScreenShareCaptureIssue>) {
+    handle
+        .capture_paused
+        .store(issue.is_some(), Ordering::SeqCst);
+    *handle.capture_issue.lock().unwrap() = issue;
+}
+
+fn current_capture_issue(handle: &ScreenShareHandle) -> Option<ScreenShareCaptureIssue> {
+    *handle.capture_issue.lock().unwrap()
+}
+
 fn record_viewer_ip(viewer_ips: &Arc<Mutex<ViewerIpMap>>, ip: impl Into<String>) {
     record_viewer_ip_at(viewer_ips, ip, Instant::now());
 }
@@ -448,6 +479,7 @@ struct HttpServerState {
     /// reconnect their stream without a manual page refresh.
     session_id: u64,
     capture_paused: Arc<AtomicBool>,
+    capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
 }
 
 /// RAII guard that decrements viewer count and removes IP on drop.
@@ -702,6 +734,7 @@ pub async fn screen_share_start(
         viewer_ips: handle.viewer_ips.clone(),
         session_id,
         capture_paused: handle.capture_paused.clone(),
+        capture_issue: handle.capture_issue.clone(),
     });
 
     // --- Spawn HTTP server ---
@@ -759,6 +792,7 @@ pub async fn screen_share_start(
     let reporter_start = Instant::now();
     let reporter_ips = handle.viewer_ips.clone();
     let reporter_capture_paused = handle.capture_paused.clone();
+    let reporter_capture_issue = handle.capture_issue.clone();
     let reporter_runtime_handle = handle.clone();
     let reporter_session_id = session_id;
 
@@ -774,6 +808,7 @@ pub async fn screen_share_start(
             reporter_start,
             reporter_ips,
             reporter_capture_paused,
+            reporter_capture_issue,
             reporter_runtime_handle,
             reporter_session_id,
         )
@@ -870,7 +905,46 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         all_urls: handle.all_urls.lock().unwrap().clone(),
         connected_ips,
         capture_paused: handle.capture_paused.load(Ordering::Relaxed),
+        capture_issue: current_capture_issue(handle),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureCandidate {
+    monitor_index: usize,
+    backend: CaptureBackendKind,
+}
+
+fn build_black_recovery_candidates(
+    display_count: usize,
+    active_monitor_index: usize,
+    active_backend: CaptureBackendKind,
+) -> VecDeque<CaptureCandidate> {
+    let mut candidates = VecDeque::new();
+    candidates.push_back(CaptureCandidate {
+        monitor_index: active_monitor_index,
+        backend: active_backend.alternate(),
+    });
+
+    for monitor_index in 0..display_count {
+        if monitor_index == active_monitor_index {
+            continue;
+        }
+        candidates.push_back(CaptureCandidate {
+            monitor_index,
+            backend: active_backend,
+        });
+        candidates.push_back(CaptureCandidate {
+            monitor_index,
+            backend: active_backend.alternate(),
+        });
+    }
+
+    candidates
+}
+
+fn detected_display_count() -> usize {
+    Display::all().map(|displays| displays.len()).unwrap_or(0)
 }
 
 fn sanitize_log_field(value: &str) -> String {
@@ -1431,7 +1505,7 @@ impl BlackFrameRecoveryWatchdog {
     }
 
     fn should_sample_desktop(&mut self, now: Instant, near_black: bool) -> bool {
-        if !near_black || !self.had_content_frame {
+        if !near_black || (!self.had_content_frame && self.recovery_armed_at.is_none()) {
             return false;
         }
         if self.last_desktop_sample_at.map_or(false, |sampled_at| {
@@ -1472,10 +1546,6 @@ impl BlackFrameRecoveryWatchdog {
             return BlackFrameDecision::Accept;
         }
 
-        if !self.had_content_frame {
-            return BlackFrameDecision::Accept;
-        }
-
         if desktop_available == Some(false) {
             self.saw_black_while_desktop_unavailable = true;
             self.black_since = None;
@@ -1488,6 +1558,11 @@ impl BlackFrameRecoveryWatchdog {
             });
         let returning_from_unavailable_desktop =
             self.saw_black_while_desktop_unavailable && desktop_available == Some(true);
+
+        if !self.had_content_frame && !(recovery_window_open || returning_from_unavailable_desktop)
+        {
+            return BlackFrameDecision::Accept;
+        }
 
         if !(recovery_window_open || returning_from_unavailable_desktop) {
             return BlackFrameDecision::Accept;
@@ -1659,6 +1734,7 @@ fn capture_loop(
     // 永远丢帧，观看端表现为无提示的永久黑屏。
     let mut width = source.width();
     let mut height = source.height();
+    let mut active_monitor_index = monitor_index;
     let frame_interval = Duration::from_millis(1000 / fps.max(1) as u64);
     let mut first_real_frame = false;
     // 会话内是否推送过真实帧：决定 WouldBlock 时是否继续发占位帧
@@ -1669,13 +1745,17 @@ fn capture_loop(
     let mut pending_resume = false;
     let mut starvation_watchdog = FrameStarvationWatchdog::new(Instant::now());
     let mut black_frame_watchdog = BlackFrameRecoveryWatchdog::new();
+    black_frame_watchdog.arm_for_recovery(Instant::now());
     let mut black_frame_suppressed_logged = false;
-    let mut forced_recreate_error: Option<io::Error> = None;
+    let mut forced_recreate_error: Option<(io::Error, bool)> = None;
+    let mut candidate_scan_started = false;
+    let mut recovery_candidates = VecDeque::new();
+    let mut privacy_issue_logged = false;
 
     // Cursor overlay setup
     #[cfg(target_os = "windows")]
     let mut monitor_rect = if show_cursor {
-        cursor_overlay::get_monitor_rect(monitor_index)
+        cursor_overlay::get_monitor_rect(active_monitor_index)
     } else {
         None
     };
@@ -1749,17 +1829,23 @@ fn capture_loop(
             );
         }
 
-        let frame_result = if let Some(error) = forced_recreate_error.take() {
-            Err(error)
-        } else {
-            match starvation.force_recreate {
-                Some(verdict) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("frame starvation watchdog: {}", verdict.describe()),
-                )),
-                None => source.frame(),
-            }
-        };
+        let mut scan_capture_candidates = false;
+        let frame_result =
+            if let Some((error, should_scan_candidates)) = forced_recreate_error.take() {
+                scan_capture_candidates = should_scan_candidates;
+                Err(error)
+            } else {
+                match starvation.force_recreate {
+                    Some(verdict) => {
+                        scan_capture_candidates = true;
+                        Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("frame starvation watchdog: {}", verdict.describe()),
+                        ))
+                    }
+                    None => source.frame(),
+                }
+            };
 
         match frame_result {
             Ok(frame) => {
@@ -1834,10 +1920,23 @@ fn capture_loop(
                     BlackFrameDecision::Accept => {
                         black_frame_suppressed_logged = false;
                         starvation_watchdog.on_frame(tick_start);
+                        if current_capture_issue(&runtime_handle).is_some() {
+                            set_capture_issue(&runtime_handle, None);
+                        }
+                        candidate_scan_started = false;
+                        recovery_candidates.clear();
+                        privacy_issue_logged = false;
                     }
                     BlackFrameDecision::Suppress => {
                         if is_current_session(&runtime_handle, session_id) {
-                            runtime_handle.capture_paused.store(true, Ordering::SeqCst);
+                            if current_capture_issue(&runtime_handle)
+                                != Some(ScreenShareCaptureIssue::PrivacyModeOrDisplayOff)
+                            {
+                                set_capture_issue(
+                                    &runtime_handle,
+                                    Some(ScreenShareCaptureIssue::Retrying),
+                                );
+                            }
                         }
                         if !black_frame_suppressed_logged {
                             black_frame_suppressed_logged = true;
@@ -1859,12 +1958,22 @@ fn capture_loop(
                         continue;
                     }
                     BlackFrameDecision::ForceRecreate { reason } => {
-                        forced_recreate_error = Some(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!("black frame watchdog: {}", reason),
+                        forced_recreate_error = Some((
+                            io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!("black frame watchdog: {}", reason),
+                            ),
+                            true,
                         ));
                         if is_current_session(&runtime_handle, session_id) {
-                            runtime_handle.capture_paused.store(true, Ordering::SeqCst);
+                            if current_capture_issue(&runtime_handle)
+                                != Some(ScreenShareCaptureIssue::PrivacyModeOrDisplayOff)
+                            {
+                                set_capture_issue(
+                                    &runtime_handle,
+                                    Some(ScreenShareCaptureIssue::Retrying),
+                                );
+                            }
                         }
                         emit_capture_create_diagnostic(
                             &app_handle,
@@ -1906,7 +2015,7 @@ fn capture_loop(
                         // 显示"画面中断，重试中"提示（capture_paused=true）。
                         pending_resume = false;
                         if is_current_session(&runtime_handle, session_id) {
-                            runtime_handle.capture_paused.store(false, Ordering::SeqCst);
+                            set_capture_issue(&runtime_handle, None);
                         }
                         emit_capture_create_diagnostic(
                             &app_handle,
@@ -1945,7 +2054,7 @@ fn capture_loop(
             Err(e) => {
                 let capture_error_detail = format!(
                     "捕获循环异常，进入暂停重试: monitor_index={}, backend={}, viewers={}, first_real_frame={}, error_kind={:?}, error={}, {}",
-                    monitor_index,
+                    active_monitor_index,
                     current_backend.label(),
                     viewer_count.load(Ordering::Relaxed),
                     first_real_frame,
@@ -1966,62 +2075,161 @@ fn capture_loop(
                 );
 
                 if is_current_session(&runtime_handle, session_id) {
-                    runtime_handle.capture_paused.store(true, Ordering::SeqCst);
+                    if current_capture_issue(&runtime_handle)
+                        != Some(ScreenShareCaptureIssue::PrivacyModeOrDisplayOff)
+                    {
+                        set_capture_issue(&runtime_handle, Some(ScreenShareCaptureIssue::Retrying));
+                    }
                 }
                 // The HTTP server and viewer connections stay alive during the pause;
                 // viewers keep the last frame and see a "retrying" hint via /status.
                 drop(source);
 
                 let mut retry_attempt = 0u32;
-                let recovered = loop {
-                    if !wait_for_capture_retry_delay(
-                        capture_recreate_backoff(retry_attempt),
-                        &cancel,
-                        &runtime_handle,
-                        session_id,
-                    ) {
-                        break None;
+                let recovered = if scan_capture_candidates {
+                    if !candidate_scan_started {
+                        recovery_candidates = build_black_recovery_candidates(
+                            detected_display_count().max(1),
+                            active_monitor_index,
+                            current_backend,
+                        );
+                        candidate_scan_started = true;
                     }
-                    match create_capture_source(
-                        monitor_index,
-                        show_cursor,
-                        backend_mode,
-                        CaptureStartKind::RuntimeRecreate,
-                        Some(current_backend),
-                        &cancel,
-                        &runtime_handle,
-                        session_id,
-                        &app_handle,
-                    ) {
-                        Ok(new_source) => break Some(new_source),
-                        Err(err) => {
-                            retry_attempt = retry_attempt.saturating_add(1);
-                            let retry_msg = format!(
-                                "屏幕捕获器重建失败，{}s 后继续重试: attempt={}, monitor_index={}, viewers={}, cause={}",
-                                capture_recreate_backoff(retry_attempt).as_secs(),
-                                retry_attempt,
-                                monitor_index,
-                                viewer_count.load(Ordering::Relaxed),
-                                err
+
+                    loop {
+                        if recovery_candidates.is_empty() {
+                            if is_current_session(&runtime_handle, session_id) {
+                                set_capture_issue(
+                                    &runtime_handle,
+                                    Some(ScreenShareCaptureIssue::PrivacyModeOrDisplayOff),
+                                );
+                            }
+                            if !privacy_issue_logged {
+                                privacy_issue_logged = true;
+                                emit_capture_create_diagnostic(
+                                    &app_handle,
+                                    "error",
+                                    "所有显示器与采集后端均持续输出黑屏；可能启用了远程控制隐私模式或显示器已被逻辑关闭。保持共享服务运行并继续定期检测"
+                                        .to_string(),
+                                );
+                            }
+                            if !wait_for_capture_retry_delay(
+                                BLACK_FRAME_PRIVACY_RESCAN_DELAY,
+                                &cancel,
+                                &runtime_handle,
+                                session_id,
+                            ) {
+                                break None;
+                            }
+                            recovery_candidates = build_black_recovery_candidates(
+                                detected_display_count().max(1),
+                                active_monitor_index,
+                                current_backend,
                             );
-                            log::warn!("{}", retry_msg);
-                            crate::scanner::emit_tool_log(
-                                &app_handle,
-                                TOOL_NAME,
-                                &retry_msg,
-                                "warn",
-                            );
-                            let _ = app_handle.emit(
-                                "screen-share-log",
-                                serde_json::json!({ "level": "warn", "message": retry_msg }),
-                            );
+                        } else if !wait_for_capture_retry_delay(
+                            capture_recreate_backoff(retry_attempt),
+                            &cancel,
+                            &runtime_handle,
+                            session_id,
+                        ) {
+                            break None;
+                        }
+
+                        let Some(candidate) = recovery_candidates.pop_front() else {
+                            continue;
+                        };
+                        emit_capture_create_diagnostic(
+                            &app_handle,
+                            "warn",
+                            format!(
+                                "检测到持续黑屏，尝试其他采集候选: monitor_index={}, backend={}, remaining_candidates={}",
+                                candidate.monitor_index,
+                                candidate.backend.label(),
+                                recovery_candidates.len()
+                            ),
+                        );
+                        match create_capture_source_for_backend(
+                            candidate.monitor_index,
+                            show_cursor,
+                            candidate.backend,
+                            &cancel,
+                            &runtime_handle,
+                            session_id,
+                            &app_handle,
+                        ) {
+                            Ok(new_source) => {
+                                break Some((new_source, candidate.monitor_index));
+                            }
+                            Err(err) => {
+                                retry_attempt = retry_attempt.saturating_add(1);
+                                emit_capture_create_diagnostic(
+                                    &app_handle,
+                                    "warn",
+                                    format!(
+                                        "黑屏恢复候选创建失败: attempt={}, monitor_index={}, backend={}, cause={}",
+                                        retry_attempt,
+                                        candidate.monitor_index,
+                                        candidate.backend.label(),
+                                        err
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    loop {
+                        if !wait_for_capture_retry_delay(
+                            capture_recreate_backoff(retry_attempt),
+                            &cancel,
+                            &runtime_handle,
+                            session_id,
+                        ) {
+                            break None;
+                        }
+                        match create_capture_source(
+                            active_monitor_index,
+                            show_cursor,
+                            backend_mode,
+                            CaptureStartKind::RuntimeRecreate,
+                            Some(current_backend),
+                            &cancel,
+                            &runtime_handle,
+                            session_id,
+                            &app_handle,
+                        ) {
+                            Ok(new_source) => {
+                                break Some((new_source, active_monitor_index));
+                            }
+                            Err(err) => {
+                                retry_attempt = retry_attempt.saturating_add(1);
+                                let retry_msg = format!(
+                                    "屏幕捕获器重建失败，{}s 后继续重试: attempt={}, monitor_index={}, viewers={}, cause={}",
+                                    capture_recreate_backoff(retry_attempt).as_secs(),
+                                    retry_attempt,
+                                    active_monitor_index,
+                                    viewer_count.load(Ordering::Relaxed),
+                                    err
+                                );
+                                log::warn!("{}", retry_msg);
+                                crate::scanner::emit_tool_log(
+                                    &app_handle,
+                                    TOOL_NAME,
+                                    &retry_msg,
+                                    "warn",
+                                );
+                                let _ = app_handle.emit(
+                                    "screen-share-log",
+                                    serde_json::json!({ "level": "warn", "message": retry_msg }),
+                                );
+                            }
                         }
                     }
                 };
 
                 match recovered {
-                    Some(new_source) => {
+                    Some((new_source, recovered_monitor_index)) => {
                         source = new_source;
+                        active_monitor_index = recovered_monitor_index;
                         // 注意：不在这里清除 capture_paused——重建"成功"可能是僵尸源
                         //（锁屏期间创建的 WGC 会话不出帧），等首个真实帧到达再清除。
                         pending_resume = true;
@@ -2044,12 +2252,12 @@ fn capture_loop(
                         }
                         #[cfg(target_os = "windows")]
                         if show_cursor {
-                            monitor_rect = cursor_overlay::get_monitor_rect(monitor_index);
+                            monitor_rect = cursor_overlay::get_monitor_rect(active_monitor_index);
                         }
                         let resumed_msg = format!(
                             "屏幕捕获已恢复，等待首帧推流: retries={}, monitor_index={}, backend={}, size={}x{}",
                             retry_attempt,
-                            monitor_index,
+                            active_monitor_index,
                             source.backend_kind().label(),
                             width,
                             height
@@ -2237,41 +2445,18 @@ fn create_capture_source(
     let mut failures: Vec<String> = Vec::new();
 
     for (index, backend) in order.iter().enumerate() {
-        let result: Result<CaptureSource, String> = match backend {
-            CaptureBackendKind::Dxgi => create_capturer(
-                monitor_index,
-                cancel,
-                runtime_handle,
-                session_id,
-                app_handle,
-            )
-            .map(CaptureSource::Dxgi),
-            #[cfg(target_os = "windows")]
-            CaptureBackendKind::Wgc => {
-                create_wgc_capturer(monitor_index, show_cursor, session_id, app_handle)
-                    .map(CaptureSource::Wgc)
-            }
-            #[cfg(not(target_os = "windows"))]
-            CaptureBackendKind::Wgc => {
-                Err("WGC capture backend is only available on Windows".to_string())
-            }
-        };
+        let result = create_capture_source_for_backend(
+            monitor_index,
+            show_cursor,
+            *backend,
+            cancel,
+            runtime_handle,
+            session_id,
+            app_handle,
+        );
 
         match result {
-            Ok(source) => {
-                emit_capture_create_diagnostic(
-                    app_handle,
-                    "success",
-                    format_capture_backend_selected_message(
-                        source.backend_kind(),
-                        session_id,
-                        monitor_index,
-                        source.width(),
-                        source.height(),
-                    ),
-                );
-                return Ok(source);
-            }
+            Ok(source) => return Ok(source),
             Err(error) => {
                 let has_next = index + 1 < order.len();
                 if has_next {
@@ -2308,6 +2493,49 @@ fn create_capture_source(
     }
 
     Err(failures.join("; "))
+}
+
+fn create_capture_source_for_backend(
+    monitor_index: usize,
+    show_cursor: bool,
+    backend: CaptureBackendKind,
+    cancel: &AtomicBool,
+    runtime_handle: &ScreenShareHandle,
+    session_id: u64,
+    app_handle: &AppHandle,
+) -> Result<CaptureSource, String> {
+    let source = match backend {
+        CaptureBackendKind::Dxgi => create_capturer(
+            monitor_index,
+            cancel,
+            runtime_handle,
+            session_id,
+            app_handle,
+        )
+        .map(CaptureSource::Dxgi),
+        #[cfg(target_os = "windows")]
+        CaptureBackendKind::Wgc => {
+            create_wgc_capturer(monitor_index, show_cursor, session_id, app_handle)
+                .map(CaptureSource::Wgc)
+        }
+        #[cfg(not(target_os = "windows"))]
+        CaptureBackendKind::Wgc => {
+            Err("WGC capture backend is only available on Windows".to_string())
+        }
+    }?;
+
+    emit_capture_create_diagnostic(
+        app_handle,
+        "success",
+        format_capture_backend_selected_message(
+            source.backend_kind(),
+            session_id,
+            monitor_index,
+            source.width(),
+            source.height(),
+        ),
+    );
+    Ok(source)
 }
 
 #[cfg(target_os = "windows")]
@@ -3331,6 +3559,7 @@ async fn handler_status(
         "viewers": state.viewer_count.load(Ordering::Relaxed),
         "session_id": state.session_id,
         "capture_paused": state.capture_paused.load(Ordering::Relaxed),
+        "capture_issue": *state.capture_issue.lock().unwrap(),
     }))
 }
 
@@ -3347,6 +3576,7 @@ async fn status_reporter(
     start_time: Instant,
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
     capture_paused: Arc<AtomicBool>,
+    capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
     runtime_handle: Arc<ScreenShareHandle>,
     session_id: u64,
 ) {
@@ -3378,6 +3608,7 @@ async fn status_reporter(
             all_urls: all_urls.clone(),
             connected_ips,
             capture_paused: capture_paused.load(Ordering::Relaxed),
+            capture_issue: *capture_issue.lock().unwrap(),
         };
 
         let _ = app_handle.emit("screen-share-status", &status);
@@ -3521,6 +3752,9 @@ html,body{height:100%;background:#060911;color:#e2e8f0;font-family:-apple-system
 .btn-pause:hover{background:rgba(245,158,11,.18)}
 .btn-fs{background:rgba(99,102,241,.1);border-color:rgba(99,102,241,.2);color:#a5b4fc}
 .btn-fs:hover{background:rgba(99,102,241,.18)}
+.capture-alert{display:none;position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:6;align-items:flex-start;gap:8px;max-width:min(92vw,720px);background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.35);color:#fbbf24;padding:9px 16px;border-radius:10px;font-size:13px;font-weight:500;line-height:1.45;backdrop-filter:blur(6px)}
+.capture-alert.privacy{background:rgba(239,68,68,.16);border-color:rgba(248,113,113,.45);color:#fecaca}
+.capture-alert.privacy .dot{background:#ef4444;box-shadow:0 0 6px #ef444460}
 </style>
 </head>
 <body>
@@ -3533,7 +3767,7 @@ html,body{height:100%;background:#060911;color:#e2e8f0;font-family:-apple-system
         <span id="pausedText"></span>
       </div>
     </div>
-    <div id="captureRetry" style="display:none;position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:6;align-items:center;gap:8px;background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.35);color:#fbbf24;padding:8px 16px;border-radius:10px;font-size:13px;font-weight:500;backdrop-filter:blur(6px)">
+    <div id="captureRetry" class="capture-alert" role="status" aria-live="polite">
       <span class="dot dot-retry"></span><span id="captureRetryText"></span>
     </div>
   </div>
@@ -3575,6 +3809,7 @@ const T={
   reconnecting:isZh?'重新连接中':'Reconnecting',
   paused:isZh?'已暂停':'Paused',
   serverRetrying:isZh?'画面中断，服务端自动重试中':'Capture interrupted — server is retrying',
+  privacyMode:isZh?'检测到所有屏幕持续黑屏。请关闭远程控制软件的隐私模式，或保持显示器处于逻辑开启状态；服务端会继续自动检测。':'All screens remain black. Disable privacy mode in the remote-control app or keep the display logically enabled; the server will keep checking automatically.',
   pause:isZh?'暂停':'Pause',
   resume:isZh?'继续':'Resume',
   refresh:isZh?'刷新率':'Refresh',
@@ -3707,6 +3942,9 @@ setInterval(async()=>{
       // 服务端采集暂停（锁屏等）→ 显示重试提示条；恢复后自动隐藏
       const captureRetryEl=document.getElementById('captureRetry');
       if(captureRetryEl){
+        const privacy=d.capture_issue==='privacy_mode_or_display_off';
+        captureRetryEl.classList.toggle('privacy',privacy);
+        document.getElementById('captureRetryText').textContent=privacy?T.privacyMode:T.serverRetrying;
         captureRetryEl.style.display=(d.capture_paused&&!paused)?'flex':'none';
       }
       if(!d.active&&alive){
@@ -3872,10 +4110,12 @@ mod tests {
         let viewer = viewer_html();
         let login = login_html(false, false);
 
-        for html in [viewer, login] {
+        for html in [&viewer, &login] {
             assert!(html.contains(r#"<link rel="icon" type="image/svg+xml""#));
             assert!(html.contains("data:image/svg+xml"));
         }
+        assert!(viewer.contains("privacy_mode_or_display_off"));
+        assert!(viewer.contains("检测到所有屏幕持续黑屏"));
     }
 
     #[test]
@@ -4426,6 +4666,72 @@ mod tests {
                 Some(true),
             ),
             BlackFrameDecision::Accept
+        );
+    }
+
+    #[test]
+    fn black_frame_watchdog_rejects_initial_black_when_capture_validation_is_armed() {
+        let t0 = Instant::now();
+        let mut watchdog = BlackFrameRecoveryWatchdog::new();
+        let black = solid_bgra_frame(16, 16, [0, 0, 0, 255]);
+        watchdog.arm_for_recovery(t0);
+
+        assert_eq!(
+            watchdog.observe_frame(
+                t0 + BLACK_FRAME_RECREATE_AFTER / 2,
+                &black,
+                16,
+                16,
+                16 * 4,
+                false,
+                Some(true),
+            ),
+            BlackFrameDecision::Suppress
+        );
+        assert!(matches!(
+            watchdog.observe_frame(
+                t0 + BLACK_FRAME_RECREATE_AFTER,
+                &black,
+                16,
+                16,
+                16 * 4,
+                false,
+                Some(true),
+            ),
+            BlackFrameDecision::ForceRecreate { .. }
+        ));
+    }
+
+    #[test]
+    fn black_recovery_candidates_try_alternate_backend_then_other_monitors() {
+        let candidates = build_black_recovery_candidates(3, 1, CaptureBackendKind::Wgc)
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            candidates,
+            vec![
+                CaptureCandidate {
+                    monitor_index: 1,
+                    backend: CaptureBackendKind::Dxgi,
+                },
+                CaptureCandidate {
+                    monitor_index: 0,
+                    backend: CaptureBackendKind::Wgc,
+                },
+                CaptureCandidate {
+                    monitor_index: 0,
+                    backend: CaptureBackendKind::Dxgi,
+                },
+                CaptureCandidate {
+                    monitor_index: 2,
+                    backend: CaptureBackendKind::Wgc,
+                },
+                CaptureCandidate {
+                    monitor_index: 2,
+                    backend: CaptureBackendKind::Dxgi,
+                },
+            ]
         );
     }
 

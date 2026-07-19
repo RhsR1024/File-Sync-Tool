@@ -1,7 +1,7 @@
 {
   "name": "trae-project",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "packageManager": "pnpm@11.13.0",
   "type": "module",
   "scripts": {
@@ -11,6 +11,8 @@
     "preview": "vite preview",
     "check": "vue-tsc -b",
     "test:share-web": "vitest run --config vitest.config.ts",
+    "test:device-simulator-assets": "node --test scripts/device-simulator-assets/*.test.mjs",
+    "build:device-simulator-assets": "node scripts/device-simulator-assets/build-approved-release.mjs",
     "lint": "eslint . --ext .ts,.vue",
     "lint:fix": "eslint . --ext .ts,.vue --fix",
     "tauri": "tauri",

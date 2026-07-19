@@ -1157,6 +1157,8 @@ export interface MonitorInfo {
   is_primary: boolean;
 }
 
+export type ScreenShareCaptureIssue = 'retrying' | 'privacy_mode_or_display_off';
+
 export interface ScreenShareStatus {
   is_active: boolean;
   viewer_count: number;
@@ -1168,6 +1170,7 @@ export interface ScreenShareStatus {
   all_urls: string[];
   connected_ips: string[];
   capture_paused: boolean;
+  capture_issue: ScreenShareCaptureIssue | null;
 }
 
 export async function screenShareListMonitors(): Promise<MonitorInfo[]> {

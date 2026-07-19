@@ -663,18 +663,19 @@ impl AlarmScheduler {
         tracker: &AlarmJobTracker,
         cancellation: &AlarmCancellation,
     ) -> bool {
+        let mut context = invocation.context.clone();
+        context.fields.insert(
+            crate::device_simulator::alarms::DynamicField::Timestamp,
+            self.clock.now_ms().to_string(),
+        );
         let request = match phase {
-            AlarmDeliveryPhase::Alarm => build_alarm_request(
-                &invocation.definition,
-                &invocation.context,
-                &invocation.image_cache,
-            )
-            .map(Some),
-            AlarmDeliveryPhase::Recovery => build_recovery_request(
-                &invocation.definition,
-                &invocation.context,
-                &invocation.image_cache,
-            ),
+            AlarmDeliveryPhase::Alarm => {
+                build_alarm_request(&invocation.definition, &context, &invocation.image_cache)
+                    .map(Some)
+            }
+            AlarmDeliveryPhase::Recovery => {
+                build_recovery_request(&invocation.definition, &context, &invocation.image_cache)
+            }
         };
         let request = match request {
             Ok(Some(request)) => request,
@@ -1196,6 +1197,7 @@ mod tests {
                     )
                     .unwrap(),
                     trigger: RecoveryTrigger::RequestedDelay,
+                    include_images: false,
                 }
             } else {
                 RecoveryDefinition::None

@@ -1,19 +1,43 @@
 use crate::device_simulator::errors::SimulatorErrorBody;
+use crate::device_simulator::events::WorkerEvent;
 use crate::device_simulator::models::{SessionState, SimulatorStatus};
 use crate::device_simulator::windows::named_pipe::PipeIdentity;
-use std::sync::Mutex;
+use crate::device_simulator::worker_protocol::{
+    WorkerCommand, WorkerCommandName, WorkerHeartbeat, WorkerMessage, WorkerRequest,
+    WorkerResponseOutcome, WORKER_PROTOCOL_VERSION,
+};
+use serde::Serialize;
+use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagerError {
     pub code: &'static str,
     pub message: String,
+    pub worker_error: Option<SimulatorErrorBody>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartedSession {
     pub identity: PipeIdentity,
     pub status: SimulatorStatus,
+}
+
+#[derive(Debug, Clone)]
+pub enum ManagerNotification {
+    Heartbeat {
+        process_id: u32,
+        heartbeat: WorkerHeartbeat,
+    },
+    Event(WorkerEvent),
+    WorkerLost {
+        session_id: String,
+        process_id: u32,
+        code: &'static str,
+        details: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +78,24 @@ impl ManagerError {
         Self {
             code,
             message: message.into(),
+            worker_error: None,
         }
+    }
+
+    fn from_worker(error: SimulatorErrorBody) -> Self {
+        Self {
+            code: "device_simulator.worker.command_failed",
+            message: error.details.clone().unwrap_or_else(|| error.code.clone()),
+            worker_error: Some(error),
+        }
+    }
+
+    pub fn into_body(self) -> SimulatorErrorBody {
+        self.worker_error.unwrap_or_else(|| {
+            SimulatorErrorBody::new(self.code, "deviceSimulator.errors.workerCommandFailed")
+                .with_public_details(self.message)
+                .retryable(false)
+        })
     }
 }
 
@@ -77,9 +118,20 @@ impl Default for ManagerInner {
     }
 }
 
-#[derive(Debug, Default)]
 pub struct SimulatorManager {
     inner: Mutex<ManagerInner>,
+    worker: AsyncMutex<Option<WorkerClient>>,
+    timeout_policy: WorkerTimeoutPolicy,
+}
+
+impl Default for SimulatorManager {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(ManagerInner::default()),
+            worker: AsyncMutex::new(None),
+            timeout_policy: WorkerTimeoutPolicy::default(),
+        }
+    }
 }
 
 impl SimulatorManager {
@@ -279,6 +331,347 @@ impl SimulatorManager {
         inner.status.updated_at_ms = now_ms();
         Ok(inner.status.clone())
     }
+
+    pub async fn has_worker(&self) -> bool {
+        self.worker.lock().await.is_some()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub async fn launch_worker(
+        &self,
+        identity: &PipeIdentity,
+        notifications: mpsc::UnboundedSender<ManagerNotification>,
+    ) -> Result<u32, ManagerError> {
+        use crate::device_simulator::windows::elevation::{
+            launch_elevated_worker, WorkerLaunchSpec,
+        };
+        use crate::device_simulator::windows::named_pipe::{
+            accept_and_verify_worker, create_secure_server,
+        };
+
+        self.timeout_policy.validate()?;
+        let mut worker = self.worker.lock().await;
+        if worker.is_some() {
+            return Err(ManagerError::new(
+                "device_simulator.worker.already_connected",
+                "an elevated Worker is already connected",
+            ));
+        }
+        let executable = std::env::current_exe().map_err(|source| {
+            ManagerError::new(
+                "device_simulator.worker.executable_unavailable",
+                format!("could not resolve current executable: {source}"),
+            )
+        })?;
+        let server = create_secure_server(identity).map_err(pipe_accept_error)?;
+        let spec = WorkerLaunchSpec::new(
+            executable,
+            identity.session_id.clone(),
+            identity.pipe_name.clone(),
+        )
+        .map_err(|source| {
+            ManagerError::new(
+                "device_simulator.worker.launch_spec_invalid",
+                source.public_details,
+            )
+        })?;
+        let process = launch_elevated_worker(&spec).map_err(|source| {
+            let code = match source.kind {
+                crate::device_simulator::windows::elevation::ElevationErrorKind::UacCancelled => {
+                    "device_simulator.worker.uac_cancelled"
+                }
+                _ => "device_simulator.worker.launch_failed",
+            };
+            ManagerError::new(code, source.public_details)
+        })?;
+        let process_id = process.process_id();
+        let pipe =
+            accept_and_verify_worker(server, identity, process_id, self.timeout_policy.startup)
+                .await
+                .map_err(pipe_accept_error)?;
+        self.record_worker_connected(&identity.session_id, process_id, now_ms())?;
+        let transport = Arc::new(WorkerTransport {
+            pipe: AsyncMutex::new(pipe),
+            session_id: identity.session_id.clone(),
+            process_id,
+            request_timeout: self.timeout_policy.request,
+            notifications: notifications.clone(),
+        });
+        let (cancel, cancel_rx) = watch::channel(false);
+        let monitor = tokio::spawn(monitor_worker(
+            Arc::clone(&transport),
+            cancel_rx,
+            notifications,
+        ));
+        *worker = Some(WorkerClient {
+            transport,
+            cancel,
+            monitor,
+            process,
+        });
+        Ok(process_id)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub async fn launch_worker(
+        &self,
+        _identity: &PipeIdentity,
+        _notifications: mpsc::UnboundedSender<ManagerNotification>,
+    ) -> Result<u32, ManagerError> {
+        Err(ManagerError::new(
+            "device_simulator.worker.unsupported_platform",
+            "elevated Worker launch is only supported on Windows",
+        ))
+    }
+
+    #[cfg(target_os = "windows")]
+    pub async fn request_worker<P: Serialize>(
+        &self,
+        command: WorkerCommandName,
+        payload: Option<&P>,
+    ) -> Result<Option<Value>, ManagerError> {
+        let payload = payload
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|source| {
+                ManagerError::new(
+                    "device_simulator.worker.request_serialize_failed",
+                    format!("could not serialize Worker request: {source}"),
+                )
+            })?;
+        let worker = self.worker.lock().await;
+        let client = worker.as_ref().ok_or_else(|| {
+            ManagerError::new(
+                "device_simulator.worker.not_connected",
+                "there is no connected elevated Worker",
+            )
+        })?;
+        client.transport.request(command, payload).await
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub async fn request_worker<P: Serialize>(
+        &self,
+        _command: WorkerCommandName,
+        _payload: Option<&P>,
+    ) -> Result<Option<Value>, ManagerError> {
+        Err(ManagerError::new(
+            "device_simulator.worker.unsupported_platform",
+            "Worker requests are only supported on Windows",
+        ))
+    }
+
+    #[cfg(target_os = "windows")]
+    pub async fn shutdown_worker(&self) -> Result<(), ManagerError> {
+        let mut slot = self.worker.lock().await;
+        let Some(worker) = slot.take() else {
+            return Ok(());
+        };
+        let _ = worker.cancel.send(true);
+        let shutdown = worker
+            .transport
+            .request(WorkerCommandName::Shutdown, None)
+            .await;
+        worker.monitor.abort();
+        let _ = worker.monitor.await;
+        if let Err(source) = shutdown {
+            return Err(source);
+        }
+        let deadline = tokio::time::Instant::now() + self.timeout_policy.stop;
+        loop {
+            if worker
+                .process
+                .try_exit_code()
+                .map_err(|source| {
+                    ManagerError::new(
+                        "device_simulator.worker.exit_query_failed",
+                        source.public_details,
+                    )
+                })?
+                .is_some()
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ManagerError::new(
+                    "device_simulator.worker.stop_timeout",
+                    "elevated Worker did not exit within the finite stop timeout",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub async fn shutdown_worker(&self) -> Result<(), ManagerError> {
+        *self.worker.lock().await = None;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WorkerTransport {
+    pipe: AsyncMutex<tokio::net::windows::named_pipe::NamedPipeServer>,
+    session_id: String,
+    process_id: u32,
+    request_timeout: Duration,
+    notifications: mpsc::UnboundedSender<ManagerNotification>,
+}
+
+#[cfg(target_os = "windows")]
+impl WorkerTransport {
+    async fn request(
+        &self,
+        command: WorkerCommandName,
+        payload: Option<Value>,
+    ) -> Result<Option<Value>, ManagerError> {
+        let request_id = uuid::Uuid::new_v4().simple().to_string();
+        let request = WorkerMessage::Request(WorkerRequest {
+            protocol_version: WORKER_PROTOCOL_VERSION,
+            request_id: request_id.clone(),
+            command: WorkerCommand {
+                name: command,
+                payload,
+            },
+        });
+        let operation = async {
+            let mut pipe = self.pipe.lock().await;
+            crate::device_simulator::worker_protocol::write_frame(&mut *pipe, &request)
+                .await
+                .map_err(|source| worker_io_error("write", source.to_string()))?;
+            loop {
+                let message = crate::device_simulator::worker_protocol::read_frame::<
+                    _,
+                    WorkerMessage,
+                >(&mut *pipe)
+                .await
+                .map_err(|source| worker_io_error("read", source.to_string()))?
+                .ok_or_else(|| {
+                    worker_io_error("read", "Worker closed the named pipe before responding")
+                })?;
+                match message {
+                    WorkerMessage::Response(response) if response.request_id == request_id => {
+                        if response.protocol_version != WORKER_PROTOCOL_VERSION {
+                            return Err(ManagerError::new(
+                                "device_simulator.worker.protocol_incompatible",
+                                "Worker response protocol version does not match",
+                            ));
+                        }
+                        return match response.outcome {
+                            WorkerResponseOutcome::Success { payload } => Ok(payload),
+                            WorkerResponseOutcome::Error { error } => {
+                                Err(ManagerError::from_worker(error))
+                            }
+                        };
+                    }
+                    WorkerMessage::Heartbeat(heartbeat) => {
+                        if heartbeat.session_id != self.session_id {
+                            return Err(ManagerError::new(
+                                "device_simulator.worker.session_mismatch",
+                                "Worker heartbeat belongs to another session",
+                            ));
+                        }
+                        let _ = self.notifications.send(ManagerNotification::Heartbeat {
+                            process_id: self.process_id,
+                            heartbeat,
+                        });
+                    }
+                    WorkerMessage::Event(event) => {
+                        if event.session_id != self.session_id {
+                            return Err(ManagerError::new(
+                                "device_simulator.worker.session_mismatch",
+                                "Worker event belongs to another session",
+                            ));
+                        }
+                        let _ = self.notifications.send(ManagerNotification::Event(event));
+                    }
+                    WorkerMessage::Response(_) => {
+                        return Err(ManagerError::new(
+                            "device_simulator.worker.response_mismatch",
+                            "Worker response request ID does not match the active request",
+                        ));
+                    }
+                    _ => {
+                        return Err(ManagerError::new(
+                            "device_simulator.worker.message_unexpected",
+                            "Worker sent an unexpected protocol message",
+                        ));
+                    }
+                }
+            }
+        };
+        match tokio::time::timeout(self.request_timeout, operation).await {
+            Ok(result) => result,
+            Err(_) => Err(ManagerError::new(
+                "device_simulator.worker.request_timeout",
+                format!("Worker command {command:?} timed out"),
+            )),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WorkerClient {
+    transport: Arc<WorkerTransport>,
+    cancel: watch::Sender<bool>,
+    monitor: tokio::task::JoinHandle<()>,
+    process: crate::device_simulator::windows::elevation::ElevatedWorkerProcess,
+}
+
+#[cfg(not(target_os = "windows"))]
+struct WorkerClient;
+
+#[cfg(target_os = "windows")]
+async fn monitor_worker(
+    transport: Arc<WorkerTransport>,
+    mut cancel: watch::Receiver<bool>,
+    notifications: mpsc::UnboundedSender<ManagerNotification>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                if let Err(source) = transport.request(WorkerCommandName::GetStatus, None).await {
+                    let _ = notifications.send(ManagerNotification::WorkerLost {
+                        session_id: transport.session_id.clone(),
+                        process_id: transport.process_id,
+                        code: "device_simulator.worker.disconnected",
+                        details: source.message,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn pipe_accept_error(
+    source: crate::device_simulator::windows::named_pipe::PipeAcceptError,
+) -> ManagerError {
+    use crate::device_simulator::windows::named_pipe::PipeAcceptErrorKind;
+    let code = match source.kind {
+        PipeAcceptErrorKind::StartupTimeout => "device_simulator.worker.startup_timeout",
+        PipeAcceptErrorKind::ProcessIdMismatch => "device_simulator.worker.pid_mismatch",
+        PipeAcceptErrorKind::HandshakeRejected => "device_simulator.worker.handshake_rejected",
+        PipeAcceptErrorKind::CreateFailed => "device_simulator.worker.pipe_create_failed",
+        _ => "device_simulator.worker.pipe_failed",
+    };
+    ManagerError::new(code, source.public_details)
+}
+
+fn worker_io_error(action: &'static str, details: impl Into<String>) -> ManagerError {
+    ManagerError::new(
+        "device_simulator.worker.io_failed",
+        format!("Worker pipe {action} failed: {}", details.into()),
+    )
 }
 
 fn ensure_session(inner: &ManagerInner, session_id: &str) -> Result<(), ManagerError> {

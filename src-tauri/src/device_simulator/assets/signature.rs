@@ -28,6 +28,20 @@ pub struct TrustedCatalogKey {
     pub public_key: [u8; 32],
 }
 
+/// Public key for the user-approved, non-commercial static-review asset
+/// release. The corresponding private key is intentionally kept outside the
+/// repository and application build. Trusting this key verifies artifact
+/// integrity; it does not upgrade any profile to real-platform verification.
+pub fn trusted_catalog_keys() -> Vec<TrustedCatalogKey> {
+    vec![TrustedCatalogKey {
+        key_id: "device-assets-static-review-2026".into(),
+        public_key: [
+            13, 90, 199, 12, 72, 36, 215, 99, 25, 160, 143, 21, 237, 43, 45, 235, 57, 13, 176, 92,
+            75, 31, 158, 90, 186, 220, 52, 215, 129, 142, 235, 57,
+        ],
+    }]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogSignatureError {
     pub code: &'static str,

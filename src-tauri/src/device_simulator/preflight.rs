@@ -15,6 +15,7 @@ pub struct PreflightEnvironment {
     pub unavailable_tcp_ports: BTreeSet<u16>,
     pub assets_ready: bool,
     pub asset_details: Option<String>,
+    pub profiles_static_reviewed: bool,
     pub profiles_platform_verified: bool,
     pub worker_available: bool,
     pub firewall_required: bool,
@@ -73,6 +74,15 @@ pub fn run_preflight(
             "profile-evidence",
             "deviceSimulator.preflight.checks.profileEvidence",
             None,
+        )
+    } else if environment.profiles_static_reviewed {
+        warning(
+            "profile-evidence",
+            "deviceSimulator.preflight.checks.profileEvidence",
+            Some(
+                "static legacy evidence was reviewed and approved for local execution; the selected profile/platform combination remains unverified on a real platform"
+                    .into(),
+            ),
         )
     } else {
         failed(
@@ -473,6 +483,7 @@ mod tests {
                 interfaces: vec![interface()],
                 local_addresses,
                 assets_ready: true,
+                profiles_static_reviewed: true,
                 profiles_platform_verified: true,
                 worker_available: true,
                 firewall_required: true,

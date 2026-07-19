@@ -17,6 +17,7 @@ import {
   type DeviceProfileSummary,
   type DeviceSimulatorSettings,
   type DeviceStatusBatch,
+  type ImportedAlarmImage,
   type PreflightReport,
   type RtspStats,
   type SimulatorLogEvent,
@@ -105,6 +106,7 @@ export function useDeviceSimulator() {
   const alarmStats = ref<AlarmJobStats | null>(null);
   const cleanupProgress = ref<CleanupProgress | null>(null);
   const lastAlarmResult = ref<AlarmTriggerResult | null>(null);
+  const importedAlarmImage = ref<ImportedAlarmImage | null>(null);
   const logs = ref<SimulatorLogEvent[]>([]);
   const busyAction = ref<string | null>(null);
   const errorMessage = ref('');
@@ -179,7 +181,14 @@ export function useDeviceSimulator() {
     if (unlisteners.length > 0) return;
     const listeners = await Promise.all([
       listen<SimulatorStatus>(DEVICE_SIMULATOR_EVENTS.status, ({ payload }) => { status.value = payload; }),
-      listen<AssetProgress>(DEVICE_SIMULATOR_EVENTS.assetProgress, ({ payload }) => { assetProgress.value = payload; }),
+      listen<AssetProgress>(DEVICE_SIMULATOR_EVENTS.assetProgress, ({ payload }) => {
+        assetProgress.value = payload;
+        if (payload.state === 'ready' || payload.state === 'failed') {
+          void deviceSimulatorApi.getAssetStatus(selectedProfileIds.value)
+            .then((status) => { assets.value = status; })
+            .catch(() => undefined);
+        }
+      }),
       listen<DeviceStatusBatch>(DEVICE_SIMULATOR_EVENTS.deviceStatus, ({ payload }) => { deviceStatus.value = payload; }),
       listen<RtspStats>(DEVICE_SIMULATOR_EVENTS.rtspStats, ({ payload }) => { rtspStats.value = payload; }),
       listen<AlarmJobStats>(DEVICE_SIMULATOR_EVENTS.alarmStats, ({ payload }) => { alarmStats.value = payload; }),
@@ -289,6 +298,16 @@ export function useDeviceSimulator() {
     if (result) lastAlarmResult.value = result;
   }
 
+  async function importAlarmImage() {
+    const result = await run('import-alarm-image', () => deviceSimulatorApi.importAlarmImage());
+    if (result) importedAlarmImage.value = result;
+    return result;
+  }
+
+  function clearAlarmImageSelection() {
+    importedAlarmImage.value = null;
+  }
+
   async function startAlarm(alarm: AlarmJobRequest) {
     await run('start-alarm', () => deviceSimulatorApi.startAlarm(alarm));
   }
@@ -333,6 +352,7 @@ export function useDeviceSimulator() {
     alarmStats,
     cleanupProgress,
     lastAlarmResult,
+    importedAlarmImage,
     logs,
     busyAction,
     errorMessage,
@@ -351,6 +371,8 @@ export function useDeviceSimulator() {
     start,
     stop,
     recover,
+    importAlarmImage,
+    clearAlarmImageSelection,
     triggerAlarm,
     startAlarm,
     stopAlarm,

@@ -142,6 +142,18 @@ pub struct AssetStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AssetProgressSnapshot {
+    pub job_id: String,
+    pub state: crate::device_simulator::models::AssetState,
+    pub current_pack_id: Option<String>,
+    pub downloaded: u64,
+    pub total: Option<u64>,
+    pub speed_bps: u64,
+    pub error: Option<SimulatorErrorBody>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceStreamAddress {
     pub device_id: String,
     pub channel_id: Option<String>,
@@ -261,6 +273,15 @@ pub enum AlarmDispatchMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ImportedAlarmImage {
+    pub image_id: String,
+    pub file_name: String,
+    pub extension: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlarmJobRequest {
     pub target_device_ids: Vec<String>,
     pub alarm_profile_id: String,
@@ -279,6 +300,7 @@ pub struct AlarmTriggerResult {
     pub attempted: u64,
     pub succeeded: u64,
     pub failed: u64,
+    pub unverified: u64,
     pub duration_ms: u64,
     pub errors: Vec<SimulatorErrorBody>,
 }
@@ -328,6 +350,7 @@ pub struct AlarmJobStatsSnapshot {
     pub attempted: u64,
     pub succeeded: u64,
     pub failed: u64,
+    pub unverified: u64,
     pub in_flight: u64,
     pub average_duration_ms: f64,
     pub last_error: Option<SimulatorErrorBody>,
@@ -339,6 +362,13 @@ pub struct RuntimeEventBatch {
     pub device_status: Option<DeviceStatusBatch>,
     pub rtsp_stats: Option<RtspStatsSnapshot>,
     pub alarm_stats: Vec<AlarmJobStatsSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeTelemetrySnapshot {
+    pub status: SimulatorStatusSnapshot,
+    pub events: RuntimeEventBatch,
 }
 
 #[derive(Debug, Default)]
@@ -793,6 +823,7 @@ mod tests {
             attempted: 1,
             succeeded: 1,
             failed: 0,
+            unverified: 0,
             in_flight: 0,
             average_duration_ms: 12.5,
             last_error: None,

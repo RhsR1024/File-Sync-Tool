@@ -9,6 +9,7 @@ import {
   Clipboard,
   Download,
   FileDown,
+  ImagePlus,
   LoaderCircle,
   Plus,
   RadioTower,
@@ -50,6 +51,17 @@ const fieldClass = 'min-h-11 w-full rounded-xl border border-slate-300 bg-white 
 const buttonFocus = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/45 focus-visible:ring-offset-2';
 
 const running = computed(() => isDeviceSimulatorRuntimeActive(simulator.status.value.state));
+const cleanupActive = computed(() => new Set([
+  'stopping_alarms',
+  'stopping_services',
+  'removing_firewall',
+  'removing_ips',
+]).has(simulator.status.value.state));
+const cleanupPercent = computed(() => {
+  const progress = simulator.cleanupProgress.value;
+  if (!progress || progress.total <= 0) return 0;
+  return Math.min(100, Math.round((progress.completed / progress.total) * 100));
+});
 const profilesById = computed(() => new Map(simulator.profiles.value.map((profile) => [profile.id, profile])));
 const visibleDevices = computed(() => simulator.preview.value?.devices.slice(0, 100) ?? []);
 const allStreamAddresses = computed(() => simulator.preview.value?.devices.flatMap((device) => device.streams) ?? []);
@@ -150,6 +162,24 @@ async function triggerAlarm() {
 async function startAlarm() {
   await simulator.startAlarm(alarmRequest());
 }
+
+async function chooseAlarmImage() {
+  const imported = await simulator.importAlarmImage();
+  if (!imported) return;
+  alarm.user_image_id = imported.image_id;
+  alarm.image_variant = null;
+}
+
+function clearAlarmImage() {
+  alarm.user_image_id = null;
+  simulator.clearAlarmImageSelection();
+}
+
+function formatImageSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
 </script>
 
 <template>
@@ -208,6 +238,9 @@ async function startAlarm() {
               <p class="mt-1 text-sm leading-6 text-slate-700">
                 {{ t(`deviceSimulator.assets.states.${simulator.assets.value?.state ?? 'unknown'}`) }}
               </p>
+              <p v-if="assetTone === 'ready'" class="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-900">
+                {{ t('deviceSimulator.assets.staticReviewWarning') }}
+              </p>
               <p v-if="simulator.assetProgress.value" class="mt-1 text-xs text-slate-600">
                 {{ simulator.assetProgress.value.current_pack_id ?? t('deviceSimulator.assets.catalog') }} ·
                 {{ simulator.assetProgress.value.downloaded.toLocaleString() }} /
@@ -251,6 +284,22 @@ async function startAlarm() {
         </div>
       </section>
 
+      <section v-if="cleanupActive && simulator.cleanupProgress.value" class="rounded-2xl border border-sky-200 bg-sky-50 p-5" aria-labelledby="cleanup-title" aria-live="polite">
+        <div class="flex items-start gap-3">
+          <Activity class="mt-0.5 h-5 w-5 shrink-0 text-sky-700" aria-hidden="true" />
+          <div class="min-w-0 flex-1">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <h2 id="cleanup-title" class="font-bold text-sky-950">{{ t('deviceSimulator.cleanup.title') }}</h2>
+              <span class="text-sm font-semibold text-sky-800">{{ simulator.cleanupProgress.value.completed }} / {{ simulator.cleanupProgress.value.total }}</span>
+            </div>
+            <p class="mt-1 text-sm leading-6 text-sky-900">{{ t(simulator.cleanupProgress.value.message_key) }}</p>
+            <div class="mt-3 h-2 overflow-hidden rounded-full bg-sky-100" role="progressbar" :aria-label="t('deviceSimulator.cleanup.progressLabel')" :aria-valuenow="cleanupPercent" aria-valuemin="0" aria-valuemax="100">
+              <div class="h-full rounded-full bg-sky-600 transition-[width] duration-200" :style="{ width: `${cleanupPercent}%` }" />
+            </div>
+          </div>
+        </div>
+      </section>
+
       <div v-if="simulator.errorMessage.value" role="alert" class="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
         <XCircle class="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
         <div class="min-w-0"><strong>{{ t('deviceSimulator.errors.title') }}</strong><p class="mt-1 break-words">{{ simulator.errorMessage.value }}</p></div>
@@ -281,6 +330,10 @@ async function startAlarm() {
                 </label>
                 <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.alarmReceiver') }}
                   <input v-model="simulator.request.platform.alarm_receiver_url" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://192.168.1.10/alarm" />
+                </label>
+                <label class="block text-sm font-semibold text-slate-700 md:col-span-2">{{ t('deviceSimulator.fields.assetServer') }}
+                  <input v-model="simulator.settings.value.asset_server_url_override" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://127.0.0.1:3000/virtual-device-assets" />
+                  <span class="mt-1 block text-xs font-normal leading-5 text-slate-500">{{ t('deviceSimulator.fields.assetServerHint') }}</span>
                 </label>
               </div>
               <div class="mt-4 space-y-3">
@@ -368,8 +421,118 @@ async function startAlarm() {
 
       <template v-else-if="activeTab === 'alarms'">
         <div class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_24rem]">
-          <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="alarm-title"><div class="flex items-center gap-3"><BellRing class="h-5 w-5 text-amber-600" aria-hidden="true" /><h2 id="alarm-title" class="font-bold text-slate-900">{{ t('deviceSimulator.alarms.title') }}</h2></div><p class="mt-2 text-sm leading-6 text-slate-600">{{ t('deviceSimulator.alarms.description') }}</p><div class="mt-5 grid gap-4 sm:grid-cols-2"><label class="text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.alarmProfile') }}<input v-model="alarm.alarm_profile_id" :class="[fieldClass, 'mt-2']" type="text" /></label><label class="text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.alarmTypes') }}<input v-model="alarmTypesText" :class="[fieldClass, 'mt-2']" type="text" :placeholder="t('deviceSimulator.alarms.typesPlaceholder')" /></label><label class="text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.dispatchMode') }}<select v-model="alarm.mode" :class="[fieldClass, 'mt-2']"><option value="sequential">{{ t('deviceSimulator.alarms.sequential') }}</option><option value="random">{{ t('deviceSimulator.alarms.random') }}</option><option value="configured">{{ t('deviceSimulator.alarms.configured') }}</option></select></label><label class="text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.interval') }}<input v-model.number="alarm.interval_ms" :class="[fieldClass, 'mt-2']" type="number" min="100" max="3600000" inputmode="numeric" /></label><label class="text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.sendCount') }}<input v-model.number="alarm.send_count" :class="[fieldClass, 'mt-2']" type="number" min="1" max="100000" inputmode="numeric" :disabled="continuousAlarm" /></label><label class="text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.recoveryDelay') }}<input v-model.number="alarm.recovery_delay_secs" :class="[fieldClass, 'mt-2']" type="number" min="0" max="86400" inputmode="numeric" /></label><label class="flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700"><input v-model="continuousAlarm" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45" /><span><span class="block">{{ t('deviceSimulator.fields.continuous') }}</span><span class="block text-xs font-normal text-slate-500">{{ t('deviceSimulator.alarms.continuousHint') }}</span></span></label></div><div class="mt-5 flex flex-wrap gap-2"><button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="triggerAlarm"><BellRing class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.triggerOnce') }}</button><button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="startAlarm"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.startAlarm') }}</button><button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-rose-700 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !simulator.alarmStats.value" @click="simulator.stopAlarm"><Square class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.stopAlarm') }}</button></div></section>
-          <aside class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="alarm-stats-title"><h2 id="alarm-stats-title" class="font-bold text-slate-900">{{ t('deviceSimulator.alarms.stats') }}</h2><dl class="mt-4 grid grid-cols-2 gap-3"><div v-for="key in ['attempted', 'succeeded', 'failed', 'in_flight']" :key="key" class="rounded-xl bg-slate-100 p-3"><dt class="text-xs font-semibold text-slate-500">{{ t(`deviceSimulator.alarms.${key}`) }}</dt><dd class="mt-1 text-xl font-bold text-slate-900">{{ simulator.alarmStats.value?.[key as keyof typeof simulator.alarmStats.value] ?? simulator.lastAlarmResult.value?.[key as keyof typeof simulator.lastAlarmResult.value] ?? 0 }}</dd></div></dl><p v-if="simulator.alarmStats.value?.last_error" class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{{ simulator.alarmStats.value.last_error.code }}</p></aside>
+          <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="alarm-title">
+            <div class="flex items-center gap-3">
+              <BellRing class="h-5 w-5 text-amber-600" aria-hidden="true" />
+              <h2 id="alarm-title" class="font-bold text-slate-900">{{ t('deviceSimulator.alarms.title') }}</h2>
+            </div>
+            <p class="mt-2 text-sm leading-6 text-slate-600">{{ t('deviceSimulator.alarms.description') }}</p>
+            <div class="mt-5 grid gap-4 sm:grid-cols-2">
+              <label class="text-sm font-semibold text-slate-700">
+                {{ t('deviceSimulator.fields.alarmProfile') }}
+                <input v-model="alarm.alarm_profile_id" :class="[fieldClass, 'mt-2']" type="text">
+              </label>
+              <label class="text-sm font-semibold text-slate-700">
+                {{ t('deviceSimulator.fields.alarmTypes') }}
+                <input v-model="alarmTypesText" :class="[fieldClass, 'mt-2']" type="text" :placeholder="t('deviceSimulator.alarms.typesPlaceholder')">
+              </label>
+              <label class="text-sm font-semibold text-slate-700">
+                {{ t('deviceSimulator.fields.dispatchMode') }}
+                <select v-model="alarm.mode" :class="[fieldClass, 'mt-2']">
+                  <option value="sequential">{{ t('deviceSimulator.alarms.sequential') }}</option>
+                  <option value="random">{{ t('deviceSimulator.alarms.random') }}</option>
+                  <option value="configured">{{ t('deviceSimulator.alarms.configured') }}</option>
+                </select>
+              </label>
+              <label class="text-sm font-semibold text-slate-700">
+                {{ t('deviceSimulator.fields.interval') }}
+                <input v-model.number="alarm.interval_ms" :class="[fieldClass, 'mt-2']" type="number" min="100" max="3600000" inputmode="numeric">
+              </label>
+              <label class="text-sm font-semibold text-slate-700">
+                {{ t('deviceSimulator.fields.sendCount') }}
+                <input v-model.number="alarm.send_count" :class="[fieldClass, 'mt-2']" type="number" min="1" max="100000" inputmode="numeric" :disabled="continuousAlarm">
+              </label>
+              <label class="text-sm font-semibold text-slate-700">
+                {{ t('deviceSimulator.fields.recoveryDelay') }}
+                <input v-model.number="alarm.recovery_delay_secs" :class="[fieldClass, 'mt-2']" type="number" min="0" max="86400" inputmode="numeric">
+              </label>
+              <label class="text-sm font-semibold text-slate-700">
+                {{ t('deviceSimulator.fields.imageVariant') }}
+                <select
+                  v-model="alarm.image_variant"
+                  :class="[fieldClass, 'mt-2']"
+                  :disabled="alarm.user_image_id !== null"
+                  :aria-describedby="alarm.user_image_id ? 'alarm-image-source-hint' : undefined"
+                >
+                  <option :value="null">{{ t('deviceSimulator.alarms.imageDefault') }}</option>
+                  <option value="small">{{ t('deviceSimulator.alarms.imageSmall') }}</option>
+                  <option value="normal">{{ t('deviceSimulator.alarms.imageNormal') }}</option>
+                  <option value="big">{{ t('deviceSimulator.alarms.imageBig') }}</option>
+                </select>
+              </label>
+              <label class="flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700">
+                <input v-model="continuousAlarm" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45">
+                <span>
+                  <span class="block">{{ t('deviceSimulator.fields.continuous') }}</span>
+                  <span class="block text-xs font-normal text-slate-500">{{ t('deviceSimulator.alarms.continuousHint') }}</span>
+                </span>
+              </label>
+              <div class="sm:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4" aria-labelledby="alarm-user-image-title">
+                <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div class="min-w-0">
+                    <h3 id="alarm-user-image-title" class="text-sm font-semibold text-slate-800">{{ t('deviceSimulator.fields.customImage') }}</h3>
+                    <p id="alarm-image-source-hint" class="mt-1 text-xs leading-5 text-slate-500">{{ t('deviceSimulator.alarms.customImageHint') }}</p>
+                    <template v-if="simulator.importedAlarmImage.value && alarm.user_image_id">
+                      <p class="mt-2 truncate text-sm font-medium text-slate-800" :title="simulator.importedAlarmImage.value.file_name">
+                        {{ simulator.importedAlarmImage.value.file_name }} · {{ formatImageSize(simulator.importedAlarmImage.value.size) }}
+                      </p>
+                      <p class="mt-1 truncate font-mono text-xs text-slate-500" :title="simulator.importedAlarmImage.value.image_id">
+                        {{ t('deviceSimulator.alarms.customImageId') }} {{ simulator.importedAlarmImage.value.image_id }}
+                      </p>
+                    </template>
+                  </div>
+                  <div class="flex shrink-0 flex-wrap gap-2">
+                    <button
+                      type="button"
+                      class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-sky-300 bg-white px-4 py-2 text-sm font-semibold text-sky-800 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      :class="buttonFocus"
+                      :disabled="simulator.busyAction.value !== null"
+                      @click="chooseAlarmImage"
+                    >
+                      <ImagePlus class="h-4 w-4" aria-hidden="true" />
+                      {{ t(alarm.user_image_id ? 'deviceSimulator.actions.replaceImage' : 'deviceSimulator.actions.chooseImage') }}
+                    </button>
+                    <button
+                      v-if="alarm.user_image_id"
+                      type="button"
+                      class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100"
+                      :class="buttonFocus"
+                      @click="clearAlarmImage"
+                    >
+                      <XCircle class="h-4 w-4" aria-hidden="true" />
+                      {{ t('deviceSimulator.actions.clearImage') }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="mt-5 flex flex-wrap gap-2">
+              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="triggerAlarm"><BellRing class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.triggerOnce') }}</button>
+              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="startAlarm"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.startAlarm') }}</button>
+              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-rose-700 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !simulator.alarmStats.value" @click="simulator.stopAlarm"><Square class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.stopAlarm') }}</button>
+            </div>
+          </section>
+          <aside class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="alarm-stats-title">
+            <h2 id="alarm-stats-title" class="font-bold text-slate-900">{{ t('deviceSimulator.alarms.stats') }}</h2>
+            <dl class="mt-4 grid grid-cols-2 gap-3">
+              <div v-for="key in ['attempted', 'succeeded', 'failed', 'unverified', 'in_flight']" :key="key" class="rounded-xl bg-slate-100 p-3">
+                <dt class="text-xs font-semibold text-slate-500">{{ t(`deviceSimulator.alarms.${key}`) }}</dt>
+                <dd class="mt-1 text-xl font-bold text-slate-900">{{ simulator.alarmStats.value?.[key as keyof typeof simulator.alarmStats.value] ?? simulator.lastAlarmResult.value?.[key as keyof typeof simulator.lastAlarmResult.value] ?? 0 }}</dd>
+              </div>
+            </dl>
+            <p class="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">{{ t('deviceSimulator.alarms.unverifiedHint') }}</p>
+            <p v-if="simulator.alarmStats.value?.last_error" class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{{ simulator.alarmStats.value.last_error.code }}</p>
+          </aside>
         </div>
       </template>
 

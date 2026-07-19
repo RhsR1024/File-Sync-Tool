@@ -5,7 +5,7 @@ use super::state::{
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -15,6 +15,50 @@ use tokio::sync::{broadcast, mpsc, watch};
 use crate::device_simulator::media::{Codec, SharedMediaPack};
 
 static NEXT_RTP_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RtspServerStats {
+    pub active_clients: u32,
+    pub bytes_sent: u64,
+    pub disconnected_clients: u64,
+}
+
+#[derive(Debug, Default)]
+struct RtspServerMetrics {
+    active_clients: AtomicU32,
+    bytes_sent: AtomicU64,
+    disconnected_clients: AtomicU64,
+}
+
+impl RtspServerMetrics {
+    fn snapshot(&self) -> RtspServerStats {
+        RtspServerStats {
+            active_clients: self.active_clients.load(Ordering::Relaxed),
+            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
+            disconnected_clients: self.disconnected_clients.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct ActiveRtspClient {
+    metrics: Arc<RtspServerMetrics>,
+}
+
+impl ActiveRtspClient {
+    fn new(metrics: Arc<RtspServerMetrics>) -> Self {
+        metrics.active_clients.fetch_add(1, Ordering::Relaxed);
+        Self { metrics }
+    }
+}
+
+impl Drop for ActiveRtspClient {
+    fn drop(&mut self) {
+        self.metrics.active_clients.fetch_sub(1, Ordering::Relaxed);
+        self.metrics
+            .disconnected_clients
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ClientRtpState {
@@ -207,11 +251,16 @@ pub struct RtspServerHandle {
     local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
     join: tokio::task::JoinHandle<Result<(), RtspServiceError>>,
+    metrics: Arc<RtspServerMetrics>,
 }
 
 impl RtspServerHandle {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    pub fn stats(&self) -> RtspServerStats {
+        self.metrics.snapshot()
     }
 
     pub async fn stop(self, timeout: Duration) -> Result<(), RtspServiceError> {
@@ -255,11 +304,18 @@ pub async fn start_rtsp_server(
         )
     })?;
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let join = tokio::spawn(serve(listener, Arc::new(config), shutdown_rx));
+    let metrics = Arc::new(RtspServerMetrics::default());
+    let join = tokio::spawn(serve(
+        listener,
+        Arc::new(config),
+        shutdown_rx,
+        Arc::clone(&metrics),
+    ));
     Ok(RtspServerHandle {
         local_addr,
         shutdown,
         join,
+        metrics,
     })
 }
 
@@ -267,6 +323,7 @@ async fn serve(
     listener: TcpListener,
     config: Arc<RtspEndpointConfig>,
     mut shutdown: watch::Receiver<bool>,
+    metrics: Arc<RtspServerMetrics>,
 ) -> Result<(), RtspServiceError> {
     let mut clients = tokio::task::JoinSet::new();
     loop {
@@ -277,7 +334,11 @@ async fn serve(
                     format!("RTSP accept failed: {source}"),
                 ))?;
                 let config = Arc::clone(&config);
-                clients.spawn(async move { let _ = serve_client(stream, config).await; });
+                let metrics = Arc::clone(&metrics);
+                clients.spawn(async move {
+                    let _active = ActiveRtspClient::new(Arc::clone(&metrics));
+                    let _ = serve_client(stream, config, metrics).await;
+                });
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -295,12 +356,17 @@ async fn serve(
 async fn serve_client(
     stream: TcpStream,
     config: Arc<RtspEndpointConfig>,
+    metrics: Arc<RtspServerMetrics>,
 ) -> Result<(), RtspServiceError> {
     let (mut reader, mut writer) = stream.into_split();
     let (outgoing, mut outbound) = mpsc::channel::<Vec<u8>>(config.client_write_queue);
+    let writer_metrics = Arc::clone(&metrics);
     let mut writer_task = AbortTaskOnDrop::new(tokio::spawn(async move {
         while let Some(bytes) = outbound.recv().await {
             writer.write_all(&bytes).await?;
+            writer_metrics
+                .bytes_sent
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         }
         writer.shutdown().await
     }));
@@ -745,6 +811,9 @@ mod tests {
         let mut response = [0u8; 512];
         let read = client.read(&mut response).await.unwrap();
         assert!(String::from_utf8_lossy(&response[..read]).contains("RTSP/1.0 200 OK"));
+        let stats = server.stats();
+        assert_eq!(stats.active_clients, 1);
+        assert!(stats.bytes_sent >= read as u64);
         drop(client);
         server.stop(Duration::from_secs(2)).await.unwrap();
         scheduler_stop.send(true).unwrap();

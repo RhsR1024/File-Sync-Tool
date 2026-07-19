@@ -10,7 +10,7 @@ pub const DEFAULT_NVR_CHANNEL_COUNT: u16 = 8;
 /// first release treats 128 as a product safety boundary, not a vendor limit.
 pub const MAX_NVR_CHANNEL_COUNT: u16 = 128;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TargetPlatform {
     Vms,
@@ -19,7 +19,7 @@ pub enum TargetPlatform {
 
 pub const FIRST_RELEASE_PLATFORMS: [TargetPlatform; 2] = [TargetPlatform::Vms, TargetPlatform::Ums];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FirstReleaseProfileId {
     #[serde(rename = "ipc-custom")]
     IpcCustom,

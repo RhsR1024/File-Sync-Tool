@@ -4161,6 +4161,7 @@ fn main() {
             device_simulator_commands::device_simulator_start,
             device_simulator_commands::device_simulator_stop,
             device_simulator_commands::device_simulator_get_status,
+            device_simulator_commands::device_simulator_import_alarm_image,
             device_simulator_commands::device_simulator_start_alarm,
             device_simulator_commands::device_simulator_trigger_alarm_once,
             device_simulator_commands::device_simulator_stop_alarm,

@@ -78,6 +78,12 @@ pub struct ElevatedWorkerProcess {
     process_id: u32,
 }
 
+// A process HANDLE is a reference to a kernel object and may be waited on or
+// closed from a different thread. Ownership remains unique in this wrapper;
+// it is never exposed as a borrowed mutable raw pointer.
+#[cfg(target_os = "windows")]
+unsafe impl Send for ElevatedWorkerProcess {}
+
 #[cfg(target_os = "windows")]
 impl ElevatedWorkerProcess {
     pub fn process_id(&self) -> u32 {

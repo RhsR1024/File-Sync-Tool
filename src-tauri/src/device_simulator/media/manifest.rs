@@ -113,6 +113,7 @@ pub enum EvidenceSourceKind {
 #[serde(rename_all = "snake_case")]
 pub enum MediaCompatibility {
     Unverified,
+    ReviewedStatic,
     PlatformVerified,
 }
 
@@ -120,6 +121,7 @@ pub enum MediaCompatibility {
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceResolution {
     Unresolved,
+    UserApproved,
     PlatformVerified,
 }
 

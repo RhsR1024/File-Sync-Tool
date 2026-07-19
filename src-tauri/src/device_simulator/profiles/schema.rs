@@ -12,9 +12,19 @@ pub struct DeviceProfileV1 {
     pub id: String,
     pub device_kind: DeviceKind,
     pub legacy_device_type: String,
+    pub identity: ProfileIdentityFacts,
     pub supported_platforms: Vec<TargetPlatform>,
     pub handlers: ProfileHandlerBindings,
     pub evidence: Vec<ProfileEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileIdentityFacts {
+    pub model: String,
+    pub firmware_version: String,
+    pub nickname: String,
+    pub device_type_enum: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +63,7 @@ pub enum EvidenceTopic {
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceStatus {
     LegacySourceConfirmed,
+    ReviewedStatic,
     RecommendedFallback,
     PlatformVerified,
 }
@@ -97,6 +108,7 @@ pub fn validate_profile(profile: &DeviceProfileV1) -> Result<(), ProfileSchemaEr
             "legacy device type is required for evidence traceability",
         ));
     }
+    validate_identity_facts(&profile.identity)?;
 
     validate_platforms(&profile.supported_platforms, "profile")?;
     validate_token(&profile.handlers.identity, "identity handler")?;
@@ -168,6 +180,27 @@ pub fn validate_profile(profile: &DeviceProfileV1) -> Result<(), ProfileSchemaEr
             return Err(ProfileSchemaError::new(
                 "device_simulator.validation.profile_evidence_incomplete",
                 format!("profile is missing '{topic:?}' evidence"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_identity_facts(identity: &ProfileIdentityFacts) -> Result<(), ProfileSchemaError> {
+    for (subject, value) in [
+        ("device model", identity.model.as_str()),
+        ("firmware version", identity.firmware_version.as_str()),
+        ("device nickname", identity.nickname.as_str()),
+    ] {
+        if value.trim().is_empty()
+            || value.len() > 128
+            || value
+                .chars()
+                .any(|character| character.is_control() || matches!(character, '<' | '>'))
+        {
+            return Err(ProfileSchemaError::new(
+                "device_simulator.validation.profile_identity_fact_invalid",
+                format!("{subject} is empty, too long, or contains unsafe characters"),
             ));
         }
     }
@@ -246,6 +279,12 @@ mod tests {
             id: "ipc-smart".into(),
             device_kind: DeviceKind::Ipc,
             legacy_device_type: "智能相机".into(),
+            identity: ProfileIdentityFacts {
+                model: "IPC3615SB-ADF28KM-I0".into(),
+                firmware_version: "GIPC-B6202.SMD-20220629.220629".into(),
+                nickname: "SMART".into(),
+                device_type_enum: 0,
+            },
             supported_platforms: vec![TargetPlatform::Vms, TargetPlatform::Ums],
             handlers: ProfileHandlerBindings {
                 identity: "legacy.identity.v1".into(),

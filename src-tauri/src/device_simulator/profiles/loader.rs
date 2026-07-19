@@ -138,7 +138,7 @@ mod tests {
     use crate::device_simulator::assets::catalog::DeviceKind;
     use crate::device_simulator::profiles::schema::{
         EvidenceStatus, EvidenceTopic, ProfileEvidence, ProfileHandlerBindings,
-        PROFILE_SCHEMA_VERSION,
+        ProfileIdentityFacts, PROFILE_SCHEMA_VERSION,
     };
     use crate::device_simulator::profiles::scope::TargetPlatform;
     use tempfile::TempDir;
@@ -149,6 +149,12 @@ mod tests {
             id: "ipc-smart".into(),
             device_kind: DeviceKind::Ipc,
             legacy_device_type: "智能相机".into(),
+            identity: ProfileIdentityFacts {
+                model: "IPC3615SB-ADF28KM-I0".into(),
+                firmware_version: "GIPC-B6202.SMD-20220629.220629".into(),
+                nickname: "SMART".into(),
+                device_type_enum: 0,
+            },
             supported_platforms: vec![TargetPlatform::Vms, TargetPlatform::Ums],
             handlers: ProfileHandlerBindings {
                 identity: "legacy.identity.v1".into(),

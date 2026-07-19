@@ -2,7 +2,7 @@ use super::schema::{validate_profile, DeviceProfileV1, ProfileSchemaError};
 use super::scope::{FirstReleaseProfileId, FIRST_RELEASE_PROFILES};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ProfileRegistry {
     profiles: BTreeMap<String, DeviceProfileV1>,
 }
@@ -87,6 +87,7 @@ fn error(code: &'static str, message: impl Into<String>) -> ProfileSchemaError {
 mod tests {
     use super::*;
     use crate::device_simulator::assets::catalog::DeviceKind;
+    use crate::device_simulator::profiles::schema::ProfileIdentityFacts;
     use crate::device_simulator::profiles::schema::{
         EvidenceStatus, EvidenceTopic, ProfileEvidence, ProfileHandlerBindings,
         PROFILE_SCHEMA_VERSION,
@@ -99,6 +100,12 @@ mod tests {
             id: id.as_str().into(),
             device_kind: id.device_kind(),
             legacy_device_type: id.legacy_device_type().into(),
+            identity: ProfileIdentityFacts {
+                model: "MODEL-STATIC-REVIEW".into(),
+                firmware_version: "VERSION-STATIC-REVIEW".into(),
+                nickname: "STATIC".into(),
+                device_type_enum: matches!(id.device_kind(), DeviceKind::Nvr) as u16,
+            },
             supported_platforms: vec![TargetPlatform::Vms, TargetPlatform::Ums],
             handlers: ProfileHandlerBindings {
                 identity: "legacy.identity.v1".into(),

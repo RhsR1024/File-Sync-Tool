@@ -2,6 +2,7 @@ import type {
   AlarmJobRequest,
   DeviceSimulatorEventPayloads,
   DeviceSimulatorSettings,
+  ImportedAlarmImage,
   SimulatorStartRequest,
   SimulatorStatus,
 } from './deviceSimulator';
@@ -58,6 +59,13 @@ export const alarmJobRequestContract: AlarmJobRequest = {
   recovery_delay_secs: 5,
   image_variant: 'normal',
   user_image_id: null,
+};
+
+export const importedAlarmImageContract: ImportedAlarmImage = {
+  image_id: 'a'.repeat(64),
+  file_name: 'alarm.png',
+  extension: 'png',
+  size: 1024,
 };
 
 export const simulatorStatusContract: SimulatorStatus = {

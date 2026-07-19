@@ -149,7 +149,7 @@ device_simulator
 - Catalog 强制 Ed25519 离线签名；素材服务器首版不保存或发送应用层凭据。
 - 防火墙默认由提权 Worker 精确管理，启动前显式确认，只清理由 journal 证明归本会话所有的规则。
 - 自定义图片独立内容寻址存储；旧模板、图片和 PCAP 允许用于测试、学习、复制和打包，但禁止商用，生成物必须保留该限制。
-- 正式功能版本为 1.2.0，素材 schema 与 engine API 首版均为 1。
+- 正式功能版本为 1.2.1，首批正式素材 Pack 版本为 1.0.2，素材 schema 与 engine API 首版均为 1。
 
 完整证据、冲突和验收值以 `2026-07-18-video-device-simulator-evidence-matrix.md` 为准。
 
@@ -1030,7 +1030,7 @@ ${update_server_url}/virtual-device-assets/catalog-v1.json
         "protocol-core@1.0.0",
         "media-h264-live@1.0.0"
       ],
-      "min_app_version": "1.2.0"
+      "min_app_version": "1.2.1"
     }
   ],
   "profiles": [
@@ -1045,7 +1045,7 @@ ${update_server_url}/virtual-device-assets/catalog-v1.json
 }
 ```
 
-实际应用版本不得直接照抄示例中的 `1.2.0`；实施时使用项目当时批准的版本。示例字段是服务器契约，不代表已经发布。
+实际应用版本不得直接照抄示例中的 `1.2.1`；实施时使用项目当时批准的版本。示例字段是服务器契约；正式发布状态以签名 catalog 和证据矩阵为准。
 
 ### 20.5 Pack 内部结构
 
