@@ -608,8 +608,9 @@ mod platform {
              $target = Get-CimInstance -Namespace 'root/WMI' -ClassName 'WmiMonitorBrightnessMethods' | \
              Where-Object {{ $_.InstanceName -eq '{instance_name}' }} | Select-Object -First 1; \
              if ($null -eq $target) {{ throw 'Brightness method is unavailable' }}; \
-             Invoke-CimMethod -InputObject $target -MethodName 'WmiSetBrightness' \
-             -Arguments @{{ Timeout = [uint32]1; Brightness = [byte]{brightness} }} | Out-Null; \
+             $result = Invoke-CimMethod -InputObject $target -MethodName 'WmiSetBrightness' \
+             -Arguments @{{ Timeout = [uint32]1; Brightness = [byte]{brightness} }}; \
+             if ($null -eq $result -or [int]$result.ReturnValue -ne 0) {{ throw ('WMI returned code ' + $result.ReturnValue) }}; \
              Write-Output 'ok'"
         );
         let output = powershell_output(&script)?;
@@ -724,7 +725,10 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_to_percent, percent_to_raw, RawFeatureRange};
+    use super::{
+        normalize_to_percent, percent_to_raw, DisplayControlBackend, DisplayControlMonitor,
+        RawFeatureRange,
+    };
 
     #[test]
     fn normalizes_non_standard_monitor_ranges() {
@@ -750,5 +754,33 @@ mod tests {
             }),
             100
         );
+    }
+
+    #[test]
+    fn serializes_the_frontend_percentage_contract() {
+        let monitor = DisplayControlMonitor {
+            id: "ddc:display:0".into(),
+            index: 0,
+            name: "Test display".into(),
+            device_name: "DISPLAY1".into(),
+            is_primary: true,
+            is_internal: false,
+            backend: DisplayControlBackend::DdcCi,
+            brightness: Some(42),
+            brightness_min: 0,
+            brightness_max: 100,
+            brightness_supported: true,
+            contrast: None,
+            contrast_min: 0,
+            contrast_max: 100,
+            contrast_supported: false,
+        };
+
+        let value = serde_json::to_value(monitor).expect("serialize monitor contract");
+        assert_eq!(value["backend"], "ddc_ci");
+        assert_eq!(value["brightness"], 42);
+        assert_eq!(value["brightness_min"], 0);
+        assert_eq!(value["brightness_max"], 100);
+        assert!(value["contrast"].is_null());
     }
 }

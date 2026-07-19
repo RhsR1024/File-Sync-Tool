@@ -16,6 +16,7 @@ test('command and event names match the approved Tauri contract', () => {
     'device_simulator_save_settings',
     'device_simulator_list_interfaces',
     'device_simulator_list_profiles',
+    'device_simulator_list_alarm_types',
     'device_simulator_get_asset_status',
     'device_simulator_prepare_assets',
     'device_simulator_cancel_asset_download',
@@ -55,6 +56,7 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
   await api.saveSettings({ marker: 'settings' });
   await api.listInterfaces();
   await api.listProfiles();
+  await api.listAlarmTypes();
   await api.getAssetStatus(['ipc-custom']);
   await api.prepareAssets(['ipc-custom']);
   await api.cancelAssetDownload('download-1');
@@ -74,6 +76,7 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
     [DEVICE_SIMULATOR_COMMANDS.saveSettings, { settings: { marker: 'settings' } }],
     [DEVICE_SIMULATOR_COMMANDS.listInterfaces, undefined],
     [DEVICE_SIMULATOR_COMMANDS.listProfiles, undefined],
+    [DEVICE_SIMULATOR_COMMANDS.listAlarmTypes, undefined],
     [DEVICE_SIMULATOR_COMMANDS.getAssetStatus, { profileIds: ['ipc-custom'] }],
     [DEVICE_SIMULATOR_COMMANDS.prepareAssets, { profileIds: ['ipc-custom'] }],
     [DEVICE_SIMULATOR_COMMANDS.cancelAssetDownload, { jobId: 'download-1' }],

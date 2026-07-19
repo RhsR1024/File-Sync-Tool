@@ -637,12 +637,23 @@ pub fn encode_http_response(response: &HttpResponse) -> Result<Vec<u8>, HttpErro
         599 => "OK",
         _ => unreachable!(),
     };
+    let range_header = response
+        .content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().starts_with("image/"));
+    let range_header = if range_header {
+        "Accept-Ranges: bytes\r\n"
+    } else {
+        ""
+    };
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
         response.status,
         reason,
         response.content_type,
-        response.body.len()
+        response.body.len(),
+        range_header
     );
     let mut output = Vec::with_capacity(header.len() + response.body.len());
     output.extend_from_slice(header.as_bytes());
@@ -1094,6 +1105,18 @@ mod tests {
         .unwrap();
         assert!(encoded.starts_with(b"HTTP/1.1 200 OK\r\n"));
         assert!(encoded.ends_with(b"\r\n\r\n{}"));
+        assert!(!encoded
+            .windows(b"Accept-Ranges: bytes".len())
+            .any(|window| window == b"Accept-Ranges: bytes"));
+        let image = encode_http_response(&HttpResponse {
+            status: 200,
+            content_type: "image/jpeg".into(),
+            body: vec![0xff, 0xd8, 0xff, 0xd9],
+        })
+        .unwrap();
+        assert!(image
+            .windows(b"Accept-Ranges: bytes\r\n".len())
+            .any(|window| window == b"Accept-Ranges: bytes\r\n"));
         let proprietary = encode_http_response(&HttpResponse {
             status: 599,
             content_type: "application/json".into(),

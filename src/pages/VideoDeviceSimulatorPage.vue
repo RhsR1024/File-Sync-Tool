@@ -17,6 +17,7 @@ import {
   RotateCcw,
   Server,
   ShieldAlert,
+  SlidersHorizontal,
   Square,
   Trash2,
   Video,
@@ -33,6 +34,7 @@ const logLevel = ref('all');
 const logQuery = ref('');
 const copiedValue = ref('');
 const continuousAlarm = ref(false);
+const advancedSettingsOpen = ref(false);
 
 const alarm = reactive<AlarmJobRequest>({
   target_device_ids: [],
@@ -45,7 +47,6 @@ const alarm = reactive<AlarmJobRequest>({
   image_variant: null,
   user_image_id: null,
 });
-const alarmTypesText = ref('');
 
 const fieldClass = 'min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm transition-colors placeholder:text-slate-400 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/25 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500';
 const buttonFocus = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/45 focus-visible:ring-offset-2';
@@ -63,6 +64,13 @@ const cleanupPercent = computed(() => {
   return Math.min(100, Math.round((progress.completed / progress.total) * 100));
 });
 const profilesById = computed(() => new Map(simulator.profiles.value.map((profile) => [profile.id, profile])));
+const selectedAlarmProfileId = ref('ipc-custom');
+const selectedAlarmTypeId = ref('');
+const availableAlarmTypes = computed(() => simulator.alarmTypes.value
+  .find((profile) => profile.profile_id === selectedAlarmProfileId.value)?.alarm_types ?? []);
+const alarmProfileOptions = computed(() => simulator.request.groups
+  .map((group) => group.profile_id)
+  .filter((profileId, index, values) => values.indexOf(profileId) === index));
 const visibleDevices = computed(() => simulator.preview.value?.devices.slice(0, 100) ?? []);
 const allStreamAddresses = computed(() => simulator.preview.value?.devices.flatMap((device) => device.streams) ?? []);
 const filteredLogs = computed(() => simulator.logs.value.filter((entry) => {
@@ -72,6 +80,11 @@ const filteredLogs = computed(() => simulator.logs.value.filter((entry) => {
   return [entry.message, entry.component, entry.device_ip, entry.error_code]
     .some((value) => value?.toLowerCase().includes(query));
 }));
+const displayedError = computed(() => {
+  const message = simulator.errorMessage.value;
+  if (!message) return '';
+  return message.startsWith('deviceSimulator.') ? t(message) : message;
+});
 const assetTone = computed(() => {
   const state = simulator.assets.value?.state ?? 'unknown';
   if (state === 'ready' || state === 'update_available') return 'ready';
@@ -85,6 +98,27 @@ watch(
     if (simulator.busyAction.value === null) void simulator.refreshAssets();
   },
 );
+
+watch(alarmProfileOptions, (profiles) => {
+  if (!profiles.includes(selectedAlarmProfileId.value)) {
+    selectedAlarmProfileId.value = profiles[0] ?? 'ipc-custom';
+    alarm.alarm_type_ids = [];
+  }
+}, { immediate: true });
+
+watch(selectedAlarmProfileId, () => {
+  selectedAlarmTypeId.value = '';
+  alarm.target_device_ids = [];
+  if (alarm.mode === 'configured') alarm.mode = 'sequential';
+});
+
+watch(selectedAlarmTypeId, (alarmTypeId) => {
+  if (!alarmTypeId && alarm.mode === 'configured') alarm.mode = 'sequential';
+});
+
+watch(() => alarm.mode, (mode) => {
+  if (mode !== 'configured') selectedAlarmTypeId.value = '';
+});
 
 onMounted(() => simulator.initialize());
 onBeforeUnmount(() => simulator.dispose());
@@ -106,6 +140,13 @@ function removeServer(id: string) {
 function profileLabel(profileId: string) {
   const profile = profilesById.value.get(profileId);
   return profile ? t(profile.display_name_key) : t(`deviceSimulator.profiles.${profileId}`);
+}
+
+function requiredFileLabel(fileId: string) {
+  if (fileId === 'protocol-core') return t('deviceSimulator.assets.basicFiles');
+  if (fileId.startsWith('media-')) return t('deviceSimulator.assets.liveFiles');
+  if (fileId.startsWith('ipc-') || fileId.startsWith('nvr-')) return profileLabel(fileId);
+  return t('deviceSimulator.assets.otherFiles');
 }
 
 function statusLabel(state: string) {
@@ -130,13 +171,11 @@ function downloadJson(filename: string, value: unknown) {
 }
 
 function syncAlarmTypes() {
-  alarm.alarm_type_ids = alarmTypesText.value
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (alarm.target_device_ids.length === 0) {
-    alarm.target_device_ids = simulator.preview.value?.devices.map((device) => device.device_id) ?? [];
-  }
+  alarm.alarm_profile_id = selectedAlarmProfileId.value;
+  alarm.alarm_type_ids = selectedAlarmTypeId.value ? [selectedAlarmTypeId.value] : [];
+  alarm.target_device_ids = simulator.preview.value?.devices
+    .filter((device) => device.profile_id === selectedAlarmProfileId.value)
+    .map((device) => device.device_id) ?? [];
 }
 
 function alarmRequest(): AlarmJobRequest {
@@ -207,6 +246,16 @@ function formatImageSize(bytes: number) {
             </span>
             <button
               type="button"
+              class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+              :class="buttonFocus"
+              :aria-pressed="advancedSettingsOpen"
+              @click="advancedSettingsOpen = !advancedSettingsOpen"
+            >
+              <SlidersHorizontal class="h-4 w-4" aria-hidden="true" />
+              {{ t(advancedSettingsOpen ? 'deviceSimulator.actions.hideAdvanced' : 'deviceSimulator.actions.advanced') }}
+            </button>
+            <button
+              type="button"
               class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
               :class="buttonFocus"
               :disabled="simulator.busyAction.value !== null"
@@ -238,19 +287,21 @@ function formatImageSize(bytes: number) {
               <p class="mt-1 text-sm leading-6 text-slate-700">
                 {{ t(`deviceSimulator.assets.states.${simulator.assets.value?.state ?? 'unknown'}`) }}
               </p>
-              <p v-if="assetTone === 'ready'" class="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-900">
+              <p v-if="advancedSettingsOpen && assetTone === 'ready'" class="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-900">
                 {{ t('deviceSimulator.assets.staticReviewWarning') }}
               </p>
-              <p v-if="simulator.assetProgress.value" class="mt-1 text-xs text-slate-600">
-                {{ simulator.assetProgress.value.current_pack_id ?? t('deviceSimulator.assets.catalog') }} ·
+              <p v-if="advancedSettingsOpen && simulator.assetProgress.value" class="mt-1 text-xs text-slate-600">
+                {{ simulator.assetProgress.value.current_pack_id
+                  ? requiredFileLabel(simulator.assetProgress.value.current_pack_id)
+                  : t('deviceSimulator.assets.catalog') }} ·
                 {{ simulator.assetProgress.value.downloaded.toLocaleString() }} /
                 {{ simulator.assetProgress.value.total?.toLocaleString() ?? '—' }} B
               </p>
-              <ul v-if="simulator.assets.value?.packs.length" class="mt-2 space-y-1 text-xs text-slate-600">
+              <ul v-if="advancedSettingsOpen && simulator.assets.value?.packs.length" class="mt-2 space-y-1 text-xs text-slate-600">
                 <li v-for="pack in simulator.assets.value.packs" :key="pack.id" class="flex flex-wrap gap-x-2">
-                  <span class="font-semibold text-slate-700">{{ pack.id }}</span>
-                  <span>{{ pack.installed_version ?? '—' }} / {{ pack.required_version }}</span>
-                  <span v-if="pack.error_code" class="font-mono text-rose-700">{{ pack.error_code }}</span>
+                  <span class="font-semibold text-slate-700">{{ requiredFileLabel(pack.id) }}</span>
+                  <span>{{ t('deviceSimulator.assets.version') }} {{ pack.installed_version ?? '—' }} / {{ pack.required_version }}</span>
+                  <span v-if="pack.error_code" class="text-rose-700">{{ t('deviceSimulator.assets.fileError') }}</span>
                 </li>
               </ul>
             </div>
@@ -300,9 +351,9 @@ function formatImageSize(bytes: number) {
         </div>
       </section>
 
-      <div v-if="simulator.errorMessage.value" role="alert" class="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+      <div v-if="displayedError" role="alert" class="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
         <XCircle class="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
-        <div class="min-w-0"><strong>{{ t('deviceSimulator.errors.title') }}</strong><p class="mt-1 break-words">{{ simulator.errorMessage.value }}</p></div>
+        <div class="min-w-0"><strong>{{ t('deviceSimulator.errors.title') }}</strong><p class="mt-1 break-words">{{ displayedError }}</p></div>
       </div>
 
       <nav class="flex gap-1 overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm" :aria-label="t('deviceSimulator.tabs.label')">
@@ -328,10 +379,10 @@ function formatImageSize(bytes: number) {
                 <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.platform') }}
                   <div :class="[fieldClass, 'mt-2', 'flex items-center bg-slate-100 font-semibold']" aria-readonly="true">UMS</div>
                 </label>
-                <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.alarmReceiver') }}
+                <label v-if="advancedSettingsOpen" class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.alarmReceiver') }}
                   <input v-model="simulator.request.platform.alarm_receiver_url" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://192.168.1.10/alarm" />
                 </label>
-                <label class="block text-sm font-semibold text-slate-700 md:col-span-2">{{ t('deviceSimulator.fields.assetServer') }}
+                <label v-if="advancedSettingsOpen" class="block text-sm font-semibold text-slate-700 md:col-span-2">{{ t('deviceSimulator.fields.assetServer') }}
                   <input v-model="simulator.settings.value.asset_server_url_override" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://127.0.0.1:3000/virtual-device-assets" />
                   <span class="mt-1 block text-xs font-normal leading-5 text-slate-500">{{ t('deviceSimulator.fields.assetServerHint') }}</span>
                 </label>
@@ -340,22 +391,22 @@ function formatImageSize(bytes: number) {
                 <div v-for="serverItem in simulator.request.platform.servers" :key="serverItem.id" class="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:grid-cols-[1fr_8rem_2.75rem]">
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.serverHost') }}<input v-model="serverItem.host" :class="[fieldClass, 'mt-1']" type="text" /></label>
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.port') }}<input v-model.number="serverItem.port" :class="[fieldClass, 'mt-1']" type="number" min="1" max="65535" inputmode="numeric" /></label>
-                  <button type="button" class="mt-5 inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl text-rose-700 hover:bg-rose-100" :class="buttonFocus" :aria-label="t('deviceSimulator.actions.removeServer')" @click="removeServer(serverItem.id)"><Trash2 class="h-5 w-5" aria-hidden="true" /></button>
+                  <button v-if="advancedSettingsOpen" type="button" class="mt-5 inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl text-rose-700 hover:bg-rose-100" :class="buttonFocus" :aria-label="t('deviceSimulator.actions.removeServer')" @click="removeServer(serverItem.id)"><Trash2 class="h-5 w-5" aria-hidden="true" /></button>
                 </div>
-                <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:border-sky-400 hover:bg-sky-50" :class="buttonFocus" @click="addServer"><Plus class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.addServer') }}</button>
+                <button v-if="advancedSettingsOpen || simulator.request.platform.servers.length === 0" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:border-sky-400 hover:bg-sky-50" :class="buttonFocus" @click="addServer"><Plus class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.addServer') }}</button>
               </div>
             </section>
 
             <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="network-title">
               <div class="flex items-center gap-3"><RadioTower class="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 id="network-title" class="font-bold text-slate-900">{{ t('deviceSimulator.configuration.network') }}</h2></div>
               <div class="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                <label class="block text-sm font-semibold text-slate-700 sm:col-span-2 lg:col-span-3">{{ t('deviceSimulator.fields.interface') }}
+                <label v-if="advancedSettingsOpen" class="block text-sm font-semibold text-slate-700 sm:col-span-2 lg:col-span-3">{{ t('deviceSimulator.fields.interface') }}
                   <select v-model="simulator.request.interface_id" :class="[fieldClass, 'mt-2']"><option value="">{{ t('deviceSimulator.fields.selectInterface') }}</option><option v-for="item in simulator.interfaces.value" :key="item.id" :value="item.id">{{ item.name }} · {{ item.description }}</option></select>
                 </label>
                 <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.startIp') }}<input v-model="simulator.request.start_ip" :class="[fieldClass, 'mt-2']" type="text" inputmode="decimal" /></label>
-                <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.prefix') }}<input v-model.number="simulator.request.subnet_prefix" :class="[fieldClass, 'mt-2']" type="number" min="1" max="30" inputmode="numeric" /></label>
+                <label v-if="advancedSettingsOpen" class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.prefix') }}<input v-model.number="simulator.request.subnet_prefix" :class="[fieldClass, 'mt-2']" type="number" min="1" max="30" inputmode="numeric" /></label>
                 <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.httpPort') }}<input v-model.number="simulator.request.device_http_port" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" /></label>
-                <label v-for="stream in ['main', 'sub', 'third'] as const" :key="stream" class="block text-sm font-semibold text-slate-700">{{ t(`deviceSimulator.fields.rtsp.${stream}`) }}<input v-model.number="simulator.request.rtsp_ports[stream]" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" /></label>
+                <label v-for="stream in (advancedSettingsOpen ? ['main', 'sub', 'third'] as const : [])" :key="stream" class="block text-sm font-semibold text-slate-700">{{ t(`deviceSimulator.fields.rtsp.${stream}`) }}<input v-model.number="simulator.request.rtsp_ports[stream]" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" /></label>
               </div>
             </section>
 
@@ -365,7 +416,7 @@ function formatImageSize(bytes: number) {
                 <article v-for="group in simulator.request.groups" :key="group.id" class="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 md:grid-cols-[minmax(12rem,1fr)_8rem_9rem_2.75rem]">
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.profile') }}<select :value="group.profile_id" :class="[fieldClass, 'mt-1']" @change="simulator.updateGroupProfile(group, ($event.target as HTMLSelectElement).value)"><option v-for="profile in simulator.profiles.value" :key="profile.id" :value="profile.id">{{ profileLabel(profile.id) }}</option><template v-if="simulator.profiles.value.length === 0"><option v-for="id in ['ipc-custom', 'ipc-smart', 'ipc-structured', 'ipc-face-access', 'nvr-common', 'nvr-vehicle']" :key="id" :value="id">{{ profileLabel(id) }}</option></template></select></label>
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.count') }}<input v-model.number="group.count" :class="[fieldClass, 'mt-1']" type="number" min="1" max="500" inputmode="numeric" /></label>
-                  <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.channels') }}<input v-model.number="group.nvr_channel_count" :class="[fieldClass, 'mt-1']" type="number" min="1" max="128" inputmode="numeric" :disabled="!group.profile_id.startsWith('nvr-')" /></label>
+                  <label v-if="advancedSettingsOpen && group.profile_id.startsWith('nvr-')" class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.channels') }}<input v-model.number="group.nvr_channel_count" :class="[fieldClass, 'mt-1']" type="number" min="1" max="128" inputmode="numeric" /></label>
                   <button type="button" class="mt-5 inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40" :class="buttonFocus" :disabled="simulator.request.groups.length <= 1" :aria-label="t('deviceSimulator.actions.removeGroup')" @click="simulator.removeGroup(group.id)"><Trash2 class="h-5 w-5" aria-hidden="true" /></button>
                 </article>
               </div>
@@ -377,10 +428,10 @@ function formatImageSize(bytes: number) {
               <h2 id="preflight-title" class="font-bold text-slate-900">{{ t('deviceSimulator.preflight.title') }}</h2>
               <p class="mt-1 text-sm leading-6 text-slate-600">{{ t('deviceSimulator.preflight.description') }}</p>
               <div class="mt-4 flex flex-wrap gap-2">
-                <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.previewDevices"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preview') }}</button>
+                <button v-if="advancedSettingsOpen" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.previewDevices"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preview') }}</button>
                 <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.runPreflight"><ShieldAlert class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preflight') }}</button>
               </div>
-              <ul v-if="simulator.preflight.value" class="mt-4 space-y-2">
+              <ul v-if="advancedSettingsOpen && simulator.preflight.value" class="mt-4 space-y-2">
                 <li v-for="check in simulator.preflight.value.checks" :key="check.id" class="flex items-start gap-2 rounded-xl border p-3 text-sm" :class="check.status === 'failed' ? 'border-rose-200 bg-rose-50 text-rose-800' : check.status === 'warning' ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'">
                   <XCircle v-if="check.status === 'failed'" class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /><AlertTriangle v-else-if="check.status === 'warning'" class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /><CheckCircle2 v-else class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                   <div><strong>{{ t(check.message_key) }}</strong><p v-if="check.details" class="mt-1 break-words">{{ check.details }}</p></div>
@@ -416,7 +467,7 @@ function formatImageSize(bytes: number) {
             <table class="min-w-full text-left text-sm"><thead class="sticky top-0 bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th class="px-5 py-3">{{ t('deviceSimulator.fields.device') }}</th><th class="px-5 py-3">{{ t('deviceSimulator.fields.stream') }}</th><th class="px-5 py-3">URL</th><th class="px-5 py-3"><span class="sr-only">{{ t('common.actions') }}</span></th></tr></thead><tbody class="divide-y divide-slate-100"><tr v-for="stream in allStreamAddresses" :key="`${stream.device_id}-${stream.channel_id}-${stream.stream}`"><td class="whitespace-nowrap px-5 py-3 font-medium text-slate-800">{{ stream.device_id }}<span v-if="stream.channel_id" class="ml-1 text-slate-500">/ {{ stream.channel_id }}</span></td><td class="px-5 py-3 text-slate-600">{{ stream.stream }}</td><td class="max-w-xl truncate px-5 py-3 font-mono text-xs text-slate-600" :title="stream.url">{{ stream.url }}</td><td class="px-5 py-3"><button type="button" class="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-xl text-sky-700 hover:bg-sky-50" :class="buttonFocus" :aria-label="t('deviceSimulator.actions.copyUrl')" @click="copyText(stream.url)"><CheckCircle2 v-if="copiedValue === stream.url" class="h-4 w-4 text-emerald-600" aria-hidden="true" /><Clipboard v-else class="h-4 w-4" aria-hidden="true" /></button></td></tr><tr v-if="allStreamAddresses.length === 0"><td colspan="4" class="px-5 py-12 text-center text-slate-500">{{ t('deviceSimulator.runtime.noStreams') }}</td></tr></tbody></table>
           </div>
         </section>
-        <section class="mt-5 rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="identity-title"><div class="flex items-center justify-between border-b border-slate-200 p-5"><h2 id="identity-title" class="font-bold text-slate-900">{{ t('deviceSimulator.runtime.identities') }}</h2><button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="!simulator.preview.value" @click="downloadJson('device-simulator-identities.json', simulator.preview.value)"><FileDown class="h-4 w-4" aria-hidden="true" />{{ t('common.export') }}</button></div><div class="max-h-96 overflow-auto"><table class="min-w-full text-left text-sm"><thead class="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500"><tr><th class="px-5 py-3">ID</th><th class="px-5 py-3">IP</th><th class="px-5 py-3">MAC</th><th class="px-5 py-3">{{ t('deviceSimulator.fields.profile') }}</th></tr></thead><tbody class="divide-y divide-slate-100"><tr v-for="device in visibleDevices" :key="device.device_id"><td class="px-5 py-3 font-medium text-slate-800">{{ device.device_id }}</td><td class="px-5 py-3 font-mono text-xs text-slate-600">{{ device.ip }}</td><td class="px-5 py-3 font-mono text-xs text-slate-600">{{ device.mac }}</td><td class="px-5 py-3 text-slate-600">{{ profileLabel(device.profile_id) }}</td></tr></tbody></table></div></section>
+        <section v-if="advancedSettingsOpen" class="mt-5 rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="identity-title"><div class="flex items-center justify-between border-b border-slate-200 p-5"><h2 id="identity-title" class="font-bold text-slate-900">{{ t('deviceSimulator.runtime.identities') }}</h2><button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="!simulator.preview.value" @click="downloadJson('device-simulator-identities.json', simulator.preview.value)"><FileDown class="h-4 w-4" aria-hidden="true" />{{ t('common.export') }}</button></div><div class="max-h-96 overflow-auto"><table class="min-w-full text-left text-sm"><thead class="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500"><tr><th class="px-5 py-3">ID</th><th class="px-5 py-3">IP</th><th class="px-5 py-3">MAC</th><th class="px-5 py-3">{{ t('deviceSimulator.fields.profile') }}</th></tr></thead><tbody class="divide-y divide-slate-100"><tr v-for="device in visibleDevices" :key="device.device_id"><td class="px-5 py-3 font-medium text-slate-800">{{ device.device_id }}</td><td class="px-5 py-3 font-mono text-xs text-slate-600">{{ device.ip }}</td><td class="px-5 py-3 font-mono text-xs text-slate-600">{{ device.mac }}</td><td class="px-5 py-3 text-slate-600">{{ profileLabel(device.profile_id) }}</td></tr></tbody></table></div></section>
       </template>
 
       <template v-else-if="activeTab === 'alarms'">
@@ -430,18 +481,24 @@ function formatImageSize(bytes: number) {
             <div class="mt-5 grid gap-4 sm:grid-cols-2">
               <label class="text-sm font-semibold text-slate-700">
                 {{ t('deviceSimulator.fields.alarmProfile') }}
-                <input v-model="alarm.alarm_profile_id" :class="[fieldClass, 'mt-2']" type="text">
+                <select v-model="selectedAlarmProfileId" :class="[fieldClass, 'mt-2']">
+                  <option v-for="profileId in alarmProfileOptions" :key="profileId" :value="profileId">{{ profileLabel(profileId) }}</option>
+                </select>
               </label>
               <label class="text-sm font-semibold text-slate-700">
                 {{ t('deviceSimulator.fields.alarmTypes') }}
-                <input v-model="alarmTypesText" :class="[fieldClass, 'mt-2']" type="text" :placeholder="t('deviceSimulator.alarms.typesPlaceholder')">
+                <select v-model="selectedAlarmTypeId" :class="[fieldClass, 'mt-2']" :disabled="availableAlarmTypes.length === 0 || alarm.mode !== 'configured'">
+                  <option value="">{{ t('deviceSimulator.alarms.allTypes') }}</option>
+                  <option v-for="alarmType in availableAlarmTypes" :key="alarmType.id" :value="alarmType.id">{{ alarmType.display_name }}</option>
+                </select>
+                <span v-if="availableAlarmTypes.length === 0" class="mt-1 block text-xs font-normal text-slate-500">{{ t('deviceSimulator.alarms.typesUnavailable') }}</span>
               </label>
               <label class="text-sm font-semibold text-slate-700">
                 {{ t('deviceSimulator.fields.dispatchMode') }}
                 <select v-model="alarm.mode" :class="[fieldClass, 'mt-2']">
                   <option value="sequential">{{ t('deviceSimulator.alarms.sequential') }}</option>
                   <option value="random">{{ t('deviceSimulator.alarms.random') }}</option>
-                  <option value="configured">{{ t('deviceSimulator.alarms.configured') }}</option>
+                  <option value="configured" :disabled="selectedAlarmTypeId === ''">{{ t('deviceSimulator.alarms.configured') }}</option>
                 </select>
               </label>
               <label class="text-sm font-semibold text-slate-700">
@@ -452,7 +509,7 @@ function formatImageSize(bytes: number) {
                 {{ t('deviceSimulator.fields.sendCount') }}
                 <input v-model.number="alarm.send_count" :class="[fieldClass, 'mt-2']" type="number" min="1" max="100000" inputmode="numeric" :disabled="continuousAlarm">
               </label>
-              <label class="text-sm font-semibold text-slate-700">
+              <label v-if="advancedSettingsOpen" class="text-sm font-semibold text-slate-700">
                 {{ t('deviceSimulator.fields.recoveryDelay') }}
                 <input v-model.number="alarm.recovery_delay_secs" :class="[fieldClass, 'mt-2']" type="number" min="0" max="86400" inputmode="numeric">
               </label>
@@ -466,7 +523,6 @@ function formatImageSize(bytes: number) {
                 >
                   <option :value="null">{{ t('deviceSimulator.alarms.imageDefault') }}</option>
                   <option value="small">{{ t('deviceSimulator.alarms.imageSmall') }}</option>
-                  <option value="normal">{{ t('deviceSimulator.alarms.imageNormal') }}</option>
                   <option value="big">{{ t('deviceSimulator.alarms.imageBig') }}</option>
                 </select>
               </label>
@@ -477,7 +533,7 @@ function formatImageSize(bytes: number) {
                   <span class="block text-xs font-normal text-slate-500">{{ t('deviceSimulator.alarms.continuousHint') }}</span>
                 </span>
               </label>
-              <div class="sm:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4" aria-labelledby="alarm-user-image-title">
+              <div v-if="advancedSettingsOpen" class="sm:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4" aria-labelledby="alarm-user-image-title">
                 <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div class="min-w-0">
                     <h3 id="alarm-user-image-title" class="text-sm font-semibold text-slate-800">{{ t('deviceSimulator.fields.customImage') }}</h3>
@@ -485,9 +541,6 @@ function formatImageSize(bytes: number) {
                     <template v-if="simulator.importedAlarmImage.value && alarm.user_image_id">
                       <p class="mt-2 truncate text-sm font-medium text-slate-800" :title="simulator.importedAlarmImage.value.file_name">
                         {{ simulator.importedAlarmImage.value.file_name }} · {{ formatImageSize(simulator.importedAlarmImage.value.size) }}
-                      </p>
-                      <p class="mt-1 truncate font-mono text-xs text-slate-500" :title="simulator.importedAlarmImage.value.image_id">
-                        {{ t('deviceSimulator.alarms.customImageId') }} {{ simulator.importedAlarmImage.value.image_id }}
                       </p>
                     </template>
                   </div>
@@ -531,13 +584,13 @@ function formatImageSize(bytes: number) {
               </div>
             </dl>
             <p class="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">{{ t('deviceSimulator.alarms.unverifiedHint') }}</p>
-            <p v-if="simulator.alarmStats.value?.last_error" class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{{ simulator.alarmStats.value.last_error.code }}</p>
+            <p v-if="simulator.alarmStats.value?.last_error" class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{{ t(simulator.alarmStats.value.last_error.message_key) }}</p>
           </aside>
         </div>
       </template>
 
       <template v-else>
-        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="logs-title"><div class="flex flex-col gap-3 border-b border-slate-200 p-5 lg:flex-row lg:items-center lg:justify-between"><div><h2 id="logs-title" class="font-bold text-slate-900">{{ t('deviceSimulator.logs.title') }}</h2><p class="mt-1 text-sm text-slate-600">{{ t('deviceSimulator.logs.description') }}</p></div><div class="flex flex-col gap-2 sm:flex-row"><label class="sr-only" for="simulator-log-level">{{ t('deviceSimulator.logs.level') }}</label><select id="simulator-log-level" v-model="logLevel" :class="[fieldClass, 'sm:w-40']"><option value="all">{{ t('common.all') }}</option><option v-for="level in ['trace', 'debug', 'info', 'warning', 'error']" :key="level" :value="level">{{ level }}</option></select><label class="sr-only" for="simulator-log-search">{{ t('common.search') }}</label><input id="simulator-log-search" v-model="logQuery" :class="[fieldClass, 'sm:w-64']" type="search" :placeholder="t('deviceSimulator.logs.search')" /><button type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="filteredLogs.length === 0" @click="downloadJson('device-simulator-logs.json', filteredLogs)"><FileDown class="h-4 w-4" aria-hidden="true" />{{ t('common.export') }}</button></div></div><ol class="max-h-[42rem] divide-y divide-slate-100 overflow-auto font-mono text-xs"><li v-for="(entry, index) in filteredLogs" :key="`${entry.timestamp}-${index}`" class="grid gap-1 px-5 py-3 lg:grid-cols-[11rem_5rem_10rem_1fr]"><time class="text-slate-500">{{ entry.timestamp }}</time><span class="font-bold uppercase" :class="entry.level === 'error' ? 'text-rose-700' : entry.level === 'warning' ? 'text-amber-700' : 'text-sky-700'">{{ entry.level }}</span><span class="truncate text-slate-500" :title="entry.component">{{ entry.component }}</span><span class="break-words text-slate-800">{{ entry.message }}<span v-if="entry.error_code" class="ml-2 rounded bg-rose-100 px-1.5 py-0.5 text-rose-700">{{ entry.error_code }}</span></span></li><li v-if="filteredLogs.length === 0" class="px-5 py-12 text-center font-sans text-sm text-slate-500">{{ t('deviceSimulator.logs.empty') }}</li></ol></section>
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="logs-title"><div class="flex flex-col gap-3 border-b border-slate-200 p-5 lg:flex-row lg:items-center lg:justify-between"><div><h2 id="logs-title" class="font-bold text-slate-900">{{ t('deviceSimulator.logs.title') }}</h2><p class="mt-1 text-sm text-slate-600">{{ t('deviceSimulator.logs.description') }}</p></div><div class="flex flex-col gap-2 sm:flex-row"><label class="sr-only" for="simulator-log-level">{{ t('deviceSimulator.logs.level') }}</label><select id="simulator-log-level" v-model="logLevel" :class="[fieldClass, 'sm:w-40']"><option value="all">{{ t('common.all') }}</option><option v-for="level in ['trace', 'debug', 'info', 'warning', 'error']" :key="level" :value="level">{{ level }}</option></select><label class="sr-only" for="simulator-log-search">{{ t('common.search') }}</label><input id="simulator-log-search" v-model="logQuery" :class="[fieldClass, 'sm:w-64']" type="search" :placeholder="t('deviceSimulator.logs.search')" /><button type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="filteredLogs.length === 0" @click="downloadJson('device-simulator-logs.json', filteredLogs)"><FileDown class="h-4 w-4" aria-hidden="true" />{{ t('common.export') }}</button></div></div><ol class="max-h-[42rem] divide-y divide-slate-100 overflow-auto font-mono text-xs"><li v-for="(entry, index) in filteredLogs" :key="`${entry.timestamp}-${index}`" class="grid gap-1 px-5 py-3" :class="advancedSettingsOpen ? 'lg:grid-cols-[11rem_5rem_10rem_1fr]' : 'lg:grid-cols-[11rem_5rem_1fr]'"><time class="text-slate-500">{{ entry.timestamp }}</time><span class="font-bold uppercase" :class="entry.level === 'error' ? 'text-rose-700' : entry.level === 'warning' ? 'text-amber-700' : 'text-sky-700'">{{ entry.level }}</span><span v-if="advancedSettingsOpen" class="truncate text-slate-500" :title="entry.component">{{ entry.component }}</span><span class="break-words text-slate-800">{{ entry.message }}<span v-if="advancedSettingsOpen && entry.error_code" class="ml-2 rounded bg-rose-100 px-1.5 py-0.5 text-rose-700">{{ entry.error_code }}</span></span></li><li v-if="filteredLogs.length === 0" class="px-5 py-12 text-center font-sans text-sm text-slate-500">{{ t('deviceSimulator.logs.empty') }}</li></ol></section>
       </template>
     </div>
   </main>

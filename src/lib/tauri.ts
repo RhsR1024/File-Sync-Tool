@@ -1205,6 +1205,9 @@ export interface ScreenShareStatus {
   connected_ips: string[];
   capture_paused: boolean;
   capture_issue: ScreenShareCaptureIssue | null;
+  interaction_connected_count: number;
+  annotation_count: number;
+  view_mode: 'live' | 'frozen';
 }
 
 export async function screenShareListMonitors(): Promise<MonitorInfo[]> {
@@ -1225,6 +1228,18 @@ export async function screenShareStop(): Promise<void> {
 
 export async function screenShareGetStatus(): Promise<ScreenShareStatus> {
   return await invoke<ScreenShareStatus>('screen_share_get_status');
+}
+
+export async function screenShareClearAnnotations(): Promise<void> {
+  await invoke('screen_share_clear_annotations');
+}
+
+export async function screenShareOpenLocalPreview(): Promise<void> {
+  await invoke('screen_share_open_local_preview');
+}
+
+export async function screenShareCloseLocalPreview(): Promise<void> {
+  await invoke('screen_share_close_local_preview');
 }
 
 // ─── File Share ───────────────────────────────────────────

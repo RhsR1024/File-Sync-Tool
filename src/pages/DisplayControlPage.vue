@@ -43,8 +43,11 @@ const hasSupportedControl = computed(() =>
 const isBusy = computed(() => loading.value || settingFeature.value !== null);
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === 'string' && error) return error;
+  const rawMessage = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  if (/__tauri|reading ['"]invoke['"]|invoke is not a function/i.test(rawMessage)) {
+    return t('displayControl.errors.desktopOnly');
+  }
+  if (rawMessage) return rawMessage;
   return t('displayControl.errors.generic');
 }
 
@@ -53,13 +56,34 @@ function clamp(value: number, minimum: number, maximum: number): number {
 }
 
 function monitorMeta(monitor: DisplayControlMonitor): string {
-  const backend = monitor.backend || t('displayControl.monitor.unknownBackend');
+  const backendLabels: Record<string, string> = {
+    ddc_ci: t('displayControl.monitor.ddcCi'),
+    wmi: t('displayControl.monitor.wmi'),
+    unsupported: t('displayControl.monitor.unsupportedBackend'),
+  };
+  const backend = backendLabels[monitor.backend] ?? t('displayControl.monitor.unknownBackend');
   return `${backend} / ${monitor.is_internal ? t('displayControl.monitor.internal') : t('displayControl.monitor.external')}`;
 }
 
 function setSelectedMonitor(id: string) {
   selectedMonitorId.value = id;
   featureError.value = null;
+}
+
+function onMonitorKeydown(event: KeyboardEvent, index: number) {
+  let nextIndex = index;
+  if (event.key === 'ArrowDown') nextIndex = (index + 1) % monitors.value.length;
+  else if (event.key === 'ArrowUp') nextIndex = (index - 1 + monitors.value.length) % monitors.value.length;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = monitors.value.length - 1;
+  else return;
+
+  event.preventDefault();
+  const monitor = monitors.value[nextIndex];
+  if (!monitor) return;
+  setSelectedMonitor(monitor.id);
+  const listbox = (event.currentTarget as HTMLElement).closest('[role="listbox"]');
+  listbox?.querySelectorAll<HTMLButtonElement>('[role="option"]')[nextIndex]?.focus();
 }
 
 function syncDrafts(monitor: DisplayControlMonitor | null) {
@@ -195,7 +219,7 @@ onMounted(() => {
       </div>
 
       <div
-        v-if="loading && monitors.length === 0"
+        v-else-if="loading && monitors.length === 0"
         class="flex min-h-[260px] items-center justify-center rounded-2xl border border-slate-200 bg-white px-6 py-12 shadow-sm"
         role="status"
         aria-live="polite"
@@ -207,7 +231,7 @@ onMounted(() => {
       </div>
 
       <div
-        v-else-if="monitors.length === 0"
+        v-else-if="!loadError && monitors.length === 0"
         class="flex min-h-[260px] flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-12 text-center shadow-sm"
       >
         <MonitorCog class="h-9 w-9 text-slate-300" aria-hidden="true" />
@@ -237,16 +261,19 @@ onMounted(() => {
 
           <div class="space-y-2" role="listbox" :aria-label="t('displayControl.monitors.title')">
             <button
-              v-for="monitor in monitors"
+              v-for="(monitor, monitorIndex) in monitors"
               :key="monitor.id"
               type="button"
               role="option"
               :aria-selected="selectedMonitorId === monitor.id"
-              class="w-full rounded-xl border px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40"
+              :tabindex="selectedMonitorId === monitor.id ? 0 : -1"
+              :disabled="settingFeature !== null"
+              class="w-full rounded-xl border px-3 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40"
               :class="selectedMonitorId === monitor.id
                 ? 'border-sky-300 bg-sky-50 shadow-sm'
                 : 'border-slate-200 bg-white hover:border-sky-200 hover:bg-slate-50'"
               @click="setSelectedMonitor(monitor.id)"
+              @keydown="onMonitorKeydown($event, monitorIndex)"
             >
               <div class="flex items-start gap-3">
                 <span
@@ -263,10 +290,16 @@ onMounted(() => {
                     </span>
                   </span>
                   <span class="mt-1 block truncate text-xs text-slate-500">{{ monitorMeta(monitor) }}</span>
-                  <span class="mt-2 flex items-center gap-2 text-[11px] font-medium text-slate-500">
-                    <span :class="monitor.brightness_supported ? 'text-amber-600' : 'text-slate-400'">{{ t('displayControl.controls.brightnessShort') }}</span>
+                  <span class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-medium text-slate-500">
+                    <span :class="monitor.brightness_supported ? 'text-amber-700' : 'text-slate-400'">
+                      {{ t('displayControl.controls.brightnessShort') }}:
+                      {{ monitor.brightness_supported ? `${monitor.brightness}%` : t('displayControl.controls.unsupported') }}
+                    </span>
                     <span aria-hidden="true">/</span>
-                    <span :class="monitor.contrast_supported ? 'text-indigo-600' : 'text-slate-400'">{{ t('displayControl.controls.contrastShort') }}</span>
+                    <span :class="monitor.contrast_supported ? 'text-indigo-700' : 'text-slate-400'">
+                      {{ t('displayControl.controls.contrastShort') }}:
+                      {{ monitor.contrast_supported ? `${monitor.contrast}%` : t('displayControl.controls.unsupported') }}
+                    </span>
                   </span>
                 </span>
               </div>
@@ -320,7 +353,7 @@ onMounted(() => {
                   </div>
                 </div>
                 <output for="display-control-brightness" class="shrink-0 rounded-lg bg-amber-50 px-2.5 py-1 text-sm font-bold tabular-nums text-amber-700">
-                  {{ selectedMonitor.brightness_supported ? brightnessDraft : t('displayControl.controls.unsupported') }}
+                  {{ selectedMonitor.brightness_supported ? `${brightnessDraft}%` : t('displayControl.controls.unsupported') }}
                 </output>
               </div>
 
@@ -333,7 +366,7 @@ onMounted(() => {
                 :max="rangeMax('brightness')"
                 step="1"
                 :disabled="!selectedMonitor.brightness_supported || isBusy"
-                :aria-valuetext="selectedMonitor.brightness_supported ? `${brightnessDraft}` : t('displayControl.controls.unsupported')"
+                :aria-valuetext="selectedMonitor.brightness_supported ? `${brightnessDraft}%` : t('displayControl.controls.unsupported')"
                 @change="applyFeature('brightness', brightnessDraft)"
               />
               <div class="flex justify-between text-[11px] font-medium tabular-nums text-slate-400">
@@ -359,7 +392,7 @@ onMounted(() => {
                   </div>
                 </div>
                 <output for="display-control-contrast" class="shrink-0 rounded-lg bg-indigo-50 px-2.5 py-1 text-sm font-bold tabular-nums text-indigo-700">
-                  {{ selectedMonitor.contrast_supported ? contrastDraft : t('displayControl.controls.unsupported') }}
+                  {{ selectedMonitor.contrast_supported ? `${contrastDraft}%` : t('displayControl.controls.unsupported') }}
                 </output>
               </div>
 
@@ -372,7 +405,7 @@ onMounted(() => {
                 :max="rangeMax('contrast')"
                 step="1"
                 :disabled="!selectedMonitor.contrast_supported || isBusy"
-                :aria-valuetext="selectedMonitor.contrast_supported ? `${contrastDraft}` : t('displayControl.controls.unsupported')"
+                :aria-valuetext="selectedMonitor.contrast_supported ? `${contrastDraft}%` : t('displayControl.controls.unsupported')"
                 @change="applyFeature('contrast', contrastDraft)"
               />
               <div class="flex justify-between text-[11px] font-medium tabular-nums text-slate-400">

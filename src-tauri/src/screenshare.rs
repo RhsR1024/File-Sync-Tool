@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{ConnectInfo, Query, State as AxumState};
+use crate::screenshare_web_assets;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, Path, Query, State as AxumState};
 use axum::http::{header::USER_AGENT, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -19,8 +21,13 @@ use bytes::{Bytes, BytesMut};
 use scrap::{Capturer, Display, Frame};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tokio::sync::{broadcast, oneshot};
+use uuid::Uuid;
+
+#[path = "screenshare_interaction.rs"]
+mod screenshare_interaction;
+use screenshare_interaction::{ClientEnvelope, InteractionState, MAX_WS_MESSAGE_BYTES};
 #[cfg(target_os = "windows")]
 use windows::core::{factory, Error as WindowsError, IInspectable, Interface, HRESULT};
 #[cfg(target_os = "windows")]
@@ -65,6 +72,7 @@ use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 // ─── Public Data Types ──────────────────────────────────────
 
 const TOOL_NAME: &str = "屏幕共享";
+const PREVIEW_WINDOW_LABEL_PREFIX: &str = "screen-share-preview";
 
 const VIEWER_IP_TTL: Duration = Duration::from_secs(12);
 /// DXGI DuplicateOutput 偶发瞬时失败，创建时做 3 次短重试；
@@ -236,6 +244,9 @@ pub struct ScreenShareStatus {
     /// screen); the HTTP server and viewer connections stay alive throughout.
     pub capture_paused: bool,
     pub capture_issue: Option<ScreenShareCaptureIssue>,
+    pub interaction_connected_count: u32,
+    pub annotation_count: u32,
+    pub view_mode: screenshare_interaction::ViewMode,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -271,6 +282,8 @@ pub struct ScreenShareHandle {
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
     capture_paused: Arc<AtomicBool>,
     capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
+    interaction: Mutex<Option<Arc<InteractionState>>>,
+    preview_token: Arc<Mutex<Option<String>>>,
     /// Completed by the server watcher once the HTTP server has fully exited
     /// (port released); screen_share_stop awaits it so "stop returned" means
     /// "the port is immediately reusable".
@@ -294,6 +307,8 @@ impl ScreenShareHandle {
             viewer_ips: Arc::new(Mutex::new(HashMap::new())),
             capture_paused: Arc::new(AtomicBool::new(false)),
             capture_issue: Arc::new(Mutex::new(None)),
+            interaction: Mutex::new(None),
+            preview_token: Arc::new(Mutex::new(None)),
             server_done_rx: Mutex::new(None),
         }
     }
@@ -340,6 +355,9 @@ fn inactive_status() -> ScreenShareStatus {
         connected_ips: Vec::new(),
         capture_paused: false,
         capture_issue: None,
+        interaction_connected_count: 0,
+        annotation_count: 0,
+        view_mode: screenshare_interaction::ViewMode::Live,
     }
 }
 
@@ -364,6 +382,8 @@ fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
     *handle.start_time.lock().unwrap() = None;
     handle.capture_paused.store(false, Ordering::SeqCst);
     *handle.capture_issue.lock().unwrap() = None;
+    *handle.interaction.lock().unwrap() = None;
+    *handle.preview_token.lock().unwrap() = None;
     *handle.server_done_rx.lock().unwrap() = None;
     if let Ok(mut ips) = handle.viewer_ips.lock() {
         ips.clear();
@@ -469,6 +489,7 @@ fn emit_inactive_status(app_handle: &AppHandle) {
 struct HttpServerState {
     app_handle: AppHandle,
     broadcast_tx: broadcast::Sender<Arc<Bytes>>,
+    interaction: Arc<InteractionState>,
     viewer_count: Arc<AtomicU32>,
     cancel: Arc<AtomicBool>,
     auth_hash: Option<String>,
@@ -480,6 +501,7 @@ struct HttpServerState {
     session_id: u64,
     capture_paused: Arc<AtomicBool>,
     capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
+    preview_token: Arc<Mutex<Option<String>>>,
 }
 
 /// RAII guard that decrements viewer count and removes IP on drop.
@@ -639,8 +661,11 @@ pub async fn screen_share_start(
     let server_url = access_urls.server_url;
     let all_urls = access_urls.all_urls;
 
-    // Broadcast channel for JPEG frames
+    // Broadcast channel for JPEG frames. Interaction state is per session and
+    // is deliberately kept separate from the lossy MJPEG channel.
     let (broadcast_tx, _) = broadcast::channel::<Arc<Bytes>>(8);
+    let interaction = InteractionState::new(session_id);
+    *handle.interaction.lock().unwrap() = Some(interaction.clone());
 
     let auth_hash = config
         .password
@@ -659,6 +684,7 @@ pub async fn screen_share_start(
     let show_cursor = config.show_cursor;
     let backend_mode = config.capture_backend_mode;
     let capture_tx = broadcast_tx.clone();
+    let capture_interaction = interaction.clone();
     let capture_app = app_handle.clone();
     let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
 
@@ -672,6 +698,7 @@ pub async fn screen_share_start(
                 show_cursor,
                 backend_mode,
                 capture_tx,
+                capture_interaction,
                 capture_cancel,
                 capture_fps,
                 capture_viewers,
@@ -726,6 +753,7 @@ pub async fn screen_share_start(
     let server_state = Arc::new(HttpServerState {
         app_handle: app_handle.clone(),
         broadcast_tx: broadcast_tx.clone(),
+        interaction: interaction.clone(),
         viewer_count: handle.viewer_count.clone(),
         cancel: session_cancel.clone(),
         auth_hash,
@@ -735,6 +763,7 @@ pub async fn screen_share_start(
         session_id,
         capture_paused: handle.capture_paused.clone(),
         capture_issue: handle.capture_issue.clone(),
+        preview_token: handle.preview_token.clone(),
     });
 
     // --- Spawn HTTP server ---
@@ -769,6 +798,7 @@ pub async fn screen_share_start(
         if is_current_session(&ss_runtime_handle, ss_session_id)
             && ss_server_active.swap(false, Ordering::SeqCst)
         {
+            close_preview_window(&ss_server_app, ss_session_id);
             reset_runtime_state(&ss_runtime_handle);
             crate::scanner::emit_tool_log(&ss_server_app, TOOL_NAME, "已停止", "info");
             let _ = ss_server_app.emit(
@@ -793,6 +823,7 @@ pub async fn screen_share_start(
     let reporter_ips = handle.viewer_ips.clone();
     let reporter_capture_paused = handle.capture_paused.clone();
     let reporter_capture_issue = handle.capture_issue.clone();
+    let reporter_interaction = interaction.clone();
     let reporter_runtime_handle = handle.clone();
     let reporter_session_id = session_id;
 
@@ -809,6 +840,7 @@ pub async fn screen_share_start(
             reporter_ips,
             reporter_capture_paused,
             reporter_capture_issue,
+            reporter_interaction,
             reporter_runtime_handle,
             reporter_session_id,
         )
@@ -857,6 +889,8 @@ pub async fn screen_share_stop(
     // Take the receiver BEFORE reset_runtime_state clears it.
     let done_rx = handle.server_done_rx.lock().unwrap().take();
 
+    let session_id = handle.session_id.load(Ordering::SeqCst);
+    close_preview_window(&app_handle, session_id);
     reset_runtime_state(handle);
 
     crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, "已停止", "info");
@@ -893,6 +927,12 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         .unwrap_or(0);
 
     let connected_ips = snapshot_viewer_ips(&handle.viewer_ips);
+    let interaction_snapshot = handle
+        .interaction
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|interaction| (interaction.client_count() as u32, interaction.snapshot()));
 
     ScreenShareStatus {
         is_active: true,
@@ -906,6 +946,108 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         connected_ips,
         capture_paused: handle.capture_paused.load(Ordering::Relaxed),
         capture_issue: current_capture_issue(handle),
+        interaction_connected_count: interaction_snapshot
+            .as_ref()
+            .map(|(count, _)| *count)
+            .unwrap_or(0),
+        annotation_count: interaction_snapshot
+            .as_ref()
+            .map(|(_, document)| document.shapes.len() as u32)
+            .unwrap_or(0),
+        view_mode: interaction_snapshot
+            .map(|(_, document)| document.mode)
+            .unwrap_or(screenshare_interaction::ViewMode::Live),
+    }
+}
+
+/// Clear every annotation in the current session. The host is the only UI
+/// that gets this command; viewers can only undo or clear their own marks.
+#[tauri::command]
+pub fn screen_share_clear_annotations(state: State<'_, crate::AppState>) -> Result<(), String> {
+    let handle = &state.screen_share;
+    let interaction = handle
+        .interaction
+        .lock()
+        .map_err(|_| "Screen share interaction state is unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "Screen share is not active".to_string())?;
+    interaction.clear_all();
+    Ok(())
+}
+
+/// Create a short-lived local preview capability. The returned URL contains
+/// only this random capability, never the configured sharing password. The
+/// browser exchanges it for an HttpOnly cookie on the first page load.
+#[tauri::command]
+pub fn screen_share_open_local_preview(
+    app_handle: AppHandle,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let handle = &state.screen_share;
+    if !handle.active.load(Ordering::SeqCst) {
+        return Err("Screen share is not active".into());
+    }
+    let base = handle.server_url.lock().unwrap().clone();
+    if base.is_empty() {
+        return Err("Screen share URL is not ready".into());
+    }
+    let session_id = handle.session_id.load(Ordering::SeqCst);
+    let window_label = preview_window_label(session_id);
+    if let Some(window) = app_handle.get_webview_window(&window_label) {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let token = Uuid::new_v4().simple().to_string();
+    *handle.preview_token.lock().unwrap() = Some(token.clone());
+    let preview_url = format!("{base}/?host_preview={token}")
+        .parse()
+        .map_err(|error| format!("Invalid local preview URL: {error}"))?;
+    let preview_handle = state.screen_share.clone();
+    let window = WebviewWindowBuilder::new(
+        &app_handle,
+        &window_label,
+        WebviewUrl::External(preview_url),
+    )
+    .title("Screen Share Preview")
+    .inner_size(1280.0, 800.0)
+    .min_inner_size(640.0, 400.0)
+    .resizable(true)
+    .build()
+    .map_err(|error| {
+        *handle.preview_token.lock().unwrap() = None;
+        format!("Failed to open local preview: {error}")
+    })?;
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed)
+            && preview_handle.session_id.load(Ordering::SeqCst) == session_id
+        {
+            *preview_handle.preview_token.lock().unwrap() = None;
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn screen_share_close_local_preview(
+    app_handle: AppHandle,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let session_id = state.screen_share.session_id.load(Ordering::SeqCst);
+    close_preview_window(&app_handle, session_id);
+    *state.screen_share.preview_token.lock().unwrap() = None;
+    Ok(())
+}
+
+fn preview_window_label(session_id: u64) -> String {
+    format!("{PREVIEW_WINDOW_LABEL_PREFIX}-{session_id}")
+}
+
+fn close_preview_window(app_handle: &AppHandle, session_id: u64) {
+    if let Some(window) = app_handle.get_webview_window(&preview_window_label(session_id)) {
+        if let Err(error) = window.close() {
+            log::warn!("Failed to close screen share preview: {error}");
+        }
     }
 }
 
@@ -1689,6 +1831,7 @@ fn capture_loop(
     show_cursor: bool,
     backend_mode: ScreenShareBackendMode,
     tx: broadcast::Sender<Arc<Bytes>>,
+    interaction: Arc<InteractionState>,
     cancel: Arc<AtomicBool>,
     fps_counter: Arc<AtomicU32>,
     viewer_count: Arc<AtomicU32>,
@@ -1774,7 +1917,8 @@ fn capture_loop(
     // Send a placeholder frame so that viewers connecting immediately get something
     {
         let placeholder = make_placeholder_jpeg();
-        let _ = tx.send(Arc::new(Bytes::from(placeholder)));
+        let data = Arc::new(Bytes::from(placeholder));
+        let _ = tx.send(data);
     }
 
     // Pre-allocate reusable buffers to avoid per-frame heap allocations.
@@ -1859,6 +2003,7 @@ fn capture_loop(
                 if current_backend == CaptureBackendKind::Wgc && stride >= 4 {
                     let (frame_w, frame_h) = (stride / 4, frame_pixels.len() / stride);
                     if frame_w > 0 && frame_h > 0 && (frame_w != width || frame_h != height) {
+                        interaction.bump_source_epoch();
                         emit_capture_create_diagnostic(
                             &app_handle,
                             "warn",
@@ -2006,6 +2151,11 @@ fn capture_loop(
 
                 if !jpeg.is_empty() {
                     let data = Arc::new(Bytes::from(jpeg));
+                    interaction.record_frame_with_metadata(
+                        data.clone(),
+                        width as u32,
+                        height as u32,
+                    );
                     let _ = tx.send(data);
                     fps_counter.fetch_add(1, Ordering::Relaxed);
                     first_real_frame = true;
@@ -2044,7 +2194,8 @@ fn capture_loop(
                         break;
                     }
                     let placeholder = make_placeholder_jpeg();
-                    let _ = tx.send(Arc::new(Bytes::from(placeholder)));
+                    let data = Arc::new(Bytes::from(placeholder));
+                    let _ = tx.send(data);
                 } else {
                     // Screen unchanged; sleep briefly (not busy-wait)
                     std::thread::sleep(Duration::from_millis(5));
@@ -2228,6 +2379,9 @@ fn capture_loop(
 
                 match recovered {
                     Some((new_source, recovered_monitor_index)) => {
+                        // A recreated capture source is a new coordinate space,
+                        // even when the dimensions happen to be unchanged.
+                        interaction.bump_source_epoch();
                         source = new_source;
                         active_monitor_index = recovered_monitor_index;
                         // 注意：不在这里清除 capture_paused——重建"成功"可能是僵尸源
@@ -3368,9 +3522,12 @@ async fn run_http_server(
 ) {
     let app = Router::new()
         .route("/", get(handler_index))
+        .route("/assets/*path", get(handler_web_asset))
         .route("/stream", get(handler_stream))
         .route("/auth", post(handler_auth))
         .route("/status", get(handler_status))
+        .route("/session/ws", get(handler_session_ws))
+        .route("/snapshot/:frame_id", get(handler_snapshot))
         .with_state(state);
 
     let (drain_started_tx, drain_started_rx) = oneshot::channel::<()>();
@@ -3411,6 +3568,15 @@ async fn run_http_server(
 #[derive(Deserialize)]
 struct IndexQuery {
     error: Option<u8>,
+    host_preview: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamQuery {
+    /// `single=1` returns the newest cached JPEG and closes the response. It
+    /// is used by the viewer's optional refresh limiter; the default remains a
+    /// long-lived MJPEG response for backwards compatibility.
+    single: Option<u8>,
 }
 
 async fn handler_index(
@@ -3418,24 +3584,70 @@ async fn handler_index(
     Query(q): Query<IndexQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let preview_query_authorized = q.host_preview.as_deref().is_some_and(|candidate| {
+        state
+            .preview_token
+            .lock()
+            .ok()
+            .and_then(|token| token.clone())
+            .as_deref()
+            == Some(candidate)
+    });
+    if preview_query_authorized {
+        let cookie_token = Uuid::new_v4().simple().to_string();
+        *state.preview_token.lock().unwrap() = Some(cookie_token.clone());
+        return Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header("Location", "/")
+            .header(
+                "Set-Cookie",
+                format!("ss_preview={cookie_token}; HttpOnly; SameSite=Strict; Path=/"),
+            )
+            .body(Body::empty())
+            .unwrap();
+    }
+    let preview_authorized = preview_token_matches(&headers, None, &state.preview_token);
     if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash) {
+        if !check_auth_cookie(&headers, hash) && !preview_authorized {
             let has_error = q.error.unwrap_or(0) == 1;
             let need_username = state.auth_username.is_some();
             return Html(login_html(has_error, need_username)).into_response();
         }
     }
-    Html(viewer_html()).into_response()
+
+    screenshare_web_assets::serve_index()
+}
+
+async fn handler_web_asset(
+    AxumState(state): AxumState<Arc<HttpServerState>>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(hash) = &state.auth_hash {
+        if !check_auth_cookie(&headers, hash)
+            && !preview_token_matches(&headers, None, &state.preview_token)
+        {
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::from("Unauthorized"))
+                .unwrap();
+        }
+    }
+    screenshare_web_assets::serve_asset(&path)
+        .unwrap_or_else(screenshare_web_assets::unavailable_response)
 }
 
 async fn handler_stream(
     AxumState(state): AxumState<Arc<HttpServerState>>,
+    Query(query): Query<StreamQuery>,
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
     // Auth check
     if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash) {
+        if !check_auth_cookie(&headers, hash)
+            && !preview_token_matches(&headers, None, &state.preview_token)
+        {
             return Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Body::from("Unauthorized"))
@@ -3444,8 +3656,41 @@ async fn handler_stream(
     }
 
     let client_ip = addr.ip().to_string();
-    let viewer_total = state.viewer_count.fetch_add(1, Ordering::Relaxed) + 1;
+    let single = query.single == Some(1);
     record_viewer_ip(&state.viewer_ips, client_ip.clone());
+
+    // A rate-limited viewer must still work when the desktop is static and
+    // the capture loop has no new broadcast frame to deliver. Reuse the
+    // server-side cached JPEG and avoid counting this short request as a
+    // long-lived viewer connection.
+    if single {
+        if state.cancel.load(Ordering::Relaxed) {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("Cache-Control", "no-store")
+                .body(Body::from("Screen share is not active"))
+                .unwrap();
+        }
+        let Some(frame) = state.interaction.latest_frame_bytes() else {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("Cache-Control", "no-store")
+                .body(Body::from("Screen frame is not ready"))
+                .unwrap();
+        };
+        state
+            .bytes_sent
+            .fetch_add(frame.len() as u64, Ordering::Relaxed);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "image/jpeg")
+            .header("Content-Length", frame.len())
+            .header("Cache-Control", "no-store, no-cache")
+            .body(Body::from(frame.as_ref().clone()))
+            .unwrap();
+    }
+
+    let viewer_total = state.viewer_count.fetch_add(1, Ordering::Relaxed) + 1;
     crate::scanner::emit_tool_log(
         &state.app_handle,
         TOOL_NAME,
@@ -3554,13 +3799,211 @@ async fn handler_status(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     record_viewer_ip(&state.viewer_ips, addr.ip().to_string());
+    let interaction_document = state.interaction.snapshot();
+    let latest_frame = state.interaction.latest_frame_info();
     Json(serde_json::json!({
         "active": !state.cancel.load(Ordering::Relaxed),
         "viewers": state.viewer_count.load(Ordering::Relaxed),
         "session_id": state.session_id,
+        "source_epoch": interaction_document.source_epoch,
+        "annotation_count": interaction_document.shapes.len(),
+        "view_mode": interaction_document.mode,
+        "frozen_frame_id": interaction_document.frozen_frame_id,
+        "interaction_connected_count": state.interaction.client_count(),
+        "latest_frame_id": latest_frame.as_ref().map(|frame| frame.frame_id),
+        "frame_width": latest_frame.as_ref().map(|frame| frame.width),
+        "frame_height": latest_frame.as_ref().map(|frame| frame.height),
+        "frame_captured_at_ms": latest_frame.as_ref().map(|frame| frame.captured_at_ms),
         "capture_paused": state.capture_paused.load(Ordering::Relaxed),
         "capture_issue": *state.capture_issue.lock().unwrap(),
     }))
+}
+
+async fn handler_snapshot(
+    AxumState(state): AxumState<Arc<HttpServerState>>,
+    Path(frame_id): Path<u64>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(hash) = &state.auth_hash {
+        if !check_auth_cookie(&headers, hash)
+            && !preview_token_matches(&headers, None, &state.preview_token)
+        {
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::from("Unauthorized"))
+                .unwrap();
+        }
+    }
+
+    let Some(frame) = state.interaction.frozen_frame(frame_id) else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("Frozen frame is not available"))
+            .unwrap();
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "image/jpeg")
+        .header("Cache-Control", "no-store, no-cache")
+        .header("Content-Length", frame.len())
+        .body(Body::from(frame.as_ref().clone()))
+        .unwrap()
+}
+
+async fn handler_session_ws(
+    AxumState(state): AxumState<Arc<HttpServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    websocket: WebSocketUpgrade,
+) -> Response {
+    if let Some(hash) = &state.auth_hash {
+        if !check_auth_cookie(&headers, hash)
+            && !preview_token_matches(&headers, None, &state.preview_token)
+        {
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::from("Unauthorized"))
+                .unwrap();
+        }
+    }
+
+    let interaction = state.interaction.clone();
+    let cancel = state.cancel.clone();
+    let client_id = Uuid::new_v4().to_string();
+    let client_ip = addr.ip().to_string();
+    websocket
+        .max_message_size(MAX_WS_MESSAGE_BYTES)
+        .on_upgrade(move |socket| {
+            run_interaction_socket(socket, interaction, cancel, client_id, client_ip)
+        })
+        .into_response()
+}
+
+async fn run_interaction_socket(
+    mut socket: WebSocket,
+    interaction: Arc<InteractionState>,
+    cancel: Arc<AtomicBool>,
+    client_id: String,
+    client_ip: String,
+) {
+    if let Err(error) = interaction.register_client(&client_id) {
+        let _ = send_interaction_message(&mut socket, error.to_message(&interaction)).await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+
+    let mut events = interaction.subscribe();
+    let hello = match interaction.hello(&client_id) {
+        Ok(message) => message,
+        Err(error) => {
+            let _ = send_interaction_message(&mut socket, error.to_message(&interaction)).await;
+            interaction.unregister_client(&client_id);
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    if send_interaction_message(&mut socket, hello).await.is_err()
+        || send_interaction_message(&mut socket, interaction.snapshot_message())
+            .await
+            .is_err()
+    {
+        interaction.unregister_client(&client_id);
+        return;
+    }
+
+    log::info!("Interaction client connected: ip={client_ip}");
+
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                // Snapshot() also expires old laser points. The client-side
+                // expiry timestamp provides smooth rendering between ticks.
+                let _ = interaction.snapshot();
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(message) => {
+                        if send_interaction_message(&mut socket, message).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if send_interaction_message(&mut socket, interaction.snapshot_message()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            incoming = socket.recv() => {
+                let Some(Ok(message)) = incoming else { break; };
+                match message {
+                    Message::Text(text) => {
+                        if text.len() > MAX_WS_MESSAGE_BYTES {
+                            let error = screenshare_interaction::ProtocolError::new(
+                                "message_too_large",
+                                format!("message exceeds {MAX_WS_MESSAGE_BYTES} bytes"),
+                            );
+                            if send_interaction_message(&mut socket, error.to_message(&interaction)).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        let envelope = match serde_json::from_str::<ClientEnvelope>(&text) {
+                            Ok(envelope) => envelope,
+                            Err(error) => {
+                                let protocol_error = screenshare_interaction::ProtocolError::new(
+                                    "invalid_json",
+                                    format!("invalid interaction message: {error}"),
+                                );
+                                if send_interaction_message(&mut socket, protocol_error.to_message(&interaction)).await.is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
+                        };
+                        if let Err(error) = interaction.process(&client_id, envelope) {
+                            if send_interaction_message(&mut socket, error.to_message(&interaction)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Message::Binary(bytes) => {
+                        let protocol_error = screenshare_interaction::ProtocolError::new(
+                            "binary_not_supported",
+                            "interaction messages must be UTF-8 JSON text",
+                        );
+                        if bytes.len() > MAX_WS_MESSAGE_BYTES || send_interaction_message(&mut socket, protocol_error.to_message(&interaction)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Ping(bytes) => {
+                        if socket.send(Message::Pong(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Pong(_) => {}
+                    Message::Close(_) => break,
+                }
+            }
+        }
+    }
+
+    interaction.unregister_client(&client_id);
+}
+
+async fn send_interaction_message(
+    socket: &mut WebSocket,
+    message: screenshare_interaction::ServerEnvelope,
+) -> Result<(), axum::Error> {
+    let serialized = serde_json::to_string(&message)
+        .map_err(|error| axum::Error::new(std::io::Error::new(std::io::ErrorKind::Other, error)))?;
+    socket.send(Message::Text(serialized)).await
 }
 
 // ─── Status Reporter ────────────────────────────────────────
@@ -3577,6 +4020,7 @@ async fn status_reporter(
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
     capture_paused: Arc<AtomicBool>,
     capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
+    interaction: Arc<InteractionState>,
     runtime_handle: Arc<ScreenShareHandle>,
     session_id: u64,
 ) {
@@ -3596,6 +4040,7 @@ async fn status_reporter(
         last_bytes = current_bytes;
 
         let connected_ips = snapshot_viewer_ips(&viewer_ips);
+        let interaction_document = interaction.snapshot();
 
         let status = ScreenShareStatus {
             is_active: true,
@@ -3609,6 +4054,9 @@ async fn status_reporter(
             connected_ips,
             capture_paused: capture_paused.load(Ordering::Relaxed),
             capture_issue: *capture_issue.lock().unwrap(),
+            interaction_connected_count: interaction.client_count() as u32,
+            annotation_count: interaction_document.shapes.len() as u32,
+            view_mode: interaction_document.mode,
         };
 
         let _ = app_handle.emit("screen-share-status", &status);
@@ -3639,6 +4087,28 @@ fn check_auth_cookie(headers: &HeaderMap, expected_hash: &str) -> bool {
                 c.strip_prefix("ss_auth=")
                     .is_some_and(|value| value == expected_hash)
             })
+        })
+        .unwrap_or(false)
+}
+
+fn preview_token_matches(
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    expected_token: &Arc<Mutex<Option<String>>>,
+) -> bool {
+    let Some(expected) = expected_token.lock().ok().and_then(|token| token.clone()) else {
+        return false;
+    };
+    if query_token.is_some_and(|token| token == expected) {
+        return true;
+    }
+    headers
+        .get("cookie")
+        .and_then(|value| value.to_str().ok())
+        .map(|cookies| {
+            cookies
+                .split(';')
+                .any(|cookie| cookie.trim().strip_prefix("ss_preview=") == Some(expected.as_str()))
         })
         .unwrap_or(false)
 }
@@ -3712,6 +4182,7 @@ fn make_placeholder_jpeg() -> Vec<u8> {
 
 // ─── Embedded HTML ──────────────────────────────────────────
 
+#[cfg(test)]
 fn viewer_html() -> String {
     r#"<!DOCTYPE html>
 <html lang="en">
@@ -4146,6 +4617,26 @@ mod tests {
     }
 
     #[test]
+    fn host_preview_capability_accepts_only_matching_query_or_cookie() {
+        let token = Arc::new(Mutex::new(Some("preview-token".to_string())));
+        let mut headers = HeaderMap::new();
+        assert!(preview_token_matches(
+            &headers,
+            Some("preview-token"),
+            &token
+        ));
+        assert!(!preview_token_matches(&headers, Some("wrong"), &token));
+
+        headers.insert(
+            "cookie",
+            "other=1; ss_preview=preview-token".parse().unwrap(),
+        );
+        assert!(preview_token_matches(&headers, None, &token));
+        *token.lock().unwrap() = None;
+        assert!(!preview_token_matches(&headers, None, &token));
+    }
+
+    #[test]
     fn prepare_runtime_state_for_start_clears_stale_runtime_state() {
         let handle = ScreenShareHandle::new();
         handle.active.store(true, Ordering::SeqCst);
@@ -4158,6 +4649,8 @@ mod tests {
         *handle.all_urls.lock().unwrap() = vec!["http://stale".into()];
         *handle.start_time.lock().unwrap() = Some(Instant::now());
         *handle.server_done_rx.lock().unwrap() = Some(oneshot::channel::<()>().1);
+        *handle.interaction.lock().unwrap() = Some(InteractionState::new(99));
+        *handle.preview_token.lock().unwrap() = Some("stale-preview".into());
         record_viewer_ip(&handle.viewer_ips, "10.0.0.1");
 
         prepare_runtime_state_for_start(&handle);
@@ -4172,6 +4665,8 @@ mod tests {
         assert!(handle.all_urls.lock().unwrap().is_empty());
         assert!(handle.start_time.lock().unwrap().is_none());
         assert!(handle.server_done_rx.lock().unwrap().is_none());
+        assert!(handle.interaction.lock().unwrap().is_none());
+        assert!(handle.preview_token.lock().unwrap().is_none());
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
     }
 
@@ -4187,6 +4682,8 @@ mod tests {
         *handle.all_urls.lock().unwrap() = vec!["http://active".into()];
         *handle.start_time.lock().unwrap() = Some(Instant::now());
         *handle.server_done_rx.lock().unwrap() = Some(oneshot::channel::<()>().1);
+        *handle.interaction.lock().unwrap() = Some(InteractionState::new(100));
+        *handle.preview_token.lock().unwrap() = Some("active-preview".into());
         record_viewer_ip(&handle.viewer_ips, "10.0.0.2");
 
         reset_runtime_state(&handle);
@@ -4201,6 +4698,8 @@ mod tests {
         assert!(handle.all_urls.lock().unwrap().is_empty());
         assert!(handle.start_time.lock().unwrap().is_none());
         assert!(handle.server_done_rx.lock().unwrap().is_none());
+        assert!(handle.interaction.lock().unwrap().is_none());
+        assert!(handle.preview_token.lock().unwrap().is_none());
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
     }
 

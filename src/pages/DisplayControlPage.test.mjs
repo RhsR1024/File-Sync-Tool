@@ -14,6 +14,8 @@ test('display control page exposes monitor selection and both hardware controls'
   assert.match(pageSource, /feature === 'brightness'/);
   assert.match(pageSource, /contrastDraft/);
   assert.match(pageSource, /role="listbox"/);
+  assert.match(pageSource, /function onMonitorKeydown/);
+  assert.match(pageSource, /event\.key === 'ArrowDown'/);
   assert.match(pageSource, /:disabled="!selectedMonitor\.brightness_supported/);
   assert.match(pageSource, /:disabled="!selectedMonitor\.contrast_supported/);
 });

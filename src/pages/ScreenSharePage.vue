@@ -16,6 +16,9 @@ import {
   ExternalLink,
   RefreshCw,
   MonitorOff,
+  Eye,
+  Eraser,
+  PencilRuler,
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -27,6 +30,8 @@ import {
   screenShareStart,
   screenShareStop,
   screenShareGetStatus,
+  screenShareClearAnnotations,
+  screenShareOpenLocalPreview,
   type MonitorInfo,
   type NetworkInterfaceInfo,
   type ScreenShareBackendMode,
@@ -67,6 +72,8 @@ const setQrCanvas = (url: string, el: unknown) => {
 };
 const errorMsg = ref('');
 const isRefreshingStatus = ref(false);
+const isOpeningPreview = ref(false);
+const isClearingAnnotations = ref(false);
 
 const status = ref<ScreenShareStatus>({
   is_active: false,
@@ -80,6 +87,9 @@ const status = ref<ScreenShareStatus>({
   connected_ips: [],
   capture_paused: false,
   capture_issue: null,
+  interaction_connected_count: 0,
+  annotation_count: 0,
+  view_mode: 'live',
 });
 
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
@@ -284,7 +294,36 @@ async function stopShare() {
     connected_ips: [],
     capture_paused: false,
     capture_issue: null,
+    interaction_connected_count: 0,
+    annotation_count: 0,
+    view_mode: 'live',
   };
+}
+
+async function openLocalPreview() {
+  isOpeningPreview.value = true;
+  errorMsg.value = '';
+  try {
+    await screenShareOpenLocalPreview();
+  } catch (error) {
+    errorMsg.value = t('tools.screenShare.errPreviewFailed', { error: String(error) });
+  } finally {
+    isOpeningPreview.value = false;
+  }
+}
+
+async function clearAllAnnotations() {
+  isClearingAnnotations.value = true;
+  errorMsg.value = '';
+  try {
+    await screenShareClearAnnotations();
+    await refreshStatus(true);
+    pushToast(t('tools.screenShare.annotationsCleared'), 'success', { ttlMs: 1600 });
+  } catch (error) {
+    errorMsg.value = t('tools.screenShare.errClearAnnotationsFailed', { error: String(error) });
+  } finally {
+    isClearingAnnotations.value = false;
+  }
 }
 
 async function copyUrl(url: string) {
@@ -696,6 +735,16 @@ onUnmounted(() => {
             </div>
             <div class="ss-card">
               <p class="ss-section-label">{{ t('tools.screenShare.accessUrl') }}</p>
+              <div class="mb-3 flex flex-wrap gap-2">
+                <button type="button" class="ss-detail-button" :disabled="isOpeningPreview" @click="openLocalPreview">
+                  <Eye class="h-3.5 w-3.5" />
+                  {{ isOpeningPreview ? t('tools.screenShare.openingPreview') : t('tools.screenShare.openLocalPreview') }}
+                </button>
+                <button type="button" class="ss-detail-button" :disabled="isClearingAnnotations || status.annotation_count === 0" @click="clearAllAnnotations">
+                  <Eraser class="h-3.5 w-3.5" />
+                  {{ isClearingAnnotations ? t('tools.screenShare.clearingAnnotations') : t('tools.screenShare.clearAllAnnotations') }}
+                </button>
+              </div>
               <div class="space-y-2">
                 <div v-for="url in allUrls" :key="url" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
                   <div class="flex items-center gap-2">
@@ -747,6 +796,16 @@ onUnmounted(() => {
                   </span>
                 </div>
                 <div class="font-mono text-2xl font-bold text-slate-900">{{ connectionCount }}</div>
+              </div>
+              <div class="ss-stat-card">
+                <div class="mb-2 flex items-center gap-2 text-slate-500">
+                  <PencilRuler class="h-4 w-4 text-violet-500" />
+                  <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">{{ t('tools.screenShare.annotationCount') }}</span>
+                </div>
+                <div class="font-mono text-2xl font-bold text-slate-900">{{ status.annotation_count }}</div>
+                <div class="mt-1 text-xs text-slate-500">
+                  {{ status.view_mode === 'frozen' ? t('tools.screenShare.viewModeFrozen') : t('tools.screenShare.viewModeLive') }}
+                </div>
               </div>
 
               <div class="ss-stat-card">

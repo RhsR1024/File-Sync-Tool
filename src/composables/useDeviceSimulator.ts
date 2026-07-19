@@ -8,6 +8,7 @@ import {
   isDeviceSimulatorTopologyLocked,
   type AlarmJobRequest,
   type AlarmJobStats,
+  type ProfileAlarmTypes,
   type AlarmTriggerResult,
   type AssetProgress,
   type AssetStatus,
@@ -72,7 +73,7 @@ function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartR
   return {
     platform: {
       kind: 'ums',
-      servers: [],
+      servers: [{ id: newId('server'), host: '', port: 80 }],
       alarm_receiver_url: null,
     },
     interface_id: settings.selected_interface_id ?? '',
@@ -97,6 +98,7 @@ export function useDeviceSimulator() {
   const status = ref<SimulatorStatus>(emptyStatus());
   const interfaces = ref<SimulatorNetworkInterfaceInfo[]>([]);
   const profiles = ref<DeviceProfileSummary[]>([]);
+  const alarmTypes = ref<ProfileAlarmTypes[]>([]);
   const assets = ref<AssetStatus | null>(null);
   const assetProgress = ref<AssetProgress | null>(null);
   const preview = ref<DevicePreview | null>(null);
@@ -148,13 +150,15 @@ export function useDeviceSimulator() {
     if (error instanceof Error) return error.message;
     if (error && typeof error === 'object') {
       const candidate = error as { code?: unknown; message_key?: unknown; details?: unknown };
-      const code = typeof candidate.code === 'string' ? candidate.code : '';
-      const details = typeof candidate.details === 'string'
-        ? candidate.details
-        : typeof candidate.message_key === 'string'
-          ? candidate.message_key
-          : '';
-      if (code || details) return [code, details].filter(Boolean).join(': ');
+      if (typeof candidate.message_key === 'string' && candidate.message_key) {
+        return candidate.message_key;
+      }
+      if (typeof candidate.details === 'string' && candidate.details) {
+        return candidate.details;
+      }
+      if (typeof candidate.code === 'string' && candidate.code) {
+        return 'deviceSimulator.errors.generic';
+      }
       try {
         return JSON.stringify(error);
       } catch {
@@ -185,7 +189,14 @@ export function useDeviceSimulator() {
         assetProgress.value = payload;
         if (payload.state === 'ready' || payload.state === 'failed') {
           void deviceSimulatorApi.getAssetStatus(selectedProfileIds.value)
-            .then((status) => { assets.value = status; })
+            .then(async (status) => {
+              assets.value = status;
+              if (payload.state === 'ready') {
+                await refreshAlarmTypes();
+              } else {
+                alarmTypes.value = [];
+              }
+            })
             .catch(() => undefined);
         }
       }),
@@ -241,12 +252,32 @@ export function useDeviceSimulator() {
 
   async function refreshAssets() {
     const result = await run('check-assets', () => deviceSimulatorApi.getAssetStatus(selectedProfileIds.value));
-    if (result) assets.value = result;
+    if (result) {
+      assets.value = result;
+      if (result.state === 'ready' || result.state === 'update_available') {
+        try {
+          alarmTypes.value = await deviceSimulatorApi.listAlarmTypes();
+        } catch {
+          // Alarm names are an optional convenience; sending all types still works.
+          alarmTypes.value = [];
+        }
+      } else {
+        alarmTypes.value = [];
+      }
+    }
   }
 
   async function prepareAssets() {
     const jobId = await run('prepare-assets', () => deviceSimulatorApi.prepareAssets(selectedProfileIds.value));
     if (jobId) await refreshAssets();
+  }
+
+  async function refreshAlarmTypes() {
+    try {
+      alarmTypes.value = await deviceSimulatorApi.listAlarmTypes();
+    } catch {
+      alarmTypes.value = [];
+    }
   }
 
   async function cancelAssetDownload() {
@@ -272,7 +303,7 @@ export function useDeviceSimulator() {
       const report = await deviceSimulatorApi.preflight(request);
       preflight.value = report;
       preview.value = report.device_preview;
-      if (hasBlockingPreflightFailure(report)) throw new Error('device_simulator.preflight.blocked');
+      if (hasBlockingPreflightFailure(report)) throw new Error('deviceSimulator.errors.preflightBlocked');
       const saved = await deviceSimulatorApi.saveSettings(settingsFromRequest());
       settings.value = saved;
       return deviceSimulatorApi.start(request);
@@ -343,6 +374,7 @@ export function useDeviceSimulator() {
     status,
     interfaces,
     profiles,
+    alarmTypes,
     assets,
     assetProgress,
     preview,
@@ -364,6 +396,7 @@ export function useDeviceSimulator() {
     dispose,
     saveSettings,
     refreshAssets,
+    refreshAlarmTypes,
     prepareAssets,
     cancelAssetDownload,
     previewDevices,

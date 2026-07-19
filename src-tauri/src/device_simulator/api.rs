@@ -121,6 +121,21 @@ pub struct DeviceProfileSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AlarmTypeSummary {
+    pub id: String,
+    pub display_name: String,
+    pub supports_pictures: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileAlarmTypes {
+    pub profile_id: String,
+    pub alarm_types: Vec<AlarmTypeSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetPackStatus {
     pub id: String,
     pub required_version: String,

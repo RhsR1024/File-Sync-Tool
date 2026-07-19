@@ -1,0 +1,16 @@
+{
+  "extends": "@vue/tsconfig/tsconfig.dom.json",
+  "compilerOptions": {
+    "composite": false,
+    "baseUrl": ".",
+    "types": ["vite/client", "vitest/globals"],
+    "skipLibCheck": true
+  },
+  "include": [
+    "src/screen-share-web/**/*.ts",
+    "src/screen-share-web/**/*.vue",
+    "src/pages/ScreenSharePage.vue",
+    "src/lib/tauri.ts",
+    "src/locales/messages.ts"
+  ]
+}

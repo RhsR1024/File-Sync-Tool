@@ -12,7 +12,7 @@ use crate::device_simulator::media::ParameterSetKind;
 use crate::device_simulator::profiles::schema::DeviceProfileV1;
 use crate::device_simulator::profiles::scope::{FirstReleaseProfileId, TargetPlatform};
 use crate::device_simulator::rtsp::routes::{
-    plan_rtsp_routes, RtspPorts as PlannedRtspPorts, RtspStreamKind,
+    plan_rtsp_routes, RtspPorts as PlannedRtspPorts, RtspRouteRole, RtspStreamKind,
 };
 use crate::device_simulator::rtsp::service::{
     start_rtsp_server, RtspEndpointConfig, RtspServerHandle, RtspStreamSource,
@@ -241,6 +241,7 @@ impl ProtocolRuntime {
                     .iter()
                     .filter(|route| route.evidence.runtime_activation_allowed())
                 {
+                    let metadata_only = route.role == RtspRouteRole::MetadataControl;
                     let sdp = build_reviewed_static_sdp(device.ip, &route.path, media.as_ref())?;
                     let source = RtspStreamSource::from_media(
                         format!("{}:{:?}", device.device_id, plan.stream),
@@ -250,7 +251,13 @@ impl ProtocolRuntime {
                         1_200,
                     )
                     .map_err(|source| runtime_error(source.code, source.message))?;
-                    routes.insert(route.path.clone(), source);
+                    routes.insert(
+                        route.path.clone(),
+                        RtspStreamSource {
+                            metadata_only,
+                            ..source
+                        },
+                    );
                 }
                 let handle = match start_rtsp_server(RtspEndpointConfig {
                     bind_addr: plan.bind_addr,
@@ -1223,8 +1230,18 @@ fn build_reviewed_static_sdp(
     let pps = media.parameter_set(ParameterSetKind::Pps).ok_or_else(|| {
         runtime_error("device_simulator.rtsp.pps_missing", "media pack has no PPS")
     })?;
+    // Keep the SDP shape emitted by the legacy IPCRtsp server, including its
+    // advertised metadata track. The legacy capture also contains no PT 107
+    // metadata RTP; the service accepts that track's SETUP but sends video.
+    let control_route = if route.ends_with("/video") {
+        route.to_owned()
+    } else {
+        "/media/video1/video".to_owned()
+    };
+    let control_url = format!("rtsp://{device_ip}{control_route}");
+    let metadata_url = format!("rtsp://{device_ip}/media/video1/metadata");
     let body = format!(
-        "v=0\r\no=- 0 0 IN IP4 {device_ip}\r\ns=File Sync Tool reviewed-static H264\r\nc=IN IP4 {device_ip}\r\nt=0 0\r\nm=video 0 RTP/AVP {payload_type}\r\na=rtpmap:{payload_type} H264/{clock_rate}\r\na=fmtp:{payload_type} packetization-mode=1; sprop-parameter-sets={},{}\r\na=control:{route}\r\n",
+        "v=0\r\no=- 1001 1 IN IP4 {device_ip}\r\ns=VCP IPC Realtime stream\r\nm=video 0 RTP/AVP {payload_type}\r\nc=IN IP4 {device_ip}\r\na=control:{control_url}\r\na=rtpmap:{payload_type} H264/{clock_rate}\r\na=fmtp:{payload_type} profile-level-id=64001f; packetization-mode=1; sprop-parameter-sets={},{}\r\na=recvonly\r\nm=application 0 RTP/AVP 107\r\nc=IN IP4 {device_ip}\r\na=control:{metadata_url}\r\na=rtpmap:107 vnd.onvif.metadata/90000\r\na=fmtp:107 DecoderTag=h3c-v3 RTCP=0\r\na=recvonly\r\n",
         BASE64_STANDARD.encode(sps),
         BASE64_STANDARD.encode(pps),
     );

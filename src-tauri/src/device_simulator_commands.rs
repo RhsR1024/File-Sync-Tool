@@ -1,17 +1,19 @@
 use crate::{config, AppState};
+use app_lib::device_simulator::alarms::{AlarmHandlerId, AlarmTypeId};
 use app_lib::device_simulator::api::{
     list_first_release_profiles, preview_devices, AlarmJobRequest, AlarmTriggerResult,
-    AssetPackStatus, AssetProgressSnapshot, AssetStatus, DevicePreview, DeviceProfileAvailability,
-    DeviceProfileSummary, ImportedAlarmImage, PreflightReport, RecoveryResult,
-    RuntimeTelemetrySnapshot, SimulatorStartRequest, SimulatorStatusSnapshot,
-    DEVICE_SIMULATOR_EVENT_ALARM_STATS, DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS,
-    DEVICE_SIMULATOR_EVENT_CLEANUP_PROGRESS, DEVICE_SIMULATOR_EVENT_DEVICE_STATUS,
-    DEVICE_SIMULATOR_EVENT_LOG, DEVICE_SIMULATOR_EVENT_RTSP_STATS, DEVICE_SIMULATOR_EVENT_STATUS,
+    AlarmTypeSummary, AssetPackStatus, AssetProgressSnapshot, AssetStatus, DevicePreview,
+    DeviceProfileAvailability, DeviceProfileSummary, ImportedAlarmImage, PreflightReport,
+    ProfileAlarmTypes, RecoveryResult, RuntimeTelemetrySnapshot, SimulatorStartRequest,
+    SimulatorStatusSnapshot, DEVICE_SIMULATOR_EVENT_ALARM_STATS,
+    DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS, DEVICE_SIMULATOR_EVENT_CLEANUP_PROGRESS,
+    DEVICE_SIMULATOR_EVENT_DEVICE_STATUS, DEVICE_SIMULATOR_EVENT_LOG,
+    DEVICE_SIMULATOR_EVENT_RTSP_STATS, DEVICE_SIMULATOR_EVENT_STATUS,
 };
 use app_lib::device_simulator::assets::cache::{
     validate_installed_pack, AssetStore, AssetStorePaths,
 };
-use app_lib::device_simulator::assets::catalog::{CatalogV1, PackRef};
+use app_lib::device_simulator::assets::catalog::CatalogV1;
 use app_lib::device_simulator::assets::catalog_cache::{
     fetch_and_cache_signed_catalog, load_cached_signed_catalog, CachedCatalog,
 };
@@ -41,19 +43,21 @@ use app_lib::device_simulator::worker_protocol::{
 };
 use semver::Version;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 
 const MAX_IMPORTED_ALARM_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ALARM_TYPES_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
 
 pub struct DeviceSimulatorCommandState {
     manager: Arc<SimulatorManager>,
@@ -177,6 +181,25 @@ pub async fn device_simulator_list_profiles(
         Ok(updated) => Ok(updated),
         Err(_) => Ok(fallback),
     }
+}
+
+#[tauri::command]
+pub async fn device_simulator_list_alarm_types(
+    app_handle: AppHandle,
+    app_state: State<'_, AppState>,
+) -> Result<Vec<ProfileAlarmTypes>, SimulatorErrorBody> {
+    let context = load_catalog_context(&app_handle, app_state.inner(), false).await?;
+    tokio::task::spawn_blocking(move || {
+        list_active_alarm_types(&context.paths, &context.cached.catalog)
+    })
+    .await
+    .map_err(|source| {
+        runtime_error(
+            "device_simulator.alarm.type_list_task_failed",
+            "deviceSimulator.errors.assetPreparationFailed",
+            source.to_string(),
+        )
+    })?
 }
 
 #[tauri::command]
@@ -1720,6 +1743,164 @@ fn apply_profile_availability(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AlarmTypesManifestSummary {
+    schema_version: u32,
+    profile_id: String,
+    handler_id: String,
+    definitions: Vec<AlarmTypeDefinitionSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlarmTypeDefinitionSummary {
+    id: String,
+    display_name: String,
+    platforms: Vec<app_lib::device_simulator::profiles::scope::TargetPlatform>,
+    supports_pictures: bool,
+}
+
+fn list_active_alarm_types(
+    paths: &AssetStorePaths,
+    catalog: &CatalogV1,
+) -> Result<Vec<ProfileAlarmTypes>, SimulatorErrorBody> {
+    let pin = AssetStore::new(paths.clone())
+        .pin_active(catalog)
+        .map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.assetPreparationFailed",
+                source.message,
+            )
+        })?;
+    let active_profiles = pin
+        .selection
+        .profiles
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let pack_directories = pin
+        .selection
+        .packs
+        .iter()
+        .zip(pin.pack_directories)
+        .map(|(pack, directory)| (pack.id.clone(), directory))
+        .collect::<BTreeMap<_, _>>();
+
+    list_first_release_profiles()
+        .into_iter()
+        .filter(|profile| active_profiles.contains(&profile.id))
+        .map(|profile| {
+            let directory = pack_directories.get(&profile.id).ok_or_else(|| {
+                runtime_error(
+                    "device_simulator.assets.profile_pack_missing",
+                    "deviceSimulator.errors.assetPreparationFailed",
+                    format!("active profile pack '{}' is missing", profile.id),
+                )
+            })?;
+            let bytes = read_alarm_types_manifest(directory, &profile.id)?;
+            parse_alarm_types_manifest(&profile.id, &bytes)
+        })
+        .collect()
+}
+
+fn read_alarm_types_manifest(
+    pack_directory: &Path,
+    profile_id: &str,
+) -> Result<Vec<u8>, SimulatorErrorBody> {
+    let path = pack_directory.join("runtime").join("alarm-types.json");
+    let metadata = fs::symlink_metadata(&path).map_err(|source| {
+        runtime_error(
+            "device_simulator.alarm.manifest_read_failed",
+            "deviceSimulator.errors.assetPreparationFailed",
+            format!("failed to inspect alarm manifest for '{profile_id}': {source}"),
+        )
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_ALARM_TYPES_MANIFEST_BYTES
+    {
+        return Err(runtime_error(
+            "device_simulator.alarm.manifest_file_invalid",
+            "deviceSimulator.errors.assetPreparationFailed",
+            format!("alarm manifest for '{profile_id}' is not a bounded regular file"),
+        ));
+    }
+    fs::read(path).map_err(|source| {
+        runtime_error(
+            "device_simulator.alarm.manifest_read_failed",
+            "deviceSimulator.errors.assetPreparationFailed",
+            format!("failed to read alarm manifest for '{profile_id}': {source}"),
+        )
+    })
+}
+
+fn parse_alarm_types_manifest(
+    profile_id: &str,
+    bytes: &[u8],
+) -> Result<ProfileAlarmTypes, SimulatorErrorBody> {
+    use app_lib::device_simulator::profiles::scope::TargetPlatform;
+
+    let manifest: AlarmTypesManifestSummary = serde_json::from_slice(bytes).map_err(|source| {
+        runtime_error(
+            "device_simulator.alarm.manifest_invalid",
+            "deviceSimulator.errors.assetPreparationFailed",
+            format!("alarm manifest for '{profile_id}' is invalid: {source}"),
+        )
+    })?;
+    let handler_id = AlarmHandlerId::from_str(&manifest.handler_id).map_err(|source| {
+        runtime_error(
+            source.code,
+            "deviceSimulator.errors.assetPreparationFailed",
+            source.message,
+        )
+    })?;
+    if manifest.schema_version != 1
+        || manifest.profile_id != profile_id
+        || handler_id.profile_id().as_str() != profile_id
+    {
+        return Err(runtime_error(
+            "device_simulator.alarm.manifest_identity_mismatch",
+            "deviceSimulator.errors.assetPreparationFailed",
+            format!("alarm manifest for '{profile_id}' has the wrong identity"),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let alarm_types = manifest
+        .definitions
+        .into_iter()
+        .filter(|definition| definition.platforms.contains(&TargetPlatform::Ums))
+        .map(|definition| {
+            let alarm_type_id = AlarmTypeId::new(definition.id).map_err(|source| {
+                runtime_error(
+                    source.code,
+                    "deviceSimulator.errors.assetPreparationFailed",
+                    source.message,
+                )
+            })?;
+            if definition.display_name.trim().is_empty()
+                || !seen.insert(alarm_type_id.as_str().to_owned())
+            {
+                return Err(runtime_error(
+                    "device_simulator.alarm.manifest_invalid",
+                    "deviceSimulator.errors.assetPreparationFailed",
+                    format!("alarm manifest for '{profile_id}' has an empty name or duplicate ID"),
+                ));
+            }
+            Ok(AlarmTypeSummary {
+                id: alarm_type_id.as_str().to_owned(),
+                display_name: definition.display_name,
+                supports_pictures: definition.supports_pictures,
+            })
+        })
+        .collect::<Result<Vec<_>, SimulatorErrorBody>>()?;
+    Ok(ProfileAlarmTypes {
+        profile_id: profile_id.to_owned(),
+        alarm_types,
+    })
+}
+
 fn import_alarm_image_file(
     source: &Path,
     user_asset_root: &Path,
@@ -2074,7 +2255,7 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use app_lib::device_simulator::assets::catalog::{
-        CatalogPack, CatalogProfile, DeviceKind, PackKind,
+        CatalogPack, CatalogProfile, DeviceKind, PackKind, PackRef,
     };
     use tempfile::TempDir;
 
@@ -2163,6 +2344,41 @@ mod tests {
         assert_eq!(
             error.code,
             "device_simulator.alarm.image_source_signature_invalid"
+        );
+    }
+
+    #[test]
+    fn alarm_type_manifest_projection_keeps_only_ums_fields() {
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "profile_id": "ipc-smart",
+            "handler_id": "alarm.smart.v1",
+            "definitions": [
+                {
+                    "id": "motion",
+                    "display_name": "Motion",
+                    "platforms": ["ums"],
+                    "supports_pictures": true,
+                    "protocol": "v1_0"
+                },
+                {
+                    "id": "not-for-ums",
+                    "display_name": "Not for UMS",
+                    "platforms": [],
+                    "supports_pictures": false
+                }
+            ]
+        });
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let result = parse_alarm_types_manifest("ipc-smart", &bytes).unwrap();
+        assert_eq!(result.profile_id, "ipc-smart");
+        assert_eq!(
+            result.alarm_types,
+            vec![AlarmTypeSummary {
+                id: "motion".into(),
+                display_name: "Motion".into(),
+                supports_pictures: true,
+            }]
         );
     }
 }

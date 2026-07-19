@@ -19,6 +19,7 @@ mod persist;
 mod remote_package_patch;
 mod scanner;
 mod screenshare;
+mod screenshare_web_assets;
 mod single_instance_guard;
 mod task_commands;
 mod task_domain;
@@ -4154,6 +4155,7 @@ fn main() {
             device_simulator_commands::device_simulator_save_settings,
             device_simulator_commands::device_simulator_list_interfaces,
             device_simulator_commands::device_simulator_list_profiles,
+            device_simulator_commands::device_simulator_list_alarm_types,
             device_simulator_commands::device_simulator_get_asset_status,
             device_simulator_commands::device_simulator_prepare_assets,
             device_simulator_commands::device_simulator_cancel_asset_download,
@@ -4248,6 +4250,9 @@ fn main() {
             screenshare::screen_share_start,
             screenshare::screen_share_stop,
             screenshare::screen_share_get_status,
+            screenshare::screen_share_clear_annotations,
+            screenshare::screen_share_open_local_preview,
+            screenshare::screen_share_close_local_preview,
             display_control::monitor_control_list,
             display_control::monitor_control_set,
             fileshare::file_share_pick_directory,

@@ -131,6 +131,17 @@ export interface DeviceProfileSummary {
   verified_platforms: DeviceSimulatorPlatform[];
 }
 
+export interface AlarmTypeSummary {
+  id: string;
+  display_name: string;
+  supports_pictures: boolean;
+}
+
+export interface ProfileAlarmTypes {
+  profile_id: string;
+  alarm_types: AlarmTypeSummary[];
+}
+
 export interface AssetPackStatus {
   id: string;
   required_version: string;
@@ -323,6 +334,7 @@ export const DEVICE_SIMULATOR_COMMANDS = {
   saveSettings: 'device_simulator_save_settings',
   listInterfaces: 'device_simulator_list_interfaces',
   listProfiles: 'device_simulator_list_profiles',
+  listAlarmTypes: 'device_simulator_list_alarm_types',
   getAssetStatus: 'device_simulator_get_asset_status',
   prepareAssets: 'device_simulator_prepare_assets',
   cancelAssetDownload: 'device_simulator_cancel_asset_download',
@@ -368,6 +380,7 @@ export interface DeviceSimulatorApi {
   saveSettings(settings: DeviceSimulatorSettings): Promise<DeviceSimulatorSettings>;
   listInterfaces(): Promise<SimulatorNetworkInterfaceInfo[]>;
   listProfiles(): Promise<DeviceProfileSummary[]>;
+  listAlarmTypes(): Promise<ProfileAlarmTypes[]>;
   getAssetStatus(profileIds: string[]): Promise<AssetStatus>;
   prepareAssets(profileIds: string[]): Promise<string>;
   cancelAssetDownload(jobId: string): Promise<void>;
@@ -389,6 +402,7 @@ export function createDeviceSimulatorApi(invokeCommand: DeviceSimulatorInvoke): 
     saveSettings: (settings) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.saveSettings, { settings }),
     listInterfaces: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listInterfaces),
     listProfiles: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listProfiles),
+    listAlarmTypes: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listAlarmTypes),
     getAssetStatus: (profileIds) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getAssetStatus, { profileIds }),
     prepareAssets: (profileIds) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.prepareAssets, { profileIds }),
     cancelAssetDownload: (jobId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.cancelAssetDownload, { jobId }),

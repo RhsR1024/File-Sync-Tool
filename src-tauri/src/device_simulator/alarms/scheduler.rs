@@ -621,6 +621,7 @@ impl AlarmScheduler {
                     AlarmDeliveryPhase::Alarm,
                     &legacy_values,
                     event_id,
+                    interval_ms,
                     &tracker,
                     &cancellation,
                 )
@@ -630,6 +631,24 @@ impl AlarmScheduler {
                 && recovery_delay_ms.is_some()
                 && !matches!(invocation.definition.recovery, RecoveryDefinition::None)
             {
+                // ACSControlAlarm.py waits for its ordinary send interval
+                // before beginning the configured recovery delay.
+                if invocation.definition.profile_id
+                    == crate::device_simulator::profiles::scope::FirstReleaseProfileId::IpcFaceAccess
+                    && !invocation.definition.transport.path.ends_with("/PersonVerification")
+                {
+                    if let Some(interval_ms) = interval_ms {
+                        if !sleep_or_cancel(
+                            self.clock.as_ref(),
+                            Duration::from_millis(interval_ms),
+                            &cancellation,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
+                }
                 if !sleep_or_cancel(
                     self.clock.as_ref(),
                     Duration::from_millis(recovery_delay_ms.unwrap_or_default()),
@@ -651,6 +670,7 @@ impl AlarmScheduler {
                     } else {
                         event_id
                     },
+                    None,
                     &tracker,
                     &cancellation,
                 )
@@ -682,12 +702,15 @@ impl AlarmScheduler {
         phase: AlarmDeliveryPhase,
         legacy_values: &LegacyAlarmValues,
         event_id: u64,
+        inter_request_interval_ms: Option<u64>,
         tracker: &AlarmJobTracker,
         cancellation: &AlarmCancellation,
     ) -> bool {
         let mut context = invocation.context.clone();
         let now = chrono::Local::now();
         let timestamp = if phase == AlarmDeliveryPhase::Alarm
+            && invocation.definition.profile_id
+                == crate::device_simulator::profiles::scope::FirstReleaseProfileId::IpcSmart
             && matches!(
                 invocation.definition.transport.body_encoding,
                 super::BodyEncoding::Multipart { .. }
@@ -738,7 +761,8 @@ impl AlarmScheduler {
             }
         };
 
-        'request: for request in requests {
+        let request_count = requests.len();
+        for (request_index, request) in requests.into_iter().enumerate() {
             for attempt in 1..=self.limits.retry.max_attempts {
                 let outcome = self
                     .attempt(
@@ -754,13 +778,13 @@ impl AlarmScheduler {
                     AttemptResult::Succeeded
                     | AttemptResult::Failed {
                         unverified: true, ..
-                    } => continue 'request,
+                    } => break,
                     AttemptResult::Cancelled => return false,
                     AttemptResult::Failed {
                         retryable: false, ..
-                    } => continue 'request,
+                    } => break,
                     AttemptResult::Failed { .. } if attempt >= self.limits.retry.max_attempts => {
-                        continue 'request;
+                        break;
                     }
                     AttemptResult::Failed { .. } => {
                         let backoff = self
@@ -777,6 +801,22 @@ impl AlarmScheduler {
                         {
                             return false;
                         }
+                    }
+                }
+            }
+            if request_index + 1 < request_count
+                && invocation.definition.profile_id
+                    == crate::device_simulator::profiles::scope::FirstReleaseProfileId::NvrVehicle
+            {
+                if let Some(delay_ms) = inter_request_interval_ms {
+                    if !sleep_or_cancel(
+                        self.clock.as_ref(),
+                        Duration::from_millis(delay_ms),
+                        cancellation,
+                    )
+                    .await
+                    {
+                        return false;
                     }
                 }
             }

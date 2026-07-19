@@ -41,6 +41,7 @@ impl RtspPorts {
 pub enum RtspRouteRole {
     Aggregate,
     VideoControl,
+    MetadataControl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +133,15 @@ pub fn plan_rtsp_routes(
                 RtspRouteEvidence::LegacyConflictPreservedPlatformUnverified
             },
         });
+        if device_kind == DeviceKind::Ipc {
+            routes.push(PlannedRtspRoute {
+                stream,
+                channel: None,
+                role: RtspRouteRole::MetadataControl,
+                path: "/media/video1/metadata".into(),
+                evidence: RtspRouteEvidence::LegacySourceConfirmedPlatformUnverified,
+            });
+        }
         listeners.push(PlannedRtspListener {
             stream,
             bind_addr: SocketAddr::new(IpAddr::V4(device_ip), ports.get(stream)),

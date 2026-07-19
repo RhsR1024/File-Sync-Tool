@@ -45,6 +45,7 @@ const NUMERIC_IMAGE_SIZE_2_SENTINEL: &str = "__FST_NUMERIC_IMAGE_SIZE_2__";
 const NUMERIC_IMAGE_SIZE_3_SENTINEL: &str = "__FST_NUMERIC_IMAGE_SIZE_3__";
 const NUMERIC_IMAGE_SIZE_4_SENTINEL: &str = "__FST_NUMERIC_IMAGE_SIZE_4__";
 const NUMERIC_IMAGE_SIZE_5_SENTINEL: &str = "__FST_NUMERIC_IMAGE_SIZE_5__";
+const LEGACY_CUSTOM_MULTIPART_BOUNDARY: &str = "------------------------e7a8348a9833c6f5";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlarmRuntimeError {
@@ -719,6 +720,7 @@ fn compile_runtime_definition(
         event_type_override,
         embedded_image_limit,
         profile_id == FirstReleaseProfileId::IpcFaceAccess && definition.id == "inlib",
+        profile_id == FirstReleaseProfileId::NvrCommon && definition.id == "channel-deleted",
     )?;
     let image_count = if !definition.supports_pictures {
         0
@@ -737,13 +739,14 @@ fn compile_runtime_definition(
     let images = image_references
         .into_iter()
         .enumerate()
-        .map(|(index, reference)| ImageAttachmentDefinition {
+        .map(|(index, selected)| ImageAttachmentDefinition {
             file_name: if multipart && profile_id == FirstReleaseProfileId::IpcCustom {
                 "picture.jpg".into()
             } else {
-                image_reference_file_name(&reference)
+                image_reference_file_name(&selected.reference)
             },
-            reference,
+            reference: selected.reference,
+            url_reference: selected.url_reference,
             field_name: if multipart {
                 "image".into()
             } else if image_count == 1 {
@@ -861,7 +864,7 @@ fn compile_runtime_definition(
             body_encoding: if multipart {
                 BodyEncoding::Multipart {
                     metadata_name: sanitize_multipart_name(&definition.event_type),
-                    metadata_content_type: "text/plain; charset=utf-8".into(),
+                    metadata_content_type: "text/plain".into(),
                 }
             } else {
                 BodyEncoding::Raw {
@@ -898,7 +901,7 @@ fn compile_json_template(
     event_type: Option<&str>,
     embedded_image_limit: usize,
 ) -> Result<CompiledTemplate, AlarmRuntimeError> {
-    compile_json_template_with_options(bytes, event_type, embedded_image_limit, false)
+    compile_json_template_with_options(bytes, event_type, embedded_image_limit, false, false)
 }
 
 fn compile_json_template_with_options(
@@ -906,6 +909,7 @@ fn compile_json_template_with_options(
     event_type: Option<&str>,
     embedded_image_limit: usize,
     include_empty_image_slots: bool,
+    allow_missing_event_type: bool,
 ) -> Result<CompiledTemplate, AlarmRuntimeError> {
     let mut value: Value = serde_json::from_slice(bytes).map_err(|source| {
         runtime_error(
@@ -914,10 +918,10 @@ fn compile_json_template_with_options(
         )
     })?;
     let mut image_fields = ImageFieldCounters::default();
+    rewrite_event_type(&mut value, event_type, allow_missing_event_type)?;
     rewrite_json_value(
         None,
         &mut value,
-        event_type,
         embedded_image_limit,
         include_empty_image_slots,
         &mut image_fields,
@@ -1019,10 +1023,43 @@ struct ImageFieldCounters {
     url: usize,
 }
 
+fn rewrite_event_type(
+    value: &mut Value,
+    event_type: Option<&str>,
+    allow_missing: bool,
+) -> Result<(), AlarmRuntimeError> {
+    let Some(event_type) = event_type else {
+        return Ok(());
+    };
+    let mut rewritten = false;
+    for pointer in ["/EventInfo/Type", "/AlarmInfo/AlarmType", "/AlarmType"] {
+        let Some(slot) = value.pointer_mut(pointer) else {
+            continue;
+        };
+        if !slot.is_string() {
+            return Err(runtime_error(
+                "device_simulator.alarm.event_type_field_invalid",
+                format!("approved alarm template field '{pointer}' must be a string"),
+            ));
+        }
+        *slot = Value::String(event_type.to_owned());
+        rewritten = true;
+    }
+    if !rewritten && allow_missing {
+        return Ok(());
+    }
+    if !rewritten {
+        return Err(runtime_error(
+            "device_simulator.alarm.event_type_field_missing",
+            "approved alarm template has no supported event type field",
+        ));
+    }
+    Ok(())
+}
+
 fn rewrite_json_value(
     key: Option<&str>,
     value: &mut Value,
-    event_type: Option<&str>,
     embedded_image_limit: usize,
     include_empty_image_slots: bool,
     image_fields: &mut ImageFieldCounters,
@@ -1058,12 +1095,18 @@ fn rewrite_json_value(
                         image_fields.url += 1;
                     }
                 }
+                if let Some(capture_time) = map.get_mut("CaptureTime") {
+                    *capture_time = if capture_time.is_number() {
+                        Value::String(NUMERIC_TIMESTAMP_SENTINEL.into())
+                    } else {
+                        Value::String("{{capture_time}}".into())
+                    };
+                }
             }
             for (child_key, child) in map.iter_mut() {
                 rewrite_json_value(
                     Some(child_key),
                     child,
-                    event_type,
                     embedded_image_limit,
                     include_empty_image_slots,
                     image_fields,
@@ -1075,61 +1118,13 @@ fn rewrite_json_value(
                 rewrite_json_value(
                     key,
                     item,
-                    event_type,
                     embedded_image_limit,
                     include_empty_image_slots,
                     image_fields,
                 )?;
             }
         }
-        _ => {
-            let Some(key) = key else { return Ok(()) };
-            match key {
-                "Reference" => *value = Value::String("{{reference}}".into()),
-                "DeviceCode" | "DeviceID" | "DeviceId" | "DevID" | "SerialNumber" => {
-                    *value = Value::String("{{device_id}}".into())
-                }
-                "DeviceIP" | "DevIP" | "IPAddr" | "IPAddress" => {
-                    *value = Value::String("{{device_ip}}".into())
-                }
-                "TimeStamp" | "Timestamp" | "PassingTime" => {
-                    *value = dynamic_value(value, "{{timestamp}}", NUMERIC_TIMESTAMP_SENTINEL)
-                }
-                "CaptureTime" if value.is_number() => {
-                    *value = Value::String(NUMERIC_TIMESTAMP_SENTINEL.into())
-                }
-                "CaptureTime" => *value = Value::String("{{capture_time}}".into()),
-                "CaptureTimeStr" => *value = Value::String("{{capture_time_text}}".into()),
-                "Seq"
-                | "AlarmSeq"
-                | "ID"
-                | "RecordID"
-                | "FaceID"
-                | "FaceDoforPersonID"
-                | "FaceDoforNonMotorVehicleID"
-                | "FaceDoforVehicleID"
-                | "PersonID"
-                | "PersonDoforFaceID" => {
-                    *value = dynamic_value(value, "{{event_id}}", NUMERIC_EVENT_ID_SENTINEL)
-                }
-                "RelatedID" => {
-                    *value = dynamic_value(value, "{{related_id}}", NUMERIC_RELATED_ID_SENTINEL)
-                }
-                "MatchPersonID" => {
-                    *value = dynamic_value(value, "{{person_id}}", NUMERIC_PERSON_ID_SENTINEL)
-                }
-                "ChannelID" | "ChannelId" | "SrcID" => {
-                    *value = dynamic_value(value, "{{channel_id}}", NUMERIC_CHANNEL_SENTINEL)
-                }
-                "AlarmType" if event_type.is_some() => {
-                    *value = Value::String(event_type.expect("checked").into())
-                }
-                "Type" if value.is_string() && event_type.is_some() => {
-                    *value = Value::String(event_type.expect("checked").into())
-                }
-                _ => {}
-            }
-        }
+        _ => {}
     }
     Ok(())
 }
@@ -1218,12 +1213,9 @@ fn image_slot_error(index: usize) -> AlarmRuntimeError {
     )
 }
 
-fn dynamic_value(current: &Value, string_marker: &str, numeric_sentinel: &str) -> Value {
-    if current.is_number() {
-        Value::String(numeric_sentinel.into())
-    } else {
-        Value::String(string_marker.into())
-    }
+struct SelectedPackImage {
+    reference: ImageAssetRef,
+    url_reference: Option<ImageAssetRef>,
 }
 
 fn select_pack_images(
@@ -1232,7 +1224,7 @@ fn select_pack_images(
     image_root: Option<&str>,
     count: usize,
     alarm_type_id: &str,
-) -> Result<Vec<ImageAssetRef>, AlarmRuntimeError> {
+) -> Result<Vec<SelectedPackImage>, AlarmRuntimeError> {
     if count == 0 {
         return Ok(vec![]);
     }
@@ -1253,16 +1245,25 @@ fn select_pack_images(
         })
         .collect::<Vec<_>>();
     paths.sort();
-    let indexes = match (profile_id, alarm_type_id, count) {
-        (FirstReleaseProfileId::NvrVehicle, "snap", 2) => vec![0, 2],
-        (FirstReleaseProfileId::IpcSmart, "falling", 1) => vec![1],
+    let (data_indexes, url_indexes) = match (profile_id, alarm_type_id, count) {
+        // VehicleAlarm.py embeds files 0 and 2, but the second URL points at
+        // file 1. Preserve that observable behavior without exposing a local
+        // filesystem path in the URL.
+        (FirstReleaseProfileId::NvrVehicle, "snap", 2) => (vec![0, 2], vec![0, 1]),
+        (FirstReleaseProfileId::IpcSmart, "falling", 1) => (vec![1], vec![1]),
         (FirstReleaseProfileId::IpcSmart, "peoplegathering", 2)
-        | (FirstReleaseProfileId::IpcSmart, "peopledispersing", 2) => vec![0, 1],
-        (FirstReleaseProfileId::IpcSmart, _, 2) => vec![1, 0],
-        _ => (0..count).collect(),
+        | (FirstReleaseProfileId::IpcSmart, "peopledispersing", 2) => (vec![0, 1], vec![0, 1]),
+        // Most two-picture V1.0 branches embed big then small ([1, 0]) while
+        // retaining URL indexes in directory order ([0, 1]).
+        (FirstReleaseProfileId::IpcSmart, _, 2) => (vec![1, 0], vec![0, 1]),
+        _ => {
+            let indexes = (0..count).collect::<Vec<_>>();
+            (indexes.clone(), indexes)
+        }
     };
-    if indexes
+    if data_indexes
         .iter()
+        .chain(&url_indexes)
         .copied()
         .max()
         .is_none_or(|maximum| maximum >= paths.len())
@@ -1280,12 +1281,24 @@ fn select_pack_images(
             format!("profile pack '{}' is not pinned", profile_id.as_str()),
         )
     })?;
-    Ok(indexes
+    Ok(data_indexes
         .into_iter()
-        .map(|index| ImageAssetRef::Pack {
-            pack_id: pack.id.clone(),
-            version: pack.version.clone(),
-            path: paths[index].clone(),
+        .zip(url_indexes)
+        .map(|(data_index, url_index)| {
+            let reference = ImageAssetRef::Pack {
+                pack_id: pack.id.clone(),
+                version: pack.version.clone(),
+                path: paths[data_index].clone(),
+            };
+            let url_reference = (url_index != data_index).then(|| ImageAssetRef::Pack {
+                pack_id: pack.id.clone(),
+                version: pack.version.clone(),
+                path: paths[url_index].clone(),
+            });
+            SelectedPackImage {
+                reference,
+                url_reference,
+            }
         })
         .collect())
 }
@@ -1403,6 +1416,7 @@ fn apply_user_image(definition: &mut AlarmHandlerDefinition, user_image: &ImageA
     };
     for image in &mut definition.images {
         image.reference = user_image.clone();
+        image.url_reference = None;
         image.file_name = format!("user-alarm.{extension}");
     }
     true
@@ -1430,55 +1444,67 @@ fn apply_image_variant(
         return Ok(());
     };
     for image in &mut definition.images {
-        let ImageAssetRef::Pack { pack_id, path, .. } = &mut image.reference else {
-            continue;
-        };
-        let mut segments = path.split('/').map(str::to_owned).collect::<Vec<_>>();
-        let variant_index = segments
-            .iter()
-            .position(|segment| matches!(segment.as_str(), "small" | "normal" | "big"))
-            .ok_or_else(|| {
-                runtime_error(
-                    "device_simulator.alarm.image_variant_unavailable",
-                    format!("alarm image '{path}' has no declared size variant"),
-                )
-            })?;
-        segments[variant_index] = variant.to_owned();
-        let preferred = segments.join("/");
-        let manifest = assets.manifest(pack_id).ok_or_else(|| {
+        apply_image_variant_to_reference(&mut image.reference, variant, assets)?;
+        if let Some(reference) = &mut image.url_reference {
+            apply_image_variant_to_reference(reference, variant, assets)?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_image_variant_to_reference(
+    reference: &mut ImageAssetRef,
+    variant: &str,
+    assets: &RuntimeAssetLayout,
+) -> Result<(), AlarmRuntimeError> {
+    let ImageAssetRef::Pack { pack_id, path, .. } = reference else {
+        return Ok(());
+    };
+    let mut segments = path.split('/').map(str::to_owned).collect::<Vec<_>>();
+    let variant_index = segments
+        .iter()
+        .position(|segment| matches!(segment.as_str(), "small" | "normal" | "big"))
+        .ok_or_else(|| {
             runtime_error(
-                "device_simulator.alarm.image_manifest_missing",
-                format!("image pack '{pack_id}' is not active"),
+                "device_simulator.alarm.image_variant_unavailable",
+                format!("alarm image '{path}' has no declared size variant"),
             )
         })?;
-        if manifest.files.iter().any(|file| file.path == preferred) {
-            *path = preferred;
-            continue;
-        }
-        let root = preferred
-            .rsplit_once('/')
-            .map(|(root, _)| root)
-            .ok_or_else(|| {
-                runtime_error(
-                    "device_simulator.alarm.image_variant_unavailable",
-                    format!("alarm image '{preferred}' has no variant directory"),
-                )
-            })?;
-        *path = assets
-            .declared_files_under(pack_id, root)
-            .map_err(|source| runtime_error(source.code, source.message))?
-            .into_iter()
-            .find(|candidate| {
-                let lower = candidate.to_ascii_lowercase();
-                lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png")
-            })
-            .ok_or_else(|| {
-                runtime_error(
-                    "device_simulator.alarm.image_variant_unavailable",
-                    format!("alarm image variant '{variant}' is not available below '{root}'"),
-                )
-            })?;
+    segments[variant_index] = variant.to_owned();
+    let preferred = segments.join("/");
+    let manifest = assets.manifest(pack_id).ok_or_else(|| {
+        runtime_error(
+            "device_simulator.alarm.image_manifest_missing",
+            format!("image pack '{pack_id}' is not active"),
+        )
+    })?;
+    if manifest.files.iter().any(|file| file.path == preferred) {
+        *path = preferred;
+        return Ok(());
     }
+    let root = preferred
+        .rsplit_once('/')
+        .map(|(root, _)| root)
+        .ok_or_else(|| {
+            runtime_error(
+                "device_simulator.alarm.image_variant_unavailable",
+                format!("alarm image '{preferred}' has no variant directory"),
+            )
+        })?;
+    *path = assets
+        .declared_files_under(pack_id, root)
+        .map_err(|source| runtime_error(source.code, source.message))?
+        .into_iter()
+        .find(|candidate| {
+            let lower = candidate.to_ascii_lowercase();
+            lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png")
+        })
+        .ok_or_else(|| {
+            runtime_error(
+                "device_simulator.alarm.image_variant_unavailable",
+                format!("alarm image variant '{variant}' is not available below '{root}'"),
+            )
+        })?;
     Ok(())
 }
 
@@ -1588,14 +1614,22 @@ fn build_context(
     definition: &AlarmHandlerDefinition,
     subscription_id: &str,
     destination: &reqwest::Url,
-    device_http_port: u16,
+    _device_http_port: u16,
 ) -> Result<AlarmBuildContext, AlarmRuntimeError> {
     let channel = device
         .preview
         .channel_count
         .map(|_| DEFAULT_CHANNEL_ID)
         .unwrap_or(DEFAULT_CHANNEL_ID);
-    let device_authority = format!("{}:{device_http_port}", device.preview.ip);
+    // The legacy alarm scripts hard-code :81 only for the custom alarm
+    // camera and :80 for every other device-side Reference. This is separate
+    // from the configurable listener port used by the virtual device service.
+    let reference_port = if definition.profile_id == FirstReleaseProfileId::IpcCustom {
+        81
+    } else {
+        80
+    };
+    let device_authority = format!("{}:{reference_port}", device.preview.ip);
     let destination_authority = destination_reference_authority(destination)?;
     let reference = match definition.profile_id {
         FirstReleaseProfileId::IpcCustom => {
@@ -1657,7 +1691,13 @@ fn build_context(
     Ok(AlarmBuildContext {
         source_ip: Some(device.preview.ip),
         fields,
-        multipart_boundary: Some(format!("fst-simulator-{}", uuid::Uuid::new_v4().simple())),
+        multipart_boundary: Some(match device.profile_id {
+            FirstReleaseProfileId::IpcCustom => LEGACY_CUSTOM_MULTIPART_BOUNDARY.to_owned(),
+            // SmartAlarm.py's helper returns a boundary with the leading two
+            // hyphens; its hand-written body prepends another two.
+            FirstReleaseProfileId::IpcSmart => format!("--{}", uuid::Uuid::new_v4().simple()),
+            _ => format!("fst-simulator-{}", uuid::Uuid::new_v4().simple()),
+        }),
         legacy_values: None,
     })
 }
@@ -1823,34 +1863,45 @@ mod tests {
         let template = compile_json_template(
             br#"{
                 "Reference":"legacy",
-                "AlarmInfo":{"TimeStamp":1,"AlarmType":"Old","AlarmSeq":2},
+                "AlarmInfo":{"TimeStamp":1,"AlarmType":"Old","AlarmSeq":2,"Nested":{"Type":"Camera"}},
                 "Image":{"Size":0,"Data":"legacy","URL":"/LAPI/V1.0/System/Picture?Index=C:\\old.jpg"}
             }"#,
             Some("CrossLine"),
             usize::MAX,
         )
         .unwrap();
-        assert!(template.fields().contains(&DynamicField::Reference));
-        assert!(template.fields().contains(&DynamicField::Timestamp));
-        assert!(template.fields().contains(&DynamicField::EventId));
+        // Identity fields are injected by the profile-specific mapper after
+        // rendering; they are not global template variables.
+        assert!(!template.fields().contains(&DynamicField::Reference));
+        assert!(!template.fields().contains(&DynamicField::Timestamp));
+        assert!(!template.fields().contains(&DynamicField::EventId));
         assert!(template.fields().contains(&DynamicField::ImageBase64));
         assert!(template.fields().contains(&DynamicField::ImageSize));
         let rendered = String::from_utf8(
             template
                 .render(&BTreeMap::from([
-                    (DynamicField::Reference, "ref".into()),
-                    (DynamicField::Timestamp, "123".into()),
-                    (DynamicField::EventId, "456".into()),
                     (DynamicField::ImageBase64, "YWJj".into()),
                     (DynamicField::ImageSize, "3".into()),
                 ]))
                 .unwrap(),
         )
         .unwrap();
-        assert!(rendered.contains("\"TimeStamp\":123"));
+        assert!(rendered.contains("\"TimeStamp\":1"));
+        assert!(rendered.contains("\"Reference\":\"legacy\""));
         assert!(rendered.contains("\"AlarmType\":\"CrossLine\""));
+        assert!(rendered.contains("\"Type\":\"Camera\""));
         assert!(rendered.contains("\"Size\":3"));
         assert!(!rendered.contains("C:\\old.jpg"));
+    }
+
+    #[test]
+    fn event_type_override_requires_an_exact_supported_json_path() {
+        let error = compile_json_template(br#"{"Nested":{"Type":"Camera"}}"#, Some("CrossLine"), 0)
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            "device_simulator.alarm.event_type_field_missing"
+        );
     }
 
     #[test]
@@ -1901,10 +1952,28 @@ mod tests {
 
     #[tokio::test]
     async fn approved_release_alarm_registry_loads_when_explicitly_configured() {
-        let Ok(root) = std::env::var("FST_APPROVED_PACK_ROOT") else {
-            return;
+        let (root, explicitly_configured) = match std::env::var("FST_APPROVED_PACK_ROOT") {
+            Ok(root) => (PathBuf::from(root), true),
+            Err(_) => (
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("target")
+                    .join("approved-packs"),
+                false,
+            ),
         };
-        let root = PathBuf::from(root);
+        if !root.is_dir() {
+            if explicitly_configured {
+                panic!(
+                    "FST_APPROVED_PACK_ROOT does not exist or is not a directory: {}",
+                    root.display()
+                );
+            }
+            eprintln!(
+                "skipping approved release alarm registry test: no approved Pack root at {}",
+                root.display()
+            );
+            return;
+        }
         let version = std::env::var("FST_APPROVED_PACK_VERSION").unwrap_or_else(|_| "1.0.3".into());
         let pins = [
             "protocol-core",
@@ -2058,6 +2127,14 @@ mod tests {
             &smart_motion.images[1].reference,
             ImageAssetRef::Pack { path, .. } if path.ends_with("/1-1.jpg")
         ));
+        assert!(matches!(
+            &smart_motion.images[0].url_reference,
+            Some(ImageAssetRef::Pack { path, .. }) if path.ends_with("/1-1.jpg")
+        ));
+        assert!(matches!(
+            &smart_motion.images[1].url_reference,
+            Some(ImageAssetRef::Pack { path, .. }) if path.ends_with("/1-2.jpg")
+        ));
         assert_eq!(
             smart_motion.follow_up_requests[0].transport.path,
             "/LAPI/V1.0/System/Event/Notification/Alarm"
@@ -2069,14 +2146,24 @@ mod tests {
             .unwrap();
         let smart_requests = crate::device_simulator::alarms::build_alarm_requests(
             smart_motion,
-            &build_context(
-                smart_device,
-                smart_motion,
-                "123",
-                runtime.destinations.get("receiver").unwrap(),
-                runtime.device_http_port,
-            )
-            .unwrap(),
+            &{
+                let mut context = build_context(
+                    smart_device,
+                    smart_motion,
+                    "123",
+                    runtime.destinations.get("receiver").unwrap(),
+                    runtime.device_http_port,
+                )
+                .unwrap();
+                context
+                    .fields
+                    .insert(DynamicField::Timestamp, "1710000000".into());
+                context.fields.insert(DynamicField::EventId, "123".into());
+                context.legacy_values = Some(
+                    crate::device_simulator::alarms::LegacyAlarmValues::new(0x1234_5678),
+                );
+                context
+            },
             &runtime.image_cache.read(),
         )
         .unwrap();
@@ -2088,7 +2175,8 @@ mod tests {
         );
         let smart_alarm_body = String::from_utf8_lossy(&smart_requests[1].body);
         let smart_structure_body = String::from_utf8_lossy(&smart_requests[0].body);
-        assert!(smart_structure_body.contains("127.0.0.1:18080/Subscription/Subscribers/123"));
+        assert!(smart_structure_body.contains("127.0.0.1:18080/Subscription/Subscribers/"));
+        assert!(!smart_structure_body.contains("206.2.18.166"));
         assert!(smart_alarm_body.contains("SmartMotionDetectOn"));
         assert!(!smart_alarm_body.contains("\"AlarmType\":\"motion\""));
         let smart_recovery = runtime
@@ -2163,21 +2251,31 @@ mod tests {
             .unwrap();
         let vehicle_requests = crate::device_simulator::alarms::build_alarm_requests(
             vehicle_match,
-            &build_context(
-                vehicle_device,
-                vehicle_match,
-                "456",
-                runtime.destinations.get("receiver").unwrap(),
-                runtime.device_http_port,
-            )
-            .unwrap(),
+            &{
+                let mut context = build_context(
+                    vehicle_device,
+                    vehicle_match,
+                    "456",
+                    runtime.destinations.get("receiver").unwrap(),
+                    runtime.device_http_port,
+                )
+                .unwrap();
+                context
+                    .fields
+                    .insert(DynamicField::Timestamp, "1710000000".into());
+                context.fields.insert(DynamicField::EventId, "456".into());
+                context.legacy_values = Some(
+                    crate::device_simulator::alarms::LegacyAlarmValues::new(0x8765_4321),
+                );
+                context
+            },
             &runtime.image_cache.read(),
         )
         .unwrap();
         assert_eq!(vehicle_requests.len(), 2);
         let vehicle_structure_body = String::from_utf8_lossy(&vehicle_requests[0].body);
         assert!(vehicle_structure_body.contains(&format!(
-            "127.0.0.1:18080/{}/Subscription/Subscribers/456",
+            "127.0.0.1:18080/{}/Subscription/Subscribers/",
             vehicle_device.preview.hardware_id
         )));
         assert_eq!(
@@ -2208,6 +2306,43 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(snap_paths[0].ends_with("/1-1.jpg"));
         assert!(snap_paths[1].ends_with("/1-3.jpg"));
+        assert!(vehicle_snap.images[0].url_reference.is_none());
+        assert!(matches!(
+            &vehicle_snap.images[1].url_reference,
+            Some(ImageAssetRef::Pack { path, .. }) if path.ends_with("/1-2.jpg")
+        ));
+        let mut snap_context = build_context(
+            vehicle_device,
+            vehicle_snap,
+            "457",
+            runtime.destinations.get("receiver").unwrap(),
+            runtime.device_http_port,
+        )
+        .unwrap();
+        snap_context.legacy_values = Some(crate::device_simulator::alarms::LegacyAlarmValues::new(
+            0x7654_3210,
+        ));
+        let snap_request = crate::device_simulator::alarms::build_alarm_request(
+            vehicle_snap,
+            &snap_context,
+            &runtime.image_cache.read(),
+        )
+        .unwrap();
+        let snap_body: Value = serde_json::from_slice(&snap_request.body).unwrap();
+        let snap_reference_prefix = format!(
+            "{}:80/{}/Subscription/Subscribers/",
+            vehicle_device.preview.ip, vehicle_device.preview.hardware_id
+        );
+        assert!(snap_body["Reference"]
+            .as_str()
+            .is_some_and(|reference| reference.starts_with(&snap_reference_prefix)));
+        assert_eq!(
+            snap_body["StructureInfo"]["ImageInfoList"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
         let custom_picture = runtime
             .registry
             .definitions()
@@ -2245,23 +2380,34 @@ mod tests {
                 definition.transport.path,
                 "/LAPI/V1.0/System/Event/Notification/Structure"
             );
+            let mut context = build_context(
+                structured_device,
+                definition,
+                "321",
+                runtime.destinations.get("receiver").unwrap(),
+                runtime.device_http_port,
+            )
+            .unwrap();
+            context
+                .fields
+                .insert(DynamicField::Timestamp, "1710000000".into());
+            context
+                .fields
+                .insert(DynamicField::CaptureTime, "20240309160000000".into());
+            context.fields.insert(DynamicField::EventId, "321".into());
+            context.legacy_values = Some(crate::device_simulator::alarms::LegacyAlarmValues::new(
+                0x3210_3210,
+            ));
             let request = crate::device_simulator::alarms::build_alarm_request(
                 definition,
-                &build_context(
-                    structured_device,
-                    definition,
-                    "321",
-                    runtime.destinations.get("receiver").unwrap(),
-                    runtime.device_http_port,
-                )
-                .unwrap(),
+                &context,
                 &runtime.image_cache.read(),
             )
             .unwrap();
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             let expected_reference = format!(
                 "{}:{}/Subscription/Subscribers/1",
-                structured_device.preview.ip, runtime.device_http_port
+                structured_device.preview.ip, 80
             );
             assert_eq!(
                 body["Reference"].as_str(),
@@ -2322,23 +2468,31 @@ mod tests {
             "/LAPI/V1.0/System/Event/Notification/PersonVerification"
         );
         for definition in [in_library, stranger] {
+            let mut context = build_context(
+                face_access_device,
+                definition,
+                "654",
+                runtime.destinations.get("receiver").unwrap(),
+                runtime.device_http_port,
+            )
+            .unwrap();
+            context
+                .fields
+                .insert(DynamicField::Timestamp, "1710000000".into());
+            context.fields.insert(DynamicField::EventId, "654".into());
+            context.legacy_values = Some(crate::device_simulator::alarms::LegacyAlarmValues::new(
+                0x6540_6540,
+            ));
             let request = crate::device_simulator::alarms::build_alarm_request(
                 definition,
-                &build_context(
-                    face_access_device,
-                    definition,
-                    "654",
-                    runtime.destinations.get("receiver").unwrap(),
-                    runtime.device_http_port,
-                )
-                .unwrap(),
+                &context,
                 &runtime.image_cache.read(),
             )
             .unwrap();
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             let expected_reference = format!(
                 "{}:{}/Subscription/Subscribers/1000",
-                face_access_device.preview.ip, runtime.device_http_port
+                face_access_device.preview.ip, 80
             );
             assert_eq!(
                 body["Reference"].as_str(),
@@ -2351,14 +2505,20 @@ mod tests {
         }
         let in_library_request = crate::device_simulator::alarms::build_alarm_request(
             in_library,
-            &build_context(
-                face_access_device,
-                in_library,
-                "654",
-                runtime.destinations.get("receiver").unwrap(),
-                runtime.device_http_port,
-            )
-            .unwrap(),
+            &{
+                let mut context = build_context(
+                    face_access_device,
+                    in_library,
+                    "654",
+                    runtime.destinations.get("receiver").unwrap(),
+                    runtime.device_http_port,
+                )
+                .unwrap();
+                context.legacy_values = Some(
+                    crate::device_simulator::alarms::LegacyAlarmValues::new(0x1234_5678),
+                );
+                context
+            },
             &runtime.image_cache.read(),
         )
         .unwrap();
@@ -2640,7 +2800,12 @@ mod tests {
             &runtime.image_cache.read(),
         )
         .unwrap();
-        assert!(String::from_utf8_lossy(&dog_request.body).contains("\"UnLeashed\":1"));
+        let dog_body = String::from_utf8_lossy(&dog_request.body);
+        assert!(dog_body.contains("\"UnLeashed\":1"));
+        assert!(dog_body.contains(&format!(
+            "{}:80/Subscription/Subscribers/",
+            smart_device.preview.ip
+        )));
 
         let custom_device = runtime
             .devices
@@ -2662,8 +2827,14 @@ mod tests {
             &runtime.image_cache.read(),
         )
         .unwrap();
-        assert!(String::from_utf8_lossy(&custom_request.body)
-            .contains("name=\"image\"; imageindex=1; filename=\"picture.jpg\""));
+        let custom_body = String::from_utf8_lossy(&custom_request.body);
+        assert!(
+            custom_body.contains("form-data;imageindex=1;name=\"image\";filename=\"picture.jpg\"")
+        );
+        assert!(custom_body.contains(&format!(
+            "{}:81/Subscription/Subscribers/",
+            custom_device.preview.ip
+        )));
 
         use sha2::{Digest, Sha256};
         let user_root = app_data
