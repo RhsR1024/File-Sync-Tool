@@ -34,7 +34,7 @@ impl Default for DeviceSimulatorSettings {
         Self {
             asset_server_url_override: None,
             selected_interface_id: None,
-            last_platform: None,
+            last_platform: Some(TargetPlatform::Ums),
             last_start_ip: None,
             last_device_groups: vec![],
             last_http_port: 81,
@@ -467,6 +467,7 @@ pub fn validate_config(config: &AppConfig) -> Result<(), String> {
 pub fn normalize_device_simulator_settings(
     mut settings: DeviceSimulatorSettings,
 ) -> DeviceSimulatorSettings {
+    settings.last_platform = Some(TargetPlatform::Ums);
     settings.asset_server_url_override = settings
         .asset_server_url_override
         .take()
@@ -615,7 +616,12 @@ fn is_safe_group_id(value: &str) -> bool {
 fn is_first_release_profile(value: &str) -> bool {
     matches!(
         value,
-        "ipc-custom" | "ipc-smart" | "nvr-common" | "nvr-vehicle"
+        "ipc-custom"
+            | "ipc-smart"
+            | "ipc-structured"
+            | "ipc-face-access"
+            | "nvr-common"
+            | "nvr-vehicle"
     )
 }
 

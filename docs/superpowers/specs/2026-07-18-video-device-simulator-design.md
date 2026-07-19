@@ -1,11 +1,13 @@
 # 视频设备模拟器设计规格
 
 - **日期**：2026-07-18
-- **状态**：旧项目静态业务行为、本地运行时和签名素材已实现；仅隔离 Windows VM 与真实平台兼容验收待完成
+- **状态**：UMS-only 六类 Profile 的旧项目静态业务行为、本地运行时和签名素材已实现；仅隔离 Windows VM 与真实 UMS 兼容验收待完成
 - **目标项目**：`D:\WorkSpace\File-Sync-Tool`
 - **旧实现参考项目**：`D:\WorkSpace\VirtualTools`
 - **目标平台**：Windows
 - **技术方向**：Vue 3 + Tauri 2 + Rust/Tokio，全量重写协议引擎
+
+> **2026-07-19 维护说明**：当前唯一产品范围是 UMS；应用版本固定为 `1.2.0`，正式素材 Pack 为 `1.0.3`。交付 Profile 为 `ipc-custom`、`ipc-smart`、`ipc-structured`、`ipc-face-access`、`nvr-common`、`nvr-vehicle`。本文中仍出现的 VMS、四类 Profile、`1.2.1/1.2.2` 或 `1.0.2` 内容只保留为历史设计记录，不再定义当前实现。当前实现与外部验收边界以 `docs/superpowers/reviews/2026-07-19-video-device-simulator-ums-parity-review.md` 为准。
 
 ---
 
@@ -141,15 +143,15 @@ device_simulator
 - 同一主 EXE 支持隐藏的 `simulator-worker` 运行模式，实现故障和权限隔离。
 - Vue 页面只通过 Tauri commands 与主进程交互，不直接访问 Worker。
 
-### 4.3 Phase 1 范围与安全决策
+### 4.3 当前范围与安全决策
 
-- 首版目标平台限定为 VMS/UMS，交付 `ipc-custom`、`ipc-smart`、`nvr-common`、`nvr-vehicle` 四个独立 Profile。
+- 目标平台只保留 UMS，交付 `ipc-custom`、`ipc-smart`、`ipc-structured`、`ipc-face-access`、`nvr-common`、`nvr-vehicle` 六个独立 Profile；模拟器不再提供 VMS 类型、配置、路由或素材分支。
 - NVR 默认 8 通道、产品安全上限 128；128 来自旧固定 Profile 素材覆盖边界，不表示厂商协议上限。
 - 首版模拟设备入站鉴权和 RTSP Digest 关闭；RTSP 只接受 TCP interleaved；主、辅、第三码流可用但媒体按客户端惰性调度；不声明实况音频。
 - Catalog 强制 Ed25519 离线签名；素材服务器首版不保存或发送应用层凭据。
 - 防火墙默认由提权 Worker 精确管理，启动前显式确认，只清理由 journal 证明归本会话所有的规则。
 - 自定义图片独立内容寻址存储；旧模板、图片和 PCAP 允许用于测试、学习、复制和打包，但禁止商用，生成物必须保留该限制。
-- 当前功能版本为 1.2.2，首批正式素材 Pack 版本为 1.0.2（最低应用版本仍为 1.2.1），素材 schema 与 engine API 首版均为 1。
+- 当前功能版本固定为 `1.2.0`，正式素材 Pack 版本为 `1.0.3`（最低应用版本 `1.2.0`），素材 schema 与 engine API 均为 1。
 
 完整证据、冲突和验收值以 `2026-07-18-video-device-simulator-evidence-matrix.md` 为准。
 
@@ -205,7 +207,7 @@ Rust 协议处理器、状态机、解析器、校验器和 handler 枚举仍编
 
 1. 由模拟器保存和提供录像回放。
 2. macOS 或 Linux 设备模拟。
-3. SIP、VIID、SNMP、门禁、访客机、梯控、可视对讲或 Xware 等非 IPC/NVR 功能，除非后续单独批准。
+3. SIP、VIID、SNMP、独立门禁控制器、访客机、梯控、可视对讲或 Xware 等范围外功能；本次批准的“人脸门禁相机”作为独立 IPC Profile 保留。
 4. 自动迁移旧工具的全部 22 类设备。
 5. 从服务器下载并执行 Python、JavaScript、DLL、WASM 或其他可执行扩展代码。
 6. 无证据的通用 ONVIF 全功能实现。
@@ -222,13 +224,15 @@ Rust 协议处理器、状态机、解析器、校验器和 handler 枚举仍编
 | Profile ID | 旧项目设备类型 | 目的 |
 | --- | --- | --- |
 | `ipc-custom` | 自定义报警相机 | IPC 上线、RTSP、带图自定义告警 |
-| `ipc-smart` | 智能相机 | IPC 上线、RTSP、VMS/UMS 智能告警 |
+| `ipc-smart` | 智能相机 | IPC 上线、RTSP、UMS 智能告警 |
+| `ipc-structured` | 结构化相机 | IPC 上线、RTSP、人体/人脸/机动车/非机动车结构化告警 |
+| `ipc-face-access` | 人脸门禁相机 | IPC 上线、RTSP、人员核验及门禁控制器告警 |
 | `nvr-common` | 普通NVR | 普通 NVR、多通道元数据、c1 三码流、常规通道/设备告警 |
 | `nvr-vehicle` | 车辆识别NVR | 多通道元数据、c1 三码流、带图车辆复合告警 |
 
 这些名称代表迁移范围，不代表可以自行定义具体型号或协议字段。实现必须从 `data\dev_type.yml`、`data\alarms_info.yml`、相关 `*Alarm.py`、XML/JSON 模板中提取真实业务事实。
 
-智能相机使用独立 profile，不得把多个旧设备类型的逻辑混合进 `ipc-custom`。首版目标平台限定为 VMS/UMS，EZStation 延后。
+智能相机、结构化相机和人脸门禁相机均使用独立 profile，不得把多个旧设备类型的逻辑混合进 `ipc-custom`。当前目标平台仅为 UMS；VMS 和 EZStation 不在本工具范围内。
 
 普通 NVR 的旧告警主要为不带图 JSON；带图 NVR 行为由车辆识别 NVR profile 提供。不得为普通 NVR 凭空增加旧项目不存在的图片告警。
 
@@ -1676,7 +1680,7 @@ Golden 结果必须来源于旧项目或真实平台抓包，不得由实现者�
 
 ### Phase 1：协议事实审计与素材清单
 
-- 对 `ipc-custom`、`nvr-common`、`nvr-vehicle` 建立旧项目来源矩阵。
+- 对六类 Profile 建立旧项目来源矩阵，并按 UMS 平台声明筛选告警与素材。
 - 列出所需 XML/JSON/图片/媒体文件。
 - 确认平台、端口、URL、handler 和告警行为。
 - 对不清楚项发起审查，不写猜测实现。

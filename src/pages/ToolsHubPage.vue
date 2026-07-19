@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorUp, PackageSearch, Puzzle, Share2, Shield, Video, type LucideIcon } from 'lucide-vue-next';
+import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorCog, MonitorUp, PackageSearch, Puzzle, Share2, Shield, Video, type LucideIcon } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
 import { appStore } from '@/lib/store';
 
@@ -92,6 +92,15 @@ const toolCards = computed<ToolCard[]>(() => [
     icon: markRaw(Globe as LucideIcon),
     iconClasses: 'from-violet-500 to-fuchsia-600 shadow-violet-500/20',
     chipKey: 'toolsHub.cards.networkTools.chip',
+  },
+  {
+    key: 'display-control',
+    titleKey: 'sidebar.displayControl',
+    descriptionKey: 'toolsHub.cards.displayControl.description',
+    path: '/tools/display-control',
+    icon: markRaw(MonitorCog as LucideIcon),
+    iconClasses: 'from-sky-500 to-blue-600 shadow-sky-500/20',
+    chipKey: 'toolsHub.cards.displayControl.chip',
   },
   {
     key: 'screen-share',

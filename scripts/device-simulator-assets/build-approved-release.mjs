@@ -23,8 +23,8 @@ import {
 } from "./lib.mjs";
 import { extractPcapMediaFile } from "./extract-pcap-media.mjs";
 
-const PACK_VERSION = "1.0.2";
-const APP_VERSION = "1.2.1";
+const PACK_VERSION = "1.0.3";
+const APP_VERSION = "1.2.0";
 const DEFAULT_KEY_ID = "device-assets-static-review-2026";
 
 const PROFILE_DEFINITIONS = Object.freeze({
@@ -50,6 +50,30 @@ const PROFILE_DEFINITIONS = Object.freeze({
       ["xml/Smart", "xml/Smart"],
       ["object/SmartStruct", "object/SmartStruct"],
       ["pic/SMART", "pic/SMART"],
+    ],
+  },
+  "ipc-structured": {
+    deviceKind: "ipc",
+    legacyDeviceType: "结构化相机",
+    discovery: "ws_discovery.ipc.v1",
+    http: "http.structured_ipc.v1",
+    alarm: "alarm.structured.v1",
+    alarmScript: "StructureAlarm.py",
+    sourceCopies: [
+      ["object/StructStruct", "object/StructStruct"],
+      ["pic/STRUCT", "pic/STRUCT"],
+    ],
+  },
+  "ipc-face-access": {
+    deviceKind: "ipc",
+    legacyDeviceType: "人脸门禁相机",
+    discovery: "ws_discovery.face_access.v1",
+    http: "http.face_access_ipc.v1",
+    alarm: "alarm.face_access.v1",
+    alarmScript: "ACSAlarm.py",
+    sourceCopies: [
+      ["object/ACSStruct", "object/ACSStruct"],
+      ["pic/ACS", "pic/ACS"],
     ],
   },
   "nvr-common": {
@@ -79,6 +103,8 @@ const PROFILE_DEFINITIONS = Object.freeze({
 const SECTION_BY_PROFILE = Object.freeze({
   "ipc-custom": "自定义报警相机",
   "ipc-smart": "智能相机",
+  "ipc-structured": "结构化相机",
+  "ipc-face-access": "人脸门禁相机",
   "nvr-common": "普通NVR",
   "nvr-vehicle": "车辆识别NVR",
 });
@@ -86,12 +112,16 @@ const SECTION_BY_PROFILE = Object.freeze({
 const IMAGE_FOLDER_BY_PROFILE = Object.freeze({
   "ipc-custom": "CUSTOM",
   "ipc-smart": "SMART",
+  "ipc-structured": "STRUCT",
+  "ipc-face-access": "ACS",
   "nvr-vehicle": "VEHICLE",
 });
 
 const OBJECT_FOLDER_BY_PROFILE = Object.freeze({
   "ipc-custom": "CustomStruct",
   "ipc-smart": "SmartStruct",
+  "ipc-structured": "StructStruct",
+  "ipc-face-access": "ACSStruct",
   "nvr-common": "NormalStruct",
   "nvr-vehicle": "VehicleStruct",
 });
@@ -176,7 +206,6 @@ function parseAlarmLine(line, profileId, index) {
     eventType: stringField(line, "EventType"),
     picName: stringField(line, "picName"),
     picData: stringField(line, "picData"),
-    picDataVms: stringField(line, "picData-vms"),
     picHeader: stringField(line, "picHeader"),
     alarmData: stringField(line, "alarmData"),
     eventAlarm: stringField(line, "EventAlarm"),
@@ -186,9 +215,8 @@ function parseAlarmLine(line, profileId, index) {
     supportsPictures: numericField(line, "issupportpic"),
     serverSupport: arrayField(line, "serverSupport"),
   };
-  const platforms = [];
-  if (fields.serverSupport.includes("VMS系列")) platforms.push("vms");
-  if (fields.serverSupport.includes("UMS")) platforms.push("ums");
+  if (!fields.serverSupport.includes("UMS")) return null;
+  const platforms = ["ums"];
   const imageFolder = IMAGE_FOLDER_BY_PROFILE[profileId];
   const imageRoot = fields.picName && imageFolder
     ? `pic/${imageFolder}/normal/${fields.picName}`
@@ -201,7 +229,6 @@ function parseAlarmLine(line, profileId, index) {
     event_type: fields.eventType ?? fields.desc ?? definitionId(fields, index),
     alarm_template: normalizeAssetPath(fields.alarmData ?? fields.eventAlarm, "object", profileId),
     structure_template: normalizeAssetPath(fields.picData, "object", profileId),
-    structure_template_vms: normalizeAssetPath(fields.picDataVms, "object", profileId),
     structure_path: fields.picHeader,
     image_root: imageRoot,
     supports_pictures: fields.supportsPictures === null ? Boolean(imageRoot) : fields.supportsPictures === 1,
@@ -226,7 +253,8 @@ export function parseApprovedAlarmDefinitions(yamlText, profileId) {
     const line = lines[index];
     if (/^\S.*:\s*$/.test(line)) break;
     if (!/^\s+-\s+\{/.test(line)) continue;
-    definitions.push(parseAlarmLine(line, profileId, index));
+    const definition = parseAlarmLine(line, profileId, index);
+    if (definition) definitions.push(definition);
   }
   if (definitions.length === 0) fail(`alarm section ${section} contains no definitions`);
   const ids = new Map();
@@ -276,7 +304,7 @@ function profileDocument(profileId, definition, identity) {
     device_kind: definition.deviceKind,
     legacy_device_type: definition.legacyDeviceType,
     identity,
-    supported_platforms: ["vms", "ums"],
+    supported_platforms: ["ums"],
     handlers: {
       identity: "legacy.identity.v1",
       discovery: definition.discovery,
@@ -286,10 +314,20 @@ function profileDocument(profileId, definition, identity) {
     },
     evidence: [
       source("identity", ["data/dev_type.yml", "script/VSITool.py"]),
-      source("discovery", ["script/Vsocket_ip.py", definition.deviceKind === "ipc" ? "xml/Common/search.xml" : "xml/Common/search-aibox.xml"]),
+      source("discovery", [
+        "script/Vsocket_ip.py",
+        definition.discovery === "ws_discovery.face_access.v1"
+          ? "xml/Common/search-acs.xml"
+          : definition.deviceKind === "ipc"
+            ? "xml/Common/search.xml"
+            : "xml/Common/search-aibox.xml",
+      ]),
       source("http", ["script/HTTPServer.py"], ["Static review permits local implementation; platform compatibility remains unverified"]),
       source("rtsp", ["script/IPCRtspLib.py", "mediafile/mainstream.pcap", "mediafile/substream.pcap", "mediafile/thirdstream.pcap"], ["Third-stream capture duplicates substream bytes; /media/video3 is the user-approved static selection"]),
-      source("alarm", ["data/alarms_info.yml", `script/${profileId === "ipc-custom" ? "Custom" : profileId === "ipc-smart" ? "Smart" : profileId === "nvr-common" ? "Normal" : "Vehicle"}Alarm.py`], ["HTTP response success semantics remain real-platform gated"]),
+      source("alarm", [
+        "data/alarms_info.yml",
+        `script/${definition.alarmScript ?? (profileId === "ipc-custom" ? "CustomAlarm.py" : profileId === "ipc-smart" ? "SmartAlarm.py" : profileId === "nvr-common" ? "NormalAlarm.py" : "VehicleAlarm.py")}`,
+      ], ["HTTP response success semantics remain real-platform gated"]),
     ],
   };
 }
@@ -303,6 +341,7 @@ async function copyDirectory(source, target, mode) {
     force: true,
     filter: (entry) => {
       if (forbiddenExtensions.has(path.extname(entry).toLowerCase())) return false;
+      if (/-vms\.[^/\\]+$/i.test(entry)) return false;
       if (mode !== "images-only") return true;
       const extension = path.extname(entry).toLowerCase();
       return extension === "" || [".jpg", ".jpeg", ".png"].includes(extension);

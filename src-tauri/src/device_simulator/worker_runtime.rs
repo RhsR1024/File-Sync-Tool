@@ -140,10 +140,12 @@ impl WorkerServiceRuntime for SystemWorkerServices {
                     )
                 })?
                 .map_err(alarm_runtime_error)?;
+            let picture_cache = alarms.image_cache();
             let protocol = ProtocolRuntime::start(ProtocolRuntimeConfig {
                 request: config.request,
                 preview: config.preview,
                 assets,
+                picture_cache,
                 enable_discovery: true,
             })
             .await
@@ -498,7 +500,7 @@ impl WorkerRuntime {
                 .map(|address| format!("device_simulator.ip.conflict:{address}"))
                 .collect(),
             warnings: vec![
-                "protocol fixtures are reviewed_static; real VMS/UMS compatibility remains unverified"
+                "protocol fixtures are reviewed_static; real UMS compatibility remains unverified"
                     .into(),
             ],
         };
@@ -1323,9 +1325,9 @@ mod tests {
     fn request() -> crate::device_simulator::api::SimulatorStartRequest {
         crate::device_simulator::api::SimulatorStartRequest {
             platform: TargetPlatformConfig {
-                kind: TargetPlatform::Vms,
+                kind: TargetPlatform::Ums,
                 servers: vec![TargetPlatformServer {
-                    id: "vms".into(),
+                    id: "ums".into(),
                     host: "127.0.0.1".into(),
                     port: 18080,
                 }],

@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 
-export type DeviceSimulatorPlatform = 'vms' | 'ums';
+export type DeviceSimulatorPlatform = 'ums';
 export type DeviceSimulatorDeviceKind = 'ipc' | 'nvr';
 export type DeviceSimulatorStreamKind = 'main' | 'sub' | 'third';
 

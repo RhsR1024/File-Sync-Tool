@@ -21,12 +21,24 @@ const source = `
 test("extracts approved alarm metadata without interpreting platform claims as verification", () => {
   const definitions = parseApprovedAlarmDefinitions(source, "ipc-smart");
   assert.equal(definitions.length, 2);
-  assert.deepEqual(definitions[0].platforms, ["vms", "ums"]);
+  assert.deepEqual(definitions[0].platforms, ["ums"]);
   assert.equal(definitions[0].structure_template, "object/SmartStruct/StructureCrossLine.json");
+  assert.equal("structure_template_vms" in definitions[0], false);
   assert.equal(definitions[0].recovery_event_type, "CrossLineCleared");
   assert.equal(definitions[0].evidence.status, "reviewed_static");
   assert.equal(definitions[1].id, "mouse-detection");
   assert.deepEqual(definitions[1].platforms, ["ums"]);
+});
+
+test("keeps only UMS face-access alarms and excludes the EZAccess-only door contact alarm", () => {
+  const definitions = parseApprovedAlarmDefinitions(`
+人脸门禁相机:
+  - {AlarmType: '陌生人', serverSupport: ["UMS"], picName: 'notinlib', picData: 'ACSStruct\\StructureNotLib.json',alarmProtocol: 'V1.0'}
+  - {AlarmType: '门磁报警', serverSupport: ["EZAccess"], alarmData: 'ACSStruct\\UnInitialOpen.json',alarmProtocol: 'V1.0'}
+`, "ipc-face-access");
+  assert.equal(definitions.length, 1);
+  assert.equal(definitions[0].id, "notinlib");
+  assert.deepEqual(definitions[0].platforms, ["ums"]);
 });
 
 test("ordinary NVR definitions retain source type and recovery event", () => {

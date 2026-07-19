@@ -94,7 +94,7 @@ function addServer() {
   simulator.request.platform.servers.push({
     id: `server-${Date.now()}`,
     host: '',
-    port: simulator.request.platform.kind === 'vms' ? 80 : 80,
+    port: 80,
   });
 }
 
@@ -326,7 +326,7 @@ function formatImageSize(bytes: number) {
               <div class="flex items-center gap-3"><Server class="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 id="platform-title" class="font-bold text-slate-900">{{ t('deviceSimulator.configuration.platform') }}</h2></div>
               <div class="mt-5 grid gap-4 md:grid-cols-2">
                 <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.platform') }}
-                  <select v-model="simulator.request.platform.kind" :class="[fieldClass, 'mt-2']"><option value="vms">VMS</option><option value="ums">UMS</option></select>
+                  <div :class="[fieldClass, 'mt-2', 'flex items-center bg-slate-100 font-semibold']" aria-readonly="true">UMS</div>
                 </label>
                 <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.alarmReceiver') }}
                   <input v-model="simulator.request.platform.alarm_receiver_url" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://192.168.1.10/alarm" />
@@ -363,7 +363,7 @@ function formatImageSize(bytes: number) {
               <div class="flex flex-wrap items-center justify-between gap-3"><div class="flex items-center gap-3"><Video class="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 id="groups-title" class="font-bold text-slate-900">{{ t('deviceSimulator.configuration.groups') }}</h2></div><button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" :class="buttonFocus" @click="simulator.addGroup()"><Plus class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.addGroup') }}</button></div>
               <div class="mt-4 space-y-3">
                 <article v-for="group in simulator.request.groups" :key="group.id" class="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 md:grid-cols-[minmax(12rem,1fr)_8rem_9rem_2.75rem]">
-                  <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.profile') }}<select :value="group.profile_id" :class="[fieldClass, 'mt-1']" @change="simulator.updateGroupProfile(group, ($event.target as HTMLSelectElement).value)"><option v-for="profile in simulator.profiles.value" :key="profile.id" :value="profile.id">{{ profileLabel(profile.id) }}</option><template v-if="simulator.profiles.value.length === 0"><option v-for="id in ['ipc-custom', 'ipc-smart', 'nvr-common', 'nvr-vehicle']" :key="id" :value="id">{{ profileLabel(id) }}</option></template></select></label>
+                  <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.profile') }}<select :value="group.profile_id" :class="[fieldClass, 'mt-1']" @change="simulator.updateGroupProfile(group, ($event.target as HTMLSelectElement).value)"><option v-for="profile in simulator.profiles.value" :key="profile.id" :value="profile.id">{{ profileLabel(profile.id) }}</option><template v-if="simulator.profiles.value.length === 0"><option v-for="id in ['ipc-custom', 'ipc-smart', 'ipc-structured', 'ipc-face-access', 'nvr-common', 'nvr-vehicle']" :key="id" :value="id">{{ profileLabel(id) }}</option></template></select></label>
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.count') }}<input v-model.number="group.count" :class="[fieldClass, 'mt-1']" type="number" min="1" max="500" inputmode="numeric" /></label>
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.channels') }}<input v-model.number="group.nvr_channel_count" :class="[fieldClass, 'mt-1']" type="number" min="1" max="128" inputmode="numeric" :disabled="!group.profile_id.startsWith('nvr-')" /></label>
                   <button type="button" class="mt-5 inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40" :class="buttonFocus" :disabled="simulator.request.groups.length <= 1" :aria-label="t('deviceSimulator.actions.removeGroup')" @click="simulator.removeGroup(group.id)"><Trash2 class="h-5 w-5" aria-hidden="true" /></button>

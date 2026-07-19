@@ -54,7 +54,7 @@ const emptyStatus = (): SimulatorStatus => ({
 const defaultSettings = (): DeviceSimulatorSettings => ({
   asset_server_url_override: null,
   selected_interface_id: null,
-  last_platform: 'vms',
+  last_platform: 'ums',
   last_start_ip: '192.168.1.100',
   last_device_groups: [{
     id: newId('group'),
@@ -71,7 +71,7 @@ const defaultSettings = (): DeviceSimulatorSettings => ({
 function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartRequest {
   return {
     platform: {
-      kind: settings.last_platform ?? 'vms',
+      kind: 'ums',
       servers: [],
       alarm_receiver_url: null,
     },

@@ -11,7 +11,7 @@ import { DEVICE_SIMULATOR_EVENTS } from './deviceSimulator';
 export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
   asset_server_url_override: null,
   selected_interface_id: 'adapter-1',
-  last_platform: 'vms',
+  last_platform: 'ums',
   last_start_ip: '192.168.50.10',
   last_device_groups: [{
     id: 'group-1',
@@ -27,7 +27,7 @@ export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
 
 export const simulatorStartRequestContract: SimulatorStartRequest = {
   platform: {
-    kind: 'vms',
+    kind: 'ums',
     servers: [{ id: 'server-1', host: '192.168.50.2', port: 80 }],
     alarm_receiver_url: 'http://192.168.50.2/alarm',
   },

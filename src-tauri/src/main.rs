@@ -8,6 +8,7 @@ mod config;
 mod deploy;
 mod device_simulator_commands;
 mod disk_cleanup;
+mod display_control;
 mod download_verify;
 mod error_code;
 mod fileshare;
@@ -4247,6 +4248,8 @@ fn main() {
             screenshare::screen_share_start,
             screenshare::screen_share_stop,
             screenshare::screen_share_get_status,
+            display_control::monitor_control_list,
+            display_control::monitor_control_set,
             fileshare::file_share_pick_directory,
             fileshare::persist::file_share_load_settings,
             fileshare::persist::file_share_save_settings,

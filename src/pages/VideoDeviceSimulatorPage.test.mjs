@@ -19,6 +19,9 @@ assert.match(page, /:disabled="simulator\.topologyLocked\.value"/, 'topology fie
 assert.match(page, /simulator\.recoverySessionId\.value/, 'residual sessions must be presented before normal work');
 assert.match(page, /simulator\.runPreflight/, 'structured preflight must be available');
 assert.match(page, /simulator\.alarmStats\.value/, 'alarm statistics must be visible');
+assert.doesNotMatch(page, /value="vms"|>VMS</i, 'the simulator must expose UMS only');
+assert.match(page, /ipc-structured/, 'structured camera must be available');
+assert.match(page, /ipc-face-access/, 'face access camera must be available');
 assert.match(page, /send_count: continuousAlarm\.value \? null/, 'continuous alarm mode must cross the API as null, never a magic zero');
 assert.match(page, /downloadJson\('device-simulator-logs\.json'/, 'logs must be exportable');
 

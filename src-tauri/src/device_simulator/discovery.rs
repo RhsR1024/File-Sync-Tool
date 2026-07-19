@@ -9,7 +9,7 @@ use tokio::net::UdpSocket;
 ///
 /// Evidence: `VirtualTools/script/Vsocket_ip.py:108-175` and
 /// `VirtualTools/xml/Common/search*.xml`. Platform compatibility remains to be
-/// confirmed by real VMS/UMS captures.
+/// confirmed by real UMS captures.
 pub const DISCOVERY_MULTICAST_ADDRESS: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 252);
 pub const DISCOVERY_LISTEN_PORT: u16 = 3702;
 pub const DISCOVERY_RESPONSE_PORTS: [u16; 3] = [3705, 3706, 3707];

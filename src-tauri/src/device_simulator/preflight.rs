@@ -406,9 +406,9 @@ mod tests {
     fn request() -> SimulatorStartRequest {
         SimulatorStartRequest {
             platform: TargetPlatformConfig {
-                kind: TargetPlatform::Vms,
+                kind: TargetPlatform::Ums,
                 servers: vec![TargetPlatformServer {
-                    id: "vms-1".into(),
+                    id: "ums-1".into(),
                     host: "192.0.2.10".into(),
                     port: 80,
                 }],
@@ -489,7 +489,7 @@ mod tests {
                 firewall_required: true,
                 firewall_available: true,
                 residual_session_id: Some("session-previous".into()),
-                platform_connectivity: BTreeMap::from([("vms-1".into(), Some(true))]),
+                platform_connectivity: BTreeMap::from([("ums-1".into(), Some(true))]),
                 ..Default::default()
             },
         );

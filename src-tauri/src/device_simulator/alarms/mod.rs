@@ -12,6 +12,7 @@ use crate::device_simulator::assets::validation::validate_pack_path;
 use crate::device_simulator::profiles::scope::{FirstReleaseProfileId, TargetPlatform};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,6 +59,8 @@ pub type AlarmResult<T> = Result<T, AlarmError>;
 pub enum AlarmHandlerId {
     CustomV1,
     SmartV1,
+    StructuredV1,
+    FaceAccessV1,
     NvrCommonV1,
     NvrVehicleV1,
 }
@@ -67,6 +70,8 @@ impl AlarmHandlerId {
         match self {
             Self::CustomV1 => "alarm.custom.v1",
             Self::SmartV1 => "alarm.smart.v1",
+            Self::StructuredV1 => "alarm.structured.v1",
+            Self::FaceAccessV1 => "alarm.face_access.v1",
             Self::NvrCommonV1 => "alarm.nvr_common.v1",
             Self::NvrVehicleV1 => "alarm.nvr_vehicle.v1",
         }
@@ -76,6 +81,8 @@ impl AlarmHandlerId {
         match self {
             Self::CustomV1 => FirstReleaseProfileId::IpcCustom,
             Self::SmartV1 => FirstReleaseProfileId::IpcSmart,
+            Self::StructuredV1 => FirstReleaseProfileId::IpcStructured,
+            Self::FaceAccessV1 => FirstReleaseProfileId::IpcFaceAccess,
             Self::NvrCommonV1 => FirstReleaseProfileId::NvrCommon,
             Self::NvrVehicleV1 => FirstReleaseProfileId::NvrVehicle,
         }
@@ -89,6 +96,8 @@ impl FromStr for AlarmHandlerId {
         match value {
             "alarm.custom.v1" => Ok(Self::CustomV1),
             "alarm.smart.v1" => Ok(Self::SmartV1),
+            "alarm.structured.v1" => Ok(Self::StructuredV1),
+            "alarm.face_access.v1" => Ok(Self::FaceAccessV1),
             "alarm.nvr_common.v1" => Ok(Self::NvrCommonV1),
             "alarm.nvr_vehicle.v1" => Ok(Self::NvrVehicleV1),
             _ => Err(AlarmError::new(
@@ -134,17 +143,29 @@ pub enum DynamicField {
     DeviceIp,
     ChannelId,
     Timestamp,
+    CaptureTime,
+    CaptureTimeText,
     Reference,
     SubscriptionId,
+    EventId,
+    RelatedId,
+    PersonId,
     AlarmState,
     ImageBase64,
     ImageBase642,
     ImageBase643,
     ImageBase644,
+    ImageBase645,
     ImageSize,
     ImageSize2,
     ImageSize3,
     ImageSize4,
+    ImageSize5,
+    ImageIndex,
+    ImageIndex2,
+    ImageIndex3,
+    ImageIndex4,
+    ImageIndex5,
 }
 
 impl DynamicField {
@@ -154,17 +175,29 @@ impl DynamicField {
             Self::DeviceIp => "device_ip",
             Self::ChannelId => "channel_id",
             Self::Timestamp => "timestamp",
+            Self::CaptureTime => "capture_time",
+            Self::CaptureTimeText => "capture_time_text",
             Self::Reference => "reference",
             Self::SubscriptionId => "subscription_id",
+            Self::EventId => "event_id",
+            Self::RelatedId => "related_id",
+            Self::PersonId => "person_id",
             Self::AlarmState => "alarm_state",
             Self::ImageBase64 => "image_base64",
             Self::ImageBase642 => "image_base64_2",
             Self::ImageBase643 => "image_base64_3",
             Self::ImageBase644 => "image_base64_4",
+            Self::ImageBase645 => "image_base64_5",
             Self::ImageSize => "image_size",
             Self::ImageSize2 => "image_size_2",
             Self::ImageSize3 => "image_size_3",
             Self::ImageSize4 => "image_size_4",
+            Self::ImageSize5 => "image_size_5",
+            Self::ImageIndex => "image_index",
+            Self::ImageIndex2 => "image_index_2",
+            Self::ImageIndex3 => "image_index_3",
+            Self::ImageIndex4 => "image_index_4",
+            Self::ImageIndex5 => "image_index_5",
         }
     }
 
@@ -174,17 +207,29 @@ impl DynamicField {
             "device_ip" => Ok(Self::DeviceIp),
             "channel_id" => Ok(Self::ChannelId),
             "timestamp" => Ok(Self::Timestamp),
+            "capture_time" => Ok(Self::CaptureTime),
+            "capture_time_text" => Ok(Self::CaptureTimeText),
             "reference" => Ok(Self::Reference),
             "subscription_id" => Ok(Self::SubscriptionId),
+            "event_id" => Ok(Self::EventId),
+            "related_id" => Ok(Self::RelatedId),
+            "person_id" => Ok(Self::PersonId),
             "alarm_state" => Ok(Self::AlarmState),
             "image_base64" => Ok(Self::ImageBase64),
             "image_base64_2" => Ok(Self::ImageBase642),
             "image_base64_3" => Ok(Self::ImageBase643),
             "image_base64_4" => Ok(Self::ImageBase644),
+            "image_base64_5" => Ok(Self::ImageBase645),
             "image_size" => Ok(Self::ImageSize),
             "image_size_2" => Ok(Self::ImageSize2),
             "image_size_3" => Ok(Self::ImageSize3),
             "image_size_4" => Ok(Self::ImageSize4),
+            "image_size_5" => Ok(Self::ImageSize5),
+            "image_index" => Ok(Self::ImageIndex),
+            "image_index_2" => Ok(Self::ImageIndex2),
+            "image_index_3" => Ok(Self::ImageIndex3),
+            "image_index_4" => Ok(Self::ImageIndex4),
+            "image_index_5" => Ok(Self::ImageIndex5),
             _ => Err(AlarmError::new(
                 "device_simulator.alarm.template_field_unknown",
                 format!("unknown alarm template field '{token}'"),
@@ -193,17 +238,26 @@ impl DynamicField {
     }
 }
 
-const IMAGE_BASE64_FIELDS: [DynamicField; 4] = [
+const IMAGE_BASE64_FIELDS: [DynamicField; 5] = [
     DynamicField::ImageBase64,
     DynamicField::ImageBase642,
     DynamicField::ImageBase643,
     DynamicField::ImageBase644,
+    DynamicField::ImageBase645,
 ];
-const IMAGE_SIZE_FIELDS: [DynamicField; 4] = [
+const IMAGE_SIZE_FIELDS: [DynamicField; 5] = [
     DynamicField::ImageSize,
     DynamicField::ImageSize2,
     DynamicField::ImageSize3,
     DynamicField::ImageSize4,
+    DynamicField::ImageSize5,
+];
+const IMAGE_INDEX_FIELDS: [DynamicField; 5] = [
+    DynamicField::ImageIndex,
+    DynamicField::ImageIndex2,
+    DynamicField::ImageIndex3,
+    DynamicField::ImageIndex4,
+    DynamicField::ImageIndex5,
 ];
 
 pub(crate) fn embedded_image_count(template: &CompiledTemplate) -> usize {
@@ -456,6 +510,12 @@ impl ImageCache {
         })
     }
 
+    pub fn get_by_token(&self, token: &str) -> Option<&CachedImage> {
+        self.images.iter().find_map(|(reference, image)| {
+            (image_reference_token(reference) == token).then_some(image)
+        })
+    }
+
     pub fn merged(&self, additional: Self) -> AlarmResult<Self> {
         let mut merged = self.clone();
         for (reference, image) in additional.images {
@@ -495,6 +555,8 @@ impl ImageCache {
         self.total_bytes
     }
 }
+
+pub type SharedImageCache = Arc<RwLock<ImageCache>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -551,6 +613,7 @@ pub struct ImageAttachmentDefinition {
     pub reference: ImageAssetRef,
     pub field_name: String,
     pub file_name: String,
+    pub image_index: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -716,11 +779,49 @@ impl AlarmHandlerRegistry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyAlarmValues {
+    seed: u64,
+}
+
+impl LegacyAlarmValues {
+    pub fn new(seed: u64) -> Self {
+        Self { seed }
+    }
+
+    fn bounded(&self, salt: u64, minimum: u64, maximum: u64) -> u64 {
+        debug_assert!(minimum <= maximum);
+        let mut value = self.seed ^ salt.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^= value >> 31;
+        minimum + value % (maximum - minimum + 1)
+    }
+
+    fn primary_subscription_id(&self) -> u16 {
+        self.bounded(1, 1, 1_000) as u16
+    }
+
+    fn follow_up_subscription_id(&self) -> u16 {
+        self.bounded(2, 1, 1_000) as u16
+    }
+
+    fn recovery_subscription_id(&self) -> u16 {
+        self.bounded(3, 1, 1_000) as u16
+    }
+
+    pub fn related_id(&self) -> String {
+        format!("16ID{}", self.bounded(4, 10_000_000_000, 99_999_999_999))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AlarmBuildContext {
     pub source_ip: Option<Ipv4Addr>,
     pub fields: BTreeMap<DynamicField, String>,
     pub multipart_boundary: Option<String>,
+    pub legacy_values: Option<LegacyAlarmValues>,
 }
 
 #[derive(Debug, Clone)]
@@ -733,12 +834,25 @@ pub struct HttpAlarmRequest {
     pub success_rule: ResponseSuccessRule,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlarmRequestRole {
+    Primary,
+    FollowUp,
+    Recovery,
+}
+
 pub fn build_alarm_request(
     definition: &AlarmHandlerDefinition,
     context: &AlarmBuildContext,
     image_cache: &ImageCache,
 ) -> AlarmResult<HttpAlarmRequest> {
-    build_request_with_template(definition, &definition.template, context, image_cache)
+    build_request_with_template(
+        definition,
+        &definition.template,
+        AlarmRequestRole::Primary,
+        context,
+        image_cache,
+    )
 }
 
 pub fn build_alarm_requests(
@@ -750,11 +864,12 @@ pub fn build_alarm_requests(
     requests.push(build_alarm_request(definition, context, image_cache)?);
     for follow_up in &definition.follow_up_requests {
         requests.push(build_request_from_parts(
-            definition.profile_id,
+            definition,
             &follow_up.template,
             follow_up.image_policy,
             &follow_up.images,
             &follow_up.transport,
+            AlarmRequestRole::FollowUp,
             context,
             image_cache,
         )?);
@@ -783,8 +898,14 @@ pub fn build_recovery_request(
                 recovery_definition.images.clear();
                 recovery_definition.image_policy = ImagePolicy::Forbidden;
             }
-            build_request_with_template(&recovery_definition, template, context, image_cache)
-                .map(Some)
+            build_request_with_template(
+                &recovery_definition,
+                template,
+                AlarmRequestRole::Recovery,
+                context,
+                image_cache,
+            )
+            .map(Some)
         }
     }
 }
@@ -792,16 +913,18 @@ pub fn build_recovery_request(
 fn build_request_with_template(
     definition: &AlarmHandlerDefinition,
     template: &CompiledTemplate,
+    role: AlarmRequestRole,
     context: &AlarmBuildContext,
     image_cache: &ImageCache,
 ) -> AlarmResult<HttpAlarmRequest> {
     validate_definition(definition)?;
     build_request_from_parts(
-        definition.profile_id,
+        definition,
         template,
         definition.image_policy,
         &definition.images,
         &definition.transport,
+        role,
         context,
         image_cache,
     )
@@ -809,15 +932,22 @@ fn build_request_with_template(
 
 #[allow(clippy::too_many_arguments)]
 fn build_request_from_parts(
-    profile_id: FirstReleaseProfileId,
+    definition: &AlarmHandlerDefinition,
     template: &CompiledTemplate,
     image_policy: ImagePolicy,
     images: &[ImageAttachmentDefinition],
     transport: &TransportDefinition,
+    role: AlarmRequestRole,
     context: &AlarmBuildContext,
     image_cache: &ImageCache,
 ) -> AlarmResult<HttpAlarmRequest> {
-    validate_request_definition(profile_id, template, image_policy, images, transport)?;
+    validate_request_definition(
+        definition.profile_id,
+        template,
+        image_policy,
+        images,
+        transport,
+    )?;
     let source_ip = context.source_ip.ok_or_else(|| {
         AlarmError::new(
             "device_simulator.alarm.source_ip_missing",
@@ -837,8 +967,14 @@ fn build_request_from_parts(
                 fields.insert(*field, image.bytes.len().to_string());
             }
         }
+        if let Some(field) = IMAGE_INDEX_FIELDS.get(index) {
+            if template.fields().contains(field) {
+                fields.insert(*field, image_reference_token(&attachment.reference));
+            }
+        }
     }
-    let metadata = template.render(&fields)?;
+    let metadata =
+        apply_legacy_runtime_values(definition, role, context, template.render(&fields)?)?;
     let (body, content_type) = match &transport.body_encoding {
         BodyEncoding::Raw { content_type } => (metadata, content_type.clone()),
         BodyEncoding::Multipart {
@@ -882,6 +1018,314 @@ fn build_request_from_parts(
     })
 }
 
+fn apply_legacy_runtime_values(
+    definition: &AlarmHandlerDefinition,
+    role: AlarmRequestRole,
+    context: &AlarmBuildContext,
+    metadata: Vec<u8>,
+) -> AlarmResult<Vec<u8>> {
+    let Some(values) = context.legacy_values.as_ref() else {
+        return Ok(metadata);
+    };
+    let mut document: serde_json::Value = serde_json::from_slice(&metadata).map_err(|source| {
+        AlarmError::new(
+            "device_simulator.alarm.rendered_json_invalid",
+            format!("rendered legacy alarm is not valid JSON: {source}"),
+        )
+    })?;
+
+    let fixed_reference = definition.profile_id == FirstReleaseProfileId::IpcStructured
+        || (definition.profile_id == FirstReleaseProfileId::IpcFaceAccess
+            && role == AlarmRequestRole::Primary
+            && definition.transport.path.ends_with("/PersonVerification"));
+    if !fixed_reference {
+        let subscription_id = match role {
+            AlarmRequestRole::Primary => values.primary_subscription_id(),
+            AlarmRequestRole::FollowUp => values.follow_up_subscription_id(),
+            AlarmRequestRole::Recovery => match definition.profile_id {
+                FirstReleaseProfileId::IpcSmart => values.follow_up_subscription_id(),
+                FirstReleaseProfileId::NvrCommon => values.primary_subscription_id(),
+                FirstReleaseProfileId::IpcFaceAccess => values.recovery_subscription_id(),
+                _ => values.primary_subscription_id(),
+            },
+        };
+        rewrite_reference_subscriptions(&mut document, subscription_id);
+    }
+
+    if role == AlarmRequestRole::Primary {
+        match definition.profile_id {
+            FirstReleaseProfileId::IpcSmart => match definition.alarm_type_id.as_str() {
+                "dog-detection" => {
+                    insert_json_object_field(
+                        &mut document,
+                        "EventDetail",
+                        serde_json::json!({"UnLeashed": 1}),
+                    );
+                }
+                "dog-detection-2" => {
+                    insert_json_object_field(
+                        &mut document,
+                        "EventDetail",
+                        serde_json::json!({"NotAllowed": 1}),
+                    );
+                }
+                _ => {}
+            },
+            FirstReleaseProfileId::IpcStructured => {
+                apply_structured_camera_values(
+                    &mut document,
+                    definition.alarm_type_id.as_str(),
+                    values,
+                );
+            }
+            FirstReleaseProfileId::IpcFaceAccess => {
+                apply_face_access_values(
+                    &mut document,
+                    definition.alarm_type_id.as_str(),
+                    values,
+                    context,
+                );
+            }
+            FirstReleaseProfileId::NvrVehicle => {
+                let plate = match definition.alarm_type_id.as_str() {
+                    "match" => Some(format!("赣B{}BL", values.bounded(30, 100, 999))),
+                    "nomatch" => Some(format!("赣A{}U8", values.bounded(31, 100, 999))),
+                    _ => None,
+                };
+                if let Some(plate) = plate {
+                    set_json_pointer(
+                        &mut document,
+                        "/VehicleEventInfo/VehicleInfoList/0/PlateAttr/Plate",
+                        serde_json::Value::String(plate),
+                    );
+                }
+            }
+            FirstReleaseProfileId::IpcCustom | FirstReleaseProfileId::NvrCommon => {}
+        }
+    }
+
+    serde_json::to_vec(&document).map_err(|source| {
+        AlarmError::new(
+            "device_simulator.alarm.rendered_json_serialize_failed",
+            format!("rendered legacy alarm could not be serialized: {source}"),
+        )
+    })
+}
+
+fn rewrite_reference_subscriptions(document: &mut serde_json::Value, subscription_id: u16) {
+    match document {
+        serde_json::Value::Object(map) => {
+            if let Some(reference) = map.get_mut("Reference") {
+                if let Some(current) = reference.as_str() {
+                    if let Some((prefix, _)) = current.rsplit_once("/Subscribers/") {
+                        *reference = serde_json::Value::String(format!(
+                            "{prefix}/Subscribers/{subscription_id}"
+                        ));
+                    }
+                }
+            }
+            for value in map.values_mut() {
+                rewrite_reference_subscriptions(value, subscription_id);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rewrite_reference_subscriptions(item, subscription_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_structured_camera_values(
+    document: &mut serde_json::Value,
+    alarm_type_id: &str,
+    values: &LegacyAlarmValues,
+) {
+    match alarm_type_id {
+        "person" => {
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/Gender",
+                values.bounded(10, 0, 2),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/AgeRange",
+                values.bounded(11, 0, 6),
+            );
+        }
+        "face" => {
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/FaceInfoList/0/AttributeInfo/Gender",
+                values.bounded(12, 0, 2),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/FaceInfoList/0/AttributeInfo/AgeRange",
+                values.bounded(13, 0, 6),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/FaceInfoList/0/AttributeInfo/GlassFlag",
+                values.bounded(14, 0, 3),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/Gender",
+                values.bounded(15, 0, 2),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/AgeRange",
+                values.bounded(16, 0, 5),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/SleevesLength",
+                values.bounded(17, 0, 3),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/HairLength",
+                values.bounded(18, 0, 3),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/BagFlag",
+                values.bounded(19, 0, 3),
+            );
+        }
+        "car" => {
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/VehicleInfoList/0/VehicleAttributeInfo/SpeedType",
+                values.bounded(20, 0, 5),
+            );
+            set_json_pointer(
+                document,
+                "/StructureInfo/ObjInfo/VehicleInfoList/0/PlateAttributeInfo/PlateNo",
+                serde_json::Value::String(format!("UV{}", values.bounded(21, 100, 999))),
+            );
+        }
+        "nonmotor" => {
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/NonMotorVehicleInfoList/0/AttributeInfo/SpeedType",
+                values.bounded(22, 0, 5),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/NonMotorVehicleInfoList/0/AttributeInfo/ImageDirection",
+                values.bounded(23, 0, 10),
+            );
+            set_number(
+                document,
+                "/StructureInfo/ObjInfo/NonMotorVehicleInfoList/0/AttributeInfo/NonVehicleType",
+                values.bounded(24, 0, 6),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn apply_face_access_values(
+    document: &mut serde_json::Value,
+    alarm_type_id: &str,
+    values: &LegacyAlarmValues,
+    context: &AlarmBuildContext,
+) {
+    if !matches!(alarm_type_id, "inlib" | "notinlib") {
+        return;
+    }
+    let temperature_tenths = values.bounded(40, 300, 450);
+    set_json_pointer(
+        document,
+        "/FaceInfoList/0/Temperature",
+        serde_json::Value::String(format!(
+            "{}.{:01}",
+            temperature_tenths / 10,
+            temperature_tenths % 10
+        )),
+    );
+    set_number(
+        document,
+        "/FaceInfoList/0/MaskFlag",
+        values.bounded(41, 0, 2),
+    );
+    let timestamp = context
+        .fields
+        .get(&DynamicField::Timestamp)
+        .and_then(|value| value.split('.').next())
+        .unwrap_or("0");
+    let nonce = values.bounded(42, 1, 30_000);
+    if alarm_type_id == "inlib" {
+        set_json_pointer(
+            document,
+            "/FaceInfoList/0/PanoImage/Name",
+            serde_json::Value::String(format!("{timestamp}_1_{nonce}.jpg")),
+        );
+        set_json_pointer(
+            document,
+            "/FaceInfoList/0/FaceImage/Name",
+            serde_json::Value::String(format!("{timestamp}_2_{nonce}.jpg")),
+        );
+    } else {
+        set_json_pointer(
+            document,
+            "/FaceInfoList/0/FaceImage/Name",
+            serde_json::Value::String(format!("{timestamp}_1_{nonce}.jpg")),
+        );
+    }
+}
+
+fn set_number(document: &mut serde_json::Value, pointer: &str, value: u64) {
+    set_json_pointer(document, pointer, serde_json::Value::from(value));
+}
+
+fn set_json_pointer(document: &mut serde_json::Value, pointer: &str, value: serde_json::Value) {
+    if let Some(slot) = document.pointer_mut(pointer) {
+        *slot = value;
+    }
+}
+
+fn insert_json_object_field(document: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+    if let Some(object) = document.as_object_mut() {
+        object.insert(key.to_owned(), value);
+    }
+}
+
+pub(crate) fn image_reference_token(reference: &ImageAssetRef) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"file-sync-tool/device-simulator/picture/v1\0");
+    match reference {
+        ImageAssetRef::Pack {
+            pack_id,
+            version,
+            path,
+        } => {
+            hasher.update(b"pack\0");
+            hasher.update(pack_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(version.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(path.as_bytes());
+        }
+        ImageAssetRef::UserAsset {
+            image_id,
+            extension,
+            ..
+        } => {
+            hasher.update(b"user\0");
+            hasher.update(image_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(extension.as_str().as_bytes());
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 fn build_multipart_body(
     boundary: &str,
     metadata_name: &str,
@@ -898,6 +1342,7 @@ fn build_multipart_body(
         boundary,
         metadata_name,
         None,
+        None,
         metadata_content_type,
     );
     body.extend_from_slice(metadata);
@@ -911,6 +1356,7 @@ fn build_multipart_body(
             boundary,
             &attachment.field_name,
             Some(&attachment.file_name),
+            attachment.image_index,
             image.content_type,
         );
         body.extend_from_slice(&image.bytes);
@@ -925,10 +1371,14 @@ fn append_part_prefix(
     boundary: &str,
     name: &str,
     file_name: Option<&str>,
+    image_index: Option<u16>,
     content_type: &str,
 ) {
     output.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     output.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"").as_bytes());
+    if let Some(image_index) = image_index {
+        output.extend_from_slice(format!("; imageindex={image_index}").as_bytes());
+    }
     if let Some(file_name) = file_name {
         output.extend_from_slice(format!("; filename=\"{file_name}\"").as_bytes());
     }
@@ -1036,6 +1486,12 @@ fn validate_request_definition(
     for image in images {
         validate_multipart_token(&image.field_name, "image field name")?;
         validate_file_name(&image.file_name)?;
+        if image.image_index == Some(0) {
+            return Err(AlarmError::new(
+                "device_simulator.alarm.multipart_image_index_invalid",
+                "multipart image indexes are one-based",
+            ));
+        }
     }
     let embedded_images = embedded_image_count(template);
     match &transport.body_encoding {
@@ -1080,6 +1536,8 @@ pub fn synthetic_unverified_first_release_registry() -> AlarmResult<AlarmHandler
     for handler_id in [
         AlarmHandlerId::CustomV1,
         AlarmHandlerId::SmartV1,
+        AlarmHandlerId::StructuredV1,
+        AlarmHandlerId::FaceAccessV1,
         AlarmHandlerId::NvrCommonV1,
         AlarmHandlerId::NvrVehicleV1,
     ] {
@@ -1118,7 +1576,7 @@ pub fn synthetic_unverified_first_release_registry() -> AlarmResult<AlarmHandler
                     .collect(),
                 template_source: "synthetic fixture; real template pending evidence gate".into(),
                 fixture_provenance: FixtureProvenance::SyntheticUnverified,
-                platforms: [TargetPlatform::Vms, TargetPlatform::Ums]
+                platforms: [TargetPlatform::Ums]
                     .into_iter()
                     .map(|platform| PlatformEvidence {
                         platform,
@@ -1147,6 +1605,18 @@ fn legacy_alarm_sources(profile_id: FirstReleaseProfileId) -> Vec<&'static str> 
             "script/SmartAlarm.py",
             "object/SmartStruct/",
             "pic/SMART/",
+        ],
+        FirstReleaseProfileId::IpcStructured => vec![
+            "data/alarms_info.yml",
+            "script/StructureAlarm.py",
+            "object/StructStruct/",
+            "pic/STRUCT/",
+        ],
+        FirstReleaseProfileId::IpcFaceAccess => vec![
+            "data/alarms_info.yml",
+            "script/ACSAlarm.py",
+            "object/ACSStruct/",
+            "pic/ACS/",
         ],
         FirstReleaseProfileId::NvrCommon => vec![
             "data/alarms_info.yml",
@@ -1374,7 +1844,7 @@ mod tests {
             template_source: "synthetic fixture, not a golden fixture".into(),
             fixture_provenance: FixtureProvenance::SyntheticUnverified,
             platforms: vec![PlatformEvidence {
-                platform: TargetPlatform::Vms,
+                platform: TargetPlatform::Ums,
                 verification: PlatformVerification::SourceConfirmedPlatformUnverified,
             }],
             intentional_changes: vec![],
@@ -1385,6 +1855,8 @@ mod tests {
         let handler_id = match profile_id {
             FirstReleaseProfileId::IpcCustom => AlarmHandlerId::CustomV1,
             FirstReleaseProfileId::IpcSmart => AlarmHandlerId::SmartV1,
+            FirstReleaseProfileId::IpcStructured => AlarmHandlerId::StructuredV1,
+            FirstReleaseProfileId::IpcFaceAccess => AlarmHandlerId::FaceAccessV1,
             FirstReleaseProfileId::NvrCommon => AlarmHandlerId::NvrCommonV1,
             FirstReleaseProfileId::NvrVehicle => AlarmHandlerId::NvrVehicleV1,
         };
@@ -1625,6 +2097,7 @@ mod tests {
                 (DynamicField::Timestamp, "2026-07-18T12:00:00+08:00".into()),
             ]),
             multipart_boundary: None,
+            legacy_values: None,
         };
         let request = build_alarm_request(&definition, &context, &ImageCache::default()).unwrap();
         assert_eq!(request.method, HttpMethod::Post);
@@ -1653,6 +2126,7 @@ mod tests {
             reference,
             field_name: "snapshot".into(),
             file_name: "alarm.jpg".into(),
+            image_index: Some(1),
         });
         definition.transport.body_encoding = BodyEncoding::Multipart {
             metadata_name: "metadata".into(),
@@ -1665,6 +2139,7 @@ mod tests {
                 (DynamicField::Timestamp, "fixed-time".into()),
             ]),
             multipart_boundary: Some("fixture-boundary".into()),
+            legacy_values: None,
         };
         let request = build_alarm_request(&definition, &context, &cache).unwrap();
         let body = &*request.body;
@@ -1672,6 +2147,8 @@ mod tests {
         assert!(body
             .windows(image_bytes.len())
             .any(|window| window == image_bytes));
+        assert!(String::from_utf8_lossy(body)
+            .contains("name=\"snapshot\"; imageindex=1; filename=\"alarm.jpg\""));
         assert!(body.ends_with(b"--fixture-boundary--\r\n"));
         assert_eq!(
             request.headers["Content-Type"],
@@ -1686,6 +2163,7 @@ mod tests {
             source_ip: Some(Ipv4Addr::LOCALHOST),
             fields: BTreeMap::new(),
             multipart_boundary: None,
+            legacy_values: None,
         };
         assert_eq!(
             build_alarm_request(&definition, &context, &ImageCache::default())
@@ -1719,6 +2197,7 @@ mod tests {
                 (DynamicField::AlarmState, "recovered".into()),
             ]),
             multipart_boundary: None,
+            legacy_values: None,
         };
         assert!(
             build_recovery_request(&definition, &context, &ImageCache::default())
@@ -1738,17 +2217,14 @@ mod tests {
     }
 
     #[test]
-    fn first_release_scaffolds_are_explicitly_unverified_for_vms_and_ums() {
+    fn first_release_scaffolds_are_explicitly_unverified_for_ums() {
         let registry = synthetic_unverified_first_release_registry().unwrap();
-        assert_eq!(registry.len(), 4);
+        assert_eq!(registry.len(), 6);
         for definition in registry.definitions() {
             assert_eq!(
                 definition.evidence.fixture_provenance,
                 FixtureProvenance::SyntheticUnverified
             );
-            assert!(!definition
-                .evidence
-                .is_platform_verified(TargetPlatform::Vms));
             assert!(!definition
                 .evidence
                 .is_platform_verified(TargetPlatform::Ums));

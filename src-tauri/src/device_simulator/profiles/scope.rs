@@ -13,11 +13,10 @@ pub const MAX_NVR_CHANNEL_COUNT: u16 = 128;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TargetPlatform {
-    Vms,
     Ums,
 }
 
-pub const FIRST_RELEASE_PLATFORMS: [TargetPlatform; 2] = [TargetPlatform::Vms, TargetPlatform::Ums];
+pub const FIRST_RELEASE_PLATFORMS: [TargetPlatform; 1] = [TargetPlatform::Ums];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FirstReleaseProfileId {
@@ -25,6 +24,10 @@ pub enum FirstReleaseProfileId {
     IpcCustom,
     #[serde(rename = "ipc-smart")]
     IpcSmart,
+    #[serde(rename = "ipc-structured")]
+    IpcStructured,
+    #[serde(rename = "ipc-face-access")]
+    IpcFaceAccess,
     #[serde(rename = "nvr-common")]
     NvrCommon,
     #[serde(rename = "nvr-vehicle")]
@@ -36,6 +39,8 @@ impl FirstReleaseProfileId {
         match self {
             Self::IpcCustom => "ipc-custom",
             Self::IpcSmart => "ipc-smart",
+            Self::IpcStructured => "ipc-structured",
+            Self::IpcFaceAccess => "ipc-face-access",
             Self::NvrCommon => "nvr-common",
             Self::NvrVehicle => "nvr-vehicle",
         }
@@ -45,6 +50,8 @@ impl FirstReleaseProfileId {
         match self {
             Self::IpcCustom => "自定义报警相机",
             Self::IpcSmart => "智能相机",
+            Self::IpcStructured => "结构化相机",
+            Self::IpcFaceAccess => "人脸门禁相机",
             Self::NvrCommon => "普通NVR",
             Self::NvrVehicle => "车辆识别NVR",
         }
@@ -52,15 +59,19 @@ impl FirstReleaseProfileId {
 
     pub const fn device_kind(self) -> DeviceKind {
         match self {
-            Self::IpcCustom | Self::IpcSmart => DeviceKind::Ipc,
+            Self::IpcCustom | Self::IpcSmart | Self::IpcStructured | Self::IpcFaceAccess => {
+                DeviceKind::Ipc
+            }
             Self::NvrCommon | Self::NvrVehicle => DeviceKind::Nvr,
         }
     }
 }
 
-pub const FIRST_RELEASE_PROFILES: [FirstReleaseProfileId; 4] = [
+pub const FIRST_RELEASE_PROFILES: [FirstReleaseProfileId; 6] = [
     FirstReleaseProfileId::IpcCustom,
     FirstReleaseProfileId::IpcSmart,
+    FirstReleaseProfileId::IpcStructured,
+    FirstReleaseProfileId::IpcFaceAccess,
     FirstReleaseProfileId::NvrCommon,
     FirstReleaseProfileId::NvrVehicle,
 ];
@@ -105,7 +116,7 @@ pub struct FirstReleaseProtocolPolicy {
     pub audio: AudioPolicy,
 }
 
-/// Approved compatibility baseline for all four first-release profiles.
+/// Approved compatibility baseline for all six first-release profiles.
 /// Profile packs may narrow capabilities but may not silently expand them.
 pub const FIRST_RELEASE_PROTOCOL_POLICY: FirstReleaseProtocolPolicy = FirstReleaseProtocolPolicy {
     device_authentication: DeviceAuthenticationPolicy::None,
@@ -130,14 +141,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn first_release_scope_is_vms_ums_and_four_independent_profiles() {
-        assert_eq!(
-            FIRST_RELEASE_PLATFORMS,
-            [TargetPlatform::Vms, TargetPlatform::Ums]
-        );
+    fn first_release_scope_is_ums_only_and_six_independent_profiles() {
+        assert_eq!(FIRST_RELEASE_PLATFORMS, [TargetPlatform::Ums]);
         assert_eq!(
             FIRST_RELEASE_PROFILES.map(FirstReleaseProfileId::as_str),
-            ["ipc-custom", "ipc-smart", "nvr-common", "nvr-vehicle"]
+            [
+                "ipc-custom",
+                "ipc-smart",
+                "ipc-structured",
+                "ipc-face-access",
+                "nvr-common",
+                "nvr-vehicle"
+            ]
         );
         assert_eq!(
             FirstReleaseProfileId::IpcSmart.legacy_device_type(),
@@ -160,8 +175,8 @@ mod tests {
             "\"ipc-smart\""
         );
         assert_eq!(
-            serde_json::to_string(&TargetPlatform::Vms).unwrap(),
-            "\"vms\""
+            serde_json::to_string(&TargetPlatform::Ums).unwrap(),
+            "\"ums\""
         );
     }
 

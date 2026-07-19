@@ -8,6 +8,7 @@ export type SidebarIconKey =
   | 'remotePackagePatch'
   | 'codeStatistics'
   | 'networkTools'
+  | 'displayControl'
   | 'screenShare'
   | 'videoDeviceSimulator'
   | 'fileShare'
@@ -99,6 +100,13 @@ export const SIDEBAR_NAV_SECTIONS = [
         labelKey: 'sidebar.networkTools',
         path: '/tools/network',
         iconKey: 'networkTools',
+        matchMode: 'prefix',
+      },
+      {
+        key: 'display-control',
+        labelKey: 'sidebar.displayControl',
+        path: '/tools/display-control',
+        iconKey: 'displayControl',
         matchMode: 'prefix',
       },
       {

@@ -347,12 +347,14 @@ mod tests {
             return;
         };
         let root = PathBuf::from(root);
-        let version = std::env::var("FST_APPROVED_PACK_VERSION").unwrap_or_else(|_| "1.0.2".into());
+        let version = std::env::var("FST_APPROVED_PACK_VERSION").unwrap_or_else(|_| "1.0.3".into());
         let pins = [
             "protocol-core",
             "media-h264-live",
             "ipc-custom",
             "ipc-smart",
+            "ipc-structured",
+            "ipc-face-access",
             "nvr-common",
             "nvr-vehicle",
         ]
@@ -363,10 +365,34 @@ mod tests {
             directory: root.join(id).join(&version),
         })
         .collect::<Vec<_>>();
-        let profiles = ["ipc-custom", "ipc-smart", "nvr-common", "nvr-vehicle"].map(str::to_owned);
+        let profiles = [
+            "ipc-custom",
+            "ipc-smart",
+            "ipc-structured",
+            "ipc-face-access",
+            "nvr-common",
+            "nvr-vehicle",
+        ]
+        .map(str::to_owned);
         let layout = RuntimeAssetLayout::load(&pins, &profiles).unwrap();
         let smart = layout.profile(FirstReleaseProfileId::IpcSmart).unwrap();
         assert_eq!(smart.identity.model, "IPC3615SB-ADF28KM-I0");
+        assert_eq!(
+            layout
+                .profile(FirstReleaseProfileId::IpcStructured)
+                .unwrap()
+                .identity
+                .model,
+            "HIC6881-IR@X38-L-WSGB-VC"
+        );
+        assert_eq!(
+            layout
+                .profile(FirstReleaseProfileId::IpcFaceAccess)
+                .unwrap()
+                .identity
+                .model,
+            "ET-S51H@B"
+        );
         assert!(!layout.media(RuntimeMediaKind::Main).frames().is_empty());
         assert!(!layout.media(RuntimeMediaKind::Third).frames().is_empty());
     }

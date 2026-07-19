@@ -2,7 +2,9 @@
 
 > 依据：`docs/superpowers/specs/2026-07-18-video-device-simulator-design.md`
 >
-> 状态：应用 `1.2.2` 与正式签名素材 Pack `1.0.2` 的本地可实现、可自动验证范围已完成；旧项目智能/车辆复合告警流程已按静态源码补齐，仅保留隔离 Windows VM 和真实 VMS/UMS 验收项。
+> 状态：应用版本固定为 `1.2.0`；正式签名素材 Pack `1.0.3` 的 UMS-only 六类 Profile 本地可实现、可自动验证范围已完成，仅保留隔离 Windows VM 和真实 UMS 验收项。
+>
+> 维护说明：本文后续仍出现的 VMS、四类 Profile、`1.2.1/1.2.2` 或 Pack `1.0.2` 内容是实施过程的历史记录，已由 `docs/superpowers/reviews/2026-07-19-video-device-simulator-ums-parity-review.md` 的当前结论取代。
 
 ## 目标
 
@@ -48,21 +50,21 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 
 | 状态 | 范围 | 当前处理 |
 | --- | --- | --- |
-| `LOCAL_COMPLETE` | Schema、正式签名素材发布工具与 `1.0.2` 六个不可变 Pack、AssetStore、Worker 协议与 Manager、会话 journal/recovery、稳定网卡标识、原生 IP/防火墙后端、身份预览、发现/HTTP/RTSP/RTP/告警运行时、内容寻址用户图片、Tauri/配置/UI/退出保护 | 已实现并由本地自动化与正式素材运行时门禁覆盖；不以此宣称厂商平台兼容 |
+| `LOCAL_COMPLETE` | Schema、正式签名素材发布工具与 `1.0.3` 八个不可变 Pack（六个 Profile + protocol-core + media）、AssetStore、Worker 协议与 Manager、会话 journal/recovery、稳定网卡标识、原生 IP/防火墙后端、身份预览、发现/HTTP/RTSP/RTP/114 类告警运行时、内容寻址用户图片、Tauri/配置/UI/退出保护 | 已实现并由本地自动化与正式素材运行时门禁覆盖；不以此宣称真实 UMS 已兼容 |
 | `EXTERNAL_VM_REQUIRED` | UAC、真实次要 IP 与防火墙创建/删除、部分失败回滚、主进程/Worker 崩溃、断电恢复、主 IP/DHCP/网关/DNS 不变 | 只能在隔离 Windows VM 执行，当前主机只做原生 API 编译与只读枚举验证 |
-| `REAL_PLATFORM_REQUIRED` | VMS/UMS 发现、添加/在线、keepalive、HTTP/LAPI/ONVIF、RTSP 录像/检索/回放、告警/图片/恢复及 10/100/500 规模 | 必须由真实平台反馈关闭；所有未测组合继续显示“未验证” |
+| `REAL_PLATFORM_REQUIRED` | UMS 发现、添加/在线、keepalive、HTTP/LAPI/ONVIF、RTSP 录像/检索/回放、六类告警/图片/恢复及 10/100/500 规模 | 必须由真实 UMS 反馈关闭；所有未测组合继续显示“未验证” |
 | `LEGACY_PARITY_BOUNDARY` | NVR 配置通道数进入 HTTP/ONVIF 元数据，RTSP 保持旧项目仅 c1 三码流 | c2～cN 独立 RTSP 在旧项目中不存在，属于未来新增能力，不再列为本次迁移缺口 |
 
 ---
 
 ## Phase 1：协议事实审计与审查门
 
-### Task 1：建立四类 Profile 来源矩阵
+### Task 1：建立六类 Profile 来源矩阵
 
 **产物**
 
 - `docs/superpowers/specs/2026-07-18-video-device-simulator-evidence-matrix.md`
-- `ipc-custom`、`ipc-smart`、`nvr-common`、`nvr-vehicle` 的源码、配置、模板、图片和媒体证据索引。
+- `ipc-custom`、`ipc-smart`、`ipc-structured`、`ipc-face-access`、`nvr-common`、`nvr-vehicle` 的源码、配置、模板、图片和媒体证据索引。
 
 **步骤**
 
@@ -82,7 +84,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 
 **依赖**：Task 1
 
-- [x] 确认首版目标平台和四类 profile 范围。
+- [x] 确认当前目标平台仅为 UMS，并冻结六类 profile 范围。
 - [x] 确认 NVR 默认/最大通道数、鉴权、RTSP transport/码流/音频范围。
 - [x] 确认 catalog 信任模型、防火墙自动管理、素材服务器认证、自定义图片范围。
 - [x] 记录首版性能验收硬件和 RTSP 并发目标。
@@ -118,7 +120,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 - [x] 实现“先上传 ZIP，验证可访问，最后原子替换 catalog”的发布流程。
 - [x] 扩展 `scripts/release-server/README.md`，明确开发服务器与生产静态服务器边界。
 - [x] 增加生成结果的可重复性和篡改失败测试。
-- [x] 生成并本地发布 `ipc-custom`、`ipc-smart`、`nvr-common`、`nvr-vehicle`、`protocol-core`、`media-h264-live` 六个 `1.0.2` 不可变 Pack；catalog 使用 `device-assets-static-review-2026` 离线 Ed25519 签名，`min_app_version=1.2.1`。
+- [x] 生成并本地发布六个 Profile Pack、`protocol-core`、`media-h264-live` 共八个 `1.0.3` 不可变 Pack；catalog 使用 `device-assets-static-review-2026` 离线 Ed25519 签名，`min_app_version=1.2.0`。
 
 ### Task 5：实现 AssetStore 下载、安装、缓存与回滚
 
@@ -213,7 +215,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 - [x] 每个虚拟 `IP:HTTP端口` 独立异步监听，不默认绑定 `0.0.0.0`。
 - [x] 使用公共路由 + profile 路由表 + 少量强类型 handler。
 - [x] 模板变量白名单、编码、路径和大小在会话启动前完成校验/编译。
-- [x] 为四个迁移 profile 建立来自旧模板/源码的正式静态 fixtures，并通过签名 Pack 加载与 loopback HTTP/RTSP 集成门禁。
+- [x] 为六个迁移 profile 建立来自旧模板/源码的正式静态 fixtures，并通过签名 Pack 加载与 loopback HTTP/RTSP 集成门禁。
 - [x] 记录解析/发送失败指标并限频日志，不使用宽泛静默异常。
 
 ---
@@ -224,7 +226,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 
 **依赖**：Task 1、Task 3、Task 4
 
-- [x] 从批准的三路 PCAP 提取 H.264 codec、clock、payload、参数集、帧边界、关键帧和建议码率，生成正式 `media-h264-live@1.0.2`。
+- [x] 从批准的三路 PCAP 提取 H.264 codec、clock、payload、参数集、帧边界、关键帧和建议码率，生成正式 `media-h264-live@1.0.3`。
 - [x] 在媒体 manifest 中记录 PCAP/SDP/control-path 差异和已批准选择；运行时拒绝未解决差异，不自行修正。
 - [x] 运行时加载一次并共享不可变帧/NAL 缓冲。
 - [x] 拒绝无关键参数、越界索引、异常码率和过大素材。
@@ -248,7 +250,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 
 **依赖**：Task 2、Task 3、Task 10；必须使用 Task 1 的已批准证据
 
-- [x] 四类 profile 的正式 `alarm-types.json` 已绑定强类型 handler、模板、图片、动态字段、传输和恢复定义，并由运行时 registry 门禁加载。
+- [x] 六类 profile 的正式 `alarm-types.json` 已绑定强类型 handler、模板、图片、动态字段、传输和恢复定义；UMS 告警数依次为 2、71、4、9、25、3，共 114 类，并由运行时 registry 门禁加载。
 - [x] 静态核实并实现 method、URL、源 IP、Content-Type、boundary 和时间戳；真实平台成功判定继续只计 `unverified`，保留 `REAL_PLATFORM_REQUIRED`。
 - [x] 图片在任务开始时校验并共享，不在每次发送时读盘。
 - [x] 普通 NVR 不增加旧业务不存在的带图告警。
@@ -296,7 +298,7 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 - `src/pages/ToolsHubPage.vue`
 - `src/locales/messages.ts`
 
-- [x] 素材 Banner：检查、下载、取消、重试、错误分类和空间信息；正式 `1.0.2` 签名 catalog/Pack 已生成并通过本地下载、验证、缓存和离线门禁。
+- [x] 素材 Banner：检查、下载、取消、重试、错误分类和空间信息；正式 `1.0.3` 签名 catalog/Pack 已生成并通过本地下载、验证、缓存和离线门禁。
 - [x] 配置：平台/服务器、网卡/IP/端口、可增删设备组。
 - [x] 结构化预检和设备身份预览；错误与可忽略 warning 明确区分。
 - [x] 运行状态、阶段、在线数、RTSP 客户端/码率、流地址复制/导出。
@@ -322,18 +324,18 @@ Phase 2 和 Phase 3 的纯基础设施可在审查结论明确后部分并行；
 
 ### Task 19：自动化与隔离 Windows 验证
 
-- [x] Rust 单元、静态 golden 与集成测试全部通过：正式 `1.0.2` Pack 门禁启用时 `cargo test` 为 app_lib 192 项、app 437 项，0 失败。
+- [x] Rust 单元、静态 golden 与集成测试全部通过：正式 `1.0.3` Pack 门禁启用时 `cargo test` 为 app_lib 195 项、app 437 项，0 失败。
 - [ ] Windows VM 验证 UAC、IP、防火墙、主进程/Worker 崩溃和断电恢复。
 - [x] 验证停止后 HTTP/RTSP 端口可立即复用（本地 loopback 自动化测试）。
 - [x] 前端相关测试、`pnpm check`、`pnpm lint`、`git diff --check` 通过。
 
 ### Task 20：真实平台与规模验收
 
-- [ ] 按 profile/平台分别记录发现、添加、在线、信息、流、告警、图片和恢复。
+- [ ] 按六个 profile 分别记录真实 UMS 的发现、添加、在线、信息、流、告警、图片和恢复。
 - [ ] 平台连续录像、检索、回放、拖动和断流重连通过；VLC 仅作为辅助测试。
 - [ ] 在记录硬件/网卡/码率/并发条件下完成 10/100/500 台档位。
 - [x] 未实测组合显示“未验证”，不宣称支持。
-- [x] 确认 EXE 不含旧项目素材、旧 Python 工具或私钥（`file-sync-tool-1.2.2-202607191002.exe`，SHA-256 `46b065e35be9b26d6ab927467df7eb24fe5dff5828c6a455725ac649b1371aca`；369 个正式素材样本、3 种私钥表示和 26 个旧工具/路径标记均无命中；bundle 资源仅含既有 `restore-win-v.ps1`）。
+- [x] 构建并核验 `file-sync-tool-1.2.0-202607191326.exe`；SHA-256 为 `6b52906146ed88ce0ff1c0270bddc3f4f4d7722193c1a8aa6dbbead819a19d51`，manifest 已同步；EXE 未发现旧 Python/PCAP/图片路径或外部签名私钥载荷（通用 libssh2/OpenSSL 密钥解析器字符串除外）。
 
 ## 每阶段交付检查
 

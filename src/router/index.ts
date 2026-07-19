@@ -86,6 +86,10 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../pages/NetworkToolsPage.vue'),
   },
   {
+    path: '/tools/display-control',
+    component: () => import('../pages/DisplayControlPage.vue'),
+  },
+  {
     path: '/tools/screen-share',
     component: () => import('../pages/ScreenSharePage.vue'),
   },

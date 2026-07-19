@@ -608,7 +608,10 @@ pub fn encode_http_response(response: &HttpResponse) -> Result<Vec<u8>, HttpErro
             "HTTP response exceeds the supported limit",
         ));
     }
-    if !matches!(response.status, 200 | 400 | 404 | 405 | 413 | 415 | 500) {
+    if !matches!(
+        response.status,
+        200 | 400 | 404 | 405 | 413 | 415 | 500 | 599
+    ) {
         return Err(error(
             "device_simulator.http.status_invalid",
             format!(
@@ -631,6 +634,7 @@ pub fn encode_http_response(response: &HttpResponse) -> Result<Vec<u8>, HttpErro
         413 => "Content Too Large",
         415 => "Unsupported Media Type",
         500 => "Internal Server Error",
+        599 => "OK",
         _ => unreachable!(),
     };
     let header = format!(
@@ -918,7 +922,7 @@ mod tests {
         RouteSpec {
             id: id.into(),
             profiles,
-            platforms: vec![TargetPlatform::Vms, TargetPlatform::Ums],
+            platforms: vec![TargetPlatform::Ums],
             matcher: RouteMatcher {
                 method: HttpMethod::Post,
                 path: "/onvif/device_service".into(),
@@ -986,7 +990,7 @@ mod tests {
         let router = CompiledHttpRouter::compile(
             "192.0.2.2".parse().unwrap(),
             FirstReleaseProfileId::IpcSmart,
-            TargetPlatform::Vms,
+            TargetPlatform::Ums,
             vec![common, profile],
             BTreeMap::from([("common.device_info".into(), template())]),
         )
@@ -1057,7 +1061,7 @@ mod tests {
             CompiledHttpRouter::compile(
                 "192.0.2.2".parse().unwrap(),
                 FirstReleaseProfileId::IpcSmart,
-                TargetPlatform::Vms,
+                TargetPlatform::Ums,
                 vec![route("common.device_info", vec![])],
                 BTreeMap::new(),
             )
@@ -1070,7 +1074,7 @@ mod tests {
             CompiledHttpRouter::compile(
                 "192.0.2.2".parse().unwrap(),
                 FirstReleaseProfileId::IpcSmart,
-                TargetPlatform::Vms,
+                TargetPlatform::Ums,
                 routes,
                 BTreeMap::from([("common.device_info".into(), template())]),
             )
@@ -1090,6 +1094,13 @@ mod tests {
         .unwrap();
         assert!(encoded.starts_with(b"HTTP/1.1 200 OK\r\n"));
         assert!(encoded.ends_with(b"\r\n\r\n{}"));
+        let proprietary = encode_http_response(&HttpResponse {
+            status: 599,
+            content_type: "application/json".into(),
+            body: b"{}".to_vec(),
+        })
+        .unwrap();
+        assert!(proprietary.starts_with(b"HTTP/1.1 599 OK\r\n"));
         assert_eq!(
             encode_http_response(&HttpResponse {
                 status: 200,

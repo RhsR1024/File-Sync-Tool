@@ -106,7 +106,7 @@ mod tests {
                 nickname: "STATIC".into(),
                 device_type_enum: matches!(id.device_kind(), DeviceKind::Nvr) as u16,
             },
-            supported_platforms: vec![TargetPlatform::Vms, TargetPlatform::Ums],
+            supported_platforms: vec![TargetPlatform::Ums],
             handlers: ProfileHandlerBindings {
                 identity: "legacy.identity.v1".into(),
                 discovery: match id.device_kind() {
@@ -142,7 +142,7 @@ mod tests {
         let profiles = FIRST_RELEASE_PROFILES.map(profile).into_iter().collect();
         let registry = ProfileRegistry::from_profiles(profiles).unwrap();
         registry.validate_first_release_coverage().unwrap();
-        assert_eq!(registry.list().count(), 4);
+        assert_eq!(registry.list().count(), 6);
         assert!(registry.get("ipc-smart").is_some());
     }
 

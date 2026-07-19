@@ -1,24 +1,10 @@
 {
-  "latest": "1.2.2",
+  "latest": "1.2.0",
   "versions": [
     {
-      "version": "1.2.2",
-      "url": "file-sync-tool-1.2.2-202607191002.exe",
-      "sha256": "46b065e35be9b26d6ab927467df7eb24fe5dff5828c6a455725ac649b1371aca",
-      "released_at": "2026-07-19",
-      "changelog": []
-    },
-    {
-      "version": "1.2.1",
-      "url": "file-sync-tool-1.2.1-202607190838.exe",
-      "sha256": "041b52b537a2d19ffda68438e787d4b842b02f46640c44e9396bc0d710f0bf6a",
-      "released_at": "2026-07-19",
-      "changelog": []
-    },
-    {
       "version": "1.2.0",
-      "url": "file-sync-tool-1.2.0-202607190205.exe",
-      "sha256": "c05ecc3c25ec8977c9a02ae4bfae355e7d0d5d70a37bcdbbebc5a30f513e2be4",
+      "url": "file-sync-tool-1.2.0-202607191326.exe",
+      "sha256": "6b52906146ed88ce0ff1c0270bddc3f4f4d7722193c1a8aa6dbbead819a19d51",
       "released_at": "2026-07-19",
       "changelog": [
         "新增视频设备模拟器首版本地基础设施与完整页面，覆盖签名素材链、Worker/恢复、Windows 原生资源后端、HTTP/RTSP/RTP/告警通用引擎，并对未发布素材和未验证平台组合保持 fail-closed。",

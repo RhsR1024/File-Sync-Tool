@@ -285,7 +285,7 @@ mod tests {
                 nickname: "SMART".into(),
                 device_type_enum: 0,
             },
-            supported_platforms: vec![TargetPlatform::Vms, TargetPlatform::Ums],
+            supported_platforms: vec![TargetPlatform::Ums],
             handlers: ProfileHandlerBindings {
                 identity: "legacy.identity.v1".into(),
                 discovery: "ws_discovery.ipc.v1".into(),
@@ -345,7 +345,7 @@ mod tests {
             validate_profile(&candidate).unwrap_err().code,
             "device_simulator.validation.profile_verification_missing"
         );
-        candidate.evidence[0].verified_platforms = vec![TargetPlatform::Vms];
+        candidate.evidence[0].verified_platforms = vec![TargetPlatform::Ums];
         assert!(validate_profile(&candidate).is_ok());
     }
 }

@@ -5,10 +5,16 @@ use std::path::{Path, PathBuf};
 const MAX_PROFILE_BYTES: u64 = 1024 * 1024;
 
 const KNOWN_IDENTITY_HANDLERS: &[&str] = &["legacy.identity.v1"];
-const KNOWN_DISCOVERY_HANDLERS: &[&str] = &["ws_discovery.ipc.v1", "ws_discovery.nvr.v1"];
+const KNOWN_DISCOVERY_HANDLERS: &[&str] = &[
+    "ws_discovery.ipc.v1",
+    "ws_discovery.face_access.v1",
+    "ws_discovery.nvr.v1",
+];
 const KNOWN_HTTP_HANDLERS: &[&str] = &[
     "http.custom_ipc.v1",
     "http.smart_ipc.v1",
+    "http.structured_ipc.v1",
+    "http.face_access_ipc.v1",
     "http.nvr_common.v1",
     "http.nvr_vehicle.v1",
 ];
@@ -16,6 +22,8 @@ const KNOWN_RTSP_HANDLERS: &[&str] = &["rtsp.tcp_interleaved.v1"];
 const KNOWN_ALARM_HANDLERS: &[&str] = &[
     "alarm.custom.v1",
     "alarm.smart.v1",
+    "alarm.structured.v1",
+    "alarm.face_access.v1",
     "alarm.nvr_common.v1",
     "alarm.nvr_vehicle.v1",
 ];
@@ -155,7 +163,7 @@ mod tests {
                 nickname: "SMART".into(),
                 device_type_enum: 0,
             },
-            supported_platforms: vec![TargetPlatform::Vms, TargetPlatform::Ums],
+            supported_platforms: vec![TargetPlatform::Ums],
             handlers: ProfileHandlerBindings {
                 identity: "legacy.identity.v1".into(),
                 discovery: "ws_discovery.ipc.v1".into(),

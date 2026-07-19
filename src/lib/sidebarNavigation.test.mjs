@@ -37,6 +37,7 @@ assert.deepEqual(toolPaths, [
   '/tools/framework-password',
   '/tools/code-statistics',
   '/tools/network',
+  '/tools/display-control',
   '/tools/screen-share',
   '/tools/video-device-simulator',
   '/tools/file-share',

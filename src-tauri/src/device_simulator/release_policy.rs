@@ -1,6 +1,6 @@
 //! Approved first-release boundaries that later runtime phases must enforce.
 
-pub const FIRST_RELEASE_APP_VERSION: &str = "1.2.1";
+pub const FIRST_RELEASE_APP_VERSION: &str = "1.2.0";
 pub const FIRST_RELEASE_ENGINE_API: u32 = 1;
 pub const FIRST_RELEASE_SCHEMA_VERSION: u32 = 1;
 
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn release_versions_match_the_asset_contract() {
-        assert_eq!(FIRST_RELEASE_APP_VERSION, "1.2.1");
+        assert_eq!(FIRST_RELEASE_APP_VERSION, "1.2.0");
         assert_eq!(FIRST_RELEASE_ENGINE_API, SUPPORTED_ENGINE_API);
         assert_eq!(FIRST_RELEASE_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSION);
     }

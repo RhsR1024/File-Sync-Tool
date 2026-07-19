@@ -1,13 +1,15 @@
+#[cfg(test)]
+use super::ImageCache;
 use super::{
     build_alarm_requests, build_recovery_request, AlarmBuildContext, AlarmError,
-    AlarmHandlerDefinition, AlarmResult, HttpAlarmRequest, ImageCache, RecoveryDefinition,
-    ResponseSuccessRule,
+    AlarmHandlerDefinition, AlarmResult, HttpAlarmRequest, LegacyAlarmValues, RecoveryDefinition,
+    ResponseSuccessRule, SharedImageCache,
 };
 use crate::device_simulator::profiles::scope::TargetPlatform;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
@@ -137,7 +139,7 @@ pub enum AlarmDeliveryPhase {
 pub struct AlarmInvocation {
     pub definition: Arc<AlarmHandlerDefinition>,
     pub context: AlarmBuildContext,
-    pub image_cache: Arc<ImageCache>,
+    pub image_cache: SharedImageCache,
 }
 
 #[derive(Debug, Clone)]
@@ -443,6 +445,7 @@ pub struct AlarmScheduler {
     global_semaphore: Arc<Semaphore>,
     global_rate: Arc<RateGate>,
     destinations: Arc<Mutex<BTreeMap<String, Arc<DestinationControl>>>>,
+    event_sequence: Arc<AtomicU64>,
 }
 
 impl AlarmScheduler {
@@ -459,6 +462,7 @@ impl AlarmScheduler {
             clock,
             limits,
             destinations: Arc::new(Mutex::new(BTreeMap::new())),
+            event_sequence: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -608,11 +612,15 @@ impl AlarmScheduler {
                 AlarmDispatchMode::Random => random.next_index(target.invocations.len()),
             };
             let invocation = &target.invocations[invocation_index];
+            let legacy_values = LegacyAlarmValues::new(random.next_u64());
+            let event_id = self.next_event_id();
             let alarm_succeeded = self
                 .deliver_invocation(
                     &target,
                     invocation,
                     AlarmDeliveryPhase::Alarm,
+                    &legacy_values,
+                    event_id,
                     &tracker,
                     &cancellation,
                 )
@@ -635,6 +643,14 @@ impl AlarmScheduler {
                     &target,
                     invocation,
                     AlarmDeliveryPhase::Recovery,
+                    &legacy_values,
+                    if invocation.definition.profile_id
+                        == crate::device_simulator::profiles::scope::FirstReleaseProfileId::IpcFaceAccess
+                    {
+                        self.next_event_id()
+                    } else {
+                        event_id
+                    },
                     &tracker,
                     &cancellation,
                 )
@@ -664,21 +680,54 @@ impl AlarmScheduler {
         target: &AlarmDeviceTarget,
         invocation: &AlarmInvocation,
         phase: AlarmDeliveryPhase,
+        legacy_values: &LegacyAlarmValues,
+        event_id: u64,
         tracker: &AlarmJobTracker,
         cancellation: &AlarmCancellation,
     ) -> bool {
         let mut context = invocation.context.clone();
+        let now = chrono::Local::now();
+        let timestamp = if phase == AlarmDeliveryPhase::Alarm
+            && matches!(
+                invocation.definition.transport.body_encoding,
+                super::BodyEncoding::Multipart { .. }
+            ) {
+            let millis = now.timestamp_subsec_millis();
+            format!("{}.{millis:03}", now.timestamp())
+        } else {
+            now.timestamp().to_string()
+        };
         context.fields.insert(
             crate::device_simulator::alarms::DynamicField::Timestamp,
-            self.clock.now_ms().to_string(),
+            timestamp,
         );
-        let requests = match phase {
-            AlarmDeliveryPhase::Alarm => {
-                build_alarm_requests(&invocation.definition, &context, &invocation.image_cache)
-            }
-            AlarmDeliveryPhase::Recovery => {
-                build_recovery_request(&invocation.definition, &context, &invocation.image_cache)
-                    .map(|request| request.into_iter().collect())
+        context.fields.insert(
+            crate::device_simulator::alarms::DynamicField::CaptureTime,
+            now.format("%Y%m%d%H%M%S%3f").to_string(),
+        );
+        context.fields.insert(
+            crate::device_simulator::alarms::DynamicField::CaptureTimeText,
+            now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        );
+        context.fields.insert(
+            crate::device_simulator::alarms::DynamicField::EventId,
+            event_id.to_string(),
+        );
+        context.fields.insert(
+            crate::device_simulator::alarms::DynamicField::RelatedId,
+            legacy_values.related_id(),
+        );
+        context.legacy_values = Some(legacy_values.clone());
+        let requests = {
+            let image_cache = invocation.image_cache.read();
+            match phase {
+                AlarmDeliveryPhase::Alarm => {
+                    build_alarm_requests(&invocation.definition, &context, &image_cache)
+                }
+                AlarmDeliveryPhase::Recovery => {
+                    build_recovery_request(&invocation.definition, &context, &image_cache)
+                        .map(|request| request.into_iter().collect())
+                }
             }
         };
         let requests = match requests {
@@ -834,6 +883,12 @@ impl AlarmScheduler {
             _destination: per_destination,
         })
     }
+
+    fn next_event_id(&self) -> u64 {
+        self.event_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    }
 }
 
 #[derive(Debug)]
@@ -957,10 +1012,14 @@ impl DeterministicRandom {
     }
 
     fn next_index(&mut self, length: usize) -> usize {
+        self.next_u64() as usize % length
+    }
+
+    fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
-        self.0 as usize % length
+        self.0
     }
 }
 
@@ -1178,7 +1237,10 @@ mod tests {
             handler_id: handler,
             alarm_type_id: AlarmTypeId::new("fixture").unwrap(),
             profile_id: handler.profile_id(),
-            template: CompiledTemplate::compile(br#"{"device":"{{device_id}}"}"#).unwrap(),
+            template: CompiledTemplate::compile(
+                br#"{"device":"{{device_id}}","timestamp":{{timestamp}},"eventId":{{event_id}}}"#,
+            )
+            .unwrap(),
             image_policy: ImagePolicy::Forbidden,
             images: vec![],
             transport: TransportDefinition {
@@ -1217,7 +1279,7 @@ mod tests {
                 template_source: "test fixture".into(),
                 fixture_provenance: FixtureProvenance::LegacyOrCaptureDerived,
                 platforms: vec![PlatformEvidence {
-                    platform: TargetPlatform::Vms,
+                    platform: TargetPlatform::Ums,
                     verification: if verified {
                         PlatformVerification::PlatformVerified
                     } else {
@@ -1232,8 +1294,8 @@ mod tests {
     fn target(device_id: &str, definitions: Vec<Arc<AlarmHandlerDefinition>>) -> AlarmDeviceTarget {
         AlarmDeviceTarget {
             device_id: device_id.into(),
-            destination_id: "vms-a".into(),
-            platform: TargetPlatform::Vms,
+            destination_id: "ums-a".into(),
+            platform: TargetPlatform::Ums,
             invocations: definitions
                 .into_iter()
                 .map(|definition| AlarmInvocation {
@@ -1245,8 +1307,9 @@ mod tests {
                             device_id.into(),
                         )]),
                         multipart_boundary: None,
+                        legacy_values: None,
                     },
-                    image_cache: Arc::new(ImageCache::default()),
+                    image_cache: Arc::new(parking_lot::RwLock::new(ImageCache::default())),
                 })
                 .collect(),
         }
@@ -1303,6 +1366,18 @@ mod tests {
         assert!(requests
             .iter()
             .all(|request| request.request.source_ip.to_string() == "10.0.0.8"));
+        let payloads = requests
+            .iter()
+            .map(|request| {
+                serde_json::from_slice::<serde_json::Value>(&request.request.body).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(payloads.iter().all(|payload| {
+            payload["timestamp"]
+                .as_i64()
+                .is_some_and(|timestamp| timestamp > 1_600_000_000)
+        }));
+        assert_ne!(payloads[0]["eventId"], payloads[1]["eventId"]);
     }
 
     #[tokio::test]

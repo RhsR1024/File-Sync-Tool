@@ -1127,6 +1127,40 @@ export async function sendWol(request: WolRequest): Promise<WolResult> {
   return await invoke('send_wol', { request });
 }
 
+export type MonitorControlFeature = 'brightness' | 'contrast';
+
+export interface DisplayControlMonitor {
+  id: string;
+  index: number;
+  name: string;
+  is_primary: boolean;
+  is_internal: boolean;
+  backend: 'ddc_ci' | 'wmi' | string;
+  brightness: number | null;
+  brightness_min: number;
+  brightness_max: number;
+  brightness_supported: boolean;
+  contrast: number | null;
+  contrast_min: number;
+  contrast_max: number;
+  contrast_supported: boolean;
+}
+
+export interface MonitorControlSetRequest {
+  monitor_id: string;
+  feature: MonitorControlFeature;
+  value: number;
+}
+
+export const monitorControlApi = {
+  listMonitors(): Promise<DisplayControlMonitor[]> {
+    return invoke<DisplayControlMonitor[]>('monitor_control_list');
+  },
+  setFeature(request: MonitorControlSetRequest): Promise<void> {
+    return invoke<void>('monitor_control_set', { request });
+  },
+};
+
 // ─── Screen Share ─────────────────────────────────────
 
 export type ScreenShareBackendMode = 'auto' | 'wgc' | 'dxgi';

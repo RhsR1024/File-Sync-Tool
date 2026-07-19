@@ -433,7 +433,7 @@ pub fn list_first_release_profiles() -> Vec<DeviceProfileSummary> {
             id: profile.as_str().to_owned(),
             display_name_key: format!("deviceSimulator.profiles.{}", profile.as_str()),
             device_kind: profile.device_kind(),
-            supported_platforms: vec![TargetPlatform::Vms, TargetPlatform::Ums],
+            supported_platforms: vec![TargetPlatform::Ums],
             availability: DeviceProfileAvailability::Unavailable,
             installed_version: None,
             available_version: None,
@@ -627,6 +627,8 @@ fn parse_profile_id(value: &str) -> Result<FirstReleaseProfileId, SimulatorError
     match value {
         "ipc-custom" => Ok(FirstReleaseProfileId::IpcCustom),
         "ipc-smart" => Ok(FirstReleaseProfileId::IpcSmart),
+        "ipc-structured" => Ok(FirstReleaseProfileId::IpcStructured),
+        "ipc-face-access" => Ok(FirstReleaseProfileId::IpcFaceAccess),
         "nvr-common" => Ok(FirstReleaseProfileId::NvrCommon),
         "nvr-vehicle" => Ok(FirstReleaseProfileId::NvrVehicle),
         _ => Err(validation_error(
@@ -701,7 +703,7 @@ mod tests {
     fn start_request() -> SimulatorStartRequest {
         SimulatorStartRequest {
             platform: TargetPlatformConfig {
-                kind: TargetPlatform::Vms,
+                kind: TargetPlatform::Ums,
                 servers: vec![],
                 alarm_receiver_url: None,
             },
@@ -791,7 +793,7 @@ mod tests {
     #[test]
     fn first_release_profiles_never_claim_platform_verification_or_local_assets() {
         let profiles = list_first_release_profiles();
-        assert_eq!(profiles.len(), 4);
+        assert_eq!(profiles.len(), 6);
         assert!(profiles.iter().all(|profile| {
             profile.verified_platforms.is_empty()
                 && profile.availability == DeviceProfileAvailability::Unavailable
