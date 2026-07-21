@@ -748,9 +748,7 @@ pub fn initialize(app: &AppHandle) {
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
             if should_restore {
-                if let Err(error) =
-                    open_window_internal(app, paper.clone(), settings.clone())
-                {
+                if let Err(error) = open_window_internal(app, paper.clone(), settings.clone()) {
                     log::warn!("[paper-todo] failed to restore paper window: {error}");
                 }
             }

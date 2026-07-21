@@ -342,11 +342,18 @@ async function confirmDeletePaper(): Promise<void> {
   emit('deleted', id);
 }
 
-function startWindowDrag(event: MouseEvent): void {
+async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promise<void> {
   if (!props.standalone || event.button !== 0) return;
   const target = event.target as HTMLElement;
-  if (target.closest('button,input,textarea,select,a')) return;
-  void getCurrentWindow().startDragging();
+  if (!explicitHandle && target.closest('button,input,textarea,select,a')) return;
+  try {
+    await getCurrentWindow().startDragging();
+    if (paper.value?.collapsed && settings.value.autoDockCapsules) {
+      await invoke('paper_todo_dock_window', { id: paper.value.id, edge: 'nearest' });
+    }
+  } catch (reason) {
+    store.error.value = String(reason);
+  }
 }
 </script>
 
@@ -369,6 +376,16 @@ function startWindowDrag(event: MouseEvent): void {
       <button class="paper-icon-button" type="button" :title="paper.pinned ? t('paperTodo.unpin') : t('paperTodo.pin')" @click="togglePinned">
         <Pin v-if="paper.pinned" class="h-4 w-4" />
         <PinOff v-else class="h-4 w-4" />
+      </button>
+      <button
+        v-if="standalone"
+        class="paper-window-drag-handle"
+        type="button"
+        :title="t('paperTodo.moveWindow')"
+        :aria-label="t('paperTodo.moveWindow')"
+        @mousedown.stop.prevent="startWindowDrag($event, true)"
+      >
+        <GripVertical class="h-4 w-4" />
       </button>
       <component :is="paper.kind === 'todo' ? StickyNote : FileText" class="h-4 w-4 shrink-0 opacity-65" aria-hidden="true" />
       <input
@@ -551,6 +568,19 @@ function startWindowDrag(event: MouseEvent): void {
   cursor: pointer;
   transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease;
 }
+.paper-window-drag-handle {
+  display: inline-flex;
+  width: 1.25rem;
+  height: 2rem;
+  flex: 0 0 1.25rem;
+  cursor: move;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.25rem;
+  opacity: 0.4;
+}
+.paper-window-drag-handle:hover { background: rgb(100 116 139 / 0.12); opacity: 0.85; }
+.paper-window-drag-handle:focus-visible { outline: 2px solid rgb(14 165 233 / 0.55); outline-offset: 1px; opacity: 1; }
 .paper-icon-button:hover:not(:disabled) { background: rgb(100 116 139 / 0.12); }
 .paper-icon-button:focus-visible { outline: 2px solid rgb(14 165 233 / 0.55); outline-offset: 1px; }
 .paper-icon-button:disabled { cursor: default; opacity: 0.25; }
