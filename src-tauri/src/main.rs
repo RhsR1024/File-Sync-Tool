@@ -4434,14 +4434,10 @@ fn main() {
                         }
                     }
                     TRAY_NEW_TODO_ID => {
-                        if let Err(error) = paper_todo::create_and_open(app, "todo") {
-                            log::warn!("[paper-todo] tray create todo failed: {error}");
-                        }
+                        paper_todo::dispatch_background(app.clone(), "newTodo");
                     }
                     TRAY_NEW_NOTE_ID => {
-                        if let Err(error) = paper_todo::create_and_open(app, "note") {
-                            log::warn!("[paper-todo] tray create note failed: {error}");
-                        }
+                        paper_todo::dispatch_background(app.clone(), "newNote");
                     }
                     TRAY_QUIT_ID => {
                         if let Some(state) = app.try_state::<AppState>() {

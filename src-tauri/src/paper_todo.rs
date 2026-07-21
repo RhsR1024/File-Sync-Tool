@@ -244,11 +244,6 @@ pub fn paper_todo_delete_paper(
         .as_array_mut()
         .ok_or_else(|| "便签列表无效".to_string())?;
     papers.retain(|paper| paper.get("id").and_then(Value::as_str) != Some(id.as_str()));
-    if let Some(window) =
-        app.get_webview_window(&format!("{PAPER_WINDOW_PREFIX}{}", safe_label(&id)))
-    {
-        let _ = window.close();
-    }
     persist_and_emit(&app, document, Some(&id), Some(&source))
 }
 
@@ -353,7 +348,7 @@ fn create_paper_value(kind: &str) -> Value {
     })
 }
 
-pub fn create_and_open(app: &AppHandle, kind: &str) -> Result<(), String> {
+fn create_and_open(app: &AppHandle, kind: &str) -> Result<(), String> {
     let runtime = app.state::<PaperTodoRuntime>();
     let (paper, settings) = {
         let _guard = runtime.io_lock.lock().map_err(|error| error.to_string())?;
@@ -375,7 +370,23 @@ pub fn create_and_open(app: &AppHandle, kind: &str) -> Result<(), String> {
         )?;
         (paper, settings)
     };
-    paper_todo_open_window(app.clone(), paper, settings)
+    open_window_internal(app, paper, settings)
+}
+
+pub fn dispatch_background(app: AppHandle, action: &'static str) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = match action {
+            "showAll" => set_all_windows_internal(&app, "show"),
+            "hideAll" => set_all_windows_internal(&app, "hide"),
+            "toggleAll" => set_all_windows_internal(&app, "toggle"),
+            "newTodo" => create_and_open(&app, "todo"),
+            "newNote" => create_and_open(&app, "note"),
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            log::warn!("[paper-todo] background action {action} failed: {error}");
+        }
+    });
 }
 
 fn launcher_position(
@@ -466,11 +477,13 @@ fn ensure_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub fn paper_todo_create_paper(app: AppHandle, kind: String) -> Result<(), String> {
+pub async fn paper_todo_create_paper(app: AppHandle, kind: String) -> Result<(), String> {
     if kind != "todo" && kind != "note" {
         return Err("未知纸片类型".into());
     }
-    create_and_open(&app, &kind)
+    tauri::async_runtime::spawn_blocking(move || create_and_open(&app, &kind))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -547,17 +560,7 @@ fn register_hotkey(
             if event.state != ShortcutState::Pressed {
                 return;
             }
-            let result = match action {
-                "showAll" => set_all_windows_internal(app, "show"),
-                "hideAll" => set_all_windows_internal(app, "hide"),
-                "toggleAll" => set_all_windows_internal(app, "toggle"),
-                "newTodo" => create_and_open(app, "todo"),
-                "newNote" => create_and_open(app, "note"),
-                _ => Ok(()),
-            };
-            if let Err(error) = result {
-                log::warn!("[paper-todo] global shortcut failed: {error}");
-            }
+            dispatch_background(app.clone(), action);
         })
         .map_err(|error| format!("注册快捷键 {hotkey} 失败: {error}"))?;
     Ok(PaperHotkeyHandle {
@@ -746,7 +749,7 @@ pub fn initialize(app: &AppHandle) {
                     .unwrap_or(false);
             if should_restore {
                 if let Err(error) =
-                    paper_todo_open_window(app.clone(), paper.clone(), settings.clone())
+                    open_window_internal(app, paper.clone(), settings.clone())
                 {
                     log::warn!("[paper-todo] failed to restore paper window: {error}");
                 }
@@ -759,30 +762,39 @@ pub fn handle_startup_args(app: &AppHandle, args: &[String]) -> bool {
     let mut handled = false;
     for argument in args {
         let command = argument.trim_start_matches('-').to_ascii_lowercase();
-        let result = match command.as_str() {
-            "show" | "open" => Some(set_all_windows_internal(app, "show")),
-            "hide" => Some(set_all_windows_internal(app, "hide")),
-            "toggle" => Some(set_all_windows_internal(app, "toggle")),
-            "new-todo" | "todo" => Some(create_and_open(app, "todo")),
-            "new-note" | "note" => Some(create_and_open(app, "note")),
+        let action = match command.as_str() {
+            "show" | "open" => Some("showAll"),
+            "hide" => Some("hideAll"),
+            "toggle" => Some("toggleAll"),
+            "new-todo" | "todo" => Some("newTodo"),
+            "new-note" | "note" => Some("newNote"),
             "exit" | "quit" => {
                 app.exit(0);
-                Some(Ok(()))
+                handled = true;
+                None
             }
             _ => None,
         };
-        if let Some(result) = result {
+        if let Some(action) = action {
             handled = true;
-            if let Err(error) = result {
-                log::warn!("[paper-todo] startup command failed: {error}");
-            }
+            dispatch_background(app.clone(), action);
         }
     }
     handled
 }
 
 #[tauri::command]
-pub fn paper_todo_open_window(app: AppHandle, paper: Value, settings: Value) -> Result<(), String> {
+pub async fn paper_todo_open_window(
+    app: AppHandle,
+    paper: Value,
+    settings: Value,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_window_internal(&app, paper, settings))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn open_window_internal(app: &AppHandle, paper: Value, settings: Value) -> Result<(), String> {
     let id = paper
         .get("id")
         .and_then(Value::as_str)
@@ -828,7 +840,7 @@ pub fn paper_todo_open_window(app: AppHandle, paper: Value, settings: Value) -> 
         .unwrap_or(true);
 
     let route = format!("index.html#/paper-todo/window/{safe_id}");
-    let mut builder = WebviewWindowBuilder::new(&app, label, WebviewUrl::App(route.into()))
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(route.into()))
         .title(
             paper
                 .get("title")
@@ -950,8 +962,10 @@ pub fn paper_todo_dock_window(app: AppHandle, id: String, edge: String) -> Resul
 }
 
 #[tauri::command]
-pub fn paper_todo_set_all_windows(app: AppHandle, action: String) -> Result<(), String> {
-    set_all_windows_internal(&app, &action)
+pub async fn paper_todo_set_all_windows(app: AppHandle, action: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_all_windows_internal(&app, &action))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn set_all_windows_internal(app: &AppHandle, action: &str) -> Result<(), String> {
@@ -969,7 +983,7 @@ fn set_all_windows_internal(app: &AppHandle, action: &str) -> Result<(), String>
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
                 {
-                    let _ = paper_todo_open_window(app.clone(), paper.clone(), settings.clone());
+                    let _ = open_window_internal(app, paper.clone(), settings.clone());
                 }
             }
         }
