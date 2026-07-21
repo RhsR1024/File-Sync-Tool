@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { computed, onBeforeUnmount, onMounted } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 
@@ -42,6 +42,11 @@ onMounted(async () => {
   setPaperWindowTransparency(true);
   try {
     await store.initialize();
+    if (store.error.value) {
+      await nextTick();
+      await getCurrentWindow().show();
+      return;
+    }
     if (!store.state.value.papers.some((paper) => paper.id === paperId.value)) {
       await getCurrentWindow().close();
       return;
@@ -68,6 +73,7 @@ onMounted(async () => {
   } catch (reason) {
     store.error.value = String(reason);
     try {
+      await nextTick();
       await getCurrentWindow().show();
     } catch {
       // The window may already be closing; there is nothing left to recover.

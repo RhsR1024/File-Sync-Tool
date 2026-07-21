@@ -36,6 +36,7 @@ import PaperTodoMarkdown from '@/components/paper-todo/PaperTodoMarkdown.vue';
 import { usePaperTodo } from '@/composables/usePaperTodo';
 import {
   createTodoItem,
+  createDesktopPaper,
   importPaperImage,
   isPowerPaper,
   MAX_NOTE_LENGTH,
@@ -61,6 +62,7 @@ const noteTextarea = ref<HTMLTextAreaElement | null>(null);
 const previewMode = ref<'edit' | 'split' | 'preview'>('edit');
 const pendingImage = ref(false);
 const deleteConfirmationOpen = ref(false);
+const deleteDialog = ref<HTMLElement | null>(null);
 
 const paper = computed(() => store.state.value.papers.find((item) => item.id === props.paperId) ?? null);
 const settings = computed(() => store.state.value.settings);
@@ -272,15 +274,18 @@ async function openDesktop(): Promise<void> {
 }
 
 async function createSiblingPaper(kind: 'todo' | 'note'): Promise<void> {
-  const created = store.addPaper(kind);
-  if (!created) return;
   try {
-    store.updatePaper(created.id, (value) => { value.desktopOpen = true; }, { immediate: true });
-    await store.flush();
-    await openPaperWindow(created, settings.value);
+    await createDesktopPaper(kind);
+    await store.refreshFromDisk();
   } catch (reason) {
     store.error.value = String(reason);
   }
+}
+
+async function openDeleteConfirmation(): Promise<void> {
+  deleteConfirmationOpen.value = true;
+  await nextTick();
+  deleteDialog.value?.focus();
 }
 
 async function openLinkedNote(id: string | null): Promise<void> {
@@ -469,7 +474,7 @@ function startWindowDrag(event: MouseEvent): void {
           <button class="paper-icon-button" type="button" :disabled="!store.canUndo(paper.id)" :title="t('paperTodo.undo')" @click="store.undoPaper(paper.id)"><Undo2 class="h-4 w-4" /></button>
           <button class="paper-icon-button" type="button" :disabled="!store.canRedo(paper.id)" :title="t('paperTodo.redo')" @click="store.redoPaper(paper.id)"><Redo2 class="h-4 w-4" /></button>
           <button class="paper-icon-button" type="button" :disabled="!completedCount" :title="t('paperTodo.clearCompleted')" @click="clearCompleted"><RotateCcw class="h-4 w-4" /></button>
-          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="deleteConfirmationOpen = true"><Trash2 class="h-4 w-4" /></button>
+          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="openDeleteConfirmation"><Trash2 class="h-4 w-4" /></button>
         </footer>
       </div>
 
@@ -508,23 +513,25 @@ function startWindowDrag(event: MouseEvent): void {
           <span class="mr-auto text-xs opacity-45">{{ paper.content.length.toLocaleString() }} / {{ MAX_NOTE_LENGTH.toLocaleString() }}</span>
           <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="t('paperTodo.dockLeft')" @click="dock('left')"><PanelLeftClose class="h-4 w-4" /></button>
           <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="t('paperTodo.dockRight')" @click="dock('right')"><PanelRightClose class="h-4 w-4" /></button>
-          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="deleteConfirmationOpen = true"><Trash2 class="h-4 w-4" /></button>
+          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="openDeleteConfirmation"><Trash2 class="h-4 w-4" /></button>
         </footer>
       </div>
     </template>
 
     <div
       v-if="deleteConfirmationOpen"
+      ref="deleteDialog"
       class="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/25 p-5 backdrop-blur-[1px]"
       role="dialog"
       aria-modal="true"
+      tabindex="-1"
       :aria-label="t('paperTodo.deletePaper')"
-      @keydown.esc="deleteConfirmationOpen = false"
+      @keydown.esc.stop="deleteConfirmationOpen = false"
     >
       <div class="w-full max-w-72 rounded-md border border-current/15 bg-white p-4 text-slate-800 shadow-xl dark:bg-zinc-900 dark:text-zinc-100">
         <p class="text-sm leading-6">{{ t('paperTodo.confirmDeletePaper') }}</p>
         <div class="mt-4 flex justify-end gap-2">
-          <button type="button" class="paper-confirm-button" @click="deleteConfirmationOpen = false">{{ t('common.cancel') }}</button>
+          <button type="button" class="paper-confirm-button" autofocus @click="deleteConfirmationOpen = false">{{ t('common.cancel') }}</button>
           <button type="button" class="paper-confirm-button border-rose-300 text-rose-700 hover:bg-rose-50 dark:text-rose-300" @click="confirmDeletePaper">{{ t('paperTodo.deletePaper') }}</button>
         </div>
       </div>

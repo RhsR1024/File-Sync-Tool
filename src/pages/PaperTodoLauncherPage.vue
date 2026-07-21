@@ -5,6 +5,7 @@ import {
   Eye,
   EyeOff,
   FilePlus2,
+  GripHorizontal,
   Plus,
   Settings2,
   StickyNote,
@@ -30,11 +31,9 @@ const store = usePaperTodo();
 const expanded = ref(false);
 const busy = ref(false);
 let collapseTimer: ReturnType<typeof setTimeout> | null = null;
-let dragSaveTimer: ReturnType<typeof setTimeout> | null = null;
-let dragArmTimer: ReturnType<typeof setTimeout> | null = null;
 let unlistenMoved: (() => void) | null = null;
-let dragArmed = false;
-let lastDragMoveAt = 0;
+let dragging = false;
+let launcherMoved = false;
 
 const edge = computed(() => store.settings.value.launcherEdge);
 const paperCount = computed(() => store.papers.value.length);
@@ -50,39 +49,25 @@ async function setExpanded(value: boolean): Promise<void> {
   await setPaperLauncherExpanded(value);
 }
 
-function toggleExpanded(): void {
-  if (Date.now() - lastDragMoveAt < 450) return;
-  void setExpanded(!expanded.value);
-}
-
-function startLauncherDrag(event: MouseEvent): void {
+async function startLauncherDrag(event: MouseEvent): Promise<void> {
   if (event.button !== 0) return;
-  dragArmed = true;
-  if (dragArmTimer) clearTimeout(dragArmTimer);
-  dragArmTimer = setTimeout(() => {
-    dragArmed = false;
-    dragArmTimer = null;
-  }, 1_500);
-  void getCurrentWindow().startDragging().catch((reason) => {
-    dragArmed = false;
-    store.error.value = String(reason);
-  });
-}
-
-function scheduleLauncherPositionSave(): void {
-  if (!dragArmed) return;
-  lastDragMoveAt = Date.now();
-  if (dragSaveTimer) clearTimeout(dragSaveTimer);
-  dragSaveTimer = setTimeout(async () => {
-    dragArmed = false;
-    dragSaveTimer = null;
-    try {
+  dragging = true;
+  launcherMoved = false;
+  try {
+    await getCurrentWindow().startDragging();
+    if (launcherMoved) {
       await savePaperLauncherPosition();
       await store.refreshFromDisk();
-    } catch (reason) {
-      store.error.value = String(reason);
     }
-  }, 300);
+  } catch (reason) {
+    store.error.value = String(reason);
+  } finally {
+    dragging = false;
+  }
+}
+
+function markLauncherMoved(): void {
+  if (dragging) launcherMoved = true;
 }
 
 function scheduleCollapse(): void {
@@ -115,13 +100,15 @@ async function openSettings(): Promise<void> {
 }
 
 onMounted(async () => {
-  await store.initialize();
-  unlistenMoved = await getCurrentWindow().onMoved(scheduleLauncherPositionSave);
+  try {
+    await store.initialize();
+    unlistenMoved = await getCurrentWindow().onMoved(markLauncherMoved);
+  } catch (reason) {
+    store.error.value = String(reason);
+  }
 });
 onBeforeUnmount(() => {
   cancelCollapse();
-  if (dragSaveTimer) clearTimeout(dragSaveTimer);
-  if (dragArmTimer) clearTimeout(dragArmTimer);
   unlistenMoved?.();
 });
 </script>
@@ -136,20 +123,32 @@ onBeforeUnmount(() => {
     <div
       class="flex h-full w-full items-center overflow-hidden rounded-md border border-slate-700/80 bg-[#111827] text-slate-100 shadow-[0_10px_28px_rgba(2,6,23,0.38)]"
     >
-      <button
-        type="button"
-        class="launcher-handle"
+      <div
+        class="launcher-rail"
         :class="edge === 'left' ? 'order-2' : 'order-1'"
-        :title="t('paperTodo.launcher.moveHint')"
-        :aria-label="expanded ? t('paperTodo.launcher.collapse') : t('paperTodo.launcher.expand')"
-        @mousedown="startLauncherDrag"
-        @click="toggleExpanded"
       >
-        <ChevronRight v-if="expanded && edge === 'left'" class="h-3.5 w-3.5" />
-        <ChevronLeft v-else-if="expanded" class="h-3.5 w-3.5" />
-        <StickyNote v-else class="h-4 w-4 text-amber-300" />
-        <span v-if="!expanded" class="text-[10px] font-semibold text-slate-300">{{ paperCount }}</span>
-      </button>
+        <button
+          type="button"
+          class="launcher-drag-handle"
+          :title="t('paperTodo.launcher.moveHint')"
+          :aria-label="t('paperTodo.launcher.moveHint')"
+          @mousedown.prevent="startLauncherDrag"
+        >
+          <GripHorizontal class="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          class="launcher-toggle"
+          :title="expanded ? t('paperTodo.launcher.collapse') : t('paperTodo.launcher.expand')"
+          :aria-label="expanded ? t('paperTodo.launcher.collapse') : t('paperTodo.launcher.expand')"
+          @click="setExpanded(!expanded)"
+        >
+          <ChevronRight v-if="expanded && edge === 'left'" class="h-3.5 w-3.5" />
+          <ChevronLeft v-else-if="expanded" class="h-3.5 w-3.5" />
+          <StickyNote v-else class="h-4 w-4 text-amber-300" />
+          <span v-if="!expanded" class="text-[10px] font-semibold text-slate-300">{{ paperCount }}</span>
+        </button>
+      </div>
 
       <div
         class="flex min-w-0 flex-1 items-center gap-1 px-1.5"
@@ -172,20 +171,37 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.launcher-handle {
-  display: inline-flex;
+.launcher-rail {
+  display: flex;
   width: 2.5rem;
   height: 100%;
   flex: 0 0 2.5rem;
-  cursor: grab;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 0.1rem;
   border-color: rgb(71 85 105 / 0.7);
   background: rgb(30 41 59 / 0.95);
 }
-.launcher-handle:active { cursor: grabbing; }
+.launcher-drag-handle,
+.launcher-toggle {
+  display: inline-flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+}
+.launcher-drag-handle {
+  height: 1rem;
+  flex: 0 0 1rem;
+  cursor: grab;
+  color: rgb(100 116 139);
+}
+.launcher-drag-handle:active { cursor: grabbing; }
+.launcher-toggle {
+  min-height: 0;
+  flex: 1 1 auto;
+  cursor: pointer;
+  flex-direction: column;
+  gap: 0.1rem;
+}
 .launcher-action {
   display: inline-flex;
   width: 2rem;
@@ -198,8 +214,8 @@ onBeforeUnmount(() => {
   color: rgb(203 213 225);
   transition: background-color 160ms ease, color 160ms ease;
 }
-.launcher-action:hover:not(:disabled), .launcher-handle:hover { background: rgb(51 65 85); color: white; }
-.launcher-action:focus-visible, .launcher-handle:focus-visible { outline: 2px solid rgb(56 189 248 / 0.75); outline-offset: -2px; }
+.launcher-action:hover:not(:disabled), .launcher-drag-handle:hover, .launcher-toggle:hover { background: rgb(51 65 85); color: white; }
+.launcher-action:focus-visible, .launcher-drag-handle:focus-visible, .launcher-toggle:focus-visible { outline: 2px solid rgb(56 189 248 / 0.75); outline-offset: -2px; }
 .launcher-action:disabled { cursor: default; opacity: 0.4; }
 @media (prefers-reduced-motion: reduce) {
   .launcher-action { transition: none; }

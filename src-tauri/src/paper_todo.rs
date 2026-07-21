@@ -395,9 +395,9 @@ fn launcher_position(
     expanded: bool,
 ) -> Result<PhysicalPosition<i32>, String> {
     let monitor = window
-        .primary_monitor()
+        .current_monitor()
         .map_err(|error| error.to_string())?
-        .or_else(|| window.current_monitor().ok().flatten())
+        .or_else(|| window.primary_monitor().ok().flatten())
         .ok_or_else(|| "未找到显示器".to_string())?;
     let monitor_position = monitor.position();
     let monitor_size = monitor.size();
