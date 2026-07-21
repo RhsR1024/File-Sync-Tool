@@ -12,6 +12,7 @@ import {
   normalizeGroup,
   parseGroupEntry,
   serializeGroup,
+  swapGroupEndpoints,
   targetKey,
 } from './applianceSshGroups.ts';
 
@@ -47,14 +48,28 @@ test('isGroupActive requires a non-blank master', () => {
   assert.equal(isGroupActive({ master: '1.1.1.1', backup: '', slaves: [] }), true);
 });
 
-test('buildGroupTargets: master+backup+slaves produces a jump pair plus direct slaves', () => {
+test('swapGroupEndpoints exchanges master and backup without changing slaves', () => {
+  const original = { master: '10.0.0.1', backup: '10.0.0.2', slaves: ['10.0.0.3'] };
+  assert.deepEqual(swapGroupEndpoints(original), {
+    master: '10.0.0.2',
+    backup: '10.0.0.1',
+    slaves: ['10.0.0.3'],
+  });
+  assert.deepEqual(original, {
+    master: '10.0.0.1',
+    backup: '10.0.0.2',
+    slaves: ['10.0.0.3'],
+  });
+});
+
+test('buildGroupTargets: master+backup+slaves produces a failover-capable jump pair', () => {
   const targets = buildGroupTargets({
     master: '10.0.0.1',
     backup: '10.0.0.2',
     slaves: ['10.0.0.3', '10.0.0.4'],
   });
   assert.deepEqual(targets, [
-    { ip: '10.0.0.2', jumpHost: '10.0.0.1' },
+    { ip: '10.0.0.2', jumpHost: '10.0.0.1', allowFailover: true },
     { ip: '10.0.0.3' },
     { ip: '10.0.0.4' },
   ]);
@@ -83,12 +98,15 @@ test('composeAllTargets dedupes direct targets across manual input and groups', 
   assert.deepEqual(targets, [{ ip: '10.0.0.5' }, { ip: '10.0.0.1' }]);
 });
 
-test('composeAllTargets keeps a direct target and a behind-jump target with the same ip', () => {
+test('composeAllTargets keeps a direct target and an HA pair containing the same ip', () => {
   const targets = composeAllTargets(
     ['10.0.0.2'],
     [{ master: '10.0.0.1', backup: '10.0.0.2', slaves: [] }],
   );
-  assert.deepEqual(targets, [{ ip: '10.0.0.2' }, { ip: '10.0.0.2', jumpHost: '10.0.0.1' }]);
+  assert.deepEqual(targets, [
+    { ip: '10.0.0.2' },
+    { ip: '10.0.0.2', jumpHost: '10.0.0.1', allowFailover: true },
+  ]);
 });
 
 test('composeAllTargets dedupes identical jump pairs across groups', () => {
@@ -99,15 +117,22 @@ test('composeAllTargets dedupes identical jump pairs across groups', () => {
       { master: '10.0.0.1', backup: '10.0.0.2', slaves: ['10.0.0.9'] },
     ],
   );
-  assert.deepEqual(targets, [{ ip: '10.0.0.2', jumpHost: '10.0.0.1' }, { ip: '10.0.0.9' }]);
+  assert.deepEqual(targets, [
+    { ip: '10.0.0.2', jumpHost: '10.0.0.1', allowFailover: true },
+    { ip: '10.0.0.9' },
+  ]);
 });
 
-test('buildRoleMap assigns masterBackup to the pair key and master/slave to direct keys', () => {
+test('buildRoleMap assigns masterBackup to both pair directions and direct roles elsewhere', () => {
   const map = buildRoleMap([
     { master: '10.0.0.1', backup: '10.0.0.2', slaves: ['10.0.0.3'] },
     { master: '10.0.1.1', backup: '', slaves: ['10.0.1.2'] },
   ]);
   assert.deepEqual(map.get(targetKey({ ip: '10.0.0.2', jumpHost: '10.0.0.1' })), {
+    groupIndex: 0,
+    role: 'masterBackup',
+  });
+  assert.deepEqual(map.get(targetKey({ ip: '10.0.0.1', jumpHost: '10.0.0.2' })), {
     groupIndex: 0,
     role: 'masterBackup',
   });

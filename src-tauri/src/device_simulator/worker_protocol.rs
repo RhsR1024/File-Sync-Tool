@@ -141,8 +141,14 @@ pub struct StopAlarmJobPayload {
     pub job_id: String,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RecoverSessionPayload {
+    pub app_data_dir: PathBuf,
+    pub session_id: String,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerResponse {
     pub protocol_version: u32,
     pub request_id: String,
@@ -548,6 +554,29 @@ mod tests {
             "device_simulator.worker.command_rejected"
         );
         assert!(!format!("{response:?}").contains("current session state"));
+    }
+
+    #[test]
+    fn response_frames_round_trip_success_and_error_outcomes() {
+        let messages = [
+            WorkerMessage::Response(WorkerResponse::success(
+                "request-success",
+                Some(json!({"state": "running"})),
+            )),
+            WorkerMessage::Response(WorkerResponse::error(
+                "request-error",
+                SimulatorErrorBody::new(
+                    "device_simulator.worker.command_rejected",
+                    "deviceSimulator.errors.workerCommandRejected",
+                ),
+            )),
+        ];
+
+        for message in messages {
+            let encoded = encode_frame(&message).unwrap();
+            let decoded: WorkerMessage = decode_frame(&encoded).unwrap();
+            assert_eq!(decoded, message);
+        }
     }
 
     #[tokio::test]

@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-07-20T08:51:42.596Z",
+  "base_url": "http://192.168.0.111:9870/",
+  "scenario": "synthetic-video",
+  "duration_seconds": 10,
+  "warmup_seconds": 2,
+  "connect_batch_size": 10,
+  "connect_batch_delay_ms": 500,
+  "connect_timeout_ms": 30000,
+  "cases": [
+    {
+      "viewer_count": 1,
+      "duration_seconds": 10.012,
+      "total_binary_bytes": 568592,
+      "aggregate_mbps": 0.454,
+      "per_viewer_mbps_avg": 0.454,
+      "per_viewer_mbps_p50": 0.454,
+      "per_viewer_mbps_p95": 0.454,
+      "first_binary_avg_ms": 10.296,
+      "first_binary_p95_ms": 10.296,
+      "source_encoded_mbps": 0.454,
+      "dropped_input_frames_delta": 0,
+      "slow_client_dropped_frames_delta": 0
+    },
+    {
+      "viewer_count": 10,
+      "duration_seconds": 10.005,
+      "total_binary_bytes": 6164411,
+      "aggregate_mbps": 4.929,
+      "per_viewer_mbps_avg": 0.493,
+      "per_viewer_mbps_p50": 0.489,
+      "per_viewer_mbps_p95": 0.558,
+      "first_binary_avg_ms": 542.678,
+      "first_binary_p95_ms": 877.836,
+      "source_encoded_mbps": 0.424,
+      "dropped_input_frames_delta": 0,
+      "slow_client_dropped_frames_delta": 0
+    }
+  ],
+  "failures": [
+    {
+      "viewer_count": 50,
+      "error": "viewer 13 timed out waiting for H.264 data"
+    }
+  ]
+}

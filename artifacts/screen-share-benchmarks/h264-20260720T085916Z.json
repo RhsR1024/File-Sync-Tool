@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-07-20T08:59:16.712Z",
+  "base_url": "http://192.168.0.111:9870/",
+  "scenario": "connection-ramp",
+  "duration_seconds": 3,
+  "warmup_seconds": 1,
+  "connect_batch_size": 1,
+  "connect_batch_delay_ms": 500,
+  "connect_timeout_ms": 15000,
+  "cases": [
+    {
+      "viewer_count": 20,
+      "duration_seconds": 3.01,
+      "total_binary_bytes": 1282883,
+      "aggregate_mbps": 3.41,
+      "per_viewer_mbps_avg": 0.17,
+      "per_viewer_mbps_p50": 0,
+      "per_viewer_mbps_p95": 0.487,
+      "first_binary_avg_ms": 36.728,
+      "first_binary_p95_ms": 44.131,
+      "source_encoded_mbps": 0.547,
+      "dropped_input_frames_delta": 0,
+      "slow_client_dropped_frames_delta": 0
+    }
+  ],
+  "failures": []
+}

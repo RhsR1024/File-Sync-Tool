@@ -596,6 +596,8 @@ export interface ApplianceSshResult {
 export interface ApplianceSshTarget {
   ip: string;
   jumpHost?: string;
+  /** Retry the same HA pair in the opposite API/SSH direction when needed. */
+  allowFailover?: boolean;
 }
 
 export type ApplianceSshApiVersion = 'componentized' | 'mainline';
@@ -695,6 +697,14 @@ export async function loadUiState(): Promise<UiState> {
 
 export async function confirmQuit(): Promise<void> {
   await invoke('confirm_quit');
+}
+
+export async function showAppNotification(title: string, body: string): Promise<void> {
+  await invoke('show_app_notification', { title, body });
+}
+
+export async function cancelQuit(): Promise<void> {
+  await invoke('cancel_quit');
 }
 
 export async function codeCountAnalyze(
@@ -1164,6 +1174,40 @@ export const monitorControlApi = {
 // ─── Screen Share ─────────────────────────────────────
 
 export type ScreenShareBackendMode = 'auto' | 'wgc' | 'dxgi';
+export type ScreenShareMediaTransport = 'auto' | 'mjpeg' | 'mse_h264' | 'webrtc';
+export type ScreenShareControlState = 'disabled' | 'available' | 'requested' | 'granted' | 'revoked';
+
+export interface ScreenShareControlRequest {
+  request_id: string;
+  client_id: string;
+  ip: string;
+  user_agent: string;
+  requested_at_ms: number;
+}
+
+export interface ScreenShareAnnotationPoint {
+  x: number;
+  y: number;
+}
+
+export interface ScreenShareAnnotationShape {
+  id: string;
+  owner_client_id: string;
+  kind: 'laser' | 'arrow' | 'rect';
+  points: ScreenShareAnnotationPoint[];
+  color: string;
+  width: number;
+  expires_at_ms?: number | null;
+}
+
+export interface ScreenShareAnnotationDocument {
+  session_id: number;
+  source_epoch: number;
+  revision: number;
+  mode: 'live' | 'frozen';
+  frozen_frame_id: number | null;
+  shapes: ScreenShareAnnotationShape[];
+}
 
 export interface ScreenShareConfig {
   port: number;
@@ -1176,6 +1220,11 @@ export interface ScreenShareConfig {
   capture_backend_mode?: ScreenShareBackendMode;
   /** Bind address: "0.0.0.0" for all interfaces, or a specific IP. */
   bind_address?: string | null;
+  control_requests_enabled?: boolean;
+  keyboard_control_enabled?: boolean;
+  annotations_enabled?: boolean;
+  shared_freeze_enabled?: boolean;
+  transport?: ScreenShareMediaTransport;
 }
 
 export interface NetworkInterfaceInfo {
@@ -1193,6 +1242,42 @@ export interface MonitorInfo {
 
 export type ScreenShareCaptureIssue = 'retrying' | 'privacy_mode_or_display_off';
 
+export interface ScreenShareMediaMetrics {
+  encoded_frame_count: number;
+  jpeg_sample_count: number;
+  jpeg_size_avg_bytes: number;
+  jpeg_size_p50_bytes: number;
+  jpeg_size_p95_bytes: number;
+  first_frame_delay_ms: number | null;
+  frame_age_ms: number | null;
+  slow_client_dropped_frames: number;
+  stream_connection_count: number;
+  stream_first_frame_sample_count: number;
+  stream_first_frame_avg_ms: number | null;
+  stream_first_frame_p95_ms: number | null;
+  stream_reconnect_count: number;
+  stream_reconnect_sample_count: number;
+  stream_reconnect_avg_ms: number | null;
+  stream_reconnect_p95_ms: number | null;
+  fps_actual: number;
+  bitrate_kbps: number;
+}
+
+export interface ScreenShareH264MediaMetrics {
+  ready: boolean;
+  codec: string | null;
+  width: number | null;
+  height: number | null;
+  target_bitrate_bps: number | null;
+  encoded_frame_count: number;
+  encoded_bytes: number;
+  keyframe_count: number;
+  cached_segment_count: number;
+  cached_bytes: number;
+  dropped_input_frames: number;
+  error: string | null;
+}
+
 export interface ScreenShareStatus {
   is_active: boolean;
   viewer_count: number;
@@ -1208,6 +1293,17 @@ export interface ScreenShareStatus {
   interaction_connected_count: number;
   annotation_count: number;
   view_mode: 'live' | 'frozen';
+  source_epoch: number;
+  latest_frame_id: number | null;
+  frame_width: number | null;
+  frame_height: number | null;
+  transport: ScreenShareMediaTransport;
+  h264_media?: ScreenShareH264MediaMetrics;
+  control_state: ScreenShareControlState;
+  controller_ip: string | null;
+  pending_control_request: ScreenShareControlRequest | null;
+  desktop_overlay_active: boolean;
+  media_metrics: ScreenShareMediaMetrics;
 }
 
 export async function screenShareListMonitors(): Promise<MonitorInfo[]> {
@@ -1234,12 +1330,49 @@ export async function screenShareClearAnnotations(): Promise<void> {
   await invoke('screen_share_clear_annotations');
 }
 
+export async function screenShareRemoveAnnotation(shapeId: string): Promise<void> {
+  await invoke('screen_share_remove_annotation', { shapeId });
+}
+
+export async function screenShareUpdateAnnotation(
+  shapeId: string,
+  points: ScreenShareAnnotationPoint[],
+  color: string,
+  width: number,
+): Promise<void> {
+  await invoke('screen_share_update_annotation', { shapeId, points, color, width });
+}
+
+export async function screenShareGetAnnotationState(): Promise<ScreenShareAnnotationDocument> {
+  return await invoke<ScreenShareAnnotationDocument>('screen_share_get_annotation_state');
+}
+
+export async function screenShareRespondControlRequest(requestId: string, allow: boolean): Promise<void> {
+  await invoke('screen_share_respond_control_request', { requestId, allow });
+}
+
+export async function screenShareRevokeControl(): Promise<void> {
+  await invoke('screen_share_revoke_control');
+}
+
 export async function screenShareOpenLocalPreview(): Promise<void> {
   await invoke('screen_share_open_local_preview');
 }
 
 export async function screenShareCloseLocalPreview(): Promise<void> {
   await invoke('screen_share_close_local_preview');
+}
+
+export async function screenShareOpenDesktopOverlay(): Promise<void> {
+  await invoke('screen_share_open_desktop_overlay');
+}
+
+export async function screenShareDesktopOverlayReady(): Promise<void> {
+  await invoke('screen_share_desktop_overlay_ready');
+}
+
+export async function screenShareCloseDesktopOverlay(): Promise<void> {
+  await invoke('screen_share_close_desktop_overlay');
 }
 
 // ─── File Share ───────────────────────────────────────────
@@ -1374,6 +1507,89 @@ export async function fileShareStop(): Promise<void> {
 
 export async function fileShareGetStatus(): Promise<FileShareStatus> {
   return await invoke<FileShareStatus>('file_share_get_status');
+}
+
+export interface TftpServerConfig {
+  root_dir: string;
+  bind_address: string;
+  port: number;
+  allow_upload: boolean;
+  allow_overwrite: boolean;
+  block_size_limit: number;
+  window_size_limit: number;
+}
+
+export interface TftpTransfer {
+  id: number;
+  direction: 'download' | 'upload';
+  client: string;
+  file_name: string;
+  bytes: number;
+  expected_bytes: number | null;
+  started_at: string;
+}
+
+export interface TftpEvent {
+  id: number;
+  timestamp: string;
+  level: 'info' | 'success' | 'error';
+  action: string;
+  client: string | null;
+  file_name: string | null;
+  bytes: number;
+  message: string;
+}
+
+export interface TftpStats {
+  completed_downloads: number;
+  completed_uploads: number;
+  bytes_sent: number;
+  bytes_received: number;
+}
+
+export interface TftpSharedFile {
+  relative_path: string;
+  size: number;
+  modified_at: string | null;
+}
+
+export interface TftpPickedFile {
+  path: string;
+  rootDir: string;
+  fileName: string;
+}
+
+export interface TftpServerStatus extends TftpServerConfig {
+  is_active: boolean;
+  uptime_secs: number;
+  active_transfers: TftpTransfer[];
+  events: TftpEvent[];
+  stats: TftpStats;
+  last_error: string | null;
+}
+
+export async function tftpServerPickDirectory(): Promise<string | null> {
+  return await invoke<string | null>('tftp_server_pick_directory');
+}
+
+export async function tftpServerPickFile(): Promise<TftpPickedFile | null> {
+  return await invoke<TftpPickedFile | null>('tftp_server_pick_file');
+}
+
+export async function tftpServerListFiles(rootDir: string): Promise<TftpSharedFile[]> {
+  return await invoke<TftpSharedFile[]>('tftp_server_list_files', { rootDir });
+}
+
+export async function tftpServerStart(config: TftpServerConfig): Promise<TftpServerStatus> {
+  return await invoke<TftpServerStatus>('tftp_server_start', { config });
+}
+
+export async function tftpServerStop(): Promise<TftpServerStatus> {
+  return await invoke<TftpServerStatus>('tftp_server_stop');
+}
+
+export async function tftpServerGetStatus(): Promise<TftpServerStatus> {
+  return await invoke<TftpServerStatus>('tftp_server_get_status');
 }
 
 export interface AdminTaskStatus {

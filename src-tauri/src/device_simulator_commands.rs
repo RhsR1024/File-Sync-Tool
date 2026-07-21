@@ -21,7 +21,7 @@ use app_lib::device_simulator::assets::download::build_asset_http_client;
 use app_lib::device_simulator::assets::resolver::resolve_profile_dependencies;
 use app_lib::device_simulator::assets::signature::trusted_catalog_keys;
 use app_lib::device_simulator::assets::store::{AssetPreparationPhase, AssetPreparationService};
-use app_lib::device_simulator::errors::{SimulatorError, SimulatorErrorBody, SimulatorResult};
+use app_lib::device_simulator::errors::SimulatorErrorBody;
 use app_lib::device_simulator::events::WorkerEventPayload;
 use app_lib::device_simulator::manager::{ManagerNotification, SimulatorManager};
 use app_lib::device_simulator::models::{AssetState, SessionState, SimulatorStatus};
@@ -29,17 +29,17 @@ use app_lib::device_simulator::preflight::{run_preflight, PreflightEnvironment};
 use app_lib::device_simulator::profiles::loader::load_profile_from_pack;
 use app_lib::device_simulator::profiles::schema::EvidenceStatus;
 use app_lib::device_simulator::runtime_assets::PinnedPackDirectory;
-use app_lib::device_simulator::session_journal::{SessionJournalStore, SessionResourceCleaner};
-use app_lib::device_simulator::windows::firewall::{FirewallBackend, SystemFirewallBackend};
+use app_lib::device_simulator::session_journal::SessionJournalStore;
 use app_lib::device_simulator::windows::interfaces::{
     list_system_interfaces, NetworkInterfaceInfo,
 };
 use app_lib::device_simulator::windows::ip_alias::{
-    assess_system_address_conflicts, unknown_address_conflict_assessments, IpAliasBackend,
-    SystemIpAliasBackend,
+    assess_system_address_conflicts, unknown_address_conflict_assessments, ConflictEvidenceKind,
 };
+use app_lib::device_simulator::windows::named_pipe::PipeIdentity;
 use app_lib::device_simulator::worker_protocol::{
-    AlarmJobCommandPayload, InitializeSessionPayload, StopAlarmJobPayload, WorkerCommandName,
+    AlarmJobCommandPayload, InitializeSessionPayload, RecoverSessionPayload, StopAlarmJobPayload,
+    WorkerCommandName,
 };
 use semver::Version;
 use serde::de::DeserializeOwned;
@@ -734,60 +734,66 @@ pub async fn device_simulator_recover(
     session_id: String,
 ) -> Result<RecoveryResult, SimulatorErrorBody> {
     let app_data_dir = app_data_dir(&app_handle)?;
-    let store = SessionJournalStore::from_app_data_dir(&app_data_dir);
-    let session_for_load = session_id.clone();
-    let journal = tokio::task::spawn_blocking(move || store.load(&session_for_load))
+    // A recovery Worker is always launched elevated. It owns process identity
+    // verification and all resource mutations, so cleanup still works after a
+    // desktop restart when the original Worker is no longer connected here.
+    let _ = simulator_state.manager.shutdown_worker().await;
+    let recovery_manager = Arc::new(SimulatorManager::default());
+    recovery_manager
+        .begin_session(session_id.clone())
+        .map_err(manager_error)?;
+    recovery_manager
+        .transition(&session_id, SessionState::Preflighting)
+        .map_err(manager_error)?;
+    recovery_manager
+        .transition(&session_id, SessionState::StartingWorker)
+        .map_err(manager_error)?;
+    let generated = PipeIdentity::generate();
+    let identity = PipeIdentity {
+        session_id: session_id.clone(),
+        pipe_name: generated.pipe_name,
+    };
+    let (notifications, _notification_rx) = mpsc::unbounded_channel();
+    recovery_manager
+        .launch_worker(&identity, notifications)
         .await
-        .map_err(|source| {
-            runtime_error(
-                "device_simulator.recovery.task_failed",
-                "deviceSimulator.errors.recoveryFailed",
-                source.to_string(),
-            )
-        })?
-        .map_err(|source| source.into_body())?;
+        .map_err(manager_error)?;
+    recovery_manager
+        .transition(&session_id, SessionState::RecoveryRequired)
+        .map_err(manager_error)?;
+    recovery_manager
+        .transition(&session_id, SessionState::Recovering)
+        .map_err(manager_error)?;
 
-    // A recorded Worker identity must be reconciled in an isolated Windows VM
-    // before resource mutation. This avoids deleting aliases while a possibly
-    // live Worker still owns listeners.
-    if journal.worker_process.is_some() {
-        return Err(runtime_error(
-            "device_simulator.recovery.worker_presence_unverified",
-            "deviceSimulator.errors.recoveryWorkerUnverified",
-            "the journal records a Worker process; process identity/liveness must be verified in the isolated Windows acceptance environment",
-        ));
-    }
-
-    let store = SessionJournalStore::from_app_data_dir(&app_data_dir);
-    let session_for_recovery = session_id.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        let mut cleaner = SystemSessionCleaner::default();
-        store.recover_session(journal, &mut cleaner, now_ms())
-    })
-    .await
-    .map_err(|source| {
-        runtime_error(
-            "device_simulator.recovery.task_failed",
-            "deviceSimulator.errors.recoveryFailed",
-            source.to_string(),
-        )
-    })?
-    .map_err(|source| source.into_body())?;
-
-    let status = SimulatorStatusSnapshot::from(SimulatorStatus {
-        session_id: Some(session_for_recovery.clone()),
-        state: outcome.journal.state,
-        updated_at_ms: outcome.journal.updated_at_ms,
-        error: outcome.error.clone(),
-    });
-    let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_STATUS, &status);
-    let _ = simulator_state;
-    Ok(RecoveryResult {
-        session_id: session_for_recovery,
-        recovered: outcome.recovered,
-        remaining_resources: outcome.remaining_resources,
-        error: outcome.error,
-    })
+    let payload = RecoverSessionPayload {
+        app_data_dir,
+        session_id: session_id.clone(),
+    };
+    let outcome = worker_request_with_timeout::<RecoveryResult, _>(
+        &recovery_manager,
+        WorkerCommandName::RecoverSession,
+        Some(&payload),
+        Duration::from_secs(120),
+    )
+    .await;
+    let _ = recovery_manager.shutdown_worker().await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let status = simulator_state
+                .manager
+                .record_recovery_outcome(&session_id, false, Some(error.clone()))
+                .map_err(manager_error)?;
+            emit_manager_status(&app_handle, status);
+            return Err(error);
+        }
+    };
+    let status = simulator_state
+        .manager
+        .record_recovery_outcome(&session_id, outcome.recovered, outcome.error.clone())
+        .map_err(manager_error)?;
+    emit_manager_status(&app_handle, status);
+    Ok(outcome)
 }
 
 pub async fn shutdown_for_exit(
@@ -874,6 +880,36 @@ where
 {
     let value = manager
         .request_worker(command, payload)
+        .await
+        .map_err(manager_error)?
+        .ok_or_else(|| {
+            runtime_error(
+                "device_simulator.worker.response_payload_missing",
+                "deviceSimulator.errors.workerCommandFailed",
+                format!("Worker command {command:?} returned no payload"),
+            )
+        })?;
+    serde_json::from_value(value).map_err(|source| {
+        runtime_error(
+            "device_simulator.worker.response_payload_invalid",
+            "deviceSimulator.errors.workerCommandFailed",
+            source.to_string(),
+        )
+    })
+}
+
+async fn worker_request_with_timeout<R, P>(
+    manager: &SimulatorManager,
+    command: WorkerCommandName,
+    payload: Option<&P>,
+    timeout: Duration,
+) -> Result<R, SimulatorErrorBody>
+where
+    R: DeserializeOwned,
+    P: Serialize,
+{
+    let value = manager
+        .request_worker_with_timeout(command, payload, timeout)
         .await
         .map_err(manager_error)?
         .ok_or_else(|| {
@@ -1261,7 +1297,7 @@ async fn build_preflight(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let conflict_assessments = if planned_addresses.is_empty() {
+    let mut conflict_assessments = if planned_addresses.is_empty() {
         Vec::new()
     } else {
         let interface_id = request.interface_id.clone();
@@ -1285,6 +1321,7 @@ async fn build_preflight(
             ),
         }
     };
+    attach_local_address_owners(&mut conflict_assessments, &interfaces);
     let requested_ports = [
         request.device_http_port,
         request.rtsp_ports.main,
@@ -1430,6 +1467,34 @@ async fn build_preflight(
     };
     let _ = simulator_state;
     Ok(run_preflight(request, &environment))
+}
+
+fn attach_local_address_owners(
+    assessments: &mut [app_lib::device_simulator::windows::ip_alias::AddressConflictAssessment],
+    interfaces: &[NetworkInterfaceInfo],
+) {
+    for assessment in assessments {
+        for evidence in &mut assessment.evidence {
+            if evidence.kind != ConflictEvidenceKind::Local {
+                continue;
+            }
+            let owners = interfaces
+                .iter()
+                .filter(|interface| {
+                    interface
+                        .ipv4_addresses
+                        .iter()
+                        .any(|address| address.address == assessment.address)
+                })
+                .map(|interface| format!("{} ({})", interface.name, interface.description))
+                .collect::<Vec<_>>();
+            evidence.details = Some(if owners.is_empty() {
+                "local network interface".into()
+            } else {
+                owners.join(", ")
+            });
+        }
+    }
 }
 
 async fn status_with_recovery(
@@ -2125,109 +2190,6 @@ fn validate_profile_ids(profile_ids: &[String]) -> Result<(), SimulatorErrorBody
         ));
     }
     Ok(())
-}
-
-#[derive(Default)]
-struct SystemSessionCleaner {
-    firewall: SystemFirewallBackend,
-    ip_alias: SystemIpAliasBackend,
-}
-
-impl SessionResourceCleaner for SystemSessionCleaner {
-    fn stop_alarm_jobs(&mut self, _session_id: &str) -> SimulatorResult<()> {
-        Ok(())
-    }
-
-    fn stop_services(&mut self, _session_id: &str) -> SimulatorResult<()> {
-        Ok(())
-    }
-
-    fn firewall_rule_exists(&mut self, rule_name: &str) -> SimulatorResult<bool> {
-        self.firewall
-            .list_managed_rules()
-            .map(|rules| {
-                rules
-                    .iter()
-                    .any(|rule| rule.name == rule_name || rule.rule_id == rule_name)
-            })
-            .map_err(|source| {
-                cleanup_error(
-                    "device_simulator.recovery.firewall_query_failed",
-                    source.to_string(),
-                )
-            })
-    }
-
-    fn remove_firewall_rule(&mut self, rule_name: &str) -> SimulatorResult<()> {
-        let rules = self.firewall.list_managed_rules().map_err(|source| {
-            cleanup_error(
-                "device_simulator.recovery.firewall_query_failed",
-                source.to_string(),
-            )
-        })?;
-        let Some(rule) = rules
-            .iter()
-            .find(|rule| rule.name == rule_name || rule.rule_id == rule_name)
-        else {
-            return Ok(());
-        };
-        self.firewall.delete_rule(&rule.rule_id).map_err(|source| {
-            cleanup_error(
-                "device_simulator.recovery.firewall_remove_failed",
-                source.to_string(),
-            )
-        })
-    }
-
-    fn ip_address_exists(
-        &mut self,
-        interface_id: &str,
-        address: Ipv4Addr,
-    ) -> SimulatorResult<bool> {
-        let interfaces = list_system_interfaces().map_err(|source| {
-            cleanup_error(
-                "device_simulator.recovery.interface_query_failed",
-                source.to_string(),
-            )
-        })?;
-        Ok(interfaces.iter().any(|interface| {
-            interface.id.as_str() == interface_id
-                && interface
-                    .ipv4_addresses
-                    .iter()
-                    .any(|item| item.address == address)
-        }))
-    }
-
-    fn remove_ip_address(
-        &mut self,
-        interface_id: &str,
-        address: Ipv4Addr,
-        prefix_len: u8,
-    ) -> SimulatorResult<()> {
-        self.ip_alias
-            .remove_alias(interface_id, address, prefix_len)
-            .map_err(|source| {
-                cleanup_error(
-                    "device_simulator.recovery.ip_remove_failed",
-                    source.to_string(),
-                )
-            })
-    }
-
-    fn pack_pin_exists(&mut self, _pack_id: &str, _version: &str) -> SimulatorResult<bool> {
-        // Session pins are in-memory guards. If no Worker process is recorded,
-        // there is no live pin object to release.
-        Ok(false)
-    }
-
-    fn release_pack_pin(&mut self, _pack_id: &str, _version: &str) -> SimulatorResult<()> {
-        Ok(())
-    }
-}
-
-fn cleanup_error(code: &'static str, details: String) -> SimulatorError {
-    SimulatorError::new(code, "deviceSimulator.errors.recoveryFailed").with_public_details(details)
 }
 
 fn settings_error(code: &'static str, details: String) -> SimulatorErrorBody {

@@ -98,15 +98,8 @@ mod platform {
                     ))
                 })?;
 
-            let progress_message = wide(OsStr::new("File Sync Tool"));
-            operation
-                .SetProgressMessage(PCWSTR(progress_message.as_ptr()))
-                .map_err(|error| {
-                    WindowsCopyError::Failed(format!(
-                        "Failed to configure the Windows copy dialog: {error}"
-                    ))
-                })?;
-
+            // SetProgressMessage is unimplemented by Windows and returns E_NOTIMPL;
+            // the standard progress dialog is shown by PerformOperations without it.
             for request in requests {
                 let destination_parent = request.target.parent().ok_or_else(|| {
                     WindowsCopyError::Failed(format!(

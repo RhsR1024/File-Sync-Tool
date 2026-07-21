@@ -12,13 +12,15 @@ export type SidebarIconKey =
   | 'screenShare'
   | 'videoDeviceSimulator'
   | 'fileShare'
+  | 'tftpServer'
   | 'diskCacheCleanup'
   | 'clipboardManager'
   | 'errorCodeLookup'
-  | 'notepadExtensions';
+  | 'notepadExtensions'
+  | 'paperTodo';
 
 export type SidebarMatchMode = 'exact' | 'prefix';
-export type SidebarRuntimeKey = 'screenShare' | 'fileShare' | 'deviceSimulator';
+export type SidebarRuntimeKey = 'screenShare' | 'fileShare' | 'deviceSimulator' | 'tftpServer';
 
 export interface SidebarNavItem {
   key: string;
@@ -134,6 +136,14 @@ export const SIDEBAR_NAV_SECTIONS = [
         runtimeKey: 'fileShare',
       },
       {
+        key: 'tftp-server',
+        labelKey: 'sidebar.tftpServer',
+        path: '/tools/tftp-server',
+        iconKey: 'tftpServer',
+        matchMode: 'prefix',
+        runtimeKey: 'tftpServer',
+      },
+      {
         key: 'disk-cache-cleanup',
         labelKey: 'sidebar.diskCacheCleanup',
         path: '/tools/disk-cache-cleanup',
@@ -159,6 +169,13 @@ export const SIDEBAR_NAV_SECTIONS = [
         labelKey: 'sidebar.notepadExtensions',
         path: '/tools/notepad-extensions',
         iconKey: 'notepadExtensions',
+        matchMode: 'prefix',
+      },
+      {
+        key: 'paper-todo',
+        labelKey: 'sidebar.paperTodo',
+        path: '/tools/paper-todo',
+        iconKey: 'paperTodo',
         matchMode: 'prefix',
       },
     ],

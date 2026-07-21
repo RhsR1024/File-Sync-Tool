@@ -151,3 +151,5 @@ http://192.168.1.20:8080/notepad-plugins/catalog-v1.json
 ```
 
 素材已获准用于测试、学习、复制和打包，禁止商业使用；目录结构、缓存头、密钥边界和发布步骤见 [视频设备模拟器素材目录说明](./virtual-device-assets/README.md)。仓库和服务器目录均不得存放私钥。
+
+当前版本的具体文件清单、Profile 最小依赖、客户端实际请求 URL 和上线验收步骤见 [视频设备模拟器素材部署指南](./virtual-device-assets/DEPLOYMENT_GUIDE.md)。

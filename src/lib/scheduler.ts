@@ -26,7 +26,7 @@ export async function executeScan() {
         }
     } catch (e) {
         const errMsg = String(e);
-        if (errMsg.includes('already in progress')) {
+        if (errMsg.includes('already in progress') || errMsg.includes('queue already in progress')) {
             // Previous scan/deploy still running — this is normal, just skip quietly
             addLog(t('console.scanSkipped'), 'info');
         } else {

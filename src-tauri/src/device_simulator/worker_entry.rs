@@ -3,8 +3,8 @@ use crate::device_simulator::events::{WorkerEvent, WorkerEventPayload};
 use crate::device_simulator::session_journal::WorkerProcessIdentity;
 use crate::device_simulator::worker_protocol::{
     read_frame, write_frame, AlarmJobCommandPayload, HandshakeRequest, InitializeSessionPayload,
-    StopAlarmJobPayload, WorkerCommandName, WorkerHeartbeat, WorkerHello, WorkerMessage,
-    WorkerRequest, WorkerResponse, WORKER_PROTOCOL_VERSION,
+    RecoverSessionPayload, StopAlarmJobPayload, WorkerCommandName, WorkerHeartbeat, WorkerHello,
+    WorkerMessage, WorkerRequest, WorkerResponse, WORKER_PROTOCOL_VERSION,
 };
 use crate::device_simulator::worker_runtime::WorkerRuntime;
 use serde::de::DeserializeOwned;
@@ -291,13 +291,48 @@ async fn handle_worker_request(
         WorkerCommandName::GetRuntimeTelemetry => {
             Ok(to_value(runtime.telemetry_snapshot().await).ok())
         }
+        WorkerCommandName::Shutdown
+            if matches!(
+                runtime.state(),
+                crate::device_simulator::models::SessionState::Idle
+                    | crate::device_simulator::models::SessionState::Stopped
+                    | crate::device_simulator::models::SessionState::Failed
+            ) =>
+        {
+            Ok(None)
+        }
         WorkerCommandName::Shutdown => runtime.stop_services().await.map(|_| None),
-        WorkerCommandName::RecoverSession => Err(
-            crate::device_simulator::worker_runtime::WorkerRuntimeError {
-                code: "device_simulator.worker.recover_not_supported",
-                message: "recovery is coordinated by the main process after Worker exit".into(),
-            },
-        ),
+        WorkerCommandName::RecoverSession => {
+            let payload = decode_payload::<RecoverSessionPayload>(request.command.payload);
+            match payload {
+                Ok(payload) => {
+                    let recovery = tokio::task::spawn_blocking(move || {
+                        crate::device_simulator::windows::recovery::recover_recorded_session(
+                            &payload.app_data_dir,
+                            &payload.session_id,
+                        )
+                    })
+                    .await;
+                    match recovery {
+                        Ok(Ok(result)) => response_value(result),
+                        Ok(Err(error)) => {
+                            return WorkerResponse::error(request_id, error.into_body())
+                        }
+                        Err(error) => {
+                            return WorkerResponse::error(
+                                request_id,
+                                SimulatorErrorBody::new(
+                                    "device_simulator.recovery.task_failed",
+                                    "deviceSimulator.errors.recoveryFailed",
+                                )
+                                .with_public_details(error.to_string()),
+                            )
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        }
     };
     match result {
         Ok(payload) => WorkerResponse::success(request_id, payload),

@@ -1,0 +1,35 @@
+﻿{
+    "schema_version":  1,
+    "generated_at_utc":  "2026-07-20T05:47:14.6769930Z",
+    "base_url":  "http://192.168.0.111:9870",
+    "duration_seconds":  5,
+    "warmup_seconds":  1,
+    "sample_interval_ms":  500,
+    "process_id":  10072,
+    "visual_process_id":  null,
+    "synthetic_visual":  true,
+    "scenarios":  [
+                      {
+                          "scenario":  "scroll",
+                          "requested_viewers":  1,
+                          "samples":  10,
+                          "fps_average":  1,
+                          "fps_minimum":  0,
+                          "frame_age_p95_ms":  820,
+                          "outbound_average_mbps":  2.0877999999999997,
+                          "outbound_peak_mbps":  3.63,
+                          "cpu_average_percent":  7.806,
+                          "cpu_peak_percent":  8.46,
+                          "working_set_average_mb":  111.745,
+                          "working_set_peak_mb":  111.76,
+                          "jpeg_average_bytes":  148206,
+                          "jpeg_p50_bytes":  136044,
+                          "jpeg_p95_bytes":  201309,
+                          "capture_first_frame_ms":  1294,
+                          "stream_first_frame_p95_ms":  0,
+                          "reconnect_p95_ms":  0,
+                          "reconnects_observed":  1,
+                          "dropped_frames":  0
+                      }
+                  ]
+}

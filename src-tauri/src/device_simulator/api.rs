@@ -5,6 +5,7 @@ use crate::device_simulator::profiles::identity::{
     generate_device_previews, IdentityPlan, MAX_PREVIEW_DEVICES,
 };
 use crate::device_simulator::profiles::scope::{FirstReleaseProfileId, TargetPlatform};
+use crate::device_simulator::windows::ip_alias::AddressConflictAssessment;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -90,6 +91,8 @@ pub struct SimulatorStartRequest {
     pub platform: TargetPlatformConfig,
     pub interface_id: String,
     pub start_ip: Ipv4Addr,
+    #[serde(default)]
+    pub device_ips: Vec<Ipv4Addr>,
     pub subnet_prefix: u8,
     pub device_http_port: u16,
     pub rtsp_ports: RtspPorts,
@@ -232,6 +235,8 @@ pub struct PreflightReport {
     pub ok: bool,
     pub checks: Vec<PreflightCheck>,
     pub device_preview: DevicePreview,
+    #[serde(default)]
+    pub address_assessments: Vec<AddressConflictAssessment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -469,6 +474,24 @@ pub fn preview_devices(
         )
     })?;
     let mut current_ip = request.start_ip;
+    let requested_device_count = request.groups.iter().try_fold(0_usize, |total, group| {
+        total.checked_add(group.count as usize).ok_or_else(|| {
+            validation_error(
+                "device_simulator.validation.device_count_invalid",
+                "device count overflowed",
+            )
+        })
+    })?;
+    if !request.device_ips.is_empty() && request.device_ips.len() != requested_device_count {
+        return Err(validation_error(
+            "device_simulator.validation.explicit_ip_count_mismatch",
+            format!(
+                "{} explicit addresses were provided for {requested_device_count} devices",
+                request.device_ips.len()
+            ),
+        ));
+    }
+    let mut explicit_address_index = 0_usize;
     let mut devices = Vec::new();
     let mut total_channels = 0_u32;
     let mut occupied = HashSet::new();
@@ -480,20 +503,45 @@ pub fn preview_devices(
                 "device group count exceeds the first-release limit",
             )
         })?;
-        let identity_plan = IdentityPlan {
-            profile_id,
-            network,
-            start_ip: current_ip,
-            device_count: count,
-            deterministic_seed: deterministic_seed(request, group),
-            http_port: request.device_http_port,
-            nvr_channel_count: group.nvr_channel_count,
+        let group_addresses = if request.device_ips.is_empty() {
+            None
+        } else {
+            let end = explicit_address_index + count as usize;
+            let addresses = request.device_ips[explicit_address_index..end].to_vec();
+            explicit_address_index = end;
+            Some(addresses)
         };
-        let generated = generate_device_previews(&identity_plan, &occupied)
-            .map_err(|source| validation_error(source.code, source.message))?;
-        for identity in generated {
+        let addresses = match group_addresses {
+            Some(addresses) => addresses,
+            None => (0..count)
+                .map(|offset| {
+                    u32::from(current_ip)
+                        .checked_add(u32::from(offset))
+                        .map(Ipv4Addr::from)
+                        .ok_or_else(|| {
+                            validation_error(
+                                "device_simulator.validation.network_capacity_insufficient",
+                                "device address range overflowed IPv4",
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        for (group_index, address) in addresses.into_iter().enumerate() {
+            let identity_plan = IdentityPlan {
+                profile_id,
+                network,
+                start_ip: address,
+                device_count: 1,
+                deterministic_seed: deterministic_seed(request, group),
+                http_port: request.device_http_port,
+                nvr_channel_count: group.nvr_channel_count,
+            };
+            let identity = generate_device_previews(&identity_plan, &occupied)
+                .map_err(|source| validation_error(source.code, source.message))?
+                .remove(0);
             occupied.insert(identity.ip);
-            let device_id = format!("{}-{:04}", group.id, identity.ordinal);
+            let device_id = format!("{}-{:04}", group.id, group_index + 1);
             let channel_count = identity.nvr_channel_count;
             total_channels = total_channels.saturating_add(u32::from(channel_count.unwrap_or(1)));
             let streams = stream_addresses(
@@ -515,14 +563,17 @@ pub fn preview_devices(
                 streams,
             });
         }
-        current_ip = Ipv4Addr::from(u32::from(current_ip).checked_add(group.count).ok_or_else(
-            || {
-                validation_error(
-                    "device_simulator.validation.network_capacity_insufficient",
-                    "device address range overflowed IPv4",
-                )
-            },
-        )?);
+        if request.device_ips.is_empty() {
+            current_ip =
+                Ipv4Addr::from(u32::from(current_ip).checked_add(group.count).ok_or_else(
+                    || {
+                        validation_error(
+                            "device_simulator.validation.network_capacity_insufficient",
+                            "device address range overflowed IPv4",
+                        )
+                    },
+                )?);
+        }
     }
     Ok(DevicePreview {
         total_devices: devices.len() as u32,
@@ -724,6 +775,7 @@ mod tests {
             },
             interface_id: "guid:a0b1c2d3-1234-5678-90ab-010203040506".into(),
             start_ip: "10.20.0.254".parse().unwrap(),
+            device_ips: vec![],
             subnet_prefix: 23,
             device_http_port: 81,
             rtsp_ports: RtspPorts::default(),
@@ -787,6 +839,32 @@ mod tests {
         assert_eq!(
             preview_devices(&request).unwrap_err().code,
             "device_simulator.validation.profile_unknown"
+        );
+    }
+
+    #[test]
+    fn preview_accepts_non_contiguous_explicit_addresses_and_rejects_count_mismatch() {
+        let mut request = start_request();
+        request.start_ip = "10.20.0.10".parse().unwrap();
+        request.device_ips = ["10.20.0.10", "10.20.0.18", "10.20.1.7"]
+            .map(|value| value.parse().unwrap())
+            .to_vec();
+        let preview = preview_devices(&request).unwrap();
+        assert_eq!(
+            preview
+                .devices
+                .iter()
+                .map(|device| device.ip)
+                .collect::<Vec<_>>(),
+            request.device_ips
+        );
+        assert_eq!(preview.devices[0].device_id, "smart-0001");
+        assert_eq!(preview.devices[2].device_id, "nvr-0001");
+
+        request.device_ips.pop();
+        assert_eq!(
+            preview_devices(&request).unwrap_err().code,
+            "device_simulator.validation.explicit_ip_count_mismatch"
         );
     }
 

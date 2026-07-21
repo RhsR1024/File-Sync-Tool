@@ -80,6 +80,17 @@ pub struct NetworkInterfaceInfo {
     pub ipv4_addresses: Vec<InterfaceIpv4Address>,
 }
 
+fn is_usable_alias_adapter(interface: &NetworkInterfaceInfo) -> bool {
+    interface.is_enabled
+        && interface.is_up
+        && interface.mac_address.is_some()
+        && !interface.ipv4_addresses.is_empty()
+        && !interface
+            .ipv4_addresses
+            .iter()
+            .all(|address| address.address.is_loopback())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterfaceProviderError {
     UnsupportedPlatform,
@@ -211,7 +222,7 @@ pub fn list_system_interfaces() -> Result<Vec<NetworkInterfaceInfo>, InterfacePr
             unicast = entry.Next;
         }
 
-        interfaces.push(NetworkInterfaceInfo {
+        let interface = NetworkInterfaceInfo {
             id,
             name: if name.is_empty() {
                 raw_adapter_name.clone()
@@ -224,7 +235,13 @@ pub fn list_system_interfaces() -> Result<Vec<NetworkInterfaceInfo>, InterfacePr
             is_up: adapter.OperStatus == IfOperStatusUp,
             mac_address,
             ipv4_addresses,
-        });
+        };
+
+        // Windows can expose protocol/filter bindings as separate rows here.
+        // Only operational L2 adapters can safely own the simulator IP aliases.
+        if is_usable_alias_adapter(&interface) {
+            interfaces.push(interface);
+        }
         current = adapter.Next;
     }
     interfaces.sort_by(|left, right| {
@@ -327,6 +344,32 @@ mod tests {
             Some("A0B1C2D3-1234-5678-90AB-010203040506".into())
         );
         assert_eq!(extract_adapter_guid("Ethernet 2"), None);
+    }
+
+    #[test]
+    fn alias_adapter_filter_rejects_filter_bindings_and_loopback() {
+        let mut interface = NetworkInterfaceInfo {
+            id: StableInterfaceId::from_adapter_guid("a0b1c2d3-1234-5678-90ab-010203040506")
+                .unwrap(),
+            name: "Ethernet".into(),
+            description: "Physical adapter".into(),
+            interface_index: 7,
+            is_enabled: true,
+            is_up: true,
+            mac_address: Some("001122334455".into()),
+            ipv4_addresses: vec![InterfaceIpv4Address {
+                address: Ipv4Addr::new(192, 168, 1, 2),
+                prefix_len: 24,
+                is_primary: true,
+            }],
+        };
+        assert!(is_usable_alias_adapter(&interface));
+
+        interface.mac_address = None;
+        assert!(!is_usable_alias_adapter(&interface));
+        interface.mac_address = Some("001122334455".into());
+        interface.ipv4_addresses[0].address = Ipv4Addr::LOCALHOST;
+        assert!(!is_usable_alias_adapter(&interface));
     }
 
     #[cfg(target_os = "windows")]

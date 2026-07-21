@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Transfer Gate</title>
+  <path fill="#67D391" d="M256 58 421 153v190L256 438 91 343V153Zm0 57-116 67v132l116 67 116-67V182Z"/>
+  <path fill="#0B1220" d="M206 168h100c24 0 44 20 44 44v88c0 24-20 44-44 44H206c-24 0-44-20-44-44v-88c0-24 20-44 44-44Z"/>
+  <path fill="#F7FAFC" d="M206 195h76l38 38v84H206Z"/>
+  <path fill="#B8C7D9" d="M282 195v38h38Z"/>
+  <path fill="#FFB02E" d="M111 237h186v-43l99 62-99 62v-43H111Z"/>
+</svg>

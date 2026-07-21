@@ -56,6 +56,50 @@ test('does not notify for hydrated history or manual task groups', () => {
   })]), []);
 });
 
+test('does not notify when a historical group receives an unqueued scan run', () => {
+  const completed = group({ copy_status: 'completed', deploy_status: 'completed' });
+  const tracker = createSyncTaskNotificationTracker([completed]);
+
+  assert.deepEqual(tracker.collect([group({
+    latest_run_id: 'run-2',
+    copy_status: 'pending',
+  })]), []);
+  assert.deepEqual(tracker.collect([group({
+    latest_run_id: 'run-2',
+    copy_status: 'running',
+  })]), []);
+  assert.deepEqual(tracker.collect([group({
+    latest_run_id: 'run-2',
+    copy_status: 'completed',
+    deploy_status: 'completed',
+  })]), []);
+});
+
+test('allows milestones for a run explicitly announced as queued', () => {
+  const completed = group({ copy_status: 'completed', deploy_status: 'completed' });
+  const tracker = createSyncTaskNotificationTracker([completed]);
+
+  tracker.markQueued('run-2');
+  assert.deepEqual(tracker.collect([group({
+    latest_run_id: 'run-2',
+    copy_status: 'pending',
+  })]), []);
+  assert.deepEqual(tracker.collect([group({
+    latest_run_id: 'run-2',
+    copy_status: 'running',
+  })]), [
+    { kind: 'copy_started', taskName: 'build-1' },
+  ]);
+  assert.deepEqual(tracker.collect([group({
+    latest_run_id: 'run-2',
+    copy_status: 'completed',
+    deploy_status: 'completed',
+  })]), [
+    { kind: 'copy_completed', taskName: 'build-1' },
+    { kind: 'deploy_completed', taskName: 'build-1' },
+  ]);
+});
+
 test('reports terminal failures and falls back to the folder name', () => {
   const tracker = createSyncTaskNotificationTracker([group({ display_name: '' })]);
 

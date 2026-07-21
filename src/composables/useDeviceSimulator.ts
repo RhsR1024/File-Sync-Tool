@@ -1,4 +1,4 @@
-import { computed, reactive, ref } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import {
@@ -26,6 +26,7 @@ import {
   type SimulatorStartRequest,
   type SimulatorStatus,
 } from '@/lib/deviceSimulator';
+import { recommendSimulatorInterface } from '@/lib/deviceSimulatorInterfaceSelection';
 
 function newId(prefix: string) {
   const suffix = typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -57,6 +58,10 @@ const defaultSettings = (): DeviceSimulatorSettings => ({
   selected_interface_id: null,
   last_platform: 'ums',
   last_start_ip: '192.168.1.100',
+  last_device_ips: [],
+  last_subnet_prefix: 24,
+  last_platform_servers: [],
+  last_alarm_receiver_url: null,
   last_device_groups: [{
     id: newId('group'),
     profile_id: 'ipc-custom',
@@ -73,12 +78,15 @@ function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartR
   return {
     platform: {
       kind: 'ums',
-      servers: [{ id: newId('server'), host: '', port: 80 }],
-      alarm_receiver_url: null,
+      servers: settings.last_platform_servers.length > 0
+        ? settings.last_platform_servers.map((server) => ({ ...server }))
+        : [{ id: newId('server'), host: '', port: 80 }],
+      alarm_receiver_url: settings.last_alarm_receiver_url,
     },
     interface_id: settings.selected_interface_id ?? '',
     start_ip: settings.last_start_ip ?? '192.168.1.100',
-    subnet_prefix: 24,
+    device_ips: [...settings.last_device_ips],
+    subnet_prefix: settings.last_subnet_prefix,
     device_http_port: settings.last_http_port,
     rtsp_ports: { ...settings.last_rtsp_ports },
     groups: settings.last_device_groups.length > 0
@@ -92,7 +100,7 @@ function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartR
   };
 }
 
-export function useDeviceSimulator() {
+function createDeviceSimulator() {
   const settings = ref(defaultSettings());
   const request = reactive<SimulatorStartRequest>(requestFromSettings(settings.value));
   const status = ref<SimulatorStatus>(emptyStatus());
@@ -113,6 +121,7 @@ export function useDeviceSimulator() {
   const busyAction = ref<string | null>(null);
   const errorMessage = ref('');
   const initialized = ref(false);
+  const manualInterfaceSelection = ref(false);
   let unlisteners: UnlistenFn[] = [];
 
   const topologyLocked = computed(() => isDeviceSimulatorTopologyLocked(status.value.state));
@@ -122,11 +131,62 @@ export function useDeviceSimulator() {
     : true);
   const recoverySessionId = computed(() => status.value.recovery_session_id
     ?? (status.value.state === 'recovery_required' ? status.value.session_id : null));
+  const interfaceSelection = computed(() => recommendSimulatorInterface(
+    interfaces.value,
+    request.start_ip,
+    request.device_ips,
+    request.interface_id,
+  ));
+  const selectedInterface = computed(() => interfaces.value
+    .find((item) => item.id === request.interface_id) ?? null);
+
+  function selectAvailableInterface() {
+    if (topologyLocked.value) return;
+    const recommendation = interfaceSelection.value;
+    if (!recommendation.recommended_interface_id) {
+      request.interface_id = '';
+      return;
+    }
+    const currentIsAvailable = interfaces.value.some((item) => item.id === request.interface_id);
+    if (!manualInterfaceSelection.value || !currentIsAvailable) {
+      request.interface_id = recommendation.recommended_interface_id;
+      if (!currentIsAvailable) manualInterfaceSelection.value = false;
+    }
+  }
+
+  function selectInterfaceManually(interfaceId: string) {
+    if (topologyLocked.value) return;
+    if (!interfaceId) {
+      manualInterfaceSelection.value = false;
+      selectAvailableInterface();
+      return;
+    }
+    if (!interfaces.value.some((item) => item.id === interfaceId)) return;
+    request.interface_id = interfaceId;
+    manualInterfaceSelection.value = true;
+  }
+
+  function applyAutomaticInterfaceSelection() {
+    if (topologyLocked.value) return;
+    manualInterfaceSelection.value = false;
+    request.interface_id = interfaceSelection.value.recommended_interface_id;
+  }
+
+  watch(
+    () => [
+      request.start_ip,
+      request.device_ips.join('|'),
+      request.subnet_prefix,
+      interfaces.value.map((item) => `${item.id}:${item.ipv4_addresses.join(',')}`).join('|'),
+    ],
+    () => selectAvailableInterface(),
+  );
 
   function replaceRequest(next: SimulatorStartRequest) {
     request.platform = next.platform;
     request.interface_id = next.interface_id;
     request.start_ip = next.start_ip;
+    request.device_ips = next.device_ips;
     request.subnet_prefix = next.subnet_prefix;
     request.device_http_port = next.device_http_port;
     request.rtsp_ports = next.rtsp_ports;
@@ -140,6 +200,10 @@ export function useDeviceSimulator() {
       selected_interface_id: request.interface_id || null,
       last_platform: request.platform.kind,
       last_start_ip: request.start_ip || null,
+      last_device_ips: [...request.device_ips],
+      last_subnet_prefix: request.subnet_prefix,
+      last_platform_servers: request.platform.servers.map((server) => ({ ...server })),
+      last_alarm_receiver_url: request.platform.alarm_receiver_url,
       last_device_groups: request.groups.map((group) => ({ ...group })),
       last_http_port: request.device_http_port,
       last_rtsp_ports: { ...request.rtsp_ports },
@@ -147,25 +211,51 @@ export function useDeviceSimulator() {
   }
 
   function errorText(error: unknown): string {
+    const info = errorInfo(error);
+    if (info) {
+      const summary = info.message_key || info.code;
+      const detail = [info.code, info.details].filter(Boolean).join(' | ');
+      return detail ? `${summary}\n${detail}` : summary;
+    }
     if (error instanceof Error) return error.message;
-    if (error && typeof error === 'object') {
-      const candidate = error as { code?: unknown; message_key?: unknown; details?: unknown };
-      if (typeof candidate.message_key === 'string' && candidate.message_key) {
-        return candidate.message_key;
-      }
-      if (typeof candidate.details === 'string' && candidate.details) {
-        return candidate.details;
-      }
-      if (typeof candidate.code === 'string' && candidate.code) {
-        return 'deviceSimulator.errors.generic';
-      }
-      try {
-        return JSON.stringify(error);
-      } catch {
-        // Fall through to the final string conversion.
-      }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      // Fall through to the final string conversion.
     }
     return String(error);
+  }
+
+  function errorInfo(error: unknown): { code: string; message_key: string; details: string } | null {
+    if (!error || typeof error !== 'object') return null;
+    const candidate = error as { code?: unknown; message_key?: unknown; details?: unknown };
+    const code = typeof candidate.code === 'string' ? candidate.code : '';
+    const message_key = typeof candidate.message_key === 'string' ? candidate.message_key : '';
+    const details = typeof candidate.details === 'string' ? candidate.details : '';
+    return code || message_key || details ? { code, message_key, details } : null;
+  }
+
+  function appendErrorLog(action: string, error: unknown) {
+    const info = errorInfo(error);
+    const message = info?.details || info?.message_key || (error instanceof Error ? error.message : String(error));
+    const errorCode = info?.code || null;
+    const previous = logs.value[logs.value.length - 1];
+    if (previous?.level === 'error' && previous.error_code === errorCode && previous.message === message) return;
+    logs.value.push({
+      timestamp: new Date().toISOString(),
+      level: 'error',
+      session_id: status.value.session_id,
+      component: `ui:${action}`,
+      profile_id: null,
+      device_id: null,
+      device_ip: null,
+      channel_id: null,
+      alarm_job_id: null,
+      rtsp_session_id: null,
+      error_code: errorCode,
+      message,
+    });
+    if (logs.value.length > 2_000) logs.value.splice(0, logs.value.length - 2_000);
   }
 
   async function run<T>(action: string, operation: () => Promise<T>): Promise<T | null> {
@@ -175,6 +265,7 @@ export function useDeviceSimulator() {
       return await operation();
     } catch (error) {
       errorMessage.value = errorText(error);
+      appendErrorLog(action, error);
       return null;
     } finally {
       busyAction.value = null;
@@ -184,7 +275,10 @@ export function useDeviceSimulator() {
   async function subscribeEvents() {
     if (unlisteners.length > 0) return;
     const listeners = await Promise.all([
-      listen<SimulatorStatus>(DEVICE_SIMULATOR_EVENTS.status, ({ payload }) => { status.value = payload; }),
+      listen<SimulatorStatus>(DEVICE_SIMULATOR_EVENTS.status, ({ payload }) => {
+        status.value = payload;
+        if (payload.last_error) appendErrorLog('backend', payload.last_error);
+      }),
       listen<AssetProgress>(DEVICE_SIMULATOR_EVENTS.assetProgress, ({ payload }) => {
         assetProgress.value = payload;
         if (payload.state === 'ready' || payload.state === 'failed') {
@@ -227,7 +321,10 @@ export function useDeviceSimulator() {
       settings.value = settingsResult.value;
       replaceRequest(requestFromSettings(settingsResult.value));
     }
-    if (interfaceResult.status === 'fulfilled') interfaces.value = interfaceResult.value;
+    if (interfaceResult.status === 'fulfilled') {
+      interfaces.value = interfaceResult.value;
+      selectAvailableInterface();
+    }
     if (profileResult.status === 'fulfilled') profiles.value = profileResult.value;
     if (statusResult.status === 'fulfilled') status.value = statusResult.value;
     const failure = [settingsResult, interfaceResult, profileResult, statusResult]
@@ -235,6 +332,27 @@ export function useDeviceSimulator() {
     if (failure?.status === 'rejected') errorMessage.value = errorText(failure.reason);
     busyAction.value = null;
     initialized.value = true;
+    if (selectedProfileIds.value.length > 0) await refreshAssets();
+  }
+
+  async function refreshEnvironment() {
+    busyAction.value = 'refresh';
+    errorMessage.value = '';
+    const [interfaceResult, profileResult, statusResult] = await Promise.allSettled([
+      deviceSimulatorApi.listInterfaces(),
+      deviceSimulatorApi.listProfiles(),
+      deviceSimulatorApi.getStatus(),
+    ]);
+    if (interfaceResult.status === 'fulfilled') {
+      interfaces.value = interfaceResult.value;
+      selectAvailableInterface();
+    }
+    if (profileResult.status === 'fulfilled') profiles.value = profileResult.value;
+    if (statusResult.status === 'fulfilled') status.value = statusResult.value;
+    const failure = [interfaceResult, profileResult, statusResult]
+      .find((result) => result.status === 'rejected');
+    if (failure?.status === 'rejected') errorMessage.value = errorText(failure.reason);
+    busyAction.value = null;
     if (selectedProfileIds.value.length > 0) await refreshAssets();
   }
 
@@ -269,7 +387,17 @@ export function useDeviceSimulator() {
 
   async function prepareAssets() {
     const jobId = await run('prepare-assets', () => deviceSimulatorApi.prepareAssets(selectedProfileIds.value));
-    if (jobId) await refreshAssets();
+    if (jobId) {
+      assetProgress.value = {
+        job_id: jobId,
+        state: 'checking',
+        current_pack_id: null,
+        downloaded: 0,
+        total: null,
+        speed_bps: 0,
+        error: null,
+      };
+    }
   }
 
   async function refreshAlarmTypes() {
@@ -312,14 +440,22 @@ export function useDeviceSimulator() {
   }
 
   async function stop() {
-    await run('stop', () => deviceSimulatorApi.stop());
+    const stopped = await run('stop', () => deviceSimulatorApi.stop());
+    if (stopped === null) return;
     const next = await run('status', () => deviceSimulatorApi.getStatus());
     if (next) status.value = next;
   }
 
   async function recover() {
     if (!recoverySessionId.value) return;
-    await run('recover', () => deviceSimulatorApi.recover(recoverySessionId.value!));
+    const recovered = await run('recover', async () => {
+      const result = await deviceSimulatorApi.recover(recoverySessionId.value!);
+      if (!result.recovered) {
+        throw result.error ?? new Error('deviceSimulator.errors.recoveryFailed');
+      }
+      return result;
+    });
+    if (!recovered) return;
     const next = await run('status', () => deviceSimulatorApi.getStatus());
     if (next) status.value = next;
   }
@@ -392,7 +528,11 @@ export function useDeviceSimulator() {
     blockingPreflight,
     recoverySessionId,
     selectedProfileIds,
+    selectedInterface,
+    interfaceSelection,
+    manualInterfaceSelection,
     initialize,
+    refreshEnvironment,
     dispose,
     saveSettings,
     refreshAssets,
@@ -412,5 +552,15 @@ export function useDeviceSimulator() {
     addGroup,
     removeGroup,
     updateGroupProfile,
+    selectInterfaceManually,
+    applyAutomaticInterfaceSelection,
   };
+}
+
+let sharedDeviceSimulator: ReturnType<typeof createDeviceSimulator> | null = null;
+
+/** Keep drafts, asset readiness, and background progress alive across route changes. */
+export function useDeviceSimulator() {
+  sharedDeviceSimulator ??= createDeviceSimulator();
+  return sharedDeviceSimulator;
 }

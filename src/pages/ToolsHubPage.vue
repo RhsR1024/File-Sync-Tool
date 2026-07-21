@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorCog, MonitorUp, PackageSearch, Puzzle, Share2, Shield, Video, type LucideIcon } from 'lucide-vue-next';
+import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorCog, MonitorUp, PackageSearch, Puzzle, RadioTower, Share2, Shield, StickyNote, Video, type LucideIcon } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
 import { appStore } from '@/lib/store';
 
@@ -29,6 +29,10 @@ function isToolActive(key: string) {
 
   if (key === 'file-share') {
     return appStore.toolRuntime.fileShare;
+  }
+
+  if (key === 'tftp-server') {
+    return appStore.toolRuntime.tftpServer;
   }
 
   return false;
@@ -130,6 +134,15 @@ const toolCards = computed<ToolCard[]>(() => [
     chipKey: 'toolsHub.cards.fileShare.chip',
   },
   {
+    key: 'tftp-server',
+    titleKey: 'sidebar.tftpServer',
+    descriptionKey: 'toolsHub.cards.tftpServer.description',
+    path: '/tools/tftp-server',
+    icon: markRaw(RadioTower as LucideIcon),
+    iconClasses: 'from-cyan-600 to-blue-600 shadow-cyan-500/20',
+    chipKey: 'toolsHub.cards.tftpServer.chip',
+  },
+  {
     key: 'disk-cache-cleanup',
     titleKey: 'sidebar.diskCacheCleanup',
     descriptionKey: 'toolsHub.cards.diskCacheCleanup.description',
@@ -164,6 +177,15 @@ const toolCards = computed<ToolCard[]>(() => [
     icon: markRaw(Puzzle as LucideIcon),
     iconClasses: 'from-violet-500 to-indigo-600 shadow-violet-500/20',
     chipKey: 'toolsHub.cards.notepadExtensions.chip',
+  },
+  {
+    key: 'paper-todo',
+    titleKey: 'sidebar.paperTodo',
+    descriptionKey: 'toolsHub.cards.paperTodo.description',
+    path: '/tools/paper-todo',
+    icon: markRaw(StickyNote as LucideIcon),
+    iconClasses: 'from-amber-400 to-emerald-600 shadow-amber-500/20',
+    chipKey: 'toolsHub.cards.paperTodo.chip',
   },
 ]);
 </script>

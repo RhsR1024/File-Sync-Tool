@@ -61,6 +61,8 @@ struct ScanQueuedEvent {
     folder: String,
     local_path: String,
     remote_path: String,
+    task_group_id: String,
+    run_id: String,
 }
 
 fn emit_scan_queued<R: tauri::Runtime>(
@@ -68,6 +70,8 @@ fn emit_scan_queued<R: tauri::Runtime>(
     folder: &str,
     local_path: &str,
     remote_path: &str,
+    task_group_id: &str,
+    run_id: &str,
 ) {
     let _ = app_handle.emit(
         "scan-queued",
@@ -75,6 +79,8 @@ fn emit_scan_queued<R: tauri::Runtime>(
             folder: folder.to_string(),
             local_path: local_path.to_string(),
             remote_path: remote_path.to_string(),
+            task_group_id: task_group_id.to_string(),
+            run_id: run_id.to_string(),
         },
     );
 }
@@ -365,6 +371,11 @@ fn mark_copy_cancelled_for_handle(
         "warn",
         message,
     );
+}
+
+fn copy_run_is_paused(task_manager: &TaskManager, task_handle: Option<&TaskRunHandle>) -> bool {
+    task_handle
+        .is_some_and(|handle| task_manager.is_run_paused(&handle.task_group_id, &handle.run_id))
 }
 
 fn clear_owned_runtime(
@@ -1413,6 +1424,22 @@ async fn perform_copy<R: tauri::Runtime>(
             return Ok(0u64);
         }
 
+        // Only announce a scheduled task once this scan has found files that
+        // actually need copying. A candidate directory can be present on every
+        // scan while all of its files are already up to date.
+        if source_clone == "scheduled" {
+            if let Some(task_handle) = task_handle_clone.as_ref() {
+                emit_scan_queued(
+                    &handle,
+                    &folder_name_clone,
+                    &target_full_path_clone.to_string_lossy(),
+                    &source_path_clone.to_string_lossy(),
+                    &task_handle.task_group_id,
+                    &task_handle.run_id,
+                );
+            }
+        }
+
         // --- Stability check ---
         // Only files modified within the configured recent-file window enter the waiting flow.
         // Older files are copied directly; recent files wait `stability_check_secs` then re-check size.
@@ -1942,13 +1969,18 @@ async fn perform_copy<R: tauri::Runtime>(
         }
         Ok(Err(e)) => {
             if let fs_extra::error::ErrorKind::Interrupted = e.kind {
+                let is_paused = copy_run_is_paused(&task_manager, task_handle.as_ref());
                 let is_skip = e.to_string().contains("Skipped");
-                let msg = if is_skip {
+                let msg = if is_paused {
+                    format!("Copy paused: {}", folder_name)
+                } else if is_skip {
                     format!("Copy skipped: {}", folder_name)
                 } else {
                     format!("Copy cancelled: {}", folder_name)
                 };
-                mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &msg);
+                if !is_paused {
+                    mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &msg);
+                }
                 emit_log(app_handle, msg.clone(), "warn");
                 if source == "manual" {
                     result.errors.push(msg);
@@ -1993,6 +2025,8 @@ pub async fn temporary_copy<R: tauri::Runtime>(
     file_extensions: Vec<String>,
     filename_includes: Vec<String>,
     skip_stability_check: bool,
+    task_id: Option<String>,
+    allow_deploy: bool,
 ) -> Result<(), String> {
     let source_path = PathBuf::from(source_path.trim());
     let target_root_path = PathBuf::from(target_root_path.trim());
@@ -2106,9 +2140,9 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         is_paused,
         overwrite_existing,
         &mut result,
-        None,
+        task_id,
         task_handle,
-        false,
+        allow_deploy,
         "manual",
         &file_extensions,
         &filename_includes,
@@ -2431,6 +2465,9 @@ async fn temporary_copy_file<R: tauri::Runtime>(
         }
         Ok(Err(e)) => {
             if e.to_lowercase().contains("cancelled") || e.to_lowercase().contains("skipped") {
+                if copy_run_is_paused(&task_manager, task_handle.as_ref()) {
+                    return Err(format!("Copy paused: {file_name}"));
+                }
                 mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &e);
                 return Err(e);
             } else {
@@ -2771,29 +2808,6 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             "info",
                         );
                         continue;
-                    }
-
-                    // Emit all as queued
-                    for (sub_path, sub_name) in &sub_dirs {
-                        let local_target_path = local_target_base.join(sub_name);
-                        if task_record_ignored_in(
-                            &cached_task_records,
-                            sub_path,
-                            &local_target_path,
-                        ) {
-                            emit_log(
-                                app_handle,
-                                format!("Ignored previously cancelled task: {}", sub_name),
-                                "info",
-                            );
-                            continue;
-                        }
-                        emit_scan_queued(
-                            app_handle,
-                            sub_name,
-                            &local_target_base.join(sub_name).to_string_lossy(),
-                            &sub_path.to_string_lossy(),
-                        );
                     }
 
                     // Pass 2: Process each folder

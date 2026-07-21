@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Sync Fold</title>
+  <path fill="#25C4D8" d="M78 108h233l62 62v89H176l-98 98Zm198 45H139v102l35-35h155v-31Z"/>
+  <path fill="#FFB02E" d="M434 404H201l-62-62v-89h197l98-98ZM236 359h137V257l-35 35H183v31Z"/>
+  <path fill="#F7FAFC" d="m337 130 58 58h-58ZM175 382l-58-58h58Z"/>
+  <path fill="#0B1220" d="m226 213 59 43-59 43Z"/>
+</svg>

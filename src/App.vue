@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import Sidebar from '@/components/Sidebar.vue';
+import ScreenShareControlRequestDialog from '@/components/ScreenShareControlRequestDialog.vue';
 import ToastContainer from '@/components/ToastContainer.vue';
 import UpdateDialog from '@/components/UpdateDialog.vue';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
-import { onMounted, onUnmounted, watch } from 'vue';
+import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { RouterView, useRouter } from 'vue-router';
 
@@ -25,14 +26,19 @@ import {
 } from '@/lib/syncTaskNotifications';
 import { taskStateStore } from '@/lib/taskStateStore';
 import {
+  cancelQuit,
   confirmQuit,
   fileShareGetStatus,
   fileShareStartSaved,
   getConfig,
+  listTaskGroups,
   loadUiState,
   saveUiState,
   screenShareGetStatus,
+  screenShareRespondControlRequest,
+  showAppNotification,
   type FileShareStatus,
+  type ScreenShareControlRequest,
   type ScreenShareStatus,
   type TaskGroupDetailSnapshot,
   type TaskGroupsSnapshot,
@@ -47,6 +53,7 @@ let unlistenTaskDetail: (() => void) | null = null;
 let unlistenTaskLog: (() => void) | null = null;
 let unlistenBeforeQuit: (() => void) | null = null;
 let unlistenScreenShareStatus: (() => void) | null = null;
+let unlistenScreenShareControlRequest: (() => void) | null = null;
 let unlistenFileShareStatus: (() => void) | null = null;
 let unlistenDeviceSimulatorStatus: (() => void) | null = null;
 let unlistenOpenClipboardSettings: (() => void) | null = null;
@@ -57,11 +64,16 @@ let syncTaskNotificationTracker = createSyncTaskNotificationTracker();
 
 const router = useRouter();
 const { t } = useI18n();
+const pendingScreenShareControlRequest = ref<ScreenShareControlRequest | null>(null);
+const respondingToScreenShareControlRequest = ref(false);
+const screenShareControlRequestError = ref('');
 
 interface ScanQueuedEvent {
   folder: string;
   local_path: string;
   remote_path: string;
+  task_group_id: string;
+  run_id: string;
 }
 
 function syncTaskNotificationsEnabled(): boolean {
@@ -82,10 +94,10 @@ async function showSyncTaskNotification(event: SyncTaskNotificationEvent): Promi
 
   try {
     if (!await ensureNotificationPermission()) return;
-    sendNotification({
-      title: t(`sync.notifications.${event.kind}Title`),
-      body: t(`sync.notifications.${event.kind}Body`, { task: event.taskName }),
-    });
+    await showAppNotification(
+      t(`sync.notifications.${event.kind}Title`),
+      t(`sync.notifications.${event.kind}Body`, { task: event.taskName }),
+    );
   } catch (error) {
     addLog(`System notification failed: ${error}`, 'error');
   }
@@ -100,6 +112,42 @@ function scheduleSave() {
       // silent
     }
   }, 3000);
+}
+
+function hasActiveCopyTask(groups: Awaited<ReturnType<typeof listTaskGroups>>): boolean {
+  return groups.some((group) => group.copy_status === 'running');
+}
+
+function applyScreenShareStatus(status: ScreenShareStatus) {
+  setToolRuntime('screenShare', status.is_active);
+  const request = status.control_state === 'requested'
+    ? status.pending_control_request
+    : null;
+  if (request) {
+    pendingScreenShareControlRequest.value = request;
+  } else if (!respondingToScreenShareControlRequest.value) {
+    pendingScreenShareControlRequest.value = null;
+    screenShareControlRequestError.value = '';
+  }
+}
+
+async function respondToScreenShareControlRequest(allow: boolean) {
+  const request = pendingScreenShareControlRequest.value;
+  if (!request || respondingToScreenShareControlRequest.value) return;
+  respondingToScreenShareControlRequest.value = true;
+  screenShareControlRequestError.value = '';
+  try {
+    await screenShareRespondControlRequest(request.request_id, allow);
+    if (pendingScreenShareControlRequest.value?.request_id === request.request_id) {
+      pendingScreenShareControlRequest.value = null;
+    }
+  } catch (error) {
+    screenShareControlRequestError.value = t('tools.screenShare.errControlResponseFailed', {
+      error: String(error),
+    });
+  } finally {
+    respondingToScreenShareControlRequest.value = false;
+  }
 }
 
 watch(() => appStore.logs.length, scheduleSave);
@@ -128,6 +176,24 @@ onMounted(async () => {
   // listeners, scheduler auto-start, or before-quit handling.
   const label = getCurrentWindow().label;
   if (label !== 'main') return;
+
+  // Register these listeners before slower app hydration so a control request
+  // can never depend on the screen-share page being mounted.
+  unlistenScreenShareControlRequest = await listen<ScreenShareControlRequest>(
+    'screen-share-control-request',
+    (event) => {
+      pendingScreenShareControlRequest.value = event.payload;
+      screenShareControlRequestError.value = '';
+    },
+  );
+  unlistenScreenShareStatus = await listen<ScreenShareStatus>('screen-share-status', (event) => {
+    applyScreenShareStatus(event.payload);
+  });
+  try {
+    applyScreenShareStatus(await screenShareGetStatus());
+  } catch (error) {
+    addLog(`Screen share status load failed: ${error}`, 'error');
+  }
 
   try {
     await ensureUpdaterInitialized();
@@ -201,6 +267,7 @@ onMounted(async () => {
   syncTaskNotificationTracker = createSyncTaskNotificationTracker(taskStateStore.groups);
 
   unlistenScanQueued = await listen<ScanQueuedEvent>('scan-queued', (event) => {
+    syncTaskNotificationTracker.markQueued(event.payload.run_id);
     void showSyncTaskNotification({
       kind: 'queued',
       taskName: event.payload.folder,
@@ -224,6 +291,35 @@ onMounted(async () => {
   });
 
   unlistenBeforeQuit = await listen('before-quit', async () => {
+    let activeCopyTask = hasActiveCopyTask(taskStateStore.groups);
+    try {
+      // Refresh from Rust so a close request cannot race a task snapshot event.
+      activeCopyTask = hasActiveCopyTask(await listTaskGroups());
+    } catch {
+      // Keep the last event-backed state if the refresh fails during shutdown.
+    }
+
+    if (activeCopyTask) {
+      // A tray exit can arrive while the main window is hidden. Restore it so
+      // the browser confirmation is visible and can be answered.
+      try {
+        const mainWindow = getCurrentWindow();
+        await mainWindow.show();
+        await mainWindow.setFocus();
+      } catch {
+        // The confirmation still falls back to the current window state.
+      }
+
+      if (!window.confirm(t('common.quitWhileCopyingConfirm'))) {
+        try {
+          await cancelQuit();
+        } catch (error) {
+          addLog(`Cancel quit failed: ${error}`, 'error');
+        }
+        return;
+      }
+    }
+
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
@@ -243,10 +339,6 @@ onMounted(async () => {
   });
 
   await hydrateToolRuntime();
-
-  unlistenScreenShareStatus = await listen<ScreenShareStatus>('screen-share-status', (event) => {
-    setToolRuntime('screenShare', event.payload.is_active);
-  });
 
   unlistenFileShareStatus = await listen<FileShareStatus>('file-share-status', (event) => {
     setToolRuntime('fileShare', event.payload.is_active);
@@ -299,6 +391,7 @@ onUnmounted(() => {
   if (unlistenTaskLog) unlistenTaskLog();
   if (unlistenBeforeQuit) unlistenBeforeQuit();
   if (unlistenScreenShareStatus) unlistenScreenShareStatus();
+  if (unlistenScreenShareControlRequest) unlistenScreenShareControlRequest();
   if (unlistenFileShareStatus) unlistenFileShareStatus();
   if (unlistenDeviceSimulatorStatus) unlistenDeviceSimulatorStatus();
   if (unlistenOpenClipboardSettings) unlistenOpenClipboardSettings();
@@ -341,4 +434,11 @@ onUnmounted(() => {
     <UpdateDialog />
     <ToastContainer />
   </div>
+  <ScreenShareControlRequestDialog
+    :request="pendingScreenShareControlRequest"
+    :busy="respondingToScreenShareControlRequest"
+    :error="screenShareControlRequestError"
+    @allow="respondToScreenShareControlRequest(true)"
+    @deny="respondToScreenShareControlRequest(false)"
+  />
 </template>

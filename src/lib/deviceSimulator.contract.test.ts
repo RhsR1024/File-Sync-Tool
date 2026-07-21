@@ -13,6 +13,10 @@ export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
   selected_interface_id: 'adapter-1',
   last_platform: 'ums',
   last_start_ip: '192.168.50.10',
+  last_device_ips: [],
+  last_subnet_prefix: 24,
+  last_platform_servers: [{ id: 'server-1', host: '192.168.50.2', port: 80 }],
+  last_alarm_receiver_url: 'http://192.168.50.2/alarm',
   last_device_groups: [{
     id: 'group-1',
     profile_id: 'ipc-custom',
@@ -33,6 +37,7 @@ export const simulatorStartRequestContract: SimulatorStartRequest = {
   },
   interface_id: 'adapter-1',
   start_ip: '192.168.50.10',
+  device_ips: [],
   subnet_prefix: 24,
   device_http_port: 81,
   rtsp_ports: { main: 554, sub: 555, third: 556 },

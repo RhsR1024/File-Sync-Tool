@@ -41,10 +41,12 @@ assert.deepEqual(toolPaths, [
   '/tools/screen-share',
   '/tools/video-device-simulator',
   '/tools/file-share',
+  '/tools/tftp-server',
   '/tools/disk-cache-cleanup',
   '/tools/clipboard',
   '/tools/error-code-lookup',
   '/tools/notepad-extensions',
+  '/tools/paper-todo',
 ]);
 
 assert.equal(

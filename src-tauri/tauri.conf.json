@@ -24,7 +24,11 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/**/clipboard_images/**", "$APPDATA/**/clipboard_icons/**"]
+        "scope": [
+          "$APPDATA/**/clipboard_images/**",
+          "$APPDATA/**/clipboard_icons/**",
+          "$APPDATA/**/paper_todo/assets/**"
+        ]
       }
     }
   },

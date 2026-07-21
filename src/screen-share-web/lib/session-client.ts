@@ -9,15 +9,36 @@ export type SessionStateListener = (state: SessionConnectionState) => void;
 
 export interface SessionClientOptions {
   url?: string;
+  clientId?: string;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
   heartbeatMs?: number;
   webSocketFactory?: (url: string) => WebSocket;
 }
 
-function defaultUrl(): string {
+const CLIENT_ID_STORAGE_KEY = 'screen-share-client-id';
+
+function createClientId(): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  if (randomUuid) return randomUuid;
+  return `viewer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+export function getStableClientId(): string {
+  try {
+    const stored = window.sessionStorage.getItem(CLIENT_ID_STORAGE_KEY);
+    if (stored && /^[A-Za-z0-9_-]{1,96}$/.test(stored)) return stored;
+    const generated = createClientId();
+    window.sessionStorage.setItem(CLIENT_ID_STORAGE_KEY, generated);
+    return generated;
+  } catch {
+    return createClientId();
+  }
+}
+
+function defaultUrl(clientId: string): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}/session/ws`;
+  return `${protocol}//${window.location.host}/session/ws?client_id=${encodeURIComponent(clientId)}`;
 }
 
 function parseMessage(data: unknown): SessionServerMessage | null {
@@ -51,6 +72,7 @@ export class ScreenShareSessionClient {
   private attempts = 0;
   private readonly messageListeners = new Set<SessionMessageListener>();
   private readonly stateListeners = new Set<SessionStateListener>();
+  private readonly clientId: string;
   private state: SessionConnectionState = { status: 'idle', attempts: 0, lastError: null };
 
   constructor(options: SessionClientOptions = {}) {
@@ -60,6 +82,7 @@ export class ScreenShareSessionClient {
       heartbeatMs: 15000,
       ...options,
     };
+    this.clientId = options.clientId ?? getStableClientId();
   }
 
   onMessage(listener: SessionMessageListener): () => void {
@@ -81,11 +104,10 @@ export class ScreenShareSessionClient {
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
       return;
     }
-    this.clientSeq = 0;
     this.setState({ status: this.attempts ? 'reconnecting' : 'connecting', lastError: null });
     const factory = this.options.webSocketFactory ?? ((url: string) => new WebSocket(url));
     try {
-      const socket = factory(this.options.url ?? defaultUrl());
+      const socket = factory(this.options.url ?? defaultUrl(this.clientId));
       this.socket = socket;
       socket.addEventListener('open', this.handleOpen);
       socket.addEventListener('message', this.handleMessage);

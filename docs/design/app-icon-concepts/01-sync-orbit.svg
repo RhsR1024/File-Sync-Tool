@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Sync Orbit</title>
+  <path fill="#F7FAFC" d="M184 142h108l48 48v126c0 30-24 54-54 54H184c-30 0-54-24-54-54V196c0-30 24-54 54-54Z"/>
+  <path fill="#B8C7D9" d="M292 142v48h48Z"/>
+  <path fill="none" stroke="#25C4D8" stroke-linecap="round" stroke-width="46" d="M101 241c7-79 74-141 155-141 35 0 67 11 93 30"/>
+  <path fill="#25C4D8" d="m359 87 56 65-84 17Z"/>
+  <path fill="none" stroke="#FFB02E" stroke-linecap="round" stroke-width="46" d="M411 271c-8 79-74 141-155 141-35 0-67-11-94-30"/>
+  <path fill="#FFB02E" d="m152 425-55-65 84-17Z"/>
+  <path fill="#0B1220" d="M185 241h99v30h-99zm0 56h70v30h-70z"/>
+</svg>

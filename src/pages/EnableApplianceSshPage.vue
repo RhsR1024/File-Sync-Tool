@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { AlertCircle, Check, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, Trash2, X as XIcon } from 'lucide-vue-next';
+import { AlertCircle, ArrowLeftRight, Check, CheckCircle2, Eye, EyeOff, Loader, Terminal, Shield, ChevronDown, ChevronUp, Server, Globe, Network, Plus, Trash2, X as XIcon } from 'lucide-vue-next';
 import { enableApplianceSsh, getConfig, saveConfig, type AppConfig, type ApplianceSshApiVersion, type ApplianceSshResult, type ApplianceSshTarget, type ApplianceSshWhitelistScope } from '../lib/tauri';
 import { getApplianceSshEnableState, isValidSshPort } from '../lib/applianceSshPresentation';
 import {
@@ -15,6 +15,7 @@ import {
   normalizeGroup,
   parseGroupEntry,
   serializeGroup,
+  swapGroupEndpoints,
   targetKey,
   type HaAccessGroup,
   type HaRole,
@@ -141,6 +142,13 @@ const addGroup = () => {
 };
 const removeGroup = (index: number) => {
   haGroups.value.splice(index, 1);
+};
+
+const swapHaGroup = (index: number) => {
+  if (isLoading.value) return;
+  const group = haGroups.value[index];
+  if (!group?.master.trim() || !group.backup.trim()) return;
+  Object.assign(group, swapGroupEndpoints(group));
 };
 
 const handleSlaveLimitExceeded = () => {
@@ -286,6 +294,7 @@ const targetChips = computed(() =>
     key: targetKey(target),
     ip: target.ip,
     jump: target.jumpHost ?? null,
+    failover: target.allowFailover === true,
     badge: roleBadge(roleMap.value.get(targetKey(target))),
   }))
 );
@@ -745,7 +754,12 @@ const enableStateClass = (value?: number) => {
                 <span v-if="item.badge" class="text-blue-500 mr-1">{{ item.badge }}</span>
                 <template v-if="item.jump">
                   <span class="text-blue-500">{{ item.jump }}</span>
-                  <span class="text-blue-400 mx-1">→</span>
+                  <ArrowLeftRight
+                    v-if="item.failover"
+                    class="mx-1 h-3 w-3 text-blue-400"
+                    aria-hidden="true"
+                  />
+                  <span v-else class="text-blue-400 mx-1">→</span>
                 </template>
                 {{ item.ip }}
               </span>
@@ -820,7 +834,7 @@ const enableStateClass = (value?: number) => {
                     <XIcon class="w-4 h-4" />
                   </button>
                 </div>
-                <div class="grid grid-cols-1 gap-2.5">
+                <div class="space-y-2">
                   <div>
                     <label class="block text-xs font-medium text-slate-600 mb-1">{{ t('tools.applianceSsh.haGroupMasterLabel') }}</label>
                     <input
@@ -831,6 +845,18 @@ const enableStateClass = (value?: number) => {
                       class="w-full min-w-0 px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
                       :class="group.master.trim() && !isValidIp(group.master.trim()) ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20' : ''"
                     />
+                  </div>
+                  <div class="flex justify-center py-0.5">
+                    <button
+                      type="button"
+                      :disabled="isLoading || !group.master.trim() || !group.backup.trim()"
+                      class="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-lg border border-blue-200 bg-blue-50 text-blue-600 transition-colors duration-200 hover:border-blue-300 hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-blue-500/30 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-300"
+                      :title="t('tools.applianceSsh.haGroupSwap')"
+                      :aria-label="t('tools.applianceSsh.haGroupSwap')"
+                      @click="swapHaGroup(idx)"
+                    >
+                      <ArrowLeftRight class="h-4 w-4" aria-hidden="true" />
+                    </button>
                   </div>
                   <div>
                     <label class="block text-xs font-medium text-slate-600 mb-1">{{ t('tools.applianceSsh.haGroupBackupLabel') }}</label>
@@ -908,7 +934,7 @@ const enableStateClass = (value?: number) => {
                     <Check v-if="isRecentGroupSelected(entry.group)" class="h-3 w-3" />
                     <span>{{ entry.group.master }}</span>
                     <template v-if="entry.group.backup">
-                      <span class="opacity-60">→</span>
+                      <ArrowLeftRight class="h-3 w-3 opacity-70" aria-hidden="true" />
                       <span>{{ entry.group.backup }}</span>
                     </template>
                     <span v-if="entry.group.slaves.length > 0" class="opacity-60">+{{ entry.group.slaves.length }}</span>

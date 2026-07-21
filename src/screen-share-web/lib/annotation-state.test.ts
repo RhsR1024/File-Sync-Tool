@@ -65,6 +65,34 @@ describe('screen share annotation state', () => {
     expect(gap.needsSnapshot).toBe(true);
   });
 
+  it('applies a single annotation update delta without changing ownership', () => {
+    const current = applySnapshot(emptyDocument(42, 7), {
+      session_id: 42,
+      source_epoch: 7,
+      revision: 1,
+      mode: 'live',
+      frozen_frame_id: null,
+      shapes: [snakeArrow],
+    });
+    const result = applyAnnotationApplied(current, {
+      operation: 'update',
+      shape: {
+        ...snakeArrow,
+        points: [{ x: 0.2, y: 0.25 }, { x: 0.8, y: 0.75 }],
+        color: '#22c55e',
+        width: 7,
+      },
+    }, 2);
+
+    expect(result.needsSnapshot).toBe(false);
+    expect(result.document.shapes[0]).toMatchObject({
+      id: 'shape-1',
+      ownerClientId: 'client-a',
+      color: '#22c55e',
+      width: 7,
+    });
+  });
+
   it('removes non-laser annotations when returning to live view', () => {
     const frozen = applySnapshot(emptyDocument(42, 7), {
       session_id: 42,

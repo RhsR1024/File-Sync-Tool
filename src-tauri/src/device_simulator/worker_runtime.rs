@@ -1335,6 +1335,7 @@ mod tests {
             },
             interface_id: "test-interface".into(),
             start_ip: "127.20.0.10".parse().unwrap(),
+            device_ips: vec![],
             subnet_prefix: 24,
             device_http_port: 18081,
             rtsp_ports: RtspPorts {

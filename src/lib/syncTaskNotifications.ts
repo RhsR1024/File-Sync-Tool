@@ -18,6 +18,7 @@ interface TrackedTaskRun {
   runId: string;
   copyStatus: CopyState;
   deployStatus: DeployState;
+  notify: boolean;
 }
 
 function taskName(group: TaskGroupListItem): string {
@@ -38,8 +39,22 @@ export function createSyncTaskNotificationTracker(initialGroups: TaskGroupListIt
         runId: group.latest_run_id,
         copyStatus: group.copy_status,
         deployStatus: group.deploy_status,
+        notify: true,
       });
     }
+  }
+
+  const queuedRunIds = new Set<string>();
+
+  function markQueued(runId: string) {
+    let matchedTrackedRun = false;
+    for (const tracked of trackedRuns.values()) {
+      if (tracked.runId === runId) {
+        tracked.notify = true;
+        matchedTrackedRun = true;
+      }
+    }
+    if (!matchedTrackedRun) queuedRunIds.add(runId);
   }
 
   function collect(groups: TaskGroupListItem[]): SyncTaskNotificationEvent[] {
@@ -51,8 +66,11 @@ export function createSyncTaskNotificationTracker(initialGroups: TaskGroupListIt
       const previous = trackedRuns.get(group.task_group_id);
       const isSameRun = previous?.runId === group.latest_run_id;
       const name = taskName(group);
+      const shouldNotify = isSameRun
+        ? previous?.notify === true
+        : queuedRunIds.has(group.latest_run_id);
 
-      if (isSameRun && previous) {
+      if (isSameRun && previous && shouldNotify) {
         if (previous.copyStatus !== 'running' && group.copy_status === 'running') {
           notifications.push({ kind: 'copy_started', taskName: name });
         }
@@ -77,7 +95,7 @@ export function createSyncTaskNotificationTracker(initialGroups: TaskGroupListIt
         ) {
           notifications.push({ kind: 'deploy_failed', taskName: name });
         }
-      } else {
+      } else if (!isSameRun && shouldNotify) {
         // A normal scanned copy first arrives as pending, then produces transitions above.
         // If the pending snapshot was missed, still report the active phase without
         // inventing copy events for deploy-only retry runs.
@@ -92,12 +110,14 @@ export function createSyncTaskNotificationTracker(initialGroups: TaskGroupListIt
         runId: group.latest_run_id,
         copyStatus: group.copy_status,
         deployStatus: group.deploy_status,
+        notify: shouldNotify,
       });
+      queuedRunIds.delete(group.latest_run_id);
     }
 
     return notifications;
   }
 
   remember(initialGroups);
-  return { collect, remember };
+  return { collect, remember, markQueued };
 }

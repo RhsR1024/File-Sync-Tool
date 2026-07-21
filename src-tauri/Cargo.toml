@@ -60,10 +60,12 @@ zip = "2"
 async_zip = { version = "0.0.17", features = ["tokio"] }
 tokio-util = { version = "0.7", features = ["io", "codec", "compat"] }
 futures-lite = "2"
+async-tftp = "0.4.2"
 mime_guess = "2"
 ipnet = "2"
 trash = "5"
 rust-embed = "8"
+mse_fmp4 = "0.2"
 
 # Clipboard manager tool (spec §14.1)
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
@@ -84,6 +86,7 @@ wiremock = "0.6"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
 clipboard-win = "5.4"
+tauri-winrt-notification = "0.7.2"
 windows = { version = "0.58", features = [
     "Foundation",
     "Win32_Devices_Display",
@@ -102,6 +105,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_LibraryLoader",
     "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
     "Win32_UI_Shell",
     "Win32_Foundation",
     "Win32_System_DataExchange",

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Sync Tool - App Icon Concepts</title>
+    <style>
+      :root {
+        color: #18212f;
+        background: #e8edf2;
+        font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+        letter-spacing: 0;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-width: 320px; }
+      main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0 64px; }
+      header { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+      h1 { margin: 0; font-size: 28px; line-height: 1.2; font-weight: 720; }
+      header p { max-width: 560px; margin: 0; color: #5b6879; font-size: 14px; line-height: 1.7; }
+      .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+      article { overflow: hidden; border: 1px solid #ccd5df; border-radius: 8px; background: #f8fafc; box-shadow: 0 6px 18px rgb(30 46 66 / 8%); }
+      .stage { display: grid; place-items: center; height: 250px; background: #111923; }
+      .stage img { width: 184px; height: 184px; }
+      .copy { padding: 18px 18px 16px; }
+      .title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+      h2 { margin: 0; font-size: 17px; line-height: 1.35; }
+      .number { color: #8693a3; font: 700 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
+      .copy p { min-height: 44px; margin: 8px 0 14px; color: #657284; font-size: 13px; line-height: 1.65; }
+      .sizes { display: flex; align-items: center; gap: 12px; padding-top: 13px; border-top: 1px solid #dbe2e9; }
+      .sizes span { color: #8693a3; font-size: 11px; }
+      .sizes img { flex: 0 0 auto; background: #111923; }
+      .s16 { width: 16px; height: 16px; }
+      .s24 { width: 24px; height: 24px; }
+      .s32 { width: 32px; height: 32px; }
+      @media (max-width: 840px) {
+        header { align-items: start; flex-direction: column; }
+        .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+      @media (max-width: 560px) {
+        main { width: min(100% - 20px, 400px); padding-top: 28px; }
+        .grid { grid-template-columns: 1fr; }
+        .stage { height: 220px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>File Sync Tool 图标提案</h1>
+        <p>统一采用高对比、粗轮廓和少量色彩，优先保证 Windows 任务栏与窗口标题栏的小尺寸识别。所有方案均为原创矢量标记。</p>
+      </header>
+      <section class="grid" aria-label="图标候选">
+        <article>
+          <div class="stage"><img src="01-sync-orbit.svg" alt="轨道同步图标"></div>
+          <div class="copy"><div class="title-row"><h2>轨道同步</h2><span class="number">01</span></div><p>文件位于双向循环中央，最直接地表达“自动同步文件”。</p><div class="sizes"><span>小尺寸</span><img class="s16" src="01-sync-orbit.svg" alt=""><img class="s24" src="01-sync-orbit.svg" alt=""><img class="s32" src="01-sync-orbit.svg" alt=""></div></div>
+        </article>
+        <article>
+          <div class="stage"><img src="02-twin-relay.svg" alt="双仓接力图标"></div>
+          <div class="copy"><div class="title-row"><h2>双仓接力</h2><span class="number">02</span></div><p>两层目录与交叉传输箭头，强调本地和远端之间的文件交付。</p><div class="sizes"><span>小尺寸</span><img class="s16" src="02-twin-relay.svg" alt=""><img class="s24" src="02-twin-relay.svg" alt=""><img class="s32" src="02-twin-relay.svg" alt=""></div></div>
+        </article>
+        <article>
+          <div class="stage"><img src="03-transfer-gate.svg" alt="传输门图标"></div>
+          <div class="copy"><div class="title-row"><h2>传输门</h2><span class="number">03</span></div><p>文件穿过六边形网关，偏向“服务器部署、远程交付”的技术感。</p><div class="sizes"><span>小尺寸</span><img class="s16" src="03-transfer-gate.svg" alt=""><img class="s24" src="03-transfer-gate.svg" alt=""><img class="s32" src="03-transfer-gate.svg" alt=""></div></div>
+        </article>
+        <article>
+          <div class="stage"><img src="04-sync-fold.svg" alt="同步折线图标"></div>
+          <div class="copy"><div class="title-row"><h2>同步折线</h2><span class="number">04</span></div><p>两张折角文件互相咬合成流向，几何感强，轮廓最独特。</p><div class="sizes"><span>小尺寸</span><img class="s16" src="04-sync-fold.svg" alt=""><img class="s24" src="04-sync-fold.svg" alt=""><img class="s32" src="04-sync-fold.svg" alt=""></div></div>
+        </article>
+        <article>
+          <div class="stage"><img src="05-node-bridge.svg" alt="节点桥图标"></div>
+          <div class="copy"><div class="title-row"><h2>节点桥</h2><span class="number">05</span></div><p>两个数据端点通过核心桥接，突出跨主机、跨网络的可靠连接。</p><div class="sizes"><span>小尺寸</span><img class="s16" src="05-node-bridge.svg" alt=""><img class="s24" src="05-node-bridge.svg" alt=""><img class="s32" src="05-node-bridge.svg" alt=""></div></div>
+        </article>
+        <article>
+          <div class="stage"><img src="06-utility-core.svg" alt="工具核心图标"></div>
+          <div class="copy"><div class="title-row"><h2>工具核心</h2><span class="number">06</span></div><p>循环箭头包围模块核心，兼顾同步主功能与桌面工具箱定位。</p><div class="sizes"><span>小尺寸</span><img class="s16" src="06-utility-core.svg" alt=""><img class="s24" src="06-utility-core.svg" alt=""><img class="s32" src="06-utility-core.svg" alt=""></div></div>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

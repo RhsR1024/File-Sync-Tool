@@ -6,10 +6,18 @@ use std::io;
 #[cfg(target_os = "windows")]
 use std::mem;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::screenshare_input::{
+    parse_input_event, source_rect_for_monitor, InputContext, InputEvent, InputWorkerHandle,
+    QueuedInput, ScreenRect,
+};
+use crate::screenshare_media::{
+    H264EncoderWorker, H264MediaEvent, H264MediaMetricsSnapshot, H264MediaState,
+    H264StreamDescriptor, H264StreamSnapshot,
+};
 use crate::screenshare_web_assets;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, State as AxumState};
@@ -21,13 +29,20 @@ use bytes::{Bytes, BytesMut};
 use scrap::{Capturer, Display, Frame};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Size, State, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 #[path = "screenshare_interaction.rs"]
 mod screenshare_interaction;
-use screenshare_interaction::{ClientEnvelope, InteractionState, MAX_WS_MESSAGE_BYTES};
+use screenshare_interaction::{
+    AnnotationDocument, AnnotationUpdatePayload, ClientEnvelope, ControlRequestInfo, ControlState,
+    InteractionClientMetadata, InteractionConfig, InteractionState, NormalizedPoint,
+    MAX_CLIENT_ID_BYTES, MAX_WS_MESSAGE_BYTES,
+};
 #[cfg(target_os = "windows")]
 use windows::core::{factory, Error as WindowsError, IInspectable, Interface, HRESULT};
 #[cfg(target_os = "windows")]
@@ -73,6 +88,7 @@ use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
 const TOOL_NAME: &str = "屏幕共享";
 const PREVIEW_WINDOW_LABEL_PREFIX: &str = "screen-share-preview";
+const DESKTOP_OVERLAY_WINDOW_LABEL_PREFIX: &str = "screen-share-desktop-overlay";
 
 const VIEWER_IP_TTL: Duration = Duration::from_secs(12);
 /// DXGI DuplicateOutput 偶发瞬时失败，创建时做 3 次短重试；
@@ -119,6 +135,9 @@ const BLACK_FRAME_DESKTOP_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const BLACK_FRAME_PRIVACY_RESCAN_DELAY: Duration = Duration::from_secs(10);
 const BLACK_FRAME_BRIGHT_THRESHOLD: u8 = 12;
 const BLACK_FRAME_MAX_BRIGHT_PIXELS_PER_10K: usize = 35;
+const MEDIA_JPEG_SAMPLE_WINDOW: usize = 512;
+const MEDIA_STREAM_SAMPLE_WINDOW: usize = 256;
+const H264_STREAM_COOPERATIVE_DELAY: Duration = Duration::from_millis(1);
 type ViewerIpMap = HashMap<String, Instant>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +231,52 @@ pub struct ScreenShareConfig {
     /// When None, defaults to "0.0.0.0".
     #[serde(default)]
     pub bind_address: Option<String>,
+    /// Whether viewers may ask the host for mouse control. Disabled by default.
+    #[serde(default)]
+    pub control_requests_enabled: bool,
+    /// Whether the approved controller may send the restricted keyboard whitelist.
+    #[serde(default)]
+    pub keyboard_control_enabled: bool,
+    /// Media transport selector. P0/P1 currently resolve auto to MJPEG.
+    #[serde(default)]
+    pub transport: ScreenShareMediaTransport,
+    #[serde(default = "default_true")]
+    pub annotations_enabled: bool,
+    #[serde(default = "default_true")]
+    pub shared_freeze_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenShareMediaTransport {
+    Auto,
+    Mjpeg,
+    MseH264,
+    WebRtc,
+}
+
+impl Default for ScreenShareMediaTransport {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl ScreenShareMediaTransport {
+    fn wants_h264(self) -> bool {
+        matches!(self, Self::Auto | Self::MseH264)
+    }
+
+    fn resolved_label(self) -> &'static str {
+        match self {
+            Self::Auto | Self::Mjpeg => "mjpeg",
+            Self::MseH264 => "mse_h264",
+            Self::WebRtc => "webrtc",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +312,242 @@ pub struct ScreenShareStatus {
     pub interaction_connected_count: u32,
     pub annotation_count: u32,
     pub view_mode: screenshare_interaction::ViewMode,
+    pub source_epoch: u64,
+    pub latest_frame_id: Option<u64>,
+    pub frame_width: Option<u32>,
+    pub frame_height: Option<u32>,
+    pub transport: ScreenShareMediaTransport,
+    pub h264_media: H264MediaMetricsSnapshot,
+    pub control_state: ControlState,
+    pub controller_ip: Option<String>,
+    pub pending_control_request: Option<screenshare_interaction::ControlRequestInfo>,
+    pub desktop_overlay_active: bool,
+    pub media_metrics: ScreenShareMediaMetricsSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct ScreenShareMediaMetricsSnapshot {
+    pub encoded_frame_count: u64,
+    pub jpeg_sample_count: u32,
+    pub jpeg_size_avg_bytes: u64,
+    pub jpeg_size_p50_bytes: u64,
+    pub jpeg_size_p95_bytes: u64,
+    pub first_frame_delay_ms: Option<u64>,
+    pub frame_age_ms: Option<u64>,
+    pub slow_client_dropped_frames: u64,
+    pub stream_connection_count: u64,
+    pub stream_first_frame_sample_count: u32,
+    pub stream_first_frame_avg_ms: Option<u64>,
+    pub stream_first_frame_p95_ms: Option<u64>,
+    pub stream_reconnect_count: u64,
+    pub stream_reconnect_sample_count: u32,
+    pub stream_reconnect_avg_ms: Option<u64>,
+    pub stream_reconnect_p95_ms: Option<u64>,
+    pub fps_actual: f32,
+    pub bitrate_kbps: u32,
+}
+
+#[derive(Debug, Default)]
+struct ScreenShareMediaSamples {
+    jpeg_sizes: VecDeque<u32>,
+    first_frame_ms: VecDeque<u64>,
+    reconnect_ms: VecDeque<u64>,
+}
+
+#[derive(Debug)]
+struct ScreenShareMediaMetrics {
+    started_at: Instant,
+    encoded_frame_count: AtomicU64,
+    first_frame_delay_ms: AtomicU64,
+    slow_client_dropped_frames: AtomicU64,
+    stream_connection_count: AtomicU64,
+    stream_reconnect_count: AtomicU64,
+    fps_actual: AtomicU32,
+    bitrate_kbps: AtomicU32,
+    samples: Mutex<ScreenShareMediaSamples>,
+}
+
+impl ScreenShareMediaMetrics {
+    fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    fn new_at(started_at: Instant) -> Self {
+        Self {
+            started_at,
+            encoded_frame_count: AtomicU64::new(0),
+            first_frame_delay_ms: AtomicU64::new(u64::MAX),
+            slow_client_dropped_frames: AtomicU64::new(0),
+            stream_connection_count: AtomicU64::new(0),
+            stream_reconnect_count: AtomicU64::new(0),
+            fps_actual: AtomicU32::new(0),
+            bitrate_kbps: AtomicU32::new(0),
+            samples: Mutex::new(ScreenShareMediaSamples::default()),
+        }
+    }
+
+    fn record_encoded_frame(&self, jpeg_size: usize) {
+        self.record_encoded_frame_at(jpeg_size, Instant::now());
+    }
+
+    fn record_encoded_frame_at(&self, jpeg_size: usize, captured_at: Instant) {
+        self.encoded_frame_count.fetch_add(1, Ordering::Relaxed);
+        let delay_ms = captured_at
+            .checked_duration_since(self.started_at)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let _ = self.first_frame_delay_ms.compare_exchange(
+            u64::MAX,
+            delay_ms,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        if let Ok(mut samples) = self.samples.lock() {
+            push_bounded(
+                &mut samples.jpeg_sizes,
+                jpeg_size.min(u32::MAX as usize) as u32,
+                MEDIA_JPEG_SAMPLE_WINDOW,
+            );
+        }
+    }
+
+    fn record_stream_open(&self, reconnect: bool) {
+        self.stream_connection_count.fetch_add(1, Ordering::Relaxed);
+        if reconnect {
+            self.stream_reconnect_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_stream_first_frame(&self, elapsed: Duration, reconnect: bool) {
+        let elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+        if let Ok(mut samples) = self.samples.lock() {
+            let target = if reconnect {
+                &mut samples.reconnect_ms
+            } else {
+                &mut samples.first_frame_ms
+            };
+            push_bounded(target, elapsed_ms, MEDIA_STREAM_SAMPLE_WINDOW);
+        }
+    }
+
+    fn record_lagged_frames(&self, skipped: u64) {
+        self.slow_client_dropped_frames
+            .fetch_add(skipped, Ordering::Relaxed);
+    }
+
+    fn update_rates(&self, fps_actual: u32, bitrate_kbps: u32) {
+        self.fps_actual.store(fps_actual, Ordering::Relaxed);
+        self.bitrate_kbps.store(bitrate_kbps, Ordering::Relaxed);
+    }
+
+    fn snapshot(
+        &self,
+        latest_frame_captured_at_ms: Option<u64>,
+    ) -> ScreenShareMediaMetricsSnapshot {
+        self.snapshot_at(latest_frame_captured_at_ms, unix_time_ms())
+    }
+
+    fn snapshot_at(
+        &self,
+        latest_frame_captured_at_ms: Option<u64>,
+        now_ms: u64,
+    ) -> ScreenShareMediaMetricsSnapshot {
+        let (jpeg, first_frame, reconnect) = self
+            .samples
+            .lock()
+            .map(|samples| {
+                (
+                    summarize_samples(&samples.jpeg_sizes),
+                    summarize_samples(&samples.first_frame_ms),
+                    summarize_samples(&samples.reconnect_ms),
+                )
+            })
+            .unwrap_or_default();
+        let first_frame_delay_ms = match self.first_frame_delay_ms.load(Ordering::Relaxed) {
+            u64::MAX => None,
+            value => Some(value),
+        };
+        ScreenShareMediaMetricsSnapshot {
+            encoded_frame_count: self.encoded_frame_count.load(Ordering::Relaxed),
+            jpeg_sample_count: jpeg.count,
+            jpeg_size_avg_bytes: jpeg.average,
+            jpeg_size_p50_bytes: jpeg.p50,
+            jpeg_size_p95_bytes: jpeg.p95,
+            first_frame_delay_ms,
+            frame_age_ms: latest_frame_captured_at_ms
+                .map(|captured_at| now_ms.saturating_sub(captured_at)),
+            slow_client_dropped_frames: self.slow_client_dropped_frames.load(Ordering::Relaxed),
+            stream_connection_count: self.stream_connection_count.load(Ordering::Relaxed),
+            stream_first_frame_sample_count: first_frame.count,
+            stream_first_frame_avg_ms: first_frame.optional_average(),
+            stream_first_frame_p95_ms: first_frame.optional_p95(),
+            stream_reconnect_count: self.stream_reconnect_count.load(Ordering::Relaxed),
+            stream_reconnect_sample_count: reconnect.count,
+            stream_reconnect_avg_ms: reconnect.optional_average(),
+            stream_reconnect_p95_ms: reconnect.optional_p95(),
+            fps_actual: self.fps_actual.load(Ordering::Relaxed) as f32,
+            bitrate_kbps: self.bitrate_kbps.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SampleSummary {
+    count: u32,
+    average: u64,
+    p50: u64,
+    p95: u64,
+}
+
+impl SampleSummary {
+    fn optional_average(&self) -> Option<u64> {
+        (self.count > 0).then_some(self.average)
+    }
+
+    fn optional_p95(&self) -> Option<u64> {
+        (self.count > 0).then_some(self.p95)
+    }
+}
+
+fn push_bounded<T>(samples: &mut VecDeque<T>, value: T, limit: usize) {
+    if samples.len() == limit {
+        samples.pop_front();
+    }
+    samples.push_back(value);
+}
+
+fn summarize_samples<T>(samples: &VecDeque<T>) -> SampleSummary
+where
+    T: Copy + Into<u64>,
+{
+    if samples.is_empty() {
+        return SampleSummary::default();
+    }
+    let mut sorted = samples.iter().copied().map(Into::into).collect::<Vec<_>>();
+    sorted.sort_unstable();
+    let sum = sorted.iter().copied().map(u128::from).sum::<u128>();
+    let count = sorted.len();
+    let average = ((sum + (count as u128 / 2)) / count as u128).min(u128::from(u64::MAX)) as u64;
+    SampleSummary {
+        count: count.min(u32::MAX as usize) as u32,
+        average,
+        p50: nearest_rank(&sorted, 50),
+        p95: nearest_rank(&sorted, 95),
+    }
+}
+
+fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
+    let rank = (sorted.len() * percentile).div_ceil(100).max(1);
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -283,7 +584,13 @@ pub struct ScreenShareHandle {
     capture_paused: Arc<AtomicBool>,
     capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
     interaction: Mutex<Option<Arc<InteractionState>>>,
+    transport: Arc<Mutex<ScreenShareMediaTransport>>,
+    h264_media: Mutex<Option<Arc<H264MediaState>>>,
+    input_worker: Mutex<Option<Arc<InputWorkerHandle>>>,
+    active_monitor_index: Arc<AtomicUsize>,
     preview_token: Arc<Mutex<Option<String>>>,
+    desktop_overlay_active: Arc<AtomicBool>,
+    media_metrics: Mutex<Option<Arc<ScreenShareMediaMetrics>>>,
     /// Completed by the server watcher once the HTTP server has fully exited
     /// (port released); screen_share_stop awaits it so "stop returned" means
     /// "the port is immediately reusable".
@@ -308,7 +615,13 @@ impl ScreenShareHandle {
             capture_paused: Arc::new(AtomicBool::new(false)),
             capture_issue: Arc::new(Mutex::new(None)),
             interaction: Mutex::new(None),
+            transport: Arc::new(Mutex::new(ScreenShareMediaTransport::Mjpeg)),
+            h264_media: Mutex::new(None),
+            input_worker: Mutex::new(None),
+            active_monitor_index: Arc::new(AtomicUsize::new(0)),
             preview_token: Arc::new(Mutex::new(None)),
+            desktop_overlay_active: Arc::new(AtomicBool::new(false)),
+            media_metrics: Mutex::new(None),
             server_done_rx: Mutex::new(None),
         }
     }
@@ -358,6 +671,17 @@ fn inactive_status() -> ScreenShareStatus {
         interaction_connected_count: 0,
         annotation_count: 0,
         view_mode: screenshare_interaction::ViewMode::Live,
+        source_epoch: 0,
+        latest_frame_id: None,
+        frame_width: None,
+        frame_height: None,
+        transport: ScreenShareMediaTransport::Mjpeg,
+        h264_media: H264MediaMetricsSnapshot::default(),
+        control_state: ControlState::Disabled,
+        controller_ip: None,
+        pending_control_request: None,
+        desktop_overlay_active: false,
+        media_metrics: ScreenShareMediaMetricsSnapshot::default(),
     }
 }
 
@@ -383,7 +707,16 @@ fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
     handle.capture_paused.store(false, Ordering::SeqCst);
     *handle.capture_issue.lock().unwrap() = None;
     *handle.interaction.lock().unwrap() = None;
+    *handle.media_metrics.lock().unwrap() = None;
+    *handle.h264_media.lock().unwrap() = None;
+    *handle.transport.lock().unwrap() = ScreenShareMediaTransport::Mjpeg;
+    if let Ok(mut worker) = handle.input_worker.lock() {
+        if let Some(worker) = worker.take() {
+            worker.shutdown();
+        }
+    }
     *handle.preview_token.lock().unwrap() = None;
+    handle.desktop_overlay_active.store(false, Ordering::SeqCst);
     *handle.server_done_rx.lock().unwrap() = None;
     if let Ok(mut ips) = handle.viewer_ips.lock() {
         ips.clear();
@@ -442,10 +775,32 @@ fn set_capture_issue(handle: &ScreenShareHandle, issue: Option<ScreenShareCaptur
         .capture_paused
         .store(issue.is_some(), Ordering::SeqCst);
     *handle.capture_issue.lock().unwrap() = issue;
+    if issue.is_some() {
+        if let Some(interaction) = handle.interaction.lock().unwrap().as_ref() {
+            interaction.revoke_control("capture_paused");
+        }
+        if let Some(worker) = handle.input_worker.lock().unwrap().as_ref() {
+            worker.revoke();
+        }
+    }
 }
 
 fn current_capture_issue(handle: &ScreenShareHandle) -> Option<ScreenShareCaptureIssue> {
     *handle.capture_issue.lock().unwrap()
+}
+
+fn invalidate_interaction_source(handle: &ScreenShareHandle, interaction: &InteractionState) {
+    interaction.bump_source_epoch();
+    if let Some(worker) = handle.input_worker.lock().unwrap().as_ref() {
+        worker.revoke();
+    }
+}
+
+fn interaction_event_updates_annotations(message_type: &str) -> bool {
+    matches!(
+        message_type,
+        "annotation.applied" | "view.state" | "source.changed"
+    )
 }
 
 fn record_viewer_ip(viewer_ips: &Arc<Mutex<ViewerIpMap>>, ip: impl Into<String>) {
@@ -487,7 +842,7 @@ fn emit_inactive_status(app_handle: &AppHandle) {
 // ─── Internal: HTTP server state ────────────────────────────
 
 struct HttpServerState {
-    app_handle: AppHandle,
+    events: Arc<dyn ScreenShareEventSink>,
     broadcast_tx: broadcast::Sender<Arc<Bytes>>,
     interaction: Arc<InteractionState>,
     viewer_count: Arc<AtomicU32>,
@@ -495,6 +850,8 @@ struct HttpServerState {
     auth_hash: Option<String>,
     auth_username: Option<String>,
     bytes_sent: Arc<AtomicU64>,
+    media_metrics: Arc<ScreenShareMediaMetrics>,
+    h264_media: Arc<H264MediaState>,
     viewer_ips: Arc<Mutex<ViewerIpMap>>,
     /// Session epoch: viewers use it to detect a server-side restart and
     /// reconnect their stream without a manual page refresh.
@@ -502,11 +859,40 @@ struct HttpServerState {
     capture_paused: Arc<AtomicBool>,
     capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
     preview_token: Arc<Mutex<Option<String>>>,
+    transport: Arc<Mutex<ScreenShareMediaTransport>>,
+    input_worker: Option<Arc<InputWorkerHandle>>,
+}
+
+trait ScreenShareEventSink: Send + Sync {
+    fn emit_tool_log(&self, message: &str, level: &str);
+    fn emit_control_request(&self, request: ControlRequestInfo);
+}
+
+struct TauriScreenShareEventSink {
+    app_handle: AppHandle,
+}
+
+impl ScreenShareEventSink for TauriScreenShareEventSink {
+    fn emit_tool_log(&self, message: &str, level: &str) {
+        let app_handle = self.app_handle.clone();
+        let message = message.to_string();
+        let level = level.to_string();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, &message, &level);
+        });
+    }
+
+    fn emit_control_request(&self, request: ControlRequestInfo) {
+        crate::show_main_window(&self.app_handle, "screen-share-control-request");
+        let _ = self
+            .app_handle
+            .emit("screen-share-control-request", request);
+    }
 }
 
 /// RAII guard that decrements viewer count and removes IP on drop.
 struct ViewerGuard {
-    app_handle: AppHandle,
+    events: Arc<dyn ScreenShareEventSink>,
     count: Arc<AtomicU32>,
     ips: Arc<Mutex<ViewerIpMap>>,
     ip: String,
@@ -530,9 +916,7 @@ impl Drop for ViewerGuard {
         if let Ok(mut set) = self.ips.lock() {
             set.remove(&self.ip);
         }
-        crate::scanner::emit_tool_log(
-            &self.app_handle,
-            TOOL_NAME,
+        self.events.emit_tool_log(
             &format!(
                 "Viewer disconnected: ip={}, remaining_viewers={}",
                 self.ip, updated_count
@@ -620,6 +1004,9 @@ pub async fn screen_share_start(
     let start_guard = begin_screen_share_start(handle)?;
     let session_id = start_guard.session_id();
     let session_cancel = current_cancel_token(handle);
+    handle
+        .active_monitor_index
+        .store(config.monitor_index, Ordering::SeqCst);
 
     // Verify monitor exists (in a block so displays is dropped before any .await)
     {
@@ -664,8 +1051,46 @@ pub async fn screen_share_start(
     // Broadcast channel for JPEG frames. Interaction state is per session and
     // is deliberately kept separate from the lossy MJPEG channel.
     let (broadcast_tx, _) = broadcast::channel::<Arc<Bytes>>(8);
-    let interaction = InteractionState::new(session_id);
+    let media_metrics = Arc::new(ScreenShareMediaMetrics::new());
+    let h264_media = Arc::new(H264MediaState::new());
+    *handle.media_metrics.lock().unwrap() = Some(media_metrics.clone());
+    *handle.h264_media.lock().unwrap() = Some(h264_media.clone());
+    let effective_transport = ScreenShareMediaTransport::Mjpeg;
+    let interaction = InteractionState::new_with_config(
+        session_id,
+        InteractionConfig {
+            annotations_enabled: config.annotations_enabled,
+            shared_freeze_enabled: config.shared_freeze_enabled,
+            control_requests_enabled: config.control_requests_enabled,
+            keyboard_control_enabled: config.control_requests_enabled
+                && config.keyboard_control_enabled,
+        },
+    );
     *handle.interaction.lock().unwrap() = Some(interaction.clone());
+    *handle.transport.lock().unwrap() = effective_transport;
+    let h264_worker = if config.transport.wants_h264() {
+        match H264EncoderWorker::spawn(h264_media.clone(), config.fps, config.quality) {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                crate::scanner::emit_tool_log(
+                    &app_handle,
+                    TOOL_NAME,
+                    &format!("H.264 编码器启动失败，继续使用 MJPEG: {error}"),
+                    "warn",
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if config.control_requests_enabled {
+        let worker = InputWorkerHandle::spawn().map_err(|error| {
+            reset_runtime_state(handle);
+            error
+        })?;
+        *handle.input_worker.lock().unwrap() = Some(worker);
+    }
 
     let auth_hash = config
         .password
@@ -676,6 +1101,7 @@ pub async fn screen_share_start(
     // --- Spawn capture thread ---
     let capture_cancel = session_cancel.clone();
     let capture_fps = handle.fps_counter.clone();
+    let capture_media_metrics = media_metrics.clone();
     let capture_viewers = handle.viewer_count.clone();
     let capture_handle = handle.clone();
     let monitor_index = config.monitor_index;
@@ -685,6 +1111,7 @@ pub async fn screen_share_start(
     let backend_mode = config.capture_backend_mode;
     let capture_tx = broadcast_tx.clone();
     let capture_interaction = interaction.clone();
+    let capture_h264_media = h264_media.clone();
     let capture_app = app_handle.clone();
     let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
 
@@ -697,10 +1124,13 @@ pub async fn screen_share_start(
                 fps,
                 show_cursor,
                 backend_mode,
+                h264_worker,
+                capture_h264_media,
                 capture_tx,
                 capture_interaction,
                 capture_cancel,
                 capture_fps,
+                capture_media_metrics,
                 capture_viewers,
                 capture_handle,
                 session_id,
@@ -747,11 +1177,59 @@ pub async fn screen_share_start(
     *handle.start_time.lock().unwrap() = Some(Instant::now());
     start_guard.mark_active();
 
+    // Viewer annotations are part of the shared session, so make the host
+    // overlay available by default. The host can still close it explicitly
+    // from the screen-share page for the remainder of this session.
+    if config.annotations_enabled {
+        schedule_desktop_overlay_window(app_handle.clone(), handle.clone(), session_id);
+    }
+
+    let mut annotation_events = interaction.subscribe();
+    let annotation_app = app_handle.clone();
+    let annotation_interaction = interaction.clone();
+    let annotation_cancel = session_cancel.clone();
+    tokio::spawn(async move {
+        let _ = annotation_app.emit(
+            "screen-share-annotation-state",
+            annotation_interaction.snapshot(),
+        );
+        let mut cancel_tick = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                result = annotation_events.recv() => {
+                    match result {
+                        Ok(event) if interaction_event_updates_annotations(&event.message_type) => {
+                            let _ = annotation_app.emit(
+                                "screen-share-annotation-state",
+                                annotation_interaction.snapshot(),
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let _ = annotation_app.emit(
+                                "screen-share-annotation-state",
+                                annotation_interaction.snapshot(),
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = cancel_tick.tick() => {
+                    if annotation_cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     *handle.shutdown_tx.lock().unwrap() = Some(shutdown_tx);
 
     let server_state = Arc::new(HttpServerState {
-        app_handle: app_handle.clone(),
+        events: Arc::new(TauriScreenShareEventSink {
+            app_handle: app_handle.clone(),
+        }),
         broadcast_tx: broadcast_tx.clone(),
         interaction: interaction.clone(),
         viewer_count: handle.viewer_count.clone(),
@@ -759,11 +1237,15 @@ pub async fn screen_share_start(
         auth_hash,
         auth_username,
         bytes_sent: handle.bytes_sent.clone(),
+        media_metrics: media_metrics.clone(),
+        h264_media: h264_media.clone(),
         viewer_ips: handle.viewer_ips.clone(),
         session_id,
         capture_paused: handle.capture_paused.clone(),
         capture_issue: handle.capture_issue.clone(),
         preview_token: handle.preview_token.clone(),
+        transport: handle.transport.clone(),
+        input_worker: handle.input_worker.lock().unwrap().clone(),
     });
 
     // --- Spawn HTTP server ---
@@ -799,6 +1281,7 @@ pub async fn screen_share_start(
             && ss_server_active.swap(false, Ordering::SeqCst)
         {
             close_preview_window(&ss_server_app, ss_session_id);
+            close_desktop_overlay_window(&ss_server_app, &ss_runtime_handle, ss_session_id);
             reset_runtime_state(&ss_runtime_handle);
             crate::scanner::emit_tool_log(&ss_server_app, TOOL_NAME, "已停止", "info");
             let _ = ss_server_app.emit(
@@ -817,6 +1300,7 @@ pub async fn screen_share_start(
     let reporter_viewers = handle.viewer_count.clone();
     let reporter_fps = handle.fps_counter.clone();
     let reporter_bytes = handle.bytes_sent.clone();
+    let reporter_media_metrics = media_metrics;
     let reporter_url = server_url.clone();
     let reporter_all_urls = all_urls.clone();
     let reporter_start = Instant::now();
@@ -824,6 +1308,8 @@ pub async fn screen_share_start(
     let reporter_capture_paused = handle.capture_paused.clone();
     let reporter_capture_issue = handle.capture_issue.clone();
     let reporter_interaction = interaction.clone();
+    let reporter_transport = handle.transport.clone();
+    let reporter_input_worker = handle.input_worker.lock().unwrap().clone();
     let reporter_runtime_handle = handle.clone();
     let reporter_session_id = session_id;
 
@@ -834,6 +1320,7 @@ pub async fn screen_share_start(
             reporter_viewers,
             reporter_fps,
             reporter_bytes,
+            reporter_media_metrics,
             reporter_url,
             reporter_all_urls,
             reporter_start,
@@ -841,6 +1328,8 @@ pub async fn screen_share_start(
             reporter_capture_paused,
             reporter_capture_issue,
             reporter_interaction,
+            reporter_transport,
+            reporter_input_worker,
             reporter_runtime_handle,
             reporter_session_id,
         )
@@ -891,6 +1380,7 @@ pub async fn screen_share_stop(
 
     let session_id = handle.session_id.load(Ordering::SeqCst);
     close_preview_window(&app_handle, session_id);
+    close_desktop_overlay_window(&app_handle, handle, session_id);
     reset_runtime_state(handle);
 
     crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, "已停止", "info");
@@ -927,19 +1417,39 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         .unwrap_or(0);
 
     let connected_ips = snapshot_viewer_ips(&handle.viewer_ips);
-    let interaction_snapshot = handle
-        .interaction
+    let interaction = handle.interaction.lock().unwrap().clone();
+    let interaction_snapshot = interaction.as_ref().map(|interaction| {
+        (
+            interaction.client_count() as u32,
+            interaction.snapshot(),
+            interaction.control_snapshot(),
+            interaction.latest_frame_info(),
+        )
+    });
+    let latest_frame_captured_at_ms = interaction_snapshot
+        .as_ref()
+        .and_then(|(_, _, _, frame)| frame.as_ref().map(|frame| frame.captured_at_ms));
+    let media_metrics = handle
+        .media_metrics
         .lock()
         .unwrap()
         .as_ref()
-        .map(|interaction| (interaction.client_count() as u32, interaction.snapshot()));
+        .map(|metrics| metrics.snapshot(latest_frame_captured_at_ms))
+        .unwrap_or_default();
+    let h264_media = handle
+        .h264_media
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|media| media.metrics())
+        .unwrap_or_default();
 
     ScreenShareStatus {
         is_active: true,
         viewer_count: handle.viewer_count.load(Ordering::Relaxed),
         connection_count: connected_ips.len() as u32,
-        fps_actual: handle.fps_counter.load(Ordering::Relaxed) as f32,
-        bitrate_kbps: 0,
+        fps_actual: media_metrics.fps_actual,
+        bitrate_kbps: media_metrics.bitrate_kbps,
         uptime_secs: uptime,
         server_url: handle.server_url.lock().unwrap().clone(),
         all_urls: handle.all_urls.lock().unwrap().clone(),
@@ -948,15 +1458,43 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         capture_issue: current_capture_issue(handle),
         interaction_connected_count: interaction_snapshot
             .as_ref()
-            .map(|(count, _)| *count)
+            .map(|(count, _, _, _)| *count)
             .unwrap_or(0),
         annotation_count: interaction_snapshot
             .as_ref()
-            .map(|(_, document)| document.shapes.len() as u32)
+            .map(|(_, document, _, _)| document.shapes.len() as u32)
             .unwrap_or(0),
         view_mode: interaction_snapshot
-            .map(|(_, document)| document.mode)
+            .as_ref()
+            .map(|(_, document, _, _)| document.mode)
             .unwrap_or(screenshare_interaction::ViewMode::Live),
+        source_epoch: interaction_snapshot
+            .as_ref()
+            .map(|(_, document, _, _)| document.source_epoch)
+            .unwrap_or(0),
+        latest_frame_id: interaction_snapshot
+            .as_ref()
+            .and_then(|(_, _, _, frame)| frame.as_ref().map(|frame| frame.frame_id)),
+        frame_width: interaction_snapshot
+            .as_ref()
+            .and_then(|(_, _, _, frame)| frame.as_ref().map(|frame| frame.width)),
+        frame_height: interaction_snapshot
+            .as_ref()
+            .and_then(|(_, _, _, frame)| frame.as_ref().map(|frame| frame.height)),
+        transport: *handle.transport.lock().unwrap(),
+        h264_media,
+        control_state: interaction_snapshot
+            .as_ref()
+            .map(|(_, _, control, _)| control.state)
+            .unwrap_or(ControlState::Disabled),
+        controller_ip: interaction_snapshot
+            .as_ref()
+            .and_then(|(_, _, control, _)| control.controller_ip.clone()),
+        pending_control_request: interaction
+            .as_ref()
+            .and_then(|interaction| interaction.pending_control_request()),
+        desktop_overlay_active: handle.desktop_overlay_active.load(Ordering::Relaxed),
+        media_metrics,
     }
 }
 
@@ -972,6 +1510,151 @@ pub fn screen_share_clear_annotations(state: State<'_, crate::AppState>) -> Resu
         .clone()
         .ok_or_else(|| "Screen share is not active".to_string())?;
     interaction.clear_all();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn screen_share_remove_annotation(
+    state: State<'_, crate::AppState>,
+    shape_id: String,
+) -> Result<(), String> {
+    let interaction = state
+        .screen_share
+        .interaction
+        .lock()
+        .map_err(|_| "Screen share interaction state is unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "Screen share is not active".to_string())?;
+    interaction
+        .remove_annotation(&shape_id)
+        .map_err(|error| error.message)
+}
+
+#[tauri::command]
+pub fn screen_share_update_annotation(
+    state: State<'_, crate::AppState>,
+    shape_id: String,
+    points: Vec<NormalizedPoint>,
+    color: String,
+    width: f32,
+) -> Result<(), String> {
+    let interaction = state
+        .screen_share
+        .interaction
+        .lock()
+        .map_err(|_| "Screen share interaction state is unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "Screen share is not active".to_string())?;
+    interaction
+        .update_annotation(AnnotationUpdatePayload {
+            shape_id,
+            points,
+            color,
+            width,
+        })
+        .map_err(|error| error.message)
+}
+
+#[tauri::command]
+pub fn screen_share_get_annotation_state(
+    state: State<'_, crate::AppState>,
+) -> Result<AnnotationDocument, String> {
+    state
+        .screen_share
+        .interaction
+        .lock()
+        .map_err(|_| "Screen share interaction state is unavailable".to_string())?
+        .as_ref()
+        .map(|interaction| interaction.snapshot())
+        .ok_or_else(|| "Screen share is not active".to_string())
+}
+
+#[tauri::command]
+pub fn screen_share_respond_control_request(
+    state: State<'_, crate::AppState>,
+    request_id: String,
+    allow: bool,
+) -> Result<(), String> {
+    let handle = &state.screen_share;
+    let interaction = handle
+        .interaction
+        .lock()
+        .map_err(|_| "Screen share interaction state is unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "Screen share is not active".to_string())?;
+    let pending = interaction
+        .pending_control_request()
+        .filter(|request| request.request_id == request_id)
+        .ok_or_else(|| "Control request is no longer pending".to_string())?;
+
+    let grant = if allow {
+        let (session_id, source_epoch, _) = interaction.identity();
+        let frame = interaction
+            .latest_frame_info()
+            .ok_or_else(|| "Screen frame is not ready".to_string())?;
+        if frame.source_epoch != source_epoch {
+            return Err("Screen source changed; request control again".to_string());
+        }
+        let monitor_index = handle.active_monitor_index.load(Ordering::Relaxed);
+        let source = source_rect_for_monitor(monitor_index, frame.width, frame.height)
+            .ok_or_else(|| "Active monitor is unavailable".to_string())?;
+        let worker = handle
+            .input_worker
+            .lock()
+            .map_err(|_| "Remote input worker is unavailable".to_string())?
+            .clone()
+            .ok_or_else(|| "Remote input is not enabled for this session".to_string())?;
+        Some((
+            worker,
+            InputContext::new(pending.client_id.clone(), session_id, source_epoch),
+            source,
+        ))
+    } else {
+        None
+    };
+
+    // Make the input path ready before publishing Granted. Otherwise the
+    // viewer can race the broadcast with its first pointer event and have the
+    // inactive worker mistaken for a saturated input queue.
+    if let Some((worker, context, source)) = grant.as_ref() {
+        if let Err(error) = worker.grant(context.clone(), *source) {
+            worker.revoke();
+            return Err(error);
+        }
+    } else if let Some(worker) = handle.input_worker.lock().unwrap().as_ref() {
+        worker.revoke();
+    }
+
+    if let Err(error) = interaction.respond_control_request(&request_id, allow) {
+        if let Some((worker, _, _)) = grant.as_ref() {
+            worker.revoke();
+        }
+        return Err(error.message);
+    }
+
+    if let Some((worker, context, _)) = grant {
+        if !interaction.is_controller(&context.client_id, context.session_id, context.source_epoch)
+        {
+            worker.revoke();
+            return Err("Screen source changed; request control again".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn screen_share_revoke_control(state: State<'_, crate::AppState>) -> Result<(), String> {
+    let handle = &state.screen_share;
+    let interaction = handle
+        .interaction
+        .lock()
+        .map_err(|_| "Screen share interaction state is unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "Screen share is not active".to_string())?;
+    interaction.revoke_control("host_revoked");
+    if let Some(worker) = handle.input_worker.lock().unwrap().as_ref() {
+        worker.revoke();
+    }
     Ok(())
 }
 
@@ -1049,6 +1732,258 @@ fn close_preview_window(app_handle: &AppHandle, session_id: u64) {
             log::warn!("Failed to close screen share preview: {error}");
         }
     }
+}
+
+#[tauri::command]
+pub fn screen_share_open_desktop_overlay(
+    app_handle: AppHandle,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let handle = state.screen_share.clone();
+    if !handle.active.load(Ordering::SeqCst) {
+        return Err("Screen share is not active".into());
+    }
+
+    let session_id = handle.session_id.load(Ordering::SeqCst);
+    schedule_desktop_overlay_window(app_handle, handle, session_id);
+    Ok(())
+}
+
+fn schedule_desktop_overlay_window(
+    app_handle: AppHandle,
+    handle: Arc<ScreenShareHandle>,
+    session_id: u64,
+) {
+    tauri::async_runtime::spawn(async move {
+        tokio::task::yield_now().await;
+        let build_app = app_handle.clone();
+        let error_app = app_handle.clone();
+        if let Err(error) = app_handle.run_on_main_thread(move || {
+            if let Err(error) = ensure_desktop_overlay_window(&build_app, handle, session_id) {
+                emit_desktop_overlay_error(&error_app, &error);
+            }
+        }) {
+            emit_desktop_overlay_error(
+                &app_handle,
+                &format!("Failed to schedule desktop annotation overlay: {error}"),
+            );
+        }
+    });
+}
+
+fn emit_desktop_overlay_error(app_handle: &AppHandle, error: &str) {
+    log::error!("Desktop annotation overlay failed: {error}");
+    crate::scanner::emit_tool_log(
+        app_handle,
+        TOOL_NAME,
+        &format!("Desktop annotation overlay failed: {error}"),
+        "error",
+    );
+    let _ = app_handle.emit("screen-share-desktop-overlay-error", error.to_string());
+}
+
+fn ensure_desktop_overlay_window(
+    app_handle: &AppHandle,
+    handle: Arc<ScreenShareHandle>,
+    session_id: u64,
+) -> Result<(), String> {
+    if !handle.active.load(Ordering::SeqCst)
+        || handle.session_id.load(Ordering::SeqCst) != session_id
+    {
+        return Err("Screen share is not active".into());
+    }
+
+    let window_label = desktop_overlay_window_label(session_id);
+    if let Some(window) = app_handle.get_webview_window(&window_label) {
+        if handle.desktop_overlay_active.load(Ordering::SeqCst) {
+            window.show().map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+
+    let overlay_handle = handle.clone();
+    let window = WebviewWindowBuilder::new(
+        app_handle,
+        &window_label,
+        WebviewUrl::App("index.html#/screen-share-overlay".into()),
+    )
+    .title("Screen Share Annotations")
+    .inner_size(1.0, 1.0)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .resizable(false)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .focusable(false)
+    .focused(false)
+    .visible(false)
+    .build()
+    .map_err(|error| format!("Failed to create desktop annotation overlay: {error}"))?;
+
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed)
+            && overlay_handle.session_id.load(Ordering::SeqCst) == session_id
+        {
+            overlay_handle
+                .desktop_overlay_active
+                .store(false, Ordering::SeqCst);
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn screen_share_desktop_overlay_ready(
+    app_handle: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let handle = &state.screen_share;
+    if !handle.active.load(Ordering::SeqCst) {
+        return Err("Screen share is not active".into());
+    }
+    let session_id = handle.session_id.load(Ordering::SeqCst);
+    if window.label() != desktop_overlay_window_label(session_id) {
+        return Err("Desktop annotation overlay belongs to a stale session".into());
+    }
+    let overlay_handle = state.screen_share.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if overlay_handle.session_id.load(Ordering::SeqCst) != session_id
+            || !overlay_handle.active.load(Ordering::SeqCst)
+        {
+            let _ = window.close();
+            return;
+        }
+        let show_result = window
+            .set_always_on_top(true)
+            .map_err(|error| error.to_string())
+            .and_then(|_| show_desktop_overlay_without_activation(&window));
+        if let Err(error) = show_result {
+            emit_desktop_overlay_error(&app_handle, &error);
+            let _ = window.close();
+            return;
+        }
+
+        // A capture-excluded, full-screen transparent window makes both WGC
+        // and DXGI return a black monitor frame on supported Windows builds.
+        // Keep the host overlay in the captured stream instead. Viewers also
+        // render the same normalized document as a crisp client-side layer,
+        // so the two representations align without creating a feedback loop.
+        match configure_desktop_overlay_window(&window, &overlay_handle) {
+            Ok(()) => overlay_handle
+                .desktop_overlay_active
+                .store(true, Ordering::SeqCst),
+            Err(error) => {
+                emit_desktop_overlay_error(&app_handle, &error);
+                let _ = window.close();
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn screen_share_close_desktop_overlay(
+    app_handle: AppHandle,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let session_id = state.screen_share.session_id.load(Ordering::SeqCst);
+    close_desktop_overlay_window(&app_handle, &state.screen_share, session_id);
+    Ok(())
+}
+
+fn desktop_overlay_window_label(session_id: u64) -> String {
+    format!("{DESKTOP_OVERLAY_WINDOW_LABEL_PREFIX}-{session_id}")
+}
+
+fn desktop_overlay_bounds(handle: &ScreenShareHandle) -> Result<ScreenRect, String> {
+    let monitor_index = handle.active_monitor_index.load(Ordering::Relaxed);
+    let (fallback_width, fallback_height) = handle
+        .interaction
+        .lock()
+        .ok()
+        .and_then(|interaction| interaction.clone())
+        .and_then(|interaction| interaction.latest_frame_info())
+        .map(|frame| (frame.width.max(1), frame.height.max(1)))
+        .unwrap_or((1, 1));
+    source_rect_for_monitor(monitor_index, fallback_width, fallback_height)
+        .filter(|rect| rect.width > 0 && rect.height > 0)
+        .ok_or_else(|| "Active monitor is unavailable".to_string())
+}
+
+fn configure_desktop_overlay_window(
+    window: &WebviewWindow,
+    handle: &ScreenShareHandle,
+) -> Result<(), String> {
+    let bounds = desktop_overlay_bounds(handle)?;
+    window
+        .set_size(Size::Physical(PhysicalSize::new(
+            bounds.width,
+            bounds.height,
+        )))
+        .map_err(|error| format!("Failed to size desktop annotation overlay: {error}"))?;
+    window
+        .set_position(PhysicalPosition::new(bounds.left, bounds.top))
+        .map_err(|error| format!("Failed to position desktop annotation overlay: {error}"))?;
+    window
+        .set_always_on_top(true)
+        .map_err(|error| format!("Failed to keep desktop annotation overlay on top: {error}"))?;
+    window.set_ignore_cursor_events(true).map_err(|error| {
+        format!("Failed to make desktop annotation overlay click-through: {error}")
+    })?;
+    // `set_ignore_cursor_events` updates Tao's window flags and can clear the
+    // raw WS_VISIBLE bit that was set by SW_SHOWNOACTIVATE. Restore visibility
+    // without activating the overlay after every style update.
+    show_desktop_overlay_without_activation(window)?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn show_desktop_overlay_without_activation(window: &WebviewWindow) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+
+    let hwnd = window
+        .hwnd()
+        .map(|hwnd| HWND(hwnd.0 as *mut _))
+        .map_err(|error| error.to_string())?;
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_desktop_overlay_without_activation(window: &WebviewWindow) -> Result<(), String> {
+    window.show().map_err(|error| error.to_string())
+}
+
+fn close_desktop_overlay_window(
+    app_handle: &AppHandle,
+    handle: &ScreenShareHandle,
+    session_id: u64,
+) {
+    handle.desktop_overlay_active.store(false, Ordering::SeqCst);
+    if let Some(window) = app_handle.get_webview_window(&desktop_overlay_window_label(session_id)) {
+        if let Err(error) = window.close() {
+            log::warn!("Failed to close desktop annotation overlay: {error}");
+        }
+    }
+}
+
+fn sync_desktop_overlay_window(
+    app_handle: &AppHandle,
+    handle: &ScreenShareHandle,
+    session_id: u64,
+) -> Result<(), String> {
+    let Some(window) = app_handle.get_webview_window(&desktop_overlay_window_label(session_id))
+    else {
+        handle.desktop_overlay_active.store(false, Ordering::SeqCst);
+        return Ok(());
+    };
+    configure_desktop_overlay_window(&window, handle)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1830,10 +2765,13 @@ fn capture_loop(
     fps: u8,
     show_cursor: bool,
     backend_mode: ScreenShareBackendMode,
+    h264_worker: Option<H264EncoderWorker>,
+    h264_media: Arc<H264MediaState>,
     tx: broadcast::Sender<Arc<Bytes>>,
     interaction: Arc<InteractionState>,
     cancel: Arc<AtomicBool>,
     fps_counter: Arc<AtomicU32>,
+    media_metrics: Arc<ScreenShareMediaMetrics>,
     viewer_count: Arc<AtomicU32>,
     runtime_handle: Arc<ScreenShareHandle>,
     session_id: u64,
@@ -1841,6 +2779,9 @@ fn capture_loop(
     app_handle: AppHandle,
 ) {
     let mut startup_tx = startup_tx;
+    let h264_worker = h264_worker;
+    let mut h264_failure_logged = false;
+    let mut h264_ready_logged = false;
     let mut source = match create_capture_source(
         monitor_index,
         show_cursor,
@@ -2003,7 +2944,7 @@ fn capture_loop(
                 if current_backend == CaptureBackendKind::Wgc && stride >= 4 {
                     let (frame_w, frame_h) = (stride / 4, frame_pixels.len() / stride);
                     if frame_w > 0 && frame_h > 0 && (frame_w != width || frame_h != height) {
-                        interaction.bump_source_epoch();
+                        invalidate_interaction_source(&runtime_handle, &interaction);
                         emit_capture_create_diagnostic(
                             &app_handle,
                             "warn",
@@ -2139,6 +3080,12 @@ fn capture_loop(
                     }
                 }
 
+                // Submit the captured pixels to the low-latency encoder before
+                // spending time on the compatibility JPEG path.
+                if let Some(worker) = h264_worker.as_ref() {
+                    let _ = worker.try_submit(source_pixels, width, height, stride);
+                }
+
                 let jpeg = encode_jpeg_reuse(
                     source_pixels,
                     width,
@@ -2149,8 +3096,42 @@ fn capture_loop(
                     &mut jpeg_buf,
                 );
 
+                if h264_worker.is_some() {
+                    let current_transport = *runtime_handle.transport.lock().unwrap();
+                    if h264_media.is_ready() {
+                        if current_transport != ScreenShareMediaTransport::MseH264 {
+                            *runtime_handle.transport.lock().unwrap() =
+                                ScreenShareMediaTransport::MseH264;
+                        }
+                        if !h264_ready_logged {
+                            h264_ready_logged = true;
+                            h264_failure_logged = false;
+                            emit_capture_create_diagnostic(
+                                &app_handle,
+                                "success",
+                                "H.264 媒体流已就绪，观看端将优先使用低带宽传输".to_string(),
+                            );
+                        }
+                    } else if current_transport == ScreenShareMediaTransport::MseH264 {
+                        *runtime_handle.transport.lock().unwrap() =
+                            ScreenShareMediaTransport::Mjpeg;
+                        h264_ready_logged = false;
+                    }
+                    if let Some(error) = h264_media.error() {
+                        if !h264_failure_logged {
+                            h264_failure_logged = true;
+                            emit_capture_create_diagnostic(
+                                &app_handle,
+                                "warn",
+                                format!("H.264 媒体流不可用，已回退 MJPEG: {error}"),
+                            );
+                        }
+                    }
+                }
+
                 if !jpeg.is_empty() {
                     let data = Arc::new(Bytes::from(jpeg));
+                    media_metrics.record_encoded_frame(data.len());
                     interaction.record_frame_with_metadata(
                         data.clone(),
                         width as u32,
@@ -2381,9 +3362,12 @@ fn capture_loop(
                     Some((new_source, recovered_monitor_index)) => {
                         // A recreated capture source is a new coordinate space,
                         // even when the dimensions happen to be unchanged.
-                        interaction.bump_source_epoch();
+                        invalidate_interaction_source(&runtime_handle, &interaction);
                         source = new_source;
                         active_monitor_index = recovered_monitor_index;
+                        runtime_handle
+                            .active_monitor_index
+                            .store(active_monitor_index, Ordering::SeqCst);
                         // 注意：不在这里清除 capture_paused——重建"成功"可能是僵尸源
                         //（锁屏期间创建的 WGC 会话不出帧），等首个真实帧到达再清除。
                         pending_resume = true;
@@ -3520,15 +4504,7 @@ async fn run_http_server(
     state: Arc<HttpServerState>,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
-    let app = Router::new()
-        .route("/", get(handler_index))
-        .route("/assets/*path", get(handler_web_asset))
-        .route("/stream", get(handler_stream))
-        .route("/auth", post(handler_auth))
-        .route("/status", get(handler_status))
-        .route("/session/ws", get(handler_session_ws))
-        .route("/snapshot/:frame_id", get(handler_snapshot))
-        .with_state(state);
+    let app = screen_share_router(state);
 
     let (drain_started_tx, drain_started_rx) = oneshot::channel::<()>();
     let serve = axum::serve(
@@ -3563,6 +4539,19 @@ async fn run_http_server(
     log::info!("Screen share HTTP server stopped");
 }
 
+fn screen_share_router(state: Arc<HttpServerState>) -> Router {
+    Router::new()
+        .route("/", get(handler_index))
+        .route("/assets/*path", get(handler_web_asset))
+        .route("/stream", get(handler_stream))
+        .route("/media/ws", get(handler_media_ws))
+        .route("/auth", post(handler_auth))
+        .route("/status", get(handler_status))
+        .route("/session/ws", get(handler_session_ws))
+        .route("/snapshot/:frame_id", get(handler_snapshot))
+        .with_state(state)
+}
+
 // ─── HTTP Handlers ──────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -3577,6 +4566,34 @@ struct StreamQuery {
     /// is used by the viewer's optional refresh limiter; the default remains a
     /// long-lived MJPEG response for backwards compatibility.
     single: Option<u8>,
+    /// Browser retries mark the replacement stream so reconnect first-frame
+    /// latency can be measured separately from initial connections.
+    reconnect: Option<u8>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SessionQuery {
+    /// Stable browser identity, scoped to one browser tab by sessionStorage.
+    client_id: Option<String>,
+}
+
+fn requested_session_client_id(candidate: Option<String>) -> String {
+    if candidate.as_deref().is_some_and(valid_session_client_id) {
+        return candidate.expect("candidate was checked above");
+    }
+    Uuid::new_v4().to_string()
+}
+
+fn valid_session_client_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_CLIENT_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn screen_share_asset_path(path: &str) -> String {
+    format!("assets/{}", path.trim_start_matches('/'))
 }
 
 async fn handler_index(
@@ -3633,8 +4650,42 @@ async fn handler_web_asset(
                 .unwrap();
         }
     }
-    screenshare_web_assets::serve_asset(&path)
+    let asset_path = screen_share_asset_path(&path);
+    screenshare_web_assets::serve_asset(&asset_path)
         .unwrap_or_else(screenshare_web_assets::unavailable_response)
+}
+
+fn mjpeg_frame_chunk(frame: &Bytes) -> Bytes {
+    let frame_len = frame.len();
+    let mut buffer = BytesMut::with_capacity(frame_len + 128);
+    buffer.extend_from_slice(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ");
+    buffer.extend_from_slice(frame_len.to_string().as_bytes());
+    buffer.extend_from_slice(b"\r\n\r\n");
+    buffer.extend_from_slice(frame);
+    buffer.extend_from_slice(b"\r\n");
+    buffer.freeze()
+}
+
+fn drain_to_latest_mjpeg_frame(
+    receiver: &mut broadcast::Receiver<Arc<Bytes>>,
+    initial: Arc<Bytes>,
+) -> (Arc<Bytes>, u64) {
+    let mut latest = initial;
+    let mut skipped = 0u64;
+    loop {
+        match receiver.try_recv() {
+            Ok(frame) => {
+                latest = frame;
+                skipped = skipped.saturating_add(1);
+            }
+            Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                skipped = skipped.saturating_add(count);
+            }
+            Err(broadcast::error::TryRecvError::Empty)
+            | Err(broadcast::error::TryRecvError::Closed) => break,
+        }
+    }
+    (latest, skipped)
 }
 
 async fn handler_stream(
@@ -3691,9 +4742,9 @@ async fn handler_stream(
     }
 
     let viewer_total = state.viewer_count.fetch_add(1, Ordering::Relaxed) + 1;
-    crate::scanner::emit_tool_log(
-        &state.app_handle,
-        TOOL_NAME,
+    let is_reconnect = query.reconnect == Some(1);
+    state.media_metrics.record_stream_open(is_reconnect);
+    state.events.emit_tool_log(
         &format!(
             "Viewer connected: ip={}, viewers={}, user_agent={}",
             client_ip,
@@ -3703,17 +4754,31 @@ async fn handler_stream(
         "info",
     );
     let viewer_guard = ViewerGuard {
-        app_handle: state.app_handle.clone(),
+        events: state.events.clone(),
         count: state.viewer_count.clone(),
         ips: state.viewer_ips.clone(),
         ip: client_ip,
     };
     let bytes_sent = state.bytes_sent.clone();
+    let media_metrics = state.media_metrics.clone();
+    let interaction = state.interaction.clone();
+    let broadcast_tx = state.broadcast_tx.clone();
     let cancel = state.cancel.clone();
-    let mut rx = state.broadcast_tx.subscribe();
+    let initial_frame = interaction.latest_frame_bytes();
+    let mut rx = broadcast_tx.subscribe();
+    let stream_started = Instant::now();
 
     let stream = async_stream::stream! {
         let _guard = viewer_guard;
+        let mut first_frame_sent = false;
+
+        if let Some(frame) = initial_frame {
+            let chunk = mjpeg_frame_chunk(&frame);
+            bytes_sent.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            media_metrics.record_stream_first_frame(stream_started.elapsed(), is_reconnect);
+            first_frame_sent = true;
+            yield Ok::<_, Infallible>(chunk);
+        }
 
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -3727,18 +4792,32 @@ async fn handler_stream(
             // causing the next start to fail with "address already in use" (os error 10048).
             match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
                 Ok(Ok(frame)) => {
-                    let frame_len = frame.len();
-                    let mut buf = BytesMut::with_capacity(frame_len + 128);
-                    buf.extend_from_slice(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ");
-                    buf.extend_from_slice(frame_len.to_string().as_bytes());
-                    buf.extend_from_slice(b"\r\n\r\n");
-                    buf.extend_from_slice(&frame);
-                    buf.extend_from_slice(b"\r\n");
-                    bytes_sent.fetch_add(buf.len() as u64, Ordering::Relaxed);
-                    yield Ok::<_, Infallible>(buf.freeze());
+                    let (frame, skipped) = drain_to_latest_mjpeg_frame(&mut rx, frame);
+                    if skipped > 0 {
+                        media_metrics.record_lagged_frames(skipped);
+                    }
+                    let chunk = mjpeg_frame_chunk(&frame);
+                    bytes_sent.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                    if !first_frame_sent {
+                        media_metrics.record_stream_first_frame(stream_started.elapsed(), is_reconnect);
+                        first_frame_sent = true;
+                    }
+                    yield Ok::<_, Infallible>(chunk);
                 }
-                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
-                    // Slow viewer: skip to latest frame
+                Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                    media_metrics.record_lagged_frames(skipped);
+                    // Reset the receiver after yielding the cached newest frame,
+                    // instead of walking through the remainder of the stale queue.
+                    rx = broadcast_tx.subscribe();
+                    if let Some(frame) = interaction.latest_frame_bytes() {
+                        let chunk = mjpeg_frame_chunk(&frame);
+                        bytes_sent.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                        if !first_frame_sent {
+                            media_metrics.record_stream_first_frame(stream_started.elapsed(), is_reconnect);
+                            first_frame_sent = true;
+                        }
+                        yield Ok::<_, Infallible>(chunk);
+                    }
                     continue;
                 }
                 Ok(Err(broadcast::error::RecvError::Closed)) => {
@@ -3760,6 +4839,235 @@ async fn handler_stream(
         .header("Access-Control-Allow-Origin", "*")
         .body(Body::from_stream(stream))
         .unwrap()
+}
+
+async fn handler_media_ws(
+    AxumState(state): AxumState<Arc<HttpServerState>>,
+    Query(query): Query<StreamQuery>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    websocket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> Response {
+    if let Some(hash) = &state.auth_hash {
+        if !check_auth_cookie(&headers, hash)
+            && !preview_token_matches(&headers, None, &state.preview_token)
+        {
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::from("Unauthorized"))
+                .unwrap();
+        }
+    }
+    if state.h264_media.snapshot().is_none() {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("Cache-Control", "no-store")
+            .body(Body::from("H.264 media stream is not ready"))
+            .unwrap();
+    }
+    let websocket = match websocket {
+        Ok(websocket) => websocket,
+        Err(rejection) => return rejection.into_response(),
+    };
+
+    let client_ip = addr.ip().to_string();
+    record_viewer_ip(&state.viewer_ips, client_ip.clone());
+    let viewer_total = state.viewer_count.fetch_add(1, Ordering::Relaxed) + 1;
+    let is_reconnect = query.reconnect == Some(1);
+    state.media_metrics.record_stream_open(is_reconnect);
+    state.events.emit_tool_log(
+        &format!(
+            "Viewer connected: ip={}, viewers={}, transport=mse_h264, user_agent={}",
+            client_ip,
+            viewer_total,
+            summarize_user_agent(&headers)
+        ),
+        "info",
+    );
+    let viewer_guard = ViewerGuard {
+        events: state.events.clone(),
+        count: state.viewer_count.clone(),
+        ips: state.viewer_ips.clone(),
+        ip: client_ip,
+    };
+    let media = state.h264_media.clone();
+    let cancel = state.cancel.clone();
+    let bytes_sent = state.bytes_sent.clone();
+    let media_metrics = state.media_metrics.clone();
+    websocket
+        .max_message_size(64 * 1024)
+        .on_upgrade(move |socket| {
+            run_h264_media_socket(
+                socket,
+                media,
+                cancel,
+                bytes_sent,
+                media_metrics,
+                is_reconnect,
+                viewer_guard,
+            )
+        })
+        .into_response()
+}
+
+async fn run_h264_media_socket(
+    mut socket: WebSocket,
+    media: Arc<H264MediaState>,
+    cancel: Arc<AtomicBool>,
+    bytes_sent: Arc<AtomicU64>,
+    media_metrics: Arc<ScreenShareMediaMetrics>,
+    is_reconnect: bool,
+    viewer_guard: ViewerGuard,
+) {
+    let _viewer_guard = viewer_guard;
+    let started_at = Instant::now();
+    let mut first_frame_sent = false;
+    let mut events = media.subscribe();
+    let mut generation = 0u64;
+    let mut sequence = 0u64;
+    if let Some(snapshot) = media.snapshot() {
+        match send_h264_snapshot(&mut socket, &snapshot, &bytes_sent).await {
+            Ok((sent_generation, sent_sequence, sent_frame)) => {
+                generation = sent_generation;
+                sequence = sent_sequence;
+                first_frame_sent = sent_frame;
+                if sent_frame {
+                    media_metrics.record_stream_first_frame(started_at.elapsed(), is_reconnect);
+                }
+            }
+            Err(_) => return,
+        }
+    }
+
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(event) => match event.as_ref() {
+                        H264MediaEvent::Reset(descriptor) => {
+                            if send_h264_descriptor(&mut socket, descriptor, &bytes_sent).await.is_err() {
+                                break;
+                            }
+                            generation = descriptor.generation;
+                            sequence = 0;
+                            first_frame_sent = false;
+                        }
+                        H264MediaEvent::Segment(segment)
+                            if segment.generation == generation && segment.sequence > sequence =>
+                        {
+                            let payload = segment.bytes.as_ref().clone();
+                            let length = payload.len();
+                            if socket.send(Message::Binary(payload.to_vec())).await.is_err() {
+                                break;
+                            }
+                            bytes_sent.fetch_add(length as u64, Ordering::Relaxed);
+                            sequence = segment.sequence;
+                            tokio::time::sleep(H264_STREAM_COOPERATIVE_DELAY).await;
+                            if !first_frame_sent {
+                                first_frame_sent = true;
+                                media_metrics.record_stream_first_frame(started_at.elapsed(), is_reconnect);
+                            }
+                        }
+                        H264MediaEvent::Segment(_) => {}
+                        H264MediaEvent::Unavailable { generation: next_generation, error } => {
+                            generation = *next_generation;
+                            sequence = 0;
+                            first_frame_sent = false;
+                            let message = serde_json::json!({
+                                "v": 1,
+                                "type": "media.unavailable",
+                                "generation": next_generation,
+                                "error": error,
+                            })
+                            .to_string();
+                            if socket.send(Message::Text(message)).await.is_err() {
+                                break;
+                            }
+                        }
+                    },
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        media_metrics.record_lagged_frames(skipped);
+                        if let Some(snapshot) = media.snapshot() {
+                            match send_h264_snapshot(&mut socket, &snapshot, &bytes_sent).await {
+                                Ok((sent_generation, sent_sequence, sent_frame)) => {
+                                    generation = sent_generation;
+                                    sequence = sent_sequence;
+                                    first_frame_sent = sent_frame;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            incoming = socket.recv() => {
+                let Some(Ok(message)) = incoming else { break; };
+                match message {
+                    Message::Ping(payload) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Close(_) => break,
+                    Message::Text(_) | Message::Binary(_) | Message::Pong(_) => {}
+                }
+            }
+        }
+    }
+}
+
+async fn send_h264_snapshot(
+    socket: &mut WebSocket,
+    snapshot: &H264StreamSnapshot,
+    bytes_sent: &AtomicU64,
+) -> Result<(u64, u64, bool), axum::Error> {
+    send_h264_descriptor(socket, &snapshot.descriptor, bytes_sent).await?;
+    let mut sequence = 0;
+    let mut sent_frame = false;
+    for segment in &snapshot.segments {
+        let payload = segment.bytes.as_ref().clone();
+        let length = payload.len();
+        socket.send(Message::Binary(payload.to_vec())).await?;
+        bytes_sent.fetch_add(length as u64, Ordering::Relaxed);
+        sequence = segment.sequence;
+        sent_frame = true;
+        tokio::time::sleep(H264_STREAM_COOPERATIVE_DELAY).await;
+    }
+    Ok((snapshot.descriptor.generation, sequence, sent_frame))
+}
+
+async fn send_h264_descriptor(
+    socket: &mut WebSocket,
+    descriptor: &H264StreamDescriptor,
+    bytes_sent: &AtomicU64,
+) -> Result<(), axum::Error> {
+    let message = serde_json::json!({
+        "v": 1,
+        "type": "media.hello",
+        "transport": "mse_h264",
+        "generation": descriptor.generation,
+        "codec": descriptor.codec,
+        "mime_type": format!("video/mp4; codecs=\"{}\"", descriptor.codec),
+        "width": descriptor.width,
+        "height": descriptor.height,
+        "fps": descriptor.fps,
+        "bitrate_bps": descriptor.bitrate_bps,
+    })
+    .to_string();
+    socket.send(Message::Text(message)).await?;
+    let init = descriptor.init_segment.as_ref().clone();
+    let length = init.len();
+    socket.send(Message::Binary(init.to_vec())).await?;
+    bytes_sent.fetch_add(length as u64, Ordering::Relaxed);
+    tokio::time::sleep(H264_STREAM_COOPERATIVE_DELAY).await;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -3801,6 +5109,10 @@ async fn handler_status(
     record_viewer_ip(&state.viewer_ips, addr.ip().to_string());
     let interaction_document = state.interaction.snapshot();
     let latest_frame = state.interaction.latest_frame_info();
+    let control = state.interaction.control_snapshot();
+    let media_metrics = state
+        .media_metrics
+        .snapshot(latest_frame.as_ref().map(|frame| frame.captured_at_ms));
     Json(serde_json::json!({
         "active": !state.cancel.load(Ordering::Relaxed),
         "viewers": state.viewer_count.load(Ordering::Relaxed),
@@ -3814,6 +5126,15 @@ async fn handler_status(
         "frame_width": latest_frame.as_ref().map(|frame| frame.width),
         "frame_height": latest_frame.as_ref().map(|frame| frame.height),
         "frame_captured_at_ms": latest_frame.as_ref().map(|frame| frame.captured_at_ms),
+        "frame_age_ms": media_metrics.frame_age_ms,
+        "fps_actual": media_metrics.fps_actual,
+        "bitrate_kbps": media_metrics.bitrate_kbps,
+        "media_metrics": media_metrics,
+        "transport": state.transport.lock().unwrap().resolved_label(),
+        "h264_media": state.h264_media.metrics(),
+        "control_state": control.state,
+        "controller_ip": control.controller_ip,
+        "pending_control_request": state.interaction.pending_control_request(),
         "capture_paused": state.capture_paused.load(Ordering::Relaxed),
         "capture_issue": *state.capture_issue.lock().unwrap(),
     }))
@@ -3855,6 +5176,7 @@ async fn handler_session_ws(
     AxumState(state): AxumState<Arc<HttpServerState>>,
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Query(query): Query<SessionQuery>,
     websocket: WebSocketUpgrade,
 ) -> Response {
     if let Some(hash) = &state.auth_hash {
@@ -3870,12 +5192,24 @@ async fn handler_session_ws(
 
     let interaction = state.interaction.clone();
     let cancel = state.cancel.clone();
-    let client_id = Uuid::new_v4().to_string();
+    let client_id = requested_session_client_id(query.client_id);
     let client_ip = addr.ip().to_string();
+    let user_agent = summarize_user_agent(&headers);
+    let events = state.events.clone();
+    let input_worker = state.input_worker.clone();
     websocket
         .max_message_size(MAX_WS_MESSAGE_BYTES)
         .on_upgrade(move |socket| {
-            run_interaction_socket(socket, interaction, cancel, client_id, client_ip)
+            run_interaction_socket(
+                socket,
+                interaction,
+                cancel,
+                client_id,
+                client_ip,
+                user_agent,
+                events,
+                input_worker,
+            )
         })
         .into_response()
 }
@@ -3886,14 +5220,20 @@ async fn run_interaction_socket(
     cancel: Arc<AtomicBool>,
     client_id: String,
     client_ip: String,
+    user_agent: String,
+    events: Arc<dyn ScreenShareEventSink>,
+    input_worker: Option<Arc<InputWorkerHandle>>,
 ) {
-    if let Err(error) = interaction.register_client(&client_id) {
+    if let Err(error) = interaction.register_client_with_metadata(
+        &client_id,
+        InteractionClientMetadata::new(client_ip.clone(), user_agent),
+    ) {
         let _ = send_interaction_message(&mut socket, error.to_message(&interaction)).await;
         let _ = socket.send(Message::Close(None)).await;
         return;
     }
 
-    let mut events = interaction.subscribe();
+    let mut interaction_events = interaction.subscribe();
     let hello = match interaction.hello(&client_id) {
         Ok(message) => message,
         Err(error) => {
@@ -3925,7 +5265,7 @@ async fn run_interaction_socket(
                 // expiry timestamp provides smooth rendering between ticks.
                 let _ = interaction.snapshot();
             }
-            event = events.recv() => {
+            event = interaction_events.recv() => {
                 match event {
                     Ok(message) => {
                         if send_interaction_message(&mut socket, message).await.is_err() {
@@ -3967,9 +5307,84 @@ async fn run_interaction_socket(
                                 continue;
                             }
                         };
-                        if let Err(error) = interaction.process(&client_id, envelope) {
-                            if send_interaction_message(&mut socket, error.to_message(&interaction)).await.is_err() {
-                                break;
+                        let message_type = envelope.message_type.clone();
+                        if message_type.starts_with("input.") {
+                            let context = InputContext::new(
+                                client_id.clone(),
+                                envelope.session_id,
+                                envelope.source_epoch,
+                            );
+                            let input_result = interaction
+                                .authorize_input(&client_id, &envelope)
+                                .and_then(|_| {
+                                    let input = parse_input_event(
+                                        &message_type,
+                                        envelope.payload.clone(),
+                                    )
+                                    .map_err(|message| {
+                                        screenshare_interaction::ProtocolError::new(
+                                            "invalid_input",
+                                            message,
+                                        )
+                                    })?;
+                                    let worker = input_worker.as_ref().ok_or_else(|| {
+                                        screenshare_interaction::ProtocolError::new(
+                                            "input_unavailable",
+                                            "remote input is not enabled for this session",
+                                        )
+                                    })?;
+                                    let queued = if matches!(&input, InputEvent::ReleaseAll) {
+                                        worker.release_all(&context).map(|_| ())
+                                    } else {
+                                        worker
+                                            .enqueue(QueuedInput::new(context, input))
+                                            .map(|_| ())
+                                    };
+                                    queued
+                                        .map_err(|_| {
+                                            screenshare_interaction::ProtocolError::new(
+                                                "input_queue_full",
+                                                "remote input queue is full; control was revoked",
+                                            )
+                                        })?;
+                                    Ok::<(), screenshare_interaction::ProtocolError>(())
+                                });
+                            if let Err(error) = input_result {
+                                if error.code == "input_queue_full" {
+                                    if let Some(worker) = input_worker.as_ref() {
+                                        worker.revoke();
+                                    }
+                                    interaction.revoke_control("input_queue_full");
+                                }
+                                if send_interaction_message(
+                                    &mut socket,
+                                    error.to_message(&interaction),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                        match interaction.process(&client_id, envelope) {
+                            Ok(Some(event)) if event.message_type == "control.requested" => {
+                                if let Some(request) = interaction.pending_control_request() {
+                                    events.emit_control_request(request);
+                                }
+                            }
+                            Ok(Some(event)) if message_type == "control.release" || message_type == "view.freeze" => {
+                                if let Some(worker) = input_worker.as_ref() {
+                                    worker.revoke();
+                                }
+                                let _ = event;
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                if send_interaction_message(&mut socket, error.to_message(&interaction)).await.is_err() {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -3994,7 +5409,15 @@ async fn run_interaction_socket(
         }
     }
 
+    let (_, source_epoch, _) = interaction.identity();
+    let was_controller =
+        interaction.is_controller(&client_id, interaction.identity().0, source_epoch);
     interaction.unregister_client(&client_id);
+    if was_controller {
+        if let Some(worker) = input_worker.as_ref() {
+            worker.revoke();
+        }
+    }
 }
 
 async fn send_interaction_message(
@@ -4014,6 +5437,7 @@ async fn status_reporter(
     viewer_count: Arc<AtomicU32>,
     fps_counter: Arc<AtomicU32>,
     bytes_sent: Arc<AtomicU64>,
+    media_metrics: Arc<ScreenShareMediaMetrics>,
     server_url: String,
     all_urls: Vec<String>,
     start_time: Instant,
@@ -4021,6 +5445,8 @@ async fn status_reporter(
     capture_paused: Arc<AtomicBool>,
     capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
     interaction: Arc<InteractionState>,
+    transport: Arc<Mutex<ScreenShareMediaTransport>>,
+    input_worker: Option<Arc<InputWorkerHandle>>,
     runtime_handle: Arc<ScreenShareHandle>,
     session_id: u64,
 ) {
@@ -4034,20 +5460,40 @@ async fn status_reporter(
             break;
         }
 
+        if input_worker.as_ref().is_some_and(|worker| worker.failed()) {
+            interaction.revoke_control("input_worker_failed");
+            if let Some(worker) = input_worker.as_ref() {
+                worker.revoke();
+            }
+        }
+
+        if runtime_handle
+            .desktop_overlay_active
+            .load(Ordering::Relaxed)
+        {
+            let _ = sync_desktop_overlay_window(&app_handle, &runtime_handle, session_id);
+        }
+
         let fps_count = fps_counter.swap(0, Ordering::Relaxed);
         let current_bytes = bytes_sent.load(Ordering::Relaxed);
         let bytes_delta = current_bytes.saturating_sub(last_bytes);
         last_bytes = current_bytes;
+        let bitrate_kbps = (bytes_delta * 8 / 1024).min(u64::from(u32::MAX)) as u32;
+        media_metrics.update_rates(fps_count, bitrate_kbps);
 
         let connected_ips = snapshot_viewer_ips(&viewer_ips);
         let interaction_document = interaction.snapshot();
+        let control = interaction.control_snapshot();
+        let latest_frame = interaction.latest_frame_info();
+        let media_snapshot =
+            media_metrics.snapshot(latest_frame.as_ref().map(|frame| frame.captured_at_ms));
 
         let status = ScreenShareStatus {
             is_active: true,
             viewer_count: viewer_count.load(Ordering::Relaxed),
             connection_count: connected_ips.len() as u32,
-            fps_actual: fps_count as f32,
-            bitrate_kbps: (bytes_delta * 8 / 1024) as u32,
+            fps_actual: media_snapshot.fps_actual,
+            bitrate_kbps: media_snapshot.bitrate_kbps,
             uptime_secs: start_time.elapsed().as_secs(),
             server_url: server_url.clone(),
             all_urls: all_urls.clone(),
@@ -4057,6 +5503,25 @@ async fn status_reporter(
             interaction_connected_count: interaction.client_count() as u32,
             annotation_count: interaction_document.shapes.len() as u32,
             view_mode: interaction_document.mode,
+            source_epoch: interaction_document.source_epoch,
+            latest_frame_id: latest_frame.as_ref().map(|frame| frame.frame_id),
+            frame_width: latest_frame.as_ref().map(|frame| frame.width),
+            frame_height: latest_frame.as_ref().map(|frame| frame.height),
+            transport: *transport.lock().unwrap(),
+            h264_media: runtime_handle
+                .h264_media
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|media| media.metrics())
+                .unwrap_or_default(),
+            control_state: control.state,
+            controller_ip: control.controller_ip,
+            pending_control_request: interaction.pending_control_request(),
+            desktop_overlay_active: runtime_handle
+                .desktop_overlay_active
+                .load(Ordering::Relaxed),
+            media_metrics: media_snapshot,
         };
 
         let _ = app_handle.emit("screen-share-status", &status);
@@ -4575,6 +6040,281 @@ button:active{{transform:scale(.99)}}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use axum::http::Request;
+    use futures_lite::StreamExt;
+    use tower::ServiceExt;
+
+    #[derive(Default)]
+    struct TestScreenShareEvents;
+
+    impl ScreenShareEventSink for TestScreenShareEvents {
+        fn emit_tool_log(&self, _message: &str, _level: &str) {}
+
+        fn emit_control_request(&self, _request: ControlRequestInfo) {}
+    }
+
+    #[test]
+    fn media_metrics_keep_bounded_jpeg_samples_and_report_percentiles() {
+        let started_at = Instant::now();
+        let metrics = ScreenShareMediaMetrics::new_at(started_at);
+
+        for index in 1..=(MEDIA_JPEG_SAMPLE_WINDOW + 40) {
+            metrics.record_encoded_frame_at(
+                index as usize,
+                started_at + Duration::from_millis(index as u64),
+            );
+        }
+
+        let snapshot = metrics.snapshot_at(None, 10_000);
+        assert_eq!(snapshot.encoded_frame_count, 552);
+        assert_eq!(snapshot.jpeg_sample_count, MEDIA_JPEG_SAMPLE_WINDOW as u32);
+        assert_eq!(snapshot.jpeg_size_avg_bytes, 297);
+        assert_eq!(snapshot.jpeg_size_p50_bytes, 296);
+        assert_eq!(snapshot.jpeg_size_p95_bytes, 527);
+        assert_eq!(snapshot.first_frame_delay_ms, Some(1));
+    }
+
+    #[test]
+    fn mjpeg_viewers_skip_queued_frames_and_send_the_latest() {
+        let (sender, _) = broadcast::channel(8);
+        let mut receiver = sender.subscribe();
+        let first = Arc::new(Bytes::from_static(b"first"));
+        let second = Arc::new(Bytes::from_static(b"second"));
+        let latest = Arc::new(Bytes::from_static(b"latest"));
+        sender.send(first.clone()).unwrap();
+        sender.send(second).unwrap();
+        sender.send(latest.clone()).unwrap();
+
+        let initial = receiver.try_recv().unwrap();
+        let (drained, skipped) = drain_to_latest_mjpeg_frame(&mut receiver, initial);
+        assert_eq!(drained.as_ref(), latest.as_ref());
+        assert_eq!(skipped, 2);
+    }
+
+    #[test]
+    fn media_metrics_report_stream_first_frame_reconnect_age_and_lag() {
+        let started_at = Instant::now();
+        let metrics = ScreenShareMediaMetrics::new_at(started_at);
+        metrics.record_stream_open(false);
+        metrics.record_stream_first_frame(Duration::from_millis(80), false);
+        metrics.record_stream_open(true);
+        metrics.record_stream_first_frame(Duration::from_millis(140), true);
+        metrics.record_lagged_frames(7);
+        metrics.update_rates(15, 8_192);
+
+        let snapshot = metrics.snapshot_at(Some(9_950), 10_000);
+        assert_eq!(snapshot.frame_age_ms, Some(50));
+        assert_eq!(snapshot.slow_client_dropped_frames, 7);
+        assert_eq!(snapshot.stream_connection_count, 2);
+        assert_eq!(snapshot.stream_first_frame_avg_ms, Some(80));
+        assert_eq!(snapshot.stream_first_frame_p95_ms, Some(80));
+        assert_eq!(snapshot.stream_reconnect_count, 1);
+        assert_eq!(snapshot.stream_reconnect_avg_ms, Some(140));
+        assert_eq!(snapshot.stream_reconnect_p95_ms, Some(140));
+        assert_eq!(snapshot.fps_actual, 15.0);
+        assert_eq!(snapshot.bitrate_kbps, 8_192);
+    }
+
+    fn test_http_state() -> Arc<HttpServerState> {
+        let (broadcast_tx, _) = broadcast::channel(8);
+        Arc::new(HttpServerState {
+            events: Arc::new(TestScreenShareEvents),
+            broadcast_tx,
+            interaction: InteractionState::new(77),
+            viewer_count: Arc::new(AtomicU32::new(0)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            auth_hash: None,
+            auth_username: None,
+            bytes_sent: Arc::new(AtomicU64::new(0)),
+            media_metrics: Arc::new(ScreenShareMediaMetrics::new()),
+            h264_media: Arc::new(H264MediaState::new()),
+            viewer_ips: Arc::new(Mutex::new(HashMap::new())),
+            session_id: 77,
+            capture_paused: Arc::new(AtomicBool::new(false)),
+            capture_issue: Arc::new(Mutex::new(None)),
+            preview_token: Arc::new(Mutex::new(None)),
+            transport: Arc::new(Mutex::new(ScreenShareMediaTransport::Mjpeg)),
+            input_worker: None,
+        })
+    }
+
+    fn http_request(path: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .uri(path)
+            .body(Body::empty())
+            .expect("test request");
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:41234"
+                .parse::<SocketAddr>()
+                .expect("test socket address"),
+        ));
+        request
+    }
+
+    #[tokio::test]
+    async fn screen_share_router_serves_every_asset_referenced_by_index() {
+        let app = screen_share_router(test_http_state());
+        let index = app
+            .clone()
+            .oneshot(http_request("/"))
+            .await
+            .expect("index response");
+        assert_eq!(index.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            to_bytes(index.into_body(), usize::MAX)
+                .await
+                .expect("index body")
+                .to_vec(),
+        )
+        .expect("utf-8 index");
+        let asset_paths: Vec<String> = regex::Regex::new(r#"(?:src|href)=\"(/assets/[^\"]+)\""#)
+            .unwrap()
+            .captures_iter(&html)
+            .map(|capture| capture[1].to_string())
+            .collect();
+        assert!(!asset_paths.is_empty(), "built index must reference assets");
+
+        for path in asset_paths {
+            let response = app
+                .clone()
+                .oneshot(http_request(&path))
+                .await
+                .expect("asset response");
+            assert_eq!(response.status(), StatusCode::OK, "asset {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn screen_share_router_snapshot_status_stream_and_websocket_paths_are_isolated() {
+        let state = test_http_state();
+        let app = screen_share_router(state.clone());
+
+        let missing_snapshot = app
+            .clone()
+            .oneshot(http_request("/snapshot/1"))
+            .await
+            .unwrap();
+        assert_eq!(missing_snapshot.status(), StatusCode::NOT_FOUND);
+
+        state
+            .interaction
+            .register_client("freezer")
+            .expect("register freezer");
+        state
+            .interaction
+            .record_frame(Arc::new(Bytes::from_static(b"jpeg-frame")));
+        state
+            .interaction
+            .process(
+                "freezer",
+                ClientEnvelope {
+                    v: screenshare_interaction::PROTOCOL_VERSION,
+                    message_type: "view.freeze".to_string(),
+                    session_id: 77,
+                    source_epoch: 1,
+                    client_seq: Some(1),
+                    revision: None,
+                    payload: None,
+                },
+            )
+            .expect("freeze request");
+
+        let snapshot = app
+            .clone()
+            .oneshot(http_request("/snapshot/1"))
+            .await
+            .unwrap();
+        assert_eq!(snapshot.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(snapshot.into_body(), usize::MAX).await.unwrap(),
+            Bytes::from_static(b"jpeg-frame")
+        );
+
+        let single_frame = app
+            .clone()
+            .oneshot(http_request("/stream?single=1"))
+            .await
+            .unwrap();
+        assert_eq!(single_frame.status(), StatusCode::OK);
+        assert_eq!(single_frame.headers()["content-type"], "image/jpeg");
+
+        let status = app.clone().oneshot(http_request("/status")).await.unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let status_json: serde_json::Value = serde_json::from_slice(
+            &to_bytes(status.into_body(), usize::MAX)
+                .await
+                .expect("status body"),
+        )
+        .expect("status JSON");
+        assert_eq!(status_json["session_id"], 77);
+        assert_eq!(status_json["source_epoch"], 1);
+        assert_eq!(status_json["latest_frame_id"], 1);
+        assert_eq!(status_json["frozen_frame_id"], 1);
+        assert_eq!(status_json["view_mode"], "frozen");
+        assert_eq!(status_json["transport"], "mjpeg");
+        assert_eq!(status_json["h264_media"]["ready"], false);
+
+        let media_without_encoder = app
+            .clone()
+            .oneshot(http_request("/media/ws"))
+            .await
+            .unwrap();
+        assert_eq!(
+            media_without_encoder.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let websocket_without_upgrade = app
+            .clone()
+            .oneshot(http_request("/session/ws"))
+            .await
+            .unwrap();
+        assert_ne!(websocket_without_upgrade.status(), StatusCode::NOT_FOUND);
+
+        let unknown = app.oneshot(http_request("/not-a-route")).await.unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn long_lived_mjpeg_stream_sends_cached_frame_without_waiting_for_broadcast() {
+        let state = test_http_state();
+        state
+            .interaction
+            .record_frame(Arc::new(Bytes::from_static(b"cached-jpeg")));
+        let app = screen_share_router(state.clone());
+
+        let response = app.oneshot(http_request("/stream")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let first_chunk = tokio::time::timeout(Duration::from_millis(100), body.next())
+            .await
+            .expect("cached frame should be immediate")
+            .expect("stream should yield a chunk")
+            .expect("chunk should be readable");
+        assert!(first_chunk
+            .windows(b"cached-jpeg".len())
+            .any(|window| window == b"cached-jpeg"));
+
+        let metrics = state.media_metrics.snapshot(None);
+        assert_eq!(metrics.stream_connection_count, 1);
+        assert_eq!(metrics.stream_first_frame_sample_count, 1);
+
+        let reconnect_response = screen_share_router(state.clone())
+            .oneshot(http_request("/stream?reconnect=1"))
+            .await
+            .unwrap();
+        let mut reconnect_body = reconnect_response.into_body().into_data_stream();
+        tokio::time::timeout(Duration::from_millis(100), reconnect_body.next())
+            .await
+            .expect("reconnect cached frame should be immediate")
+            .expect("reconnect stream should yield a chunk")
+            .expect("reconnect chunk should be readable");
+        let metrics = state.media_metrics.snapshot(None);
+        assert_eq!(metrics.stream_connection_count, 2);
+        assert_eq!(metrics.stream_reconnect_count, 1);
+        assert_eq!(metrics.stream_reconnect_sample_count, 1);
+    }
 
     #[test]
     fn screen_share_embedded_pages_include_svg_favicon() {
@@ -4587,6 +6327,54 @@ mod tests {
         }
         assert!(viewer.contains("privacy_mode_or_display_off"));
         assert!(viewer.contains("检测到所有屏幕持续黑屏"));
+    }
+
+    #[test]
+    fn screen_share_asset_route_restores_embedded_assets_prefix() {
+        assert_eq!(screen_share_asset_path("index.js"), "assets/index.js");
+        assert_eq!(screen_share_asset_path("/index.css"), "assets/index.css");
+    }
+
+    #[test]
+    fn legacy_config_defaults_preserve_existing_viewing_behavior() {
+        let config: ScreenShareConfig = serde_json::from_value(serde_json::json!({
+            "port": 9870,
+            "username": null,
+            "password": null,
+            "monitor_index": 0,
+            "quality": 70,
+            "fps": 15,
+            "show_cursor": true
+        }))
+        .expect("legacy screen-share config");
+
+        assert!(config.annotations_enabled);
+        assert!(config.shared_freeze_enabled);
+        assert!(!config.control_requests_enabled);
+        assert!(!config.keyboard_control_enabled);
+        assert_eq!(config.transport, ScreenShareMediaTransport::Auto);
+    }
+
+    #[test]
+    fn h264_selector_preserves_explicit_mjpeg_and_webrtc_fallback() {
+        assert!(ScreenShareMediaTransport::Auto.wants_h264());
+        assert!(ScreenShareMediaTransport::MseH264.wants_h264());
+        assert!(!ScreenShareMediaTransport::Mjpeg.wants_h264());
+        assert!(!ScreenShareMediaTransport::WebRtc.wants_h264());
+        assert_eq!(ScreenShareMediaTransport::Mjpeg.resolved_label(), "mjpeg");
+    }
+
+    #[test]
+    fn desktop_overlay_identity_and_annotation_events_are_session_scoped() {
+        assert_eq!(
+            desktop_overlay_window_label(42),
+            "screen-share-desktop-overlay-42"
+        );
+        assert!(interaction_event_updates_annotations("annotation.applied"));
+        assert!(interaction_event_updates_annotations("view.state"));
+        assert!(interaction_event_updates_annotations("source.changed"));
+        assert!(!interaction_event_updates_annotations("control.state"));
+        assert!(!interaction_event_updates_annotations("input.pointer_move"));
     }
 
     #[test]
@@ -4650,7 +6438,9 @@ mod tests {
         *handle.start_time.lock().unwrap() = Some(Instant::now());
         *handle.server_done_rx.lock().unwrap() = Some(oneshot::channel::<()>().1);
         *handle.interaction.lock().unwrap() = Some(InteractionState::new(99));
+        *handle.media_metrics.lock().unwrap() = Some(Arc::new(ScreenShareMediaMetrics::new()));
         *handle.preview_token.lock().unwrap() = Some("stale-preview".into());
+        handle.desktop_overlay_active.store(true, Ordering::SeqCst);
         record_viewer_ip(&handle.viewer_ips, "10.0.0.1");
 
         prepare_runtime_state_for_start(&handle);
@@ -4666,7 +6456,9 @@ mod tests {
         assert!(handle.start_time.lock().unwrap().is_none());
         assert!(handle.server_done_rx.lock().unwrap().is_none());
         assert!(handle.interaction.lock().unwrap().is_none());
+        assert!(handle.media_metrics.lock().unwrap().is_none());
         assert!(handle.preview_token.lock().unwrap().is_none());
+        assert!(!handle.desktop_overlay_active.load(Ordering::SeqCst));
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
     }
 
@@ -4683,7 +6475,9 @@ mod tests {
         *handle.start_time.lock().unwrap() = Some(Instant::now());
         *handle.server_done_rx.lock().unwrap() = Some(oneshot::channel::<()>().1);
         *handle.interaction.lock().unwrap() = Some(InteractionState::new(100));
+        *handle.media_metrics.lock().unwrap() = Some(Arc::new(ScreenShareMediaMetrics::new()));
         *handle.preview_token.lock().unwrap() = Some("active-preview".into());
+        handle.desktop_overlay_active.store(true, Ordering::SeqCst);
         record_viewer_ip(&handle.viewer_ips, "10.0.0.2");
 
         reset_runtime_state(&handle);
@@ -4699,7 +6493,9 @@ mod tests {
         assert!(handle.start_time.lock().unwrap().is_none());
         assert!(handle.server_done_rx.lock().unwrap().is_none());
         assert!(handle.interaction.lock().unwrap().is_none());
+        assert!(handle.media_metrics.lock().unwrap().is_none());
         assert!(handle.preview_token.lock().unwrap().is_none());
+        assert!(!handle.desktop_overlay_active.load(Ordering::SeqCst));
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
     }
 

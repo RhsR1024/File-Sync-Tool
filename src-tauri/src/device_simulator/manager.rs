@@ -292,6 +292,39 @@ impl SimulatorManager {
         Ok(())
     }
 
+    pub fn record_recovery_outcome(
+        &self,
+        session_id: &str,
+        recovered: bool,
+        error: Option<SimulatorErrorBody>,
+    ) -> Result<SimulatorStatus, ManagerError> {
+        let mut inner = self.inner.lock().expect("simulator manager poisoned");
+        if !matches!(
+            inner.status.state,
+            SessionState::Idle | SessionState::Stopped | SessionState::Failed
+        ) && inner.status.session_id.as_deref() != Some(session_id)
+        {
+            return Err(ManagerError::new(
+                "device_simulator.session.active_mismatch",
+                "cannot apply recovery for a different active simulator session",
+            ));
+        }
+        inner.status = SimulatorStatus {
+            session_id: Some(session_id.to_owned()),
+            state: if recovered {
+                SessionState::Stopped
+            } else {
+                SessionState::RecoveryRequired
+            },
+            updated_at_ms: now_ms(),
+            error,
+        };
+        inner.resources_may_be_owned = !recovered;
+        inner.worker_process_id = None;
+        inner.last_heartbeat_ms = None;
+        Ok(inner.status.clone())
+    }
+
     /// A disconnected or crashed Worker is never restarted automatically:
     /// ownership must first be reconciled from the durable session journal.
     pub fn record_worker_loss(
@@ -394,7 +427,6 @@ impl SimulatorManager {
             pipe: AsyncMutex::new(pipe),
             session_id: identity.session_id.clone(),
             process_id,
-            request_timeout: self.timeout_policy.request,
             notifications: notifications.clone(),
         });
         let (cancel, cancel_rx) = watch::channel(false);
@@ -402,6 +434,7 @@ impl SimulatorManager {
             Arc::clone(&transport),
             cancel_rx,
             notifications,
+            self.timeout_policy.request,
         ));
         *worker = Some(WorkerClient {
             transport,
@@ -430,6 +463,23 @@ impl SimulatorManager {
         command: WorkerCommandName,
         payload: Option<&P>,
     ) -> Result<Option<Value>, ManagerError> {
+        self.request_worker_with_timeout(command, payload, self.timeout_policy.request)
+            .await
+    }
+
+    #[cfg(target_os = "windows")]
+    pub async fn request_worker_with_timeout<P: Serialize>(
+        &self,
+        command: WorkerCommandName,
+        payload: Option<&P>,
+        timeout: Duration,
+    ) -> Result<Option<Value>, ManagerError> {
+        if timeout.is_zero() || timeout > Duration::from_secs(120) {
+            return Err(ManagerError::new(
+                "device_simulator.worker.timeout_invalid",
+                "Worker request timeout must be within 1ms..=120s",
+            ));
+        }
         let payload = payload
             .map(serde_json::to_value)
             .transpose()
@@ -446,7 +496,7 @@ impl SimulatorManager {
                 "there is no connected elevated Worker",
             )
         })?;
-        client.transport.request(command, payload).await
+        client.transport.request(command, payload, timeout).await
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -454,6 +504,19 @@ impl SimulatorManager {
         &self,
         _command: WorkerCommandName,
         _payload: Option<&P>,
+    ) -> Result<Option<Value>, ManagerError> {
+        Err(ManagerError::new(
+            "device_simulator.worker.unsupported_platform",
+            "Worker requests are only supported on Windows",
+        ))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub async fn request_worker_with_timeout<P: Serialize>(
+        &self,
+        _command: WorkerCommandName,
+        _payload: Option<&P>,
+        _timeout: Duration,
     ) -> Result<Option<Value>, ManagerError> {
         Err(ManagerError::new(
             "device_simulator.worker.unsupported_platform",
@@ -470,7 +533,7 @@ impl SimulatorManager {
         let _ = worker.cancel.send(true);
         let shutdown = worker
             .transport
-            .request(WorkerCommandName::Shutdown, None)
+            .request(WorkerCommandName::Shutdown, None, self.timeout_policy.stop)
             .await;
         worker.monitor.abort();
         let _ = worker.monitor.await;
@@ -515,7 +578,6 @@ struct WorkerTransport {
     pipe: AsyncMutex<tokio::net::windows::named_pipe::NamedPipeServer>,
     session_id: String,
     process_id: u32,
-    request_timeout: Duration,
     notifications: mpsc::UnboundedSender<ManagerNotification>,
 }
 
@@ -525,6 +587,7 @@ impl WorkerTransport {
         &self,
         command: WorkerCommandName,
         payload: Option<Value>,
+        timeout: Duration,
     ) -> Result<Option<Value>, ManagerError> {
         let request_id = uuid::Uuid::new_v4().simple().to_string();
         let request = WorkerMessage::Request(WorkerRequest {
@@ -601,7 +664,7 @@ impl WorkerTransport {
                 }
             }
         };
-        match tokio::time::timeout(self.request_timeout, operation).await {
+        match tokio::time::timeout(timeout, operation).await {
             Ok(result) => result,
             Err(_) => Err(ManagerError::new(
                 "device_simulator.worker.request_timeout",
@@ -627,6 +690,7 @@ async fn monitor_worker(
     transport: Arc<WorkerTransport>,
     mut cancel: watch::Receiver<bool>,
     notifications: mpsc::UnboundedSender<ManagerNotification>,
+    request_timeout: Duration,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -638,7 +702,10 @@ async fn monitor_worker(
                 }
             }
             _ = interval.tick() => {
-                if let Err(source) = transport.request(WorkerCommandName::GetStatus, None).await {
+                if let Err(source) = transport
+                    .request(WorkerCommandName::GetStatus, None, request_timeout)
+                    .await
+                {
                     let _ = notifications.send(ManagerNotification::WorkerLost {
                         session_id: transport.session_id.clone(),
                         process_id: transport.process_id,
@@ -778,6 +845,22 @@ mod tests {
             manager.begin_session("session-2".into()).unwrap_err().code,
             "device_simulator.session.already_active"
         );
+    }
+
+    #[test]
+    fn recovery_outcome_releases_or_preserves_the_session_gate() {
+        let manager = SimulatorManager::default();
+        let failed = manager
+            .record_recovery_outcome("session-1", false, Some(error()))
+            .unwrap();
+        assert_eq!(failed.state, SessionState::RecoveryRequired);
+        assert!(manager.begin_session("session-2".into()).is_err());
+
+        let stopped = manager
+            .record_recovery_outcome("session-1", true, None)
+            .unwrap();
+        assert_eq!(stopped.state, SessionState::Stopped);
+        manager.begin_session("session-2".into()).unwrap();
     }
 
     #[test]

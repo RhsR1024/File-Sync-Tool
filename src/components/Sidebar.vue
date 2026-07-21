@@ -14,8 +14,10 @@ import {
   Server,
   Settings,
   Share2,
+  RadioTower,
   Shield,
   ShieldCheck,
+  StickyNote,
   Terminal,
   Video,
 } from 'lucide-vue-next';
@@ -48,10 +50,12 @@ const iconMap: Record<SidebarIconKey, Component> = {
   screenShare: MonitorUp,
   videoDeviceSimulator: Video,
   fileShare: Share2,
+  tftpServer: RadioTower,
   diskCacheCleanup: HardDrive,
   clipboardManager: Clipboard,
   errorCodeLookup: FileSearch,
   notepadExtensions: Puzzle,
+  paperTodo: StickyNote,
 };
 
 const sections = computed(() =>

@@ -551,13 +551,18 @@ fn list_system_neighbor_evidence(
         } else {
             (ConflictObservationResult::Inconclusive, "unknown")
         };
+        let details = if result == ConflictObservationResult::Occupied {
+            Some(format_physical_address(
+                &row.PhysicalAddress[..physical_length],
+            ))
+        } else {
+            Some(state.to_owned())
+        };
         let candidate = ConflictEvidence {
             address,
             kind: ConflictEvidenceKind::Neighbor,
             result,
-            details: Some(format!(
-                "Windows neighbor table state={state}, interface_index={interface_index}"
-            )),
+            details,
         };
         match evidence.get(&address) {
             Some(existing) if existing.result == ConflictObservationResult::Occupied => {}
@@ -567,6 +572,14 @@ fn list_system_neighbor_evidence(
         }
     }
     Ok(evidence)
+}
+
+fn format_physical_address(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -702,6 +715,14 @@ fn build_unicast_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_addresses_use_a_readable_mac_format() {
+        assert_eq!(
+            format_physical_address(&[0x00, 0x1a, 0x2b, 0x03, 0xcd, 0xef]),
+            "00:1A:2B:03:CD:EF"
+        );
+    }
 
     fn ip(value: &str) -> Ipv4Addr {
         value.parse().unwrap()

@@ -232,6 +232,10 @@ function handleCloseDetail() {
   taskStateStore.selectedGroupDetail = null;
 }
 
+async function handleManualCopyQueued() {
+  await taskStateStore.hydrateTaskState();
+}
+
 async function handleScanClick() {
   if (appStore.isRunning) return;
   await executeScan();
@@ -461,7 +465,7 @@ function handleManualCopyClose() {
     <ManualCopyModal
       :is-open="isManualCopyModalOpen"
       @close="handleManualCopyClose"
-      @success="() => {}"
+      @success="handleManualCopyQueued"
     />
 
     <!-- Retry target exists dialog -->

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-07-20T11:23:38.602Z",
+  "base_url": "http://192.168.0.111:9870/",
+  "scenario": "synthetic-video-50-steady",
+  "duration_seconds": 10,
+  "warmup_seconds": 10,
+  "worker_viewer_limit": 5,
+  "connect_batch_delay_ms": 250,
+  "connect_timeout_ms": 30000,
+  "cases": [
+    {
+      "viewer_count": 50,
+      "duration_seconds": 10.008,
+      "total_binary_bytes": 6338481,
+      "aggregate_mbps": 5.067,
+      "per_viewer_mbps_avg": 0.101,
+      "per_viewer_mbps_p50": 0.096,
+      "per_viewer_mbps_p95": 0.141,
+      "media_messages_avg": 3.3,
+      "media_messages_min": 2,
+      "media_messages_p95": 5,
+      "media_messages_max": 6,
+      "first_media_avg_ms": 3331.065,
+      "first_media_p95_ms": 7961.96,
+      "initial_binary_bytes_avg": 721556,
+      "initial_binary_bytes_p95": 1156034,
+      "initial_binary_messages_avg": 19.8,
+      "initial_binary_messages_p95": 31,
+      "source_encoded_mbps": 0.651,
+      "encoded_frame_count_delta": 21,
+      "viewer_count_start": 50,
+      "viewer_count_end": 51,
+      "keyframe_count_delta": 7,
+      "cached_segment_count_end": 1,
+      "cached_bytes_end": 32899,
+      "dropped_input_frames_delta": 0,
+      "slow_client_dropped_frames_delta": 0
+    }
+  ],
+  "failures": []
+}

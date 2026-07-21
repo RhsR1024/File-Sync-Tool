@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "screen-share-overlay",
+  "description": "Permissions for the click-through screen-share annotation overlay.",
+  "windows": [
+    "screen-share-desktop-overlay-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:window:allow-close"
+  ]
+}

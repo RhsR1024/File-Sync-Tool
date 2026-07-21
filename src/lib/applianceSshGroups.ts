@@ -1,10 +1,10 @@
 import type { ApplianceSshTarget } from './tauri';
 
 /**
- * HA access group for the appliance SSH page: one master (management API +
- * local whitelist), an optional backup reached via chained SSH through the
- * master, and up to MAX_SLAVES_PER_GROUP standalone slaves that behave like
- * direct targets.
+ * HA access group for the appliance SSH page: one master, an optional backup,
+ * and up to MAX_SLAVES_PER_GROUP standalone slaves. A master/backup pair can
+ * switch roles, so either node may provide the management API and act as the
+ * SSH hop for the other node.
  */
 export interface HaAccessGroup {
   master: string;
@@ -34,6 +34,14 @@ export function createEmptyGroup(): HaAccessGroup {
   return { master: '', backup: '', slaves: [] };
 }
 
+export function swapGroupEndpoints(group: HaAccessGroup): HaAccessGroup {
+  return {
+    master: group.backup,
+    backup: group.master,
+    slaves: [...group.slaves],
+  };
+}
+
 export function normalizeGroup(group: HaAccessGroup): HaAccessGroup {
   const seen = new Set<string>();
   const slaves: string[] = [];
@@ -55,9 +63,10 @@ export function isGroupActive(group: HaAccessGroup): boolean {
 }
 
 /**
- * Expand one group into backend targets. With a backup present the master is
- * covered by the jump-pair target (the management API and local whitelist run
- * on the jump host); without one the master degrades to a direct target.
+ * Expand one group into backend targets. For a master/backup pair, use the
+ * master management API and chain SSH from master to backup. The backend may
+ * reverse the direction after a failover. Without a backup, the master remains
+ * a direct target.
  */
 export function buildGroupTargets(group: HaAccessGroup): ApplianceSshTarget[] {
   const g = normalizeGroup(group);
@@ -65,7 +74,7 @@ export function buildGroupTargets(group: HaAccessGroup): ApplianceSshTarget[] {
 
   const targets: ApplianceSshTarget[] = [];
   if (g.backup) {
-    targets.push({ ip: g.backup, jumpHost: g.master });
+    targets.push({ ip: g.backup, jumpHost: g.master, allowFailover: true });
   } else {
     targets.push({ ip: g.master });
   }
@@ -111,9 +120,9 @@ export function composeAllTargets(
 
 /**
  * Map each group-originated target key to its group index and role so result
- * rows can show a role badge. The jump-pair row carries both machines' status,
- * hence the combined `masterBackup` role. First writer wins on duplicates,
- * matching composeAllTargets de-duplication.
+ * rows can show a role badge. Both directions of a failover-capable pair map
+ * to the same combined role, because the backend reports the direction that
+ * actually succeeded. First writer wins on duplicates.
  */
 export function buildRoleMap(groups: readonly HaAccessGroup[]): Map<string, HaRoleInfo> {
   const map = new Map<string, HaRoleInfo>();
@@ -125,6 +134,7 @@ export function buildRoleMap(groups: readonly HaAccessGroup[]): Map<string, HaRo
     const g = normalizeGroup(raw);
     if (!g.master) return;
     if (g.backup) {
+      set(targetKey({ ip: g.master, jumpHost: g.backup }), { groupIndex, role: 'masterBackup' });
       set(targetKey({ ip: g.backup, jumpHost: g.master }), { groupIndex, role: 'masterBackup' });
     } else {
       set(targetKey({ ip: g.master }), { groupIndex, role: 'master' });

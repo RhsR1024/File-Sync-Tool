@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-07-20T10:57:14.860Z",
+  "base_url": "http://192.168.0.111:9870/",
+  "scenario": "yield-with-read",
+  "duration_seconds": 2,
+  "warmup_seconds": 1,
+  "worker_viewer_limit": 8,
+  "connect_batch_delay_ms": 100,
+  "connect_timeout_ms": 15000,
+  "cases": [
+    {
+      "viewer_count": 15,
+      "duration_seconds": 2.007,
+      "total_binary_bytes": 982316,
+      "aggregate_mbps": 3.916,
+      "per_viewer_mbps_avg": 0.261,
+      "per_viewer_mbps_p50": 0.01,
+      "per_viewer_mbps_p95": 0.776,
+      "first_media_avg_ms": 3034.338,
+      "first_media_p95_ms": 4765.755,
+      "initial_binary_bytes_avg": 405499,
+      "initial_binary_bytes_p95": 612777,
+      "initial_binary_messages_avg": 6.3,
+      "initial_binary_messages_p95": 10,
+      "source_encoded_mbps": 0.808,
+      "keyframe_count_delta": 1,
+      "cached_segment_count_end": 3,
+      "cached_bytes_end": 202775,
+      "dropped_input_frames_delta": 0,
+      "slow_client_dropped_frames_delta": 0
+    }
+  ],
+  "failures": []
+}

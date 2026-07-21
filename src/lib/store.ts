@@ -28,6 +28,7 @@ export interface ToolRuntimeState {
     screenShare: boolean;
     fileShare: boolean;
     deviceSimulator: boolean;
+    tftpServer: boolean;
 }
 
 export const appStore = reactive({
@@ -43,6 +44,7 @@ export const appStore = reactive({
         screenShare: false,
         fileShare: false,
         deviceSimulator: false,
+        tftpServer: false,
     } as ToolRuntimeState,
 });
 

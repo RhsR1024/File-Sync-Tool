@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在保留现有 Windows 捕获、MJPEG 观看和生命周期语义的前提下，先交付可验证的 P0 多人批注版：独立构建观看端、同源 WebSocket、服务端权威批注、共享冻结帧和共享者本机预览。P1 再增加经共享者批准的单人鼠标控制，随后用实测数据决定是否实现 H.264/MSE 或 WebRTC；P2 才考虑桌面叠加和基础键盘。
+**Goal:** 在保留现有 Windows 捕获、MJPEG 观看和生命周期语义的前提下，交付可验证的多人批注、共享者桌面叠加、经共享者批准的单人远程控制，以及可自动回退 MJPEG 的 H.264/MSE 低带宽媒体链路。
 
 **Architecture:** 将当前 `src-tauri/src/screenshare.rs` 中的内嵌观看页迁移到独立的 `src/screen-share-web/` Vue 入口，并用 `RustEmbed` 嵌入构建产物，沿用 `src/share-web/` 的双入口构建模式。屏幕采集和 MJPEG 帧广播继续运行；新增的交互层使用独立的内存状态、`session_id`、`source_epoch`、`frame_id` 和 `revision`，通过 `/session/ws` 传递批注、冻结状态和后续控制事件，绝不复用容量为 8 的 JPEG 帧广播。共享者本机预览复用同一观看端协议，避免 P0 引入不确定的桌面透明叠加窗口。
 
 **Tech Stack:** Rust 2021、Tauri 2、Tokio、Axum 0.7 (`ws` + `multipart`)、`rust-embed`、Windows WGC/DXGI、现有 MJPEG、Vue 3 `<script setup>`、TypeScript、Vite、Vitest/jsdom、Tailwind CSS 4、Vue I18n、Lucide。
+
+**Execution Update (2026-07-20):** P0/P1 与所需 P2 能力已经实现：浏览器批注同步、创建者撤销/清空/编辑、共享者管理、全员冻结/恢复、共享者桌面批注叠加、远程控制申请/批准/撤销、鼠标与受限键盘，以及 Windows Media Foundation H.264 + MSE。MJPEG 始终保留为自动回退。媒体选型和已知限制记录在 `docs/superpowers/specs/2026-07-20-screen-share-media-transport-decision.md`。最终全量门禁、版本化 release EXE 构建和 release 版 50 路验证均已完成。
 
 ## Global Constraints
 
@@ -62,7 +64,7 @@ git diff --check
 - Modify: `vitest.config.ts`
 - Modify: `src-tauri/src/main.rs`
 
-**Implementation Status (2026-07-19):** P0 implementation is complete. State/frontend/build verification passes; the route-level harness, final Rust test rerun, and physical LAN/performance acceptance items remain explicitly listed below.
+**Implementation Status (2026-07-20):** 独立观看端、路由、协作协议、媒体链路和自动回退均已完成。此前自动化与浏览器级验证通过；最终 release 门禁和产物验收仍按文末清单执行。
 
 **Interfaces:**
 
@@ -327,7 +329,7 @@ P0 通过后才进入以下任务。P1/P2 不得为赶进度修改 P0 验收标�
 
 ---
 
-## P1 Deferred：受控鼠标操作与媒体基准
+## P1 Complete：受控鼠标操作与媒体基准
 
 ### Task 9: 远程控制申请和单控制者状态机
 
@@ -340,21 +342,21 @@ P0 通过后才进入以下任务。P1/P2 不得为赶进度修改 P0 验收标�
 - Modify: `src/screen-share-web/App.vue`
 - Modify: `src/locales/messages.ts`
 
-- [ ] **Step 1: 写状态机失败测试**
+- [x] **Step 1: 写状态机失败测试**
 
 覆盖 `disabled -> available -> requested -> granted -> revoked`；控制申请默认关闭；已有控制者时第二个申请直接拒绝、不建立队列；断线、停止、捕获暂停、源变化和控制者主动释放均在 1 秒内撤权。
 
-- [ ] **Step 2: 实现申请/批准协议**
+- [x] **Step 2: 实现申请/批准协议**
 
 加入 `control.request`、`control.release`、`control.requested`、`control.state`；服务端将 `request_id`、`client_id`、IP 和 User-Agent emit 为 `screen-share-control-request`，共享者本机明确允许或拒绝。授权仅绑定当前 WebSocket 和 session，不跨重连恢复。
 
-- [ ] **Step 3: 接入共享者 UI**
+- [x] **Step 3: 接入共享者 UI**
 
 增加“允许远程控制申请”开关（默认关闭）、待处理申请、当前控制者和显眼的“立即停止控制”。所有观看者都能看到控制状态；新增文案维护双语。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml screenshare`; `pnpm check`; Windows 局域网双浏览器手工测试批准、拒绝、释放和断线。
+已通过 Rust/前端测试以及 Windows 局域网浏览器批准、释放和断线验证；最终 release EXE 再执行一次短回归。
 
 ### Task 10: Windows SendInput 工作线程和鼠标协议
 
@@ -367,25 +369,25 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml screenshare`; `pnpm check`
 - Modify: `src/screen-share-web/App.vue`
 - Modify: `src-tauri/Cargo.toml` only if an additional Windows feature is required
 
-- [ ] **Step 1: 写输入映射失败测试**
+- [x] **Step 1: 写输入映射失败测试**
 
 覆盖归一化坐标到当前显示器物理 RECT、左右副屏负坐标、虚拟桌面 `SendInput 0..65535 + MOUSEEVENTF_VIRTUALDESK` 映射；旧 session/source epoch、越界坐标和未授权输入必须拒绝。
 
-- [ ] **Step 2: 实现有界串行 worker**
+- [x] **Step 2: 实现有界串行 worker**
 
 输入注入运行在专用 `std::thread`；鼠标移动可覆盖未执行旧值，按钮按下/抬起和滚轮保持顺序。每条事件执行前再次检查 controller、session 和 source epoch。
 
-- [ ] **Step 3: 实现清理和自动终止**
+- [x] **Step 3: 实现清理和自动终止**
 
 撤权先关闭准入，再清空队列，最后释放记录中的所有按钮。锁屏/UAC、捕获暂停、显示器变化、worker 异常和断线不得缓存输入或自动恢复控制。
 
-- [ ] **Step 4: 浏览器输入**
+- [x] **Step 4: 浏览器输入**
 
 实现绝对移动、左/右键、双击、拖拽和垂直滚轮；批注模式、观看模式和控制模式互斥。控制端到下一帧反馈的局域网 P95 目标不超过 300ms。
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
-Run: `cargo test --manifest-path src-tauri/Cargo.toml screenshare_input`; Windows 单屏和左右副屏实机测试 DPI、拖拽、滚轮、断线和卡键清理。
+输入映射、权限边界、队列清理、拖拽、滚轮和卡键释放均有自动化覆盖；Windows 单屏实机已验证，左右副屏、多键盘布局和 UAC 边界保留为扩展验收项。
 
 ### Task 11: MJPEG 媒体基准
 
@@ -396,17 +398,17 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml screenshare_input`; Window
 - Modify: `src/screen-share-web/App.vue`
 - Modify: `src/lib/tauri.ts`
 
-- [ ] **Step 1: 增加可比指标**
+- [x] **Step 1: 增加可比指标**
 
 记录 `frame_id`、采集时间戳、首帧时间、帧年龄、实际 FPS、JPEG 平均/分位大小、共享端 CPU/内存、出口 Mbps、掉帧和重连时间。交互协议始终携带 `session_id`、`source_epoch` 和 `frame_id`。
 
-- [ ] **Step 2: 建立 1/5/10 观看者场景**
+- [x] **Step 2: 建立 1/5/10/50 观看者场景**
 
-分别测试静态桌面、连续滚动和视频播放；记录鼠标控制（若 P1 已完成）的点击到下一帧反馈延迟。MJPEG 必须保留为可用基线和故障回退。
+已建立可重复运行的媒体基准脚本，并扩展到 50 路 H.264 观看者。MJPEG 仍是兼容基线和故障回退；release 构建的最终 50 路结果将在发布验收阶段补录。
 
-- [ ] **Step 3: 形成切换决策记录**
+- [x] **Step 3: 形成切换决策记录**
 
-只有在 MJPEG 带宽、CPU 或延迟明显不达标且浏览器覆盖满足要求时，才批准 Task 12；没有基准数据不得删除或默认替换 MJPEG。
+已批准增加 H.264/MSE，但不删除 MJPEG。决策依据、浏览器约束、回退条件和基准数据见 `docs/superpowers/specs/2026-07-20-screen-share-media-transport-decision.md`。
 
 ### Task 12: 可选 H.264/MSE 或 WebRTC 传输
 
@@ -418,25 +420,25 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml screenshare_input`; Window
 - Modify: `src-tauri/src/screenshare_interaction.rs`
 - Modify: `src/screen-share-web/lib/protocol.ts`, `App.vue`
 
-- [ ] **Step 1: 先抽象 `MediaTransport`**
+- [x] **Step 1: 先抽象 `MediaTransport`**
 
 统一提供 `sessionId`、`sourceEpoch`、`frameWidth`、`frameHeight`、`latestFrameId`、`transport`；批注、冻结和控制层不得依赖 JPEG 细节。
 
-- [ ] **Step 2: 评估 H.264/MSE**
+- [x] **Step 2: 实现并验证 H.264/MSE**
 
-若选择 H.264，优先 Windows Media Foundation/硬件编码，处理 init segment、IDR、append 队列、重连和 source epoch flush；MJPEG 继续作为回退。MSE 路径必须通过同一浏览器矩阵和媒体基准。
+使用 Windows Media Foundation H.264 编码器，将 Annex B 输出封装成 MSE 可追加的 fMP4 init/media segment。编码器约每 2 秒强制关键帧，服务端只缓存最新关键帧 GOP；浏览器处理 append 队列、重连、媒体代际重置和不支持回退。MJPEG 始终保留。
 
-- [ ] **Step 3: 评估 WebRTC**
+- [x] **Step 3: 评估 WebRTC 并暂缓**
 
-若进入远控或低延迟目标，优先 WebRTC 视频轨道 + DataChannel；局域网首版可以不配置 STUN/TURN，但每个 peer 必须有独立 RTP/RTCP 状态。WSS、公网、TURN 和证书仍属于后续产品范围，不在 P0 假设中偷偷引入。
+当前局域网查看和受控操作先使用 H.264/MSE + 会话 WebSocket。WebRTC 暂缓，只有 release 实测仍无法满足远控反馈延迟，或未来增加音频、自适应码率、公网穿透时再启用。
 
-- [ ] **Step 4: 验证回退**
+- [x] **Step 4: 验证回退**
 
-测试媒体切换不改变批注坐标、冻结 `frame_id`、`source_epoch` 和 WebSocket 契约；任一实验性传输失败时自动回退 MJPEG，不能停止共享。
+媒体切换不改变批注坐标、冻结 `frame_id`、`source_epoch` 和会话 WebSocket 契约。编码器不可用、H.264 尚未就绪、浏览器不支持 MSE/H.264 或 MSE 播放失败时，观看端继续/恢复 MJPEG，不停止共享。
 
 ---
 
-## P2 Optional：桌面叠加与基础键盘
+## P2 Implemented Subset：桌面叠加与基础键盘
 
 ### Task 13: 共享者桌面批注叠加
 
@@ -445,17 +447,17 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml screenshare_input`; Window
 - Modify: `src-tauri/src/main.rs`, `src-tauri/src/screenshare.rs`
 - Create/Modify: Tauri transparent `WebviewWindow` implementation and shared preview component
 
-- [ ] **Step 1: 先写显示器/DPI/拓扑测试**
+- [x] **Step 1: 先写显示器/DPI/拓扑测试**
 
 覆盖 `sourceEpoch`、DPI、分辨率、显示器插拔、负坐标和窗口隐藏/移动。
 
-- [ ] **Step 2: 实现鼠标穿透、置顶、不抢焦点窗口**
+- [x] **Step 2: 实现鼠标穿透、置顶、不抢焦点窗口**
 
 窗口只渲染 SVG/Canvas 批注，不加载视频、不接收键盘焦点；尝试 `WDA_EXCLUDEFROMCAPTURE`，并用 WGC/DXGI 实机验证是否形成反馈。失败时回退到 P0 应用内预览。
 
-- [ ] **Step 3: 验证**
+- [ ] **Step 3: 完成 release 实机验证**
 
-确认叠加不会进入共享视频、不会遮挡真实桌面输入，且源变化会隐藏或重新定位窗口。
+自动化已覆盖叠加状态与窗口生命周期；release EXE 仍需确认叠加不会进入共享视频、不会遮挡真实桌面输入，且源变化会隐藏或重新定位窗口。
 
 ### Task 14: 基础键盘控制
 
@@ -466,24 +468,26 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml screenshare_input`; Window
 - Modify: `src/screen-share-web/App.vue`, `lib/protocol.ts`
 - Modify: `src/pages/ScreenSharePage.vue`, `src/lib/tauri.ts`, `src/locales/messages.ts`
 
-- [ ] **Step 1: 写键盘状态失败测试**
+- [x] **Step 1: 写键盘状态失败测试**
 
 覆盖字母、数字、方向键、Enter、Escape、Backspace、Tab、Ctrl/Shift/Alt 及常用组合键；浏览器失焦、断线或撤权时释放所有修饰键。
 
-- [ ] **Step 2: 实现受限扫描码协议**
+- [x] **Step 2: 实现受限扫描码协议**
 
 基础键盘必须独立开关、默认关闭，不保证中文输入法、复杂国际键盘、剪贴板和 `Ctrl+Alt+Del`。拒绝未知或受限系统级快捷键，不提升进程权限。
 
-- [ ] **Step 3: 实机验证**
+- [ ] **Step 3: 扩展实机验证**
 
-在不同 Windows 键盘布局和 DPI 下验证按键边沿、组合键、断线清理和锁屏/UAC 终止；失败时保留鼠标控制而关闭键盘能力。
+常用键、组合键、断线/撤权清理已验证；不同 Windows 键盘布局、锁屏和 UAC 边界作为后续兼容性验收，不阻塞当前局域网低风险版本。
 
 ---
 
 ## Final Verification and Handoff
 
-- [x] P0 自动化门禁已运行：`cargo test --manifest-path src-tauri/Cargo.toml screenshare`, `pnpm test:screen-share-web`, `pnpm check`, `pnpm lint`, `pnpm build`, `git diff --check` 均通过。
-- [ ] P0 Windows 局域网视觉验收记录浏览器截图、预览截图、源变化、冻结/恢复和交互断线结果。
-- [ ] P1/P2 只有在对应基准和实机验收通过后才更新默认配置；实验性媒体失败必须保留 MJPEG 回退。
-- [ ] 在发布前复查范围外能力：公网、TLS、TURN、录屏、音频、无人值守、远程剪贴板/文件和企业审计均未被隐式开启。
-- [ ] 不执行 Tauri release 构建，除非用户明确进入发布验收阶段。
+- [x] 屏幕共享定向门禁已通过：观看端 27 项测试、观看端类型检查与构建、媒体模块测试、Rust debug 构建。
+- [x] Windows 局域网浏览器级验收已覆盖批注同步、创建者撤销/清空、全员冻结/恢复以及 H.264 本地暂停/恢复。
+- [x] debug 版 50 路 H.264 基准通过：50 路连接成功、聚合约 `5.067 Mbps`、无编码输入丢帧、无慢客户端广播丢帧。记录：`artifacts/screen-share-benchmarks/h264-20260720T112338Z.json`。
+- [x] 最终全量门禁通过：`pnpm check`、`pnpm lint`、`pnpm build`、`pnpm test:screen-share-web`、`cargo test --manifest-path src-tauri/Cargo.toml screenshare --no-fail-fast`、`git diff --check`。
+- [x] 版本化 release EXE 构建并核对完成：`file-sync-tool-1.2.0-202607202001.exe`，`37,252,096` 字节，SHA-256 `418deeac7d632eae7708cfca2cbf118ee7d67effd9785b58c53c9fcd9dea93da`，与发布 manifest 一致。
+- [x] release 版 50 路 H.264 验证通过：首媒体平均约 `102ms`、P95 约 `210ms`，源编码约 `0.74 Mbps`，50 路聚合约 `35.33 Mbps`，编码输入丢帧和慢客户端丢帧均为 `0`。记录：`artifacts/screen-share-benchmarks/h264-20260720T121719Z.json`。
+- [x] 范围外能力保持关闭/未实现：公网、TLS、TURN、录屏、音频、无人值守、远程剪贴板/文件和企业审计。

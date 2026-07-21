@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 use crate::clipboard::models::ClipboardSettings;
-use app_lib::device_simulator::api::{DeviceGroupDraft, RtspPorts};
+use app_lib::device_simulator::api::{DeviceGroupDraft, RtspPorts, TargetPlatformServer};
 use app_lib::device_simulator::profiles::identity::MAX_PREVIEW_DEVICES;
 use app_lib::device_simulator::profiles::scope::{
     validate_nvr_channel_count, TargetPlatform, DEFAULT_NVR_CHANNEL_COUNT,
@@ -22,6 +22,10 @@ pub struct DeviceSimulatorSettings {
     pub selected_interface_id: Option<String>,
     pub last_platform: Option<TargetPlatform>,
     pub last_start_ip: Option<std::net::Ipv4Addr>,
+    pub last_device_ips: Vec<std::net::Ipv4Addr>,
+    pub last_subnet_prefix: u8,
+    pub last_platform_servers: Vec<TargetPlatformServer>,
+    pub last_alarm_receiver_url: Option<String>,
     pub last_device_groups: Vec<DeviceGroupDraft>,
     pub last_http_port: u16,
     pub last_rtsp_ports: RtspPorts,
@@ -36,6 +40,10 @@ impl Default for DeviceSimulatorSettings {
             selected_interface_id: None,
             last_platform: Some(TargetPlatform::Ums),
             last_start_ip: None,
+            last_device_ips: vec![],
+            last_subnet_prefix: 24,
+            last_platform_servers: vec![],
+            last_alarm_receiver_url: None,
             last_device_groups: vec![],
             last_http_port: 81,
             last_rtsp_ports: RtspPorts::default(),
@@ -479,6 +487,29 @@ pub fn normalize_device_simulator_settings(
         .take()
         .map(|value| value.trim().to_owned())
         .filter(|value| is_safe_interface_id(value));
+    settings.last_subnet_prefix = settings.last_subnet_prefix.clamp(1, 30);
+    settings
+        .last_device_ips
+        .truncate(MAX_PREVIEW_DEVICES as usize);
+    let mut seen_ips = HashSet::new();
+    settings
+        .last_device_ips
+        .retain(|address| seen_ips.insert(*address));
+    settings.last_platform_servers.truncate(8);
+    settings.last_platform_servers.retain_mut(|server| {
+        server.id = server.id.trim().to_owned();
+        server.host = server.host.trim().to_owned();
+        !server.id.is_empty()
+            && server.id.len() <= 128
+            && !server.host.is_empty()
+            && server.host.len() <= 253
+            && server.port > 0
+    });
+    settings.last_alarm_receiver_url = settings
+        .last_alarm_receiver_url
+        .take()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty() && value.len() <= 2048);
 
     let mut seen = HashSet::new();
     let mut remaining = u32::from(MAX_PREVIEW_DEVICES);
@@ -530,6 +561,9 @@ pub fn validate_device_simulator_settings(
         return Err("Device simulator interface id is invalid".into());
     }
     validate_simulator_ports(settings.last_http_port, settings.last_rtsp_ports)?;
+    if !(1..=30).contains(&settings.last_subnet_prefix) {
+        return Err("Device simulator subnet prefix must be between 1 and 30".into());
+    }
     let mut ids = HashSet::new();
     let mut total = 0_u32;
     for group in &settings.last_device_groups {

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Twin Relay</title>
+  <path fill="#25C4D8" d="M74 142c0-25 20-45 45-45h83l30 34h70c25 0 45 20 45 45v69H74Z"/>
+  <path fill="#1599B2" d="M74 208h273v77c0 25-20 45-45 45H119c-25 0-45-20-45-45Z"/>
+  <path fill="#FFB02E" d="M165 267c0-25 20-45 45-45h83l30 34h70c25 0 45 20 45 45v69H165Z"/>
+  <path fill="#E38B17" d="M165 333h273v77c0 25-20 45-45 45H210c-25 0-45-20-45-45Z"/>
+  <path fill="#F7FAFC" d="m127 285 76-76 26 26-76 76 35 35-92 22 22-92Z"/>
+  <path fill="#F7FAFC" d="m385 228-76 76-26-26 76-76-35-35 92-22-22 92Z"/>
+</svg>

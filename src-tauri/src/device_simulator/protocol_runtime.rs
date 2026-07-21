@@ -1646,6 +1646,7 @@ mod tests {
             },
             interface_id: "loopback-fixture".into(),
             start_ip: Ipv4Addr::LOCALHOST,
+            device_ips: vec![],
             subnet_prefix: 8,
             device_http_port: ports[0],
             rtsp_ports: RtspPorts {

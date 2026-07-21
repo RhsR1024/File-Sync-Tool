@@ -24,3 +24,5 @@ virtual-device-assets/
 - 仓库中的 `scripts/release-server/serve.py` 仅适合开发验证，不作为大规模生产素材分发服务。
 
 完整生成、签名、校验、发布和密钥轮换步骤见 [`scripts/device-simulator-assets/README.md`](../../device-simulator-assets/README.md)。
+
+如果需要把当前版本真正部署到升级服务器，请参阅 [`DEPLOYMENT_GUIDE.md`](./DEPLOYMENT_GUIDE.md)，其中列出了当前 Catalog 对应的 ZIP 文件、Profile 依赖、客户端访问 URL 和验收步骤。

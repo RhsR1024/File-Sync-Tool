@@ -1,32 +1,56 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 
-import { pointToNormalized, type ContainedRect } from '../lib/coordinates';
-import type { AnnotationAddPayload, AnnotationKind, AnnotationShape, NormalizedPoint } from '../types';
+import { clampNormalized, pointToNormalized, type ContainedRect } from '../lib/coordinates';
+import type {
+  AnnotationAddPayload,
+  AnnotationKind,
+  AnnotationShape,
+  AnnotationUpdatePayload,
+  NormalizedPoint,
+} from '../types';
 
 const props = defineProps<{
   shapes: AnnotationShape[];
   geometry: ContainedRect;
-  tool: AnnotationKind | 'view';
+  tool: AnnotationKind | 'view' | 'control';
   color: string;
   width: number;
   enabled: boolean;
+  editMode: boolean;
+  selectedId: string | null;
+  clientId: string;
 }>();
 
 const emit = defineEmits<{
   add: [payload: AnnotationAddPayload];
+  select: [shapeId: string | null];
+  update: [payload: AnnotationUpdatePayload];
 }>();
 
 const layer = ref<HTMLElement | null>(null);
 const draft = ref<{ kind: 'arrow' | 'rect'; start: NormalizedPoint; end: NormalizedPoint } | null>(null);
 const activePointerId = ref<number | null>(null);
+const editDraft = ref<AnnotationShape | null>(null);
+const editDrag = ref<{
+  pointerId: number;
+  shapeId: string;
+  mode: 'move' | 'point';
+  pointIndex: number;
+  origin: NormalizedPoint;
+  originalPoints: NormalizedPoint[];
+} | null>(null);
+
+const displayShapes = computed(() => props.shapes.map((shape) => (
+  editDraft.value?.id === shape.id ? editDraft.value : shape
+)));
 
 const layerStyle = computed<Record<string, string>>(() => ({
   left: `${props.geometry.left}px`,
   top: `${props.geometry.top}px`,
   width: `${props.geometry.width}px`,
   height: `${props.geometry.height}px`,
-  pointerEvents: props.enabled && props.tool !== 'view' ? 'auto' : 'none',
+  pointerEvents: props.enabled && (props.editMode || (props.tool !== 'view' && props.tool !== 'control')) ? 'auto' : 'none',
 }));
 
 const svgViewBox = computed(() => `0 0 ${Math.max(1, props.geometry.width)} ${Math.max(1, props.geometry.height)}`);
@@ -78,8 +102,31 @@ function mapEvent(event: PointerEvent): NormalizedPoint | null {
   return pointToNormalized(event.clientX, event.clientY, parentRect, props.geometry);
 }
 
+function canEditShape(shape: AnnotationShape): boolean {
+  return props.editMode && shape.kind !== 'laser' && shape.ownerClientId === props.clientId;
+}
+
+function cloneShape(shape: AnnotationShape): AnnotationShape {
+  return {
+    ...shape,
+    points: shape.points.map((point) => ({ ...point })),
+  };
+}
+
+function capturePointer(event: PointerEvent) {
+  try { layer.value?.setPointerCapture(event.pointerId); } catch { /* pointer already released */ }
+}
+
+function releasePointer(event: PointerEvent) {
+  try { layer.value?.releasePointerCapture(event.pointerId); } catch { /* pointer already released */ }
+}
+
 function begin(event: PointerEvent) {
-  if (!props.enabled || props.tool === 'view') return;
+  if (props.editMode) {
+    emit('select', null);
+    return;
+  }
+  if (!props.enabled || props.tool === 'view' || props.tool === 'control') return;
   const point = mapEvent(event);
   if (!point) return;
   event.preventDefault();
@@ -95,23 +142,63 @@ function begin(event: PointerEvent) {
   }
   draft.value = { kind: props.tool, start: point, end: point };
   activePointerId.value = event.pointerId;
-  layer.value?.setPointerCapture(event.pointerId);
+  capturePointer(event);
 }
 
 function move(event: PointerEvent) {
+  if (editDrag.value && editDraft.value && editDrag.value.pointerId === event.pointerId) {
+    const point = mapEvent(event);
+    if (!point) return;
+    const drag = editDrag.value;
+    const next = cloneShape(editDraft.value);
+    if (drag.mode === 'point') {
+      next.points[drag.pointIndex] = point;
+    } else {
+      const deltaX = point.x - drag.origin.x;
+      const deltaY = point.y - drag.origin.y;
+      const minX = Math.min(...drag.originalPoints.map((item) => item.x));
+      const maxX = Math.max(...drag.originalPoints.map((item) => item.x));
+      const minY = Math.min(...drag.originalPoints.map((item) => item.y));
+      const maxY = Math.max(...drag.originalPoints.map((item) => item.y));
+      const boundedX = Math.min(1 - maxX, Math.max(-minX, deltaX));
+      const boundedY = Math.min(1 - maxY, Math.max(-minY, deltaY));
+      next.points = drag.originalPoints.map((item) => clampNormalized({
+        x: item.x + boundedX,
+        y: item.y + boundedY,
+      }));
+    }
+    editDraft.value = next;
+    return;
+  }
   if (!draft.value || activePointerId.value !== event.pointerId) return;
   const point = mapEvent(event);
   if (point) draft.value.end = point;
 }
 
 function finish(event: PointerEvent) {
+  if (editDrag.value && editDraft.value && editDrag.value.pointerId === event.pointerId) {
+    const updated = editDraft.value;
+    const original = props.shapes.find((shape) => shape.id === updated.id);
+    editDrag.value = null;
+    editDraft.value = null;
+    releasePointer(event);
+    if (original && JSON.stringify(original.points) !== JSON.stringify(updated.points)) {
+      emit('update', {
+        shape_id: updated.id,
+        points: updated.points,
+        color: updated.color,
+        width: updated.width,
+      });
+    }
+    return;
+  }
   if (!draft.value || activePointerId.value !== event.pointerId) return;
   const current = draft.value;
   const dx = current.end.x - current.start.x;
   const dy = current.end.y - current.start.y;
   draft.value = null;
   activePointerId.value = null;
-  try { layer.value?.releasePointerCapture(event.pointerId); } catch { /* pointer already released */ }
+  releasePointer(event);
   if (Math.hypot(dx, dy) < 0.005) return;
   emit('add', {
     kind: current.kind,
@@ -123,10 +210,54 @@ function finish(event: PointerEvent) {
 }
 
 function cancel(event: PointerEvent) {
+  if (editDrag.value?.pointerId === event.pointerId) {
+    editDrag.value = null;
+    editDraft.value = null;
+    releasePointer(event);
+    return;
+  }
   if (activePointerId.value !== event.pointerId) return;
   draft.value = null;
   activePointerId.value = null;
-  try { layer.value?.releasePointerCapture(event.pointerId); } catch { /* noop */ }
+  releasePointer(event);
+}
+
+function beginShapeDrag(shape: AnnotationShape, event: PointerEvent) {
+  if (!canEditShape(shape)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  emit('select', shape.id);
+  const origin = mapEvent(event);
+  if (!origin) return;
+  editDraft.value = cloneShape(shape);
+  editDrag.value = {
+    pointerId: event.pointerId,
+    shapeId: shape.id,
+    mode: 'move',
+    pointIndex: -1,
+    origin,
+    originalPoints: shape.points.map((point) => ({ ...point })),
+  };
+  capturePointer(event);
+}
+
+function beginHandleDrag(shape: AnnotationShape, pointIndex: number, event: PointerEvent) {
+  if (!canEditShape(shape)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  emit('select', shape.id);
+  const origin = mapEvent(event);
+  if (!origin) return;
+  editDraft.value = cloneShape(shape);
+  editDrag.value = {
+    pointerId: event.pointerId,
+    shapeId: shape.id,
+    mode: 'point',
+    pointIndex,
+    origin,
+    originalPoints: shape.points.map((point) => ({ ...point })),
+  };
+  capturePointer(event);
 }
 </script>
 
@@ -135,7 +266,7 @@ function cancel(event: PointerEvent) {
     ref="layer"
     class="annotation-layer"
     :style="layerStyle"
-    :aria-hidden="!enabled || tool === 'view'"
+    :aria-hidden="!enabled || (!editMode && (tool === 'view' || tool === 'control'))"
     @pointerdown="begin"
     @pointermove="move"
     @pointerup="finish"
@@ -148,7 +279,31 @@ function cancel(event: PointerEvent) {
       focusable="false"
       aria-hidden="true"
     >
-      <g v-for="shape in shapes" :key="shape.id" class="annotation-shape" :style="{ color: safeColor(shape.color) }">
+      <g
+        v-for="shape in displayShapes"
+        :key="shape.id"
+        class="annotation-shape"
+        :class="{ 'is-selected': selectedId === shape.id, 'is-editable': canEditShape(shape) }"
+        :style="{ color: safeColor(shape.color) }"
+        @pointerdown="beginShapeDrag(shape, $event)"
+      >
+        <line
+          v-if="shape.kind === 'arrow' && canEditShape(shape)"
+          :x1="cssPoint(shape.points[0] ?? { x: 0, y: 0 }).x"
+          :y1="cssPoint(shape.points[0] ?? { x: 0, y: 0 }).y"
+          :x2="cssPoint(shape.points[shape.points.length - 1] ?? { x: 0, y: 0 }).x"
+          :y2="cssPoint(shape.points[shape.points.length - 1] ?? { x: 0, y: 0 }).y"
+          :stroke-width="Math.max(18, shape.width + 12)"
+          class="annotation-hit-target"
+          vector-effect="non-scaling-stroke"
+        />
+        <rect
+          v-if="shape.kind === 'rect' && canEditShape(shape)"
+          v-bind="rectFor(shape)"
+          :stroke-width="Math.max(18, shape.width + 12)"
+          class="annotation-hit-target"
+          vector-effect="non-scaling-stroke"
+        />
         <line
           v-if="shape.kind === 'arrow'"
           :x1="cssPoint(shape.points[0] ?? { x: 0, y: 0 }).x"
@@ -180,6 +335,17 @@ function cancel(event: PointerEvent) {
           :fill="safeColor(shape.color)"
           class="laser-dot"
         />
+        <g v-if="selectedId === shape.id && canEditShape(shape)" class="annotation-handles">
+          <circle
+            v-for="(point, pointIndex) in shape.points"
+            :key="`${shape.id}-${pointIndex}`"
+            :cx="cssPoint(point).x"
+            :cy="cssPoint(point).y"
+            r="8"
+            class="annotation-handle"
+            @pointerdown="beginHandleDrag(shape, pointIndex, $event)"
+          />
+        </g>
       </g>
       <g v-if="draft" class="annotation-draft" :style="{ color: safeColor(color) }">
         <line

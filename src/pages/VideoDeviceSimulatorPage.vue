@@ -1,20 +1,26 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { invoke } from '@tauri-apps/api/core';
+import { useRouter } from 'vue-router';
 import {
   Activity,
   AlertTriangle,
   BellRing,
+  Cable,
   CheckCircle2,
   Clipboard,
   Download,
   FileDown,
   ImagePlus,
   LoaderCircle,
+  List,
+  Pencil,
   Plus,
   RadioTower,
   RefreshCw,
   RotateCcw,
+  Search,
   Server,
   ShieldAlert,
   SlidersHorizontal,
@@ -25,9 +31,16 @@ import {
 } from 'lucide-vue-next';
 
 import { useDeviceSimulator } from '@/composables/useDeviceSimulator';
-import { isDeviceSimulatorRuntimeActive, type AlarmJobRequest } from '@/lib/deviceSimulator';
+import {
+  isDeviceSimulatorRuntimeActive,
+  type AddressConflictAssessment,
+  type AlarmJobRequest,
+  type ConflictEvidence,
+  type PreflightCheck,
+} from '@/lib/deviceSimulator';
 
 const { t } = useI18n();
+const router = useRouter();
 const simulator = useDeviceSimulator();
 const activeTab = ref<'configuration' | 'runtime' | 'alarms' | 'logs'>('configuration');
 const logLevel = ref('all');
@@ -35,6 +48,9 @@ const logQuery = ref('');
 const copiedValue = ref('');
 const continuousAlarm = ref(false);
 const advancedSettingsOpen = ref(false);
+const interfaceSelectorOpen = ref(false);
+const ipAllocationMode = ref<'continuous' | 'explicit'>('continuous');
+const deviceIpText = ref('');
 
 const alarm = reactive<AlarmJobRequest>({
   target_device_ids: [],
@@ -51,7 +67,10 @@ const alarm = reactive<AlarmJobRequest>({
 const fieldClass = 'min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm transition-colors placeholder:text-slate-400 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/25 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500';
 const buttonFocus = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/45 focus-visible:ring-offset-2';
 
-const running = computed(() => isDeviceSimulatorRuntimeActive(simulator.status.value.state));
+const runtimeActive = computed(() => isDeviceSimulatorRuntimeActive(simulator.status.value.state));
+const recoveryRequired = computed(() => Boolean(simulator.recoverySessionId.value));
+const running = computed(() => simulator.status.value.state === 'running');
+const stoppable = computed(() => runtimeActive.value && !recoveryRequired.value);
 const cleanupActive = computed(() => new Set([
   'stopping_alarms',
   'stopping_services',
@@ -83,7 +102,11 @@ const filteredLogs = computed(() => simulator.logs.value.filter((entry) => {
 const displayedError = computed(() => {
   const message = simulator.errorMessage.value;
   if (!message) return '';
-  return message.startsWith('deviceSimulator.') ? t(message) : message;
+  const newline = message.indexOf('\n');
+  const messageKey = newline >= 0 ? message.slice(0, newline) : message;
+  const details = newline >= 0 ? message.slice(newline + 1) : '';
+  const summary = messageKey.startsWith('deviceSimulator.') ? t(messageKey) : messageKey;
+  return details ? `${summary}\n${details}` : summary;
 });
 const assetTone = computed(() => {
   const state = simulator.assets.value?.state ?? 'unknown';
@@ -111,6 +134,46 @@ watch(selectedAlarmProfileId, () => {
   alarm.target_device_ids = [];
   if (alarm.mode === 'configured') alarm.mode = 'sequential';
 });
+const assetDownloadActive = computed(() => new Set([
+  'checking',
+  'downloading',
+  'verifying',
+  'installing',
+]).has(simulator.assetProgress.value?.state ?? ''));
+const assetPercent = computed(() => {
+  const progress = simulator.assetProgress.value;
+  if (!progress?.total) return null;
+  return Math.min(100, Math.round((progress.downloaded / progress.total) * 100));
+});
+const configuredDeviceCount = computed(() => simulator.request.groups
+  .reduce((total, group) => total + Math.max(0, Number(group.count) || 0), 0));
+const explicitIpCountMismatch = computed(() => ipAllocationMode.value === 'explicit'
+  && simulator.request.device_ips.length !== configuredDeviceCount.value);
+const addressAssessments = computed(() => simulator.preflight.value?.address_assessments ?? []);
+const unresolvedAddressAssessments = computed(() => addressAssessments.value
+  .filter((assessment) => assessment.verdict !== 'clear'));
+const visibleAddressAssessments = computed(() => unresolvedAddressAssessments.value.slice(0, 12));
+const hiddenAddressAssessmentCount = computed(() => Math.max(0, unresolvedAddressAssessments.value.length - visibleAddressAssessments.value.length));
+const interfaceSelectionDescription = computed(() => {
+  const selection = simulator.interfaceSelection.value;
+  if (simulator.manualInterfaceSelection.value) return t('deviceSimulator.networkAdapter.manual');
+  if (selection.kind === 'unavailable') return t('deviceSimulator.networkAdapter.unavailable');
+  if (selection.kind === 'invalid_target') return t('deviceSimulator.networkAdapter.invalidTarget');
+  if (selection.kind === 'fallback') return t('deviceSimulator.networkAdapter.noMatch');
+  if (selection.kind === 'ambiguous') {
+    return t('deviceSimulator.networkAdapter.ambiguous', { count: selection.matching_interface_ids.length });
+  }
+  if (selection.target_count > 1) {
+    return t('deviceSimulator.networkAdapter.autoMatchedMany', {
+      matched: selection.matched_target_count,
+      total: selection.target_count,
+    });
+  }
+  return t('deviceSimulator.networkAdapter.autoMatched', {
+    ip: selection.target_ip ?? '',
+    subnet: selection.matched_network ?? '',
+  });
+});
 
 watch(selectedAlarmTypeId, (alarmTypeId) => {
   if (!alarmTypeId && alarm.mode === 'configured') alarm.mode = 'sequential';
@@ -120,8 +183,13 @@ watch(() => alarm.mode, (mode) => {
   if (mode !== 'configured') selectedAlarmTypeId.value = '';
 });
 
-onMounted(() => simulator.initialize());
-onBeforeUnmount(() => simulator.dispose());
+onMounted(async () => {
+  await simulator.initialize();
+  if (simulator.request.device_ips.length > 0) {
+    ipAllocationMode.value = 'explicit';
+    deviceIpText.value = simulator.request.device_ips.join('\n');
+  }
+});
 
 function addServer() {
   if (simulator.topologyLocked.value) return;
@@ -151,6 +219,72 @@ function requiredFileLabel(fileId: string) {
 
 function statusLabel(state: string) {
   return t(`deviceSimulator.states.${state}`);
+}
+
+function preflightDetails(check: PreflightCheck) {
+  const localConflicts = unresolvedAddressAssessments.value.filter((assessment) => assessment.evidence
+    .some((evidence) => evidence.kind === 'local' && evidence.result === 'occupied'));
+  if (check.id === 'local-addresses' && localConflicts.length > 0) {
+    return t('deviceSimulator.preflight.evidence.localConfirmed', {
+      addresses: formatAssessmentAddresses(localConflicts),
+    });
+  }
+  if (check.id === 'address-conflicts') {
+    const conflicts = unresolvedAddressAssessments.value.filter((assessment) => assessment.verdict === 'conflict');
+    if (conflicts.length > 0) {
+      return t('deviceSimulator.preflight.evidence.confirmed', {
+        addresses: formatAssessmentAddresses(conflicts),
+      });
+    }
+    if (unresolvedAddressAssessments.value.length > 0) {
+      return t('deviceSimulator.preflight.evidence.inconclusive', {
+        addresses: formatAssessmentAddresses(unresolvedAddressAssessments.value),
+      });
+    }
+  }
+  if (check.id === 'profile-evidence' && check.status === 'warning') {
+    return t('deviceSimulator.preflight.evidence.profileUnverified');
+  }
+  if (check.id === 'platform-connectivity' && check.status === 'warning') {
+    return t('deviceSimulator.preflight.evidence.serverConnectivity', {
+      servers: simulator.request.platform.servers
+        .map((server) => `${server.host}:${server.port}`)
+        .join(', '),
+    });
+  }
+  if (check.id === 'firewall' && check.status === 'warning') {
+    return t('deviceSimulator.preflight.evidence.firewallManual');
+  }
+  return check.details ?? '';
+}
+
+function formatAssessmentAddresses(assessments: AddressConflictAssessment[]) {
+  const shown = assessments.slice(0, 12).map((assessment) => assessment.address).join(', ');
+  const remaining = assessments.length - 12;
+  return remaining > 0 ? `${shown} (+${remaining})` : shown;
+}
+
+function addressVerdictLabel(assessment: AddressConflictAssessment) {
+  return t(`deviceSimulator.preflight.evidence.verdict.${assessment.verdict}`);
+}
+
+function addressEvidenceText(evidence: ConflictEvidence) {
+  if (evidence.kind === 'local') {
+    return t('deviceSimulator.preflight.evidence.local', {
+      owner: evidence.details || t('deviceSimulator.preflight.evidence.localInterface'),
+    });
+  }
+  if (evidence.kind === 'neighbor' && evidence.result === 'occupied') {
+    return t('deviceSimulator.preflight.evidence.neighbor', {
+      mac: evidence.details || t('deviceSimulator.preflight.evidence.unknownMac'),
+    });
+  }
+  if (evidence.kind === 'neighbor') {
+    return t('deviceSimulator.preflight.evidence.neighborState', {
+      state: evidence.details || 'unknown',
+    });
+  }
+  return t('deviceSimulator.preflight.evidence.notProbed');
 }
 
 async function copyText(value: string) {
@@ -219,6 +353,47 @@ function formatImageSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
+
+function setIpAllocationMode(mode: 'continuous' | 'explicit') {
+  ipAllocationMode.value = mode;
+  if (mode === 'continuous') {
+    simulator.request.device_ips = [];
+    deviceIpText.value = '';
+    return;
+  }
+  if (!deviceIpText.value.trim()) deviceIpText.value = simulator.request.start_ip;
+  updateExplicitIps();
+}
+
+function updateExplicitIps() {
+  const addresses = deviceIpText.value
+    .split(/[\s,;]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  simulator.request.device_ips = addresses;
+  const first = addresses[0];
+  if (first && /^(?:\d{1,3}\.){3}\d{1,3}$/.test(first)) simulator.request.start_ip = first;
+}
+
+function selectNetworkInterface(event: Event) {
+  simulator.selectInterfaceManually((event.target as HTMLSelectElement).value);
+}
+
+async function openPingScanner() {
+  const address = simulator.request.device_ips[0] ?? simulator.request.start_ip;
+  const octets = address.split('.');
+  if (octets.length === 4) {
+    try {
+      await invoke('save_kv', {
+        key: 'networkTools.pingScanConfig',
+        value: { prefix: octets.slice(0, 3).join('.'), start: 1, end: 254, timeoutMs: 1000 },
+      });
+    } catch {
+      // The network tool remains usable even if its suggested range cannot be saved.
+    }
+  }
+  await router.push('/tools/network');
+}
 </script>
 
 <template>
@@ -259,9 +434,9 @@ function formatImageSize(bytes: number) {
               class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
               :class="buttonFocus"
               :disabled="simulator.busyAction.value !== null"
-              @click="simulator.initialize"
+              @click="simulator.refreshEnvironment"
             >
-              <RefreshCw class="h-4 w-4" :class="simulator.busyAction.value === 'initialize' ? 'animate-spin motion-reduce:animate-none' : ''" aria-hidden="true" />
+              <RefreshCw class="h-4 w-4" :class="['refresh', 'check-assets'].includes(simulator.busyAction.value ?? '') ? 'animate-spin motion-reduce:animate-none' : ''" aria-hidden="true" />
               {{ t('common.refresh') }}
             </button>
           </div>
@@ -290,13 +465,22 @@ function formatImageSize(bytes: number) {
               <p v-if="advancedSettingsOpen && assetTone === 'ready'" class="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-900">
                 {{ t('deviceSimulator.assets.staticReviewWarning') }}
               </p>
-              <p v-if="advancedSettingsOpen && simulator.assetProgress.value" class="mt-1 text-xs text-slate-600">
+              <p v-if="assetDownloadActive && simulator.assetProgress.value" class="mt-2 text-xs font-medium text-slate-700" aria-live="polite">
                 {{ simulator.assetProgress.value.current_pack_id
                   ? requiredFileLabel(simulator.assetProgress.value.current_pack_id)
-                  : t('deviceSimulator.assets.catalog') }} ·
-                {{ simulator.assetProgress.value.downloaded.toLocaleString() }} /
-                {{ simulator.assetProgress.value.total?.toLocaleString() ?? '—' }} B
+                  : t(`deviceSimulator.assets.states.${simulator.assetProgress.value.state}`) }}
+                <template v-if="simulator.assetProgress.value.total">
+                  · {{ formatImageSize(simulator.assetProgress.value.downloaded) }} /
+                  {{ formatImageSize(simulator.assetProgress.value.total) }}
+                </template>
+                <template v-if="simulator.assetProgress.value.speed_bps > 0">
+                  · {{ formatImageSize(simulator.assetProgress.value.speed_bps) }}/s
+                </template>
               </p>
+              <div v-if="assetDownloadActive" class="mt-2 h-2 w-full max-w-xl overflow-hidden rounded-full bg-white/80" role="progressbar" :aria-label="t('deviceSimulator.assets.progressLabel')" :aria-valuenow="assetPercent ?? undefined" aria-valuemin="0" aria-valuemax="100">
+                <div v-if="assetPercent !== null" class="h-full rounded-full bg-sky-600 transition-[width] duration-200" :style="{ width: `${assetPercent}%` }" />
+                <div v-else class="h-full w-1/3 animate-pulse rounded-full bg-sky-600 motion-reduce:animate-none" />
+              </div>
               <ul v-if="advancedSettingsOpen && simulator.assets.value?.packs.length" class="mt-2 space-y-1 text-xs text-slate-600">
                 <li v-for="pack in simulator.assets.value.packs" :key="pack.id" class="flex flex-wrap gap-x-2">
                   <span class="font-semibold text-slate-700">{{ requiredFileLabel(pack.id) }}</span>
@@ -313,7 +497,7 @@ function formatImageSize(bytes: number) {
             <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.prepareAssets">
               <Download class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.downloadAssets') }}
             </button>
-            <button v-if="simulator.assetProgress.value?.state === 'downloading'" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-rose-300 bg-white px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50" :class="buttonFocus" @click="simulator.cancelAssetDownload">
+            <button v-if="assetDownloadActive" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-rose-300 bg-white px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50" :class="buttonFocus" @click="simulator.cancelAssetDownload">
               <Square class="h-4 w-4" aria-hidden="true" />{{ t('common.cancel') }}
             </button>
           </div>
@@ -330,7 +514,9 @@ function formatImageSize(bytes: number) {
             </div>
           </div>
           <button type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl bg-rose-700 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.recover">
-            <RotateCcw class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.recover') }}
+            <LoaderCircle v-if="simulator.busyAction.value === 'recover'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            <RotateCcw v-else class="h-4 w-4" aria-hidden="true" />
+            {{ t(simulator.busyAction.value === 'recover' ? 'deviceSimulator.actions.recovering' : 'deviceSimulator.actions.recover') }}
           </button>
         </div>
       </section>
@@ -353,7 +539,7 @@ function formatImageSize(bytes: number) {
 
       <div v-if="displayedError" role="alert" class="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
         <XCircle class="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
-        <div class="min-w-0"><strong>{{ t('deviceSimulator.errors.title') }}</strong><p class="mt-1 break-words">{{ displayedError }}</p></div>
+        <div class="min-w-0"><strong>{{ t('deviceSimulator.errors.title') }}</strong><p class="mt-1 whitespace-pre-wrap break-words">{{ displayedError }}</p></div>
       </div>
 
       <nav class="flex gap-1 overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm" :aria-label="t('deviceSimulator.tabs.label')">
@@ -398,12 +584,46 @@ function formatImageSize(bytes: number) {
             </section>
 
             <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="network-title">
-              <div class="flex items-center gap-3"><RadioTower class="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 id="network-title" class="font-bold text-slate-900">{{ t('deviceSimulator.configuration.network') }}</h2></div>
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div class="flex items-center gap-3"><RadioTower class="h-5 w-5 text-sky-700" aria-hidden="true" /><h2 id="network-title" class="font-bold text-slate-900">{{ t('deviceSimulator.configuration.network') }}</h2></div>
+                <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50" :class="buttonFocus" @click="openPingScanner"><Search class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.pingScan') }}</button>
+              </div>
+              <div class="mt-5 inline-flex rounded-lg border border-slate-300 bg-slate-100 p-1" role="group" :aria-label="t('deviceSimulator.fields.ipAllocationMode')">
+                <button v-for="mode in ['continuous', 'explicit'] as const" :key="mode" type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors" :class="ipAllocationMode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'" :aria-pressed="ipAllocationMode === mode" @click="setIpAllocationMode(mode)"><List v-if="mode === 'explicit'" class="h-4 w-4" aria-hidden="true" /><RadioTower v-else class="h-4 w-4" aria-hidden="true" />{{ t(`deviceSimulator.fields.ipModes.${mode}`) }}</button>
+              </div>
+              <div class="mt-5 border-y border-slate-200 py-4">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div class="flex min-w-0 items-start gap-3">
+                    <Cable class="mt-0.5 h-5 w-5 shrink-0 text-sky-700" aria-hidden="true" />
+                    <div class="min-w-0">
+                      <p class="text-xs font-semibold text-slate-500">{{ t('deviceSimulator.networkAdapter.label') }}</p>
+                      <p class="mt-1 break-words text-sm font-bold text-slate-900">
+                        {{ simulator.selectedInterface.value
+                          ? `${simulator.selectedInterface.value.name} · ${simulator.selectedInterface.value.description}`
+                          : t('deviceSimulator.fields.selectInterface') }}
+                      </p>
+                      <p v-if="simulator.selectedInterface.value?.ipv4_addresses.length" class="mt-1 break-words font-mono text-xs text-slate-600">
+                        {{ simulator.selectedInterface.value.ipv4_addresses.join(', ') }}
+                      </p>
+                      <p class="mt-2 text-xs leading-5" :class="simulator.interfaceSelection.value.kind === 'fallback' || simulator.interfaceSelection.value.kind === 'ambiguous' ? 'text-amber-800' : 'text-slate-600'">
+                        {{ interfaceSelectionDescription }}
+                      </p>
+                    </div>
+                  </div>
+                  <button type="button" class="inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.interfaces.value.length === 0" :aria-expanded="interfaceSelectorOpen" @click="interfaceSelectorOpen = !interfaceSelectorOpen">
+                    <Pencil class="h-4 w-4" aria-hidden="true" />{{ t(interfaceSelectorOpen ? 'deviceSimulator.networkAdapter.done' : 'deviceSimulator.networkAdapter.change') }}
+                  </button>
+                </div>
+                <div v-if="interfaceSelectorOpen" class="mt-4 flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <label class="min-w-0 flex-1 text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.interface') }}
+                    <select :value="simulator.request.interface_id" :class="[fieldClass, 'mt-2']" @change="selectNetworkInterface"><option value="">{{ t('deviceSimulator.fields.selectInterface') }}</option><option v-for="item in simulator.interfaces.value" :key="item.id" :value="item.id">{{ item.name }} · {{ item.description }}</option></select>
+                  </label>
+                  <button v-if="simulator.manualInterfaceSelection.value" type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 text-sm font-semibold text-sky-800 hover:bg-sky-100" :class="buttonFocus" @click="simulator.applyAutomaticInterfaceSelection">{{ t('deviceSimulator.networkAdapter.useAutomatic') }}</button>
+                </div>
+              </div>
               <div class="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                <label v-if="advancedSettingsOpen" class="block text-sm font-semibold text-slate-700 sm:col-span-2 lg:col-span-3">{{ t('deviceSimulator.fields.interface') }}
-                  <select v-model="simulator.request.interface_id" :class="[fieldClass, 'mt-2']"><option value="">{{ t('deviceSimulator.fields.selectInterface') }}</option><option v-for="item in simulator.interfaces.value" :key="item.id" :value="item.id">{{ item.name }} · {{ item.description }}</option></select>
-                </label>
-                <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.startIp') }}<input v-model="simulator.request.start_ip" :class="[fieldClass, 'mt-2']" type="text" inputmode="decimal" /></label>
+                <label v-if="ipAllocationMode === 'continuous'" class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.startIp') }}<input v-model="simulator.request.start_ip" :class="[fieldClass, 'mt-2']" type="text" inputmode="decimal" /></label>
+                <label v-else class="block text-sm font-semibold text-slate-700 sm:col-span-2 lg:col-span-3">{{ t('deviceSimulator.fields.explicitIps') }}<textarea v-model="deviceIpText" :class="[fieldClass, 'mt-2', 'min-h-28 resize-y font-mono']" rows="4" :placeholder="t('deviceSimulator.fields.explicitIpsPlaceholder')" @input="updateExplicitIps" /><span class="mt-1 block text-xs font-normal leading-5" :class="explicitIpCountMismatch ? 'text-rose-700' : 'text-slate-500'">{{ t('deviceSimulator.fields.explicitIpsHint', { addresses: simulator.request.device_ips.length, devices: configuredDeviceCount }) }}</span></label>
                 <label v-if="advancedSettingsOpen" class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.prefix') }}<input v-model.number="simulator.request.subnet_prefix" :class="[fieldClass, 'mt-2']" type="number" min="1" max="30" inputmode="numeric" /></label>
                 <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.httpPort') }}<input v-model.number="simulator.request.device_http_port" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" /></label>
                 <label v-for="stream in (advancedSettingsOpen ? ['main', 'sub', 'third'] as const : [])" :key="stream" class="block text-sm font-semibold text-slate-700">{{ t(`deviceSimulator.fields.rtsp.${stream}`) }}<input v-model.number="simulator.request.rtsp_ports[stream]" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" /></label>
@@ -431,10 +651,18 @@ function formatImageSize(bytes: number) {
                 <button v-if="advancedSettingsOpen" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.previewDevices"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preview') }}</button>
                 <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.runPreflight"><ShieldAlert class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preflight') }}</button>
               </div>
-              <ul v-if="advancedSettingsOpen && simulator.preflight.value" class="mt-4 space-y-2">
+              <ul v-if="simulator.preflight.value" class="mt-4 space-y-2" aria-live="polite">
                 <li v-for="check in simulator.preflight.value.checks" :key="check.id" class="flex items-start gap-2 rounded-xl border p-3 text-sm" :class="check.status === 'failed' ? 'border-rose-200 bg-rose-50 text-rose-800' : check.status === 'warning' ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'">
                   <XCircle v-if="check.status === 'failed'" class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /><AlertTriangle v-else-if="check.status === 'warning'" class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /><CheckCircle2 v-else class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                  <div><strong>{{ t(check.message_key) }}</strong><p v-if="check.details" class="mt-1 break-words">{{ check.details }}</p></div>
+                   <div class="min-w-0"><strong>{{ t(check.message_key) }}</strong><p v-if="preflightDetails(check)" class="mt-1 break-words">{{ preflightDetails(check) }}</p>
+                     <div v-if="check.id === 'address-conflicts' && visibleAddressAssessments.length > 0" class="mt-2 space-y-1 text-xs leading-5">
+                       <div v-for="assessment in visibleAddressAssessments" :key="assessment.address" class="font-mono">
+                         <span class="font-semibold">{{ assessment.address }}</span><span class="ml-2 font-sans">{{ addressVerdictLabel(assessment) }}</span>
+                         <p v-for="evidence in assessment.evidence.filter((item) => item.result !== 'available')" :key="`${assessment.address}-${evidence.kind}-${evidence.result}`" class="pl-2 font-sans text-current/80">{{ addressEvidenceText(evidence) }}</p>
+                       </div>
+                       <p v-if="hiddenAddressAssessmentCount > 0" class="font-sans">{{ t('deviceSimulator.preflight.evidence.more', { count: hiddenAddressAssessmentCount }) }}</p>
+                     </div>
+                   </div>
                 </li>
               </ul>
               <div v-if="simulator.preview.value" class="mt-5 grid grid-cols-2 gap-3">
@@ -442,8 +670,8 @@ function formatImageSize(bytes: number) {
                 <div class="rounded-xl bg-slate-100 p-3"><p class="text-xs font-semibold text-slate-500">{{ t('deviceSimulator.metrics.channels') }}</p><p class="mt-1 text-2xl font-bold text-slate-900">{{ simulator.preview.value.total_channels }}</p></div>
               </div>
               <div class="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
-                <button v-if="!running" type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || simulator.blockingPreflight.value" @click="simulator.start"><LoaderCircle v-if="simulator.busyAction.value === 'start'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><RadioTower v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.start') }}</button>
-                <button v-else type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl bg-rose-700 px-4 py-2 text-sm font-bold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.stop"><Square class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.stop') }}</button>
+                <button v-if="!stoppable && !recoveryRequired" type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.start"><LoaderCircle v-if="simulator.busyAction.value === 'start'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><RadioTower v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.start') }}</button>
+                <button v-else-if="stoppable" type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl bg-rose-700 px-4 py-2 text-sm font-bold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.stop"><LoaderCircle v-if="simulator.busyAction.value === 'stop'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><Square v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.stop') }}</button>
                 <button type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || simulator.topologyLocked.value" @click="simulator.saveSettings">{{ t('common.save') }}</button>
               </div>
               <p v-if="simulator.topologyLocked.value" class="mt-3 flex items-start gap-2 text-xs leading-5 text-amber-800"><AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{{ t('deviceSimulator.configuration.locked') }}</p>
@@ -568,6 +796,7 @@ function formatImageSize(bytes: number) {
                   </div>
                 </div>
               </div>
+              <p v-if="!running && !simulator.preflight.value" class="mt-3 text-xs leading-5 text-slate-500">{{ t('deviceSimulator.preflight.startHint') }}</p>
             </div>
             <div class="mt-5 flex flex-wrap gap-2">
               <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="triggerAlarm"><BellRing class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.triggerOnce') }}</button>

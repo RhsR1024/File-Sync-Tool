@@ -9,3 +9,4 @@ pub mod firewall;
 pub mod interfaces;
 pub mod ip_alias;
 pub mod named_pipe;
+pub mod recovery;

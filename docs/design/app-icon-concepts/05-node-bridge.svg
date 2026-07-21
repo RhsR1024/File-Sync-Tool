@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Node Bridge</title>
+  <rect width="176" height="176" x="42" y="168" rx="54" fill="#25C4D8"/>
+  <rect width="176" height="176" x="294" y="168" rx="54" fill="#FFB02E"/>
+  <path fill="#0B1220" d="M90 217h80v22H90Zm0 44h80v22H90Zm252-44h80v22h-80Zm0 44h80v22h-80Z"/>
+  <path fill="#F7FAFC" d="M188 236h136v-39l72 59-72 59v-39H188Z"/>
+  <path fill="#0B1220" d="m256 195 61 61-61 61-61-61Z"/>
+  <circle cx="256" cy="256" r="20" fill="#67D391"/>
+</svg>

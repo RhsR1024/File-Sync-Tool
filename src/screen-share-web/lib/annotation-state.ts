@@ -136,6 +136,8 @@ export function applyAnnotationApplied(
   const shape = normalizeShape(source.shape);
   if (operation === 'add' && shape) {
     next.shapes = [...next.shapes.filter((item) => item.id !== shape.id), shape].slice(-MAX_SHAPES);
+  } else if (operation === 'update' && shape) {
+    next.shapes = next.shapes.map((item) => item.id === shape.id ? shape : item);
   } else if (operation === 'remove') {
     const ids = new Set(Array.isArray(source.removed_ids) ? source.removed_ids.filter((id): id is string => typeof id === 'string') : []);
     if (shape) ids.add(shape.id);

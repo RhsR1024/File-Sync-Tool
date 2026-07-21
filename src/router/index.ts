@@ -102,6 +102,10 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../pages/FileSharePage.vue'),
   },
   {
+    path: '/tools/tftp-server',
+    component: () => import('../pages/TftpServerPage.vue'),
+  },
+  {
     path: '/tools/disk-cache-cleanup',
     component: () => import('../pages/DiskCacheCleanupPage.vue'),
   },
@@ -118,6 +122,20 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../pages/NotepadExtensionsPage.vue'),
   },
   {
+    path: '/tools/paper-todo',
+    component: () => import('../pages/PaperTodoPage.vue'),
+  },
+  {
+    path: '/paper-todo/window/:id',
+    component: () => import('../pages/PaperTodoWindowPage.vue'),
+    meta: { noLayout: true },
+  },
+  {
+    path: '/paper-todo/launcher',
+    component: () => import('../pages/PaperTodoLauncherPage.vue'),
+    meta: { noLayout: true },
+  },
+  {
     path: '/clipboard-panel',
     component: () => import('../pages/ClipboardPanelPage.vue'),
     meta: { noLayout: true },
@@ -130,6 +148,11 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/clipboard-preview/text',
     component: () => import('../pages/ClipboardTextPreview.vue'),
+    meta: { noLayout: true },
+  },
+  {
+    path: '/screen-share-overlay',
+    component: () => import('../pages/ScreenShareOverlayPage.vue'),
     meta: { noLayout: true },
   },
 ]

@@ -168,6 +168,10 @@ pub fn run_preflight(
         .filter(|assessment| assessment.verdict == ConflictVerdict::Conflict)
         .map(|assessment| assessment.address)
         .collect::<Vec<_>>();
+    let address_assessments = assessed
+        .iter()
+        .map(|assessment| (*assessment).clone())
+        .collect::<Vec<_>>();
     checks.push(if !conflicts.is_empty() {
         failed(
             "address-conflicts",
@@ -328,6 +332,7 @@ pub fn run_preflight(
         ok,
         checks,
         device_preview,
+        address_assessments,
     }
 }
 
@@ -402,6 +407,9 @@ mod tests {
     };
     use crate::device_simulator::profiles::scope::TargetPlatform;
     use crate::device_simulator::windows::interfaces::StableInterfaceId;
+    use crate::device_simulator::windows::ip_alias::{
+        assess_address_conflict, ConflictEvidence, ConflictEvidenceKind, ConflictObservationResult,
+    };
 
     fn request() -> SimulatorStartRequest {
         SimulatorStartRequest {
@@ -416,6 +424,7 @@ mod tests {
             },
             interface_id: "guid:a0b1c2d3-1234-5678-90ab-010203040506".into(),
             start_ip: "192.168.50.10".parse().unwrap(),
+            device_ips: vec![],
             subnet_prefix: 24,
             device_http_port: 81,
             rtsp_ports: RtspPorts::default(),
@@ -476,12 +485,22 @@ mod tests {
     #[test]
     fn local_conflict_and_residual_session_are_blocking() {
         let mut local_addresses = HashSet::new();
-        local_addresses.insert("192.168.50.10".parse().unwrap());
+        let occupied_address = "192.168.50.10".parse().unwrap();
+        local_addresses.insert(occupied_address);
         let report = run_preflight(
             &request(),
             &PreflightEnvironment {
                 interfaces: vec![interface()],
                 local_addresses,
+                conflict_assessments: vec![assess_address_conflict(
+                    occupied_address,
+                    [ConflictEvidence {
+                        address: occupied_address,
+                        kind: ConflictEvidenceKind::Local,
+                        result: ConflictObservationResult::Occupied,
+                        details: Some("Ethernet (Test adapter)".into()),
+                    }],
+                )],
                 assets_ready: true,
                 profiles_static_reviewed: true,
                 profiles_platform_verified: true,
@@ -500,5 +519,10 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.id == "recovery" && check.status == PreflightCheckStatus::Failed
         }));
+        assert_eq!(report.address_assessments.len(), 1);
+        assert_eq!(
+            report.address_assessments[0].evidence[0].details.as_deref(),
+            Some("Ethernet (Test adapter)")
+        );
     }
 }

@@ -32,3 +32,9 @@ body.clipboard-panel-window,
 body.clipboard-panel-window #app {
   background: transparent;
 }
+
+html.paper-todo-window,
+body.paper-todo-window,
+body.paper-todo-window #app {
+  background: transparent;
+}

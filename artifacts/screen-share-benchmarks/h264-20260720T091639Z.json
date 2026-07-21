@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-07-20T09:16:39.193Z",
+  "base_url": "http://192.168.0.111:9870/",
+  "scenario": "static-connection-ramp",
+  "duration_seconds": 3,
+  "warmup_seconds": 1,
+  "connect_batch_size": 1,
+  "connect_batch_delay_ms": 250,
+  "connect_timeout_ms": 15000,
+  "cases": [],
+  "failures": [
+    {
+      "viewer_count": 50,
+      "error": "viewer 36 timed out waiting for H.264 data"
+    }
+  ]
+}

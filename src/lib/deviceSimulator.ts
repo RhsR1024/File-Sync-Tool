@@ -66,6 +66,10 @@ export interface DeviceSimulatorSettings {
   selected_interface_id: string | null;
   last_platform: DeviceSimulatorPlatform | null;
   last_start_ip: string | null;
+  last_device_ips: string[];
+  last_subnet_prefix: number;
+  last_platform_servers: TargetPlatformServer[];
+  last_alarm_receiver_url: string | null;
   last_device_groups: DeviceGroupDraft[];
   last_http_port: number;
   last_rtsp_ports: RtspPorts;
@@ -98,6 +102,7 @@ export interface SimulatorStartRequest {
   platform: TargetPlatformConfig;
   interface_id: string;
   start_ip: string;
+  device_ips: string[];
   subnet_prefix: number;
   device_http_port: number;
   rtsp_ports: RtspPorts;
@@ -193,10 +198,29 @@ export interface PreflightCheck {
   details: string | null;
 }
 
+export type ConflictEvidenceKind = 'local' | 'neighbor' | 'probe' | 'unknown';
+export type ConflictObservationResult = 'occupied' | 'available' | 'inconclusive';
+export type ConflictVerdict = 'conflict' | 'clear' | 'unknown';
+
+export interface ConflictEvidence {
+  address: string;
+  kind: ConflictEvidenceKind;
+  result: ConflictObservationResult;
+  details: string | null;
+}
+
+export interface AddressConflictAssessment {
+  address: string;
+  verdict: ConflictVerdict;
+  strongest_evidence: ConflictEvidenceKind;
+  evidence: ConflictEvidence[];
+}
+
 export interface PreflightReport {
   ok: boolean;
   checks: PreflightCheck[];
   device_preview: DevicePreview;
+  address_assessments: AddressConflictAssessment[];
 }
 
 export interface SimulatorErrorInfo {

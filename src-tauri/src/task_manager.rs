@@ -338,6 +338,39 @@ impl TaskManager {
         Ok(())
     }
 
+    pub fn requeue_paused_copy(&self, task_group_id: &str, run_id: &str) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            let run = &mut group.runs[run_index];
+            if matches!(run.copy_phase, CopyState::Pending | CopyState::Running) {
+                run.copy_phase = CopyState::Pending;
+                run.finished_at = None;
+                group.paused = true;
+                group.cancel_requested = false;
+                group.paused_at.get_or_insert_with(current_timestamp);
+                group.refresh_from_runs();
+            }
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
+    }
+
+    pub fn is_run_paused(&self, task_group_id: &str, run_id: &str) -> bool {
+        self.inner
+            .state
+            .lock()
+            .unwrap()
+            .groups
+            .iter()
+            .find(|group| {
+                group.task_group_id == task_group_id
+                    && group.latest_run_id.as_deref() == Some(run_id)
+            })
+            .is_some_and(|group| group.paused)
+    }
+
     pub fn request_run_cancel(&self, task_group_id: &str, run_id: &str) -> Result<(), String> {
         {
             let mut state = self.inner.state.lock().unwrap();
@@ -1150,6 +1183,33 @@ mod tests {
         assert_eq!(detail.source_type, TaskSourceType::Manual);
         assert_eq!(detail.runs.len(), 1);
         assert_eq!(detail.runs[0].run_type, TaskRunType::CopyAndDeploy);
+    }
+
+    #[test]
+    fn paused_copy_can_return_to_pending_without_becoming_cancelled() {
+        let manager = TaskManager::new_in_memory();
+        let handle = manager.begin_scheduled_copy(TaskStartRequest::sample());
+        manager
+            .mark_copy_started(&handle.task_group_id, &handle.run_id)
+            .unwrap();
+        manager
+            .requeue_paused_copy(&handle.task_group_id, &handle.run_id)
+            .unwrap();
+
+        let detail = manager.get_group_detail(&handle.task_group_id).unwrap();
+        assert_eq!(detail.copy_status, CopyState::Pending);
+        assert_eq!(detail.summary_status, TaskSummaryStatus::Paused);
+        assert!(manager.is_run_paused(&handle.task_group_id, &handle.run_id));
+
+        manager
+            .set_run_paused(&handle.task_group_id, &handle.run_id, false)
+            .unwrap();
+        manager
+            .mark_copy_started(&handle.task_group_id, &handle.run_id)
+            .unwrap();
+        let resumed = manager.get_group_detail(&handle.task_group_id).unwrap();
+        assert_eq!(resumed.copy_status, CopyState::Running);
+        assert_eq!(resumed.summary_status, TaskSummaryStatus::Copying);
     }
 
     #[test]

@@ -190,10 +190,28 @@ button:disabled {
   image-rendering: auto;
 }
 
+.screen-image.is-hidden-media {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.screen-image.is-image-error {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .annotation-layer {
   position: absolute;
   z-index: 4;
   touch-action: none;
+}
+
+.remote-control-layer {
+  position: absolute;
+  z-index: 5;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
 }
 
 .annotation-svg {
@@ -206,6 +224,36 @@ button:disabled {
 .annotation-shape,
 .annotation-draft {
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
+
+.annotation-shape.is-editable {
+  cursor: grab;
+  pointer-events: visiblePainted;
+}
+
+.annotation-shape.is-editable:active {
+  cursor: grabbing;
+}
+
+.annotation-shape.is-selected {
+  filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.95)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
+}
+
+.annotation-hit-target {
+  fill: none;
+  stroke: transparent;
+  pointer-events: stroke;
+}
+
+.annotation-handles {
+  pointer-events: all;
+}
+
+.annotation-handle {
+  fill: #f8fafc;
+  stroke: #38bdf8;
+  stroke-width: 3;
+  cursor: crosshair;
 }
 
 .laser-dot {
@@ -283,6 +331,104 @@ button:disabled {
   color: var(--text-muted);
 }
 
+.stream-empty-state {
+  position: absolute;
+  z-index: 7;
+  top: 50%;
+  left: 50%;
+  display: inline-flex;
+  min-width: 180px;
+  max-width: min(360px, calc(100% - 32px));
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 18px;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  color: var(--text-muted);
+  background: rgba(15, 23, 42, 0.9);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(10px);
+  font-size: 13px;
+  text-align: center;
+}
+
+.annotation-edit-bar {
+  position: absolute;
+  z-index: 9;
+  bottom: 16px;
+  left: 50%;
+  max-width: calc(100% - 32px);
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  padding: 6px 8px 6px 12px;
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  border-radius: 8px;
+  color: var(--text);
+  background: rgba(15, 23, 42, 0.94);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(10px);
+}
+
+.annotation-edit-label {
+  min-width: 0;
+  overflow: hidden;
+  color: #bae6fd;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.annotation-edit-action,
+.toolbar-action-button {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.annotation-edit-action {
+  padding: 0 10px;
+}
+
+.toolbar-action-button {
+  padding: 0 11px;
+}
+
+.annotation-edit-action:hover:not(:disabled),
+.toolbar-action-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-raised);
+  border-color: var(--line-strong);
+}
+
+.annotation-edit-action.danger:hover:not(:disabled),
+.toolbar-action-button.danger:hover:not(:disabled) {
+  color: #fecdd3;
+  background: rgba(190, 24, 93, 0.22);
+  border-color: rgba(251, 113, 133, 0.45);
+}
+
+.annotation-edit-bar ~ .session-notice {
+  bottom: 76px;
+}
+
 .viewer-toolbar {
   min-height: 64px;
   flex: 0 0 auto;
@@ -345,6 +491,12 @@ button:disabled {
   color: var(--accent);
   background: var(--accent-soft);
   border-color: rgba(56, 189, 248, 0.32);
+}
+
+.icon-button.danger:hover:not(:disabled) {
+  color: var(--danger);
+  background: rgba(251, 113, 133, 0.12);
+  border-color: rgba(251, 113, 133, 0.32);
 }
 
 .icon-button.compact {
@@ -478,6 +630,15 @@ button:disabled {
   .viewer-toolbar {
     gap: 4px;
     padding-inline: 6px;
+  }
+
+  .annotation-edit-bar {
+    bottom: 8px;
+    max-width: calc(100% - 16px);
+  }
+
+  .annotation-edit-label {
+    max-width: 92px;
   }
 
   .toolbar-divider {

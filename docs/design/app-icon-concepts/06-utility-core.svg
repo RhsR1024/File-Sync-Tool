@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Utility Core</title>
+  <path fill="#0B1220" d="m256 45 183 106v210L256 467 73 361V151Z"/>
+  <path fill="none" stroke="#25C4D8" stroke-linecap="round" stroke-width="44" d="M145 240c8-54 55-95 111-95 25 0 47 8 66 21"/>
+  <path fill="#25C4D8" d="m326 122 61 69-90 17Z"/>
+  <path fill="none" stroke="#FFB02E" stroke-linecap="round" stroke-width="44" d="M367 272c-8 54-55 95-111 95-25 0-48-8-66-21"/>
+  <path fill="#FFB02E" d="m186 390-61-69 90-17Z"/>
+  <path fill="#F7FAFC" d="m256 199 57 33v66l-57 33-57-33v-66Z"/>
+  <path fill="#67D391" d="m256 232 29 17v34l-29 17-29-17v-34Z"/>
+</svg>

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Screen Share Benchmark Motion</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; min-height: 100%; background: #0b0d10; color: #f8fafc; font-family: "Segoe UI", Arial, sans-serif; }
+    body.video { height: 100vh; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .scroll-feed { width: min(1180px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 160px; }
+    .scroll-header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; min-height: 64px; padding: 0 18px; border-bottom: 1px solid #303740; background: #11151a; }
+    .scroll-header strong { font-size: 18px; }
+    .scroll-header span { color: #67e8f9; font: 600 13px Consolas, monospace; }
+    .row { display: grid; grid-template-columns: 90px 130px 1fr 110px; gap: 16px; align-items: center; min-height: 54px; padding: 9px 14px; border-bottom: 1px solid #252b32; background: #151a20; }
+    .row:nth-child(3n) { background: #191e24; }
+    .row:nth-child(5n) { border-left: 4px solid #f59e0b; }
+    .row:nth-child(7n) { border-left: 4px solid #22c55e; }
+    .row code { color: #93c5fd; }
+    .row .state { color: #f8fafc; font-weight: 700; }
+    .row .value { color: #fda4af; text-align: right; font: 700 14px Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <canvas id="motion" aria-label="Synthetic high-motion screen share benchmark"></canvas>
+  <div id="scroll" hidden>
+    <div class="scroll-header"><strong>Operations Timeline</strong><span id="clock"></span></div>
+    <main class="scroll-feed" id="feed"></main>
+  </div>
+  <script>
+    const mode = new URLSearchParams(location.search).get('mode') === 'scroll' ? 'scroll' : 'video';
+    const canvas = document.getElementById('motion');
+    const scrollRoot = document.getElementById('scroll');
+
+    if (mode === 'scroll') {
+      canvas.hidden = true;
+      scrollRoot.hidden = false;
+      const feed = document.getElementById('feed');
+      const states = ['RUNNING', 'VERIFYING', 'COPIED', 'QUEUED', 'COMPLETE'];
+      const services = ['scanner', 'delivery', 'checksum', 'indexer', 'archive', 'sync'];
+      for (let index = 0; index < 360; index += 1) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.innerHTML = `<code>${String(index + 1).padStart(4, '0')}</code><span class="state">${states[index % states.length]}</span><span>${services[index % services.length]} / node-${String((index * 17) % 97).padStart(2, '0')} / batch-${(index * 7919).toString(16).padStart(6, '0')}</span><span class="value">${((index * 37) % 9999).toLocaleString()} ms</span>`;
+        feed.appendChild(row);
+      }
+      let direction = 1;
+      let previous = performance.now();
+      function scrollFrame(now) {
+        const delta = Math.min(40, now - previous);
+        previous = now;
+        window.scrollBy(0, direction * delta * 0.22);
+        if (window.scrollY >= document.documentElement.scrollHeight - innerHeight - 2) direction = -1;
+        if (window.scrollY <= 1) direction = 1;
+        document.getElementById('clock').textContent = new Date().toISOString();
+        requestAnimationFrame(scrollFrame);
+      }
+      requestAnimationFrame(scrollFrame);
+    } else {
+      document.body.classList.add('video');
+      const context = canvas.getContext('2d', { alpha: false });
+      const palette = ['#0b0d10', '#ef4444', '#f59e0b', '#22c55e', '#38bdf8', '#f8fafc'];
+      function resize() {
+        canvas.width = Math.max(1, innerWidth);
+        canvas.height = Math.max(1, innerHeight);
+      }
+      addEventListener('resize', resize);
+      resize();
+      function draw(now) {
+        const width = canvas.width;
+        const height = canvas.height;
+        context.fillStyle = '#0b0d10';
+        context.fillRect(0, 0, width, height);
+        const cell = Math.max(28, Math.floor(Math.min(width, height) / 18));
+        const phase = Math.floor(now / 45);
+        for (let y = 0; y < height + cell; y += cell) {
+          for (let x = 0; x < width + cell; x += cell) {
+            context.fillStyle = palette[(Math.floor(x / cell) + Math.floor(y / cell) + phase) % palette.length];
+            const offset = (phase * 7 + y / cell * 13) % cell;
+            context.fillRect(x + offset - cell, y, cell - 2, cell - 2);
+          }
+        }
+        const barWidth = Math.max(140, width * 0.18);
+        const barX = ((now * 0.32) % (width + barWidth)) - barWidth;
+        context.fillStyle = '#111827';
+        context.fillRect(barX, 0, barWidth, height);
+        context.strokeStyle = '#f8fafc';
+        context.lineWidth = 6;
+        context.strokeRect(barX + 12, 12, barWidth - 24, height - 24);
+        context.fillStyle = '#f8fafc';
+        context.font = `700 ${Math.max(24, Math.floor(height / 24))}px Consolas, monospace`;
+        context.fillText(new Date().toISOString(), 32, height - 44);
+        requestAnimationFrame(draw);
+      }
+      requestAnimationFrame(draw);
+    }
+  </script>
+</body>
+</html>

@@ -10,6 +10,9 @@ use tokio::task::JoinSet;
 
 type ProbeFuture = Pin<Box<dyn Future<Output = Option<f64>> + Send>>;
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 async fn first_successful_probe(probes: Vec<ProbeFuture>) -> Option<f64> {
     if probes.is_empty() {
         return None;
@@ -43,21 +46,26 @@ async fn probe_tcp_port(ip: String, port: u16, timeout: std::time::Duration) -> 
     }
 }
 
-async fn tcp_ping_ports(ip: &str, ports: &[u16], timeout_ms: u64) -> (bool, Option<f64>) {
-    let timeout = std::time::Duration::from_millis(timeout_ms);
-    let probes = ports
-        .iter()
-        .copied()
-        .map(|port| {
-            let ip = ip.to_string();
-            Box::pin(async move { probe_tcp_port(ip, port, timeout).await }) as ProbeFuture
-        })
-        .collect();
+#[cfg(target_os = "windows")]
+async fn probe_icmp(ip: String, timeout_ms: u64) -> Option<f64> {
+    let started = std::time::Instant::now();
+    let timeout_arg = timeout_ms.max(1).to_string();
+    let command = tokio::process::Command::new("ping")
+        .args(["-n", "1", "-w", timeout_arg.as_str(), ip.as_str()])
+        .kill_on_drop(true)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let process_timeout = std::time::Duration::from_millis(timeout_ms.saturating_add(750));
 
-    match first_successful_probe(probes).await {
-        Some(latency_ms) => (true, Some(latency_ms)),
-        None => (false, None),
+    match tokio::time::timeout(process_timeout, command).await {
+        Ok(Ok(output)) if output.status.success() => Some(started.elapsed().as_secs_f64() * 1000.0),
+        _ => None,
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn probe_icmp(_ip: String, _timeout_ms: u64) -> Option<f64> {
+    None
 }
 
 // ─── Ping Scan ───────────────────────────────────────────────────────────────
@@ -96,8 +104,19 @@ impl Default for NetworkState {
 /// Try a TCP connect to common service ports. If we get a connection OR a
 /// "connection refused" the host is alive (there is a TCP stack answering).
 async fn tcp_ping(ip: &str, timeout_ms: u64) -> (bool, Option<f64>) {
-    let ports: &[u16] = &[80, 443, 22, 135, 445];
-    tcp_ping_ports(ip, ports, timeout_ms).await
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let ports: &[u16] = &[80, 443, 22, 53, 135, 139, 445, 3389];
+    let mut probes = Vec::with_capacity(ports.len() + 1);
+    probes.push(Box::pin(probe_icmp(ip.to_string(), timeout_ms)) as ProbeFuture);
+    probes.extend(ports.iter().copied().map(|port| {
+        let ip = ip.to_string();
+        Box::pin(async move { probe_tcp_port(ip, port, timeout).await }) as ProbeFuture
+    }));
+
+    match first_successful_probe(probes).await {
+        Some(latency_ms) => (true, Some(latency_ms)),
+        None => (false, None),
+    }
 }
 
 fn validate_prefix(prefix: &str) -> Result<(), String> {

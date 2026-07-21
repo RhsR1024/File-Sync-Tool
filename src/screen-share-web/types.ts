@@ -1,6 +1,7 @@
 export type AnnotationKind = 'laser' | 'arrow' | 'rect';
 
 export type ViewMode = 'live' | 'frozen';
+export type ControlState = 'disabled' | 'available' | 'requested' | 'granted' | 'revoked';
 
 export interface NormalizedPoint {
   x: number;
@@ -29,8 +30,8 @@ export interface AnnotationDocument {
 export interface SessionFeatures {
   annotations_enabled?: boolean;
   shared_freeze_enabled?: boolean;
-  control_requests?: boolean;
-  keyboard_control?: boolean;
+  control_requests_enabled?: boolean;
+  keyboard_control_enabled?: boolean;
   [key: string]: unknown;
 }
 
@@ -62,8 +63,19 @@ export interface AnnotationAddPayload {
   expires_at_ms?: number | null;
 }
 
+export interface AnnotationRemovePayload {
+  shape_id: string;
+}
+
+export interface AnnotationUpdatePayload {
+  shape_id: string;
+  points: NormalizedPoint[];
+  color: string;
+  width: number;
+}
+
 export interface AnnotationAppliedPayload {
-  operation?: 'add' | 'remove' | 'clear_own' | 'clear_all' | string;
+  operation?: 'add' | 'update' | 'remove' | 'undo' | 'clear_own' | 'clear_all' | string;
   shape?: AnnotationShape;
   removed_ids?: string[];
   owner_client_id?: string;
@@ -73,6 +85,7 @@ export interface AnnotationAppliedPayload {
 
 export interface ViewStatePayload {
   document?: AnnotationDocument;
+  control?: ControlStateSnapshot;
   snapshot_url?: string | null;
   mode?: ViewMode;
   frame_id?: number | null;
@@ -91,6 +104,26 @@ export interface SessionErrorPayload {
   retryable?: boolean;
 }
 
+export interface ControlStateSnapshot {
+  state: ControlState;
+  request_id?: string;
+  requester_client_id?: string;
+  controller_client_id?: string;
+  controller_ip?: string;
+}
+
+export interface ControlRequestedPayload {
+  request_id?: string;
+  client_id?: string;
+  ip?: string;
+  user_agent?: string;
+}
+
+export interface ControlStatePayload {
+  control?: ControlStateSnapshot;
+  reason?: string;
+}
+
 export type SessionServerMessage = SessionEnvelope<
   SessionHelloPayload
   | AnnotationDocument
@@ -98,6 +131,8 @@ export type SessionServerMessage = SessionEnvelope<
   | ViewStatePayload
   | SourceChangedPayload
   | SessionErrorPayload
+  | ControlRequestedPayload
+  | ControlStatePayload
   | Record<string, unknown>
 >;
 
@@ -117,6 +152,36 @@ export interface ScreenShareHttpStatus {
   frame_height?: number | null;
   capture_paused?: boolean;
   capture_issue?: 'retrying' | 'privacy_mode_or_display_off' | string | null;
+  transport?: 'mjpeg' | 'mse_h264' | 'webrtc';
+  h264_media?: {
+    ready?: boolean;
+    codec?: string | null;
+    width?: number | null;
+    height?: number | null;
+    target_bitrate_bps?: number | null;
+    encoded_frame_count?: number;
+    encoded_bytes?: number;
+    keyframe_count?: number;
+    cached_segment_count?: number;
+    cached_bytes?: number;
+    dropped_input_frames?: number;
+    error?: string | null;
+  };
+  control_state?: ControlState;
+  controller_ip?: string | null;
+}
+
+export interface H264MediaHello {
+  v: 1;
+  type: 'media.hello';
+  transport: 'mse_h264';
+  generation: number;
+  codec: string;
+  mime_type: string;
+  width: number;
+  height: number;
+  fps: number;
+  bitrate_bps: number;
 }
 
 export interface SessionConnectionState {

@@ -18,7 +18,19 @@ import {
   MonitorOff,
   Eye,
   Eraser,
+  Undo2,
   PencilRuler,
+  MousePointer2,
+  ShieldCheck,
+  ShieldX,
+  Layers3,
+  Trash2,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  ArrowDown,
+  X,
+  Check,
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -31,11 +43,23 @@ import {
   screenShareStop,
   screenShareGetStatus,
   screenShareClearAnnotations,
+  screenShareGetAnnotationState,
+  screenShareRemoveAnnotation,
+  screenShareUpdateAnnotation,
+  screenShareRespondControlRequest,
+  screenShareRevokeControl,
   screenShareOpenLocalPreview,
+  screenShareOpenDesktopOverlay,
+  screenShareCloseDesktopOverlay,
   type MonitorInfo,
   type NetworkInterfaceInfo,
   type ScreenShareBackendMode,
+  type ScreenShareMediaTransport,
   type ScreenShareConfig,
+  type ScreenShareControlRequest,
+  type ScreenShareAnnotationDocument,
+  type ScreenShareAnnotationShape,
+  type ScreenShareMediaMetrics,
   type ScreenShareStatus,
 } from '../lib/tauri';
 import { pushToast } from '../composables/useToast';
@@ -58,7 +82,10 @@ const quality = ref(70);
 const fps = ref(15);
 const showCursor = ref(true);
 const backendMode = ref<ScreenShareBackendMode>('auto');
+const mediaTransport = ref<ScreenShareMediaTransport>('auto');
 const autoStart = ref(false);
+const controlRequestsEnabled = ref(false);
+const keyboardControlEnabled = ref(false);
 
 const isActive = ref(false);
 const isStarting = ref(false);
@@ -73,7 +100,34 @@ const setQrCanvas = (url: string, el: unknown) => {
 const errorMsg = ref('');
 const isRefreshingStatus = ref(false);
 const isOpeningPreview = ref(false);
+const isTogglingDesktopOverlay = ref(false);
 const isClearingAnnotations = ref(false);
+const annotationActionId = ref<string | null>(null);
+const isRespondingControl = ref(false);
+const isRevokingControl = ref(false);
+
+function emptyMediaMetrics(): ScreenShareMediaMetrics {
+  return {
+    encoded_frame_count: 0,
+    jpeg_sample_count: 0,
+    jpeg_size_avg_bytes: 0,
+    jpeg_size_p50_bytes: 0,
+    jpeg_size_p95_bytes: 0,
+    first_frame_delay_ms: null,
+    frame_age_ms: null,
+    slow_client_dropped_frames: 0,
+    stream_connection_count: 0,
+    stream_first_frame_sample_count: 0,
+    stream_first_frame_avg_ms: null,
+    stream_first_frame_p95_ms: null,
+    stream_reconnect_count: 0,
+    stream_reconnect_sample_count: 0,
+    stream_reconnect_avg_ms: null,
+    stream_reconnect_p95_ms: null,
+    fps_actual: 0,
+    bitrate_kbps: 0,
+  };
+}
 
 const status = ref<ScreenShareStatus>({
   is_active: false,
@@ -90,7 +144,32 @@ const status = ref<ScreenShareStatus>({
   interaction_connected_count: 0,
   annotation_count: 0,
   view_mode: 'live',
+  source_epoch: 0,
+  latest_frame_id: null,
+  frame_width: null,
+  frame_height: null,
+  transport: 'mjpeg',
+  control_state: 'disabled',
+  controller_ip: null,
+  pending_control_request: null,
+  desktop_overlay_active: false,
+  media_metrics: emptyMediaMetrics(),
 });
+
+const annotationDocument = ref<ScreenShareAnnotationDocument>({
+  session_id: 0,
+  source_epoch: 0,
+  revision: 0,
+  mode: 'live',
+  frozen_frame_id: null,
+  shapes: [],
+});
+const hostAnnotationColors = ['#f59e0b', '#ef4444', '#22c55e', '#38bdf8', '#f8fafc'] as const;
+const hostAnnotationWidths = [2, 4, 7] as const;
+const persistentAnnotations = computed(() => annotationDocument.value.shapes.filter((shape) => shape.kind !== 'laser'));
+const latestPersistentAnnotation = computed<ScreenShareAnnotationShape | null>(() => (
+  persistentAnnotations.value[persistentAnnotations.value.length - 1] ?? null
+));
 
 const logs = ref<{ level: string; message: string; time: string }[]>([]);
 let lastUptimeUpdate = 0;
@@ -166,9 +245,12 @@ interface SavedSettings {
   fps: number;
   showCursor: boolean;
   backendMode: ScreenShareBackendMode;
+  mediaTransport?: ScreenShareMediaTransport;
   selectedMonitor: number;
   selectedBindAddress: string;
   autoStart: boolean;
+  controlRequestsEnabled?: boolean;
+  keyboardControlEnabled?: boolean;
 }
 
 async function saveSettings() {
@@ -185,9 +267,12 @@ async function saveSettings() {
         fps: fps.value,
         showCursor: showCursor.value,
         backendMode: backendMode.value,
+        mediaTransport: mediaTransport.value,
         selectedMonitor: selectedMonitor.value,
         selectedBindAddress: selectedBindAddress.value,
         autoStart: autoStart.value,
+        controlRequestsEnabled: controlRequestsEnabled.value,
+        keyboardControlEnabled: keyboardControlEnabled.value,
       } satisfies SavedSettings,
     });
   } catch {
@@ -210,9 +295,14 @@ async function loadSettings() {
     fps.value = saved.fps ?? 15;
     showCursor.value = saved.showCursor ?? true;
     backendMode.value = saved.backendMode ?? 'auto';
+    mediaTransport.value = saved.mediaTransport ?? 'auto';
     selectedMonitor.value = saved.selectedMonitor ?? 0;
     selectedBindAddress.value = saved.selectedBindAddress ?? '0.0.0.0';
     autoStart.value = saved.autoStart ?? false;
+    controlRequestsEnabled.value = saved.controlRequestsEnabled ?? false;
+    keyboardControlEnabled.value = Boolean(
+      controlRequestsEnabled.value && saved.keyboardControlEnabled,
+    );
   } catch {
     /* Ignore malformed legacy saved settings. */
   }
@@ -229,6 +319,11 @@ function buildScreenShareConfig(): ScreenShareConfig {
     show_cursor: showCursor.value,
     capture_backend_mode: backendMode.value,
     bind_address: selectedBindAddress.value || '0.0.0.0',
+    control_requests_enabled: controlRequestsEnabled.value,
+    keyboard_control_enabled: controlRequestsEnabled.value && keyboardControlEnabled.value,
+    annotations_enabled: true,
+    shared_freeze_enabled: true,
+    transport: mediaTransport.value,
   };
 }
 
@@ -249,6 +344,34 @@ const backendModeOptions = computed(() => [
     description: t('tools.screenShare.backendModeDxgiDesc'),
   },
 ]);
+
+const mediaTransportOptions = computed(() => [
+  {
+    value: 'auto' as const,
+    label: t('tools.screenShare.mediaTransportAuto'),
+    description: t('tools.screenShare.mediaTransportAutoDesc'),
+  },
+  {
+    value: 'mse_h264' as const,
+    label: t('tools.screenShare.mediaTransportH264'),
+    description: t('tools.screenShare.mediaTransportH264Desc'),
+  },
+  {
+    value: 'mjpeg' as const,
+    label: t('tools.screenShare.mediaTransportMjpeg'),
+    description: t('tools.screenShare.mediaTransportMjpegDesc'),
+  },
+]);
+
+const activeTransportLabel = computed(() => (
+  status.value.transport === 'mse_h264'
+    ? t('tools.screenShare.mediaTransportH264')
+    : t('tools.screenShare.mediaTransportMjpeg')
+));
+
+watch(controlRequestsEnabled, (enabled) => {
+  if (!enabled) keyboardControlEnabled.value = false;
+});
 
 async function applyStartedShare(url: string) {
   serverUrl.value = url;
@@ -297,7 +420,48 @@ async function stopShare() {
     interaction_connected_count: 0,
     annotation_count: 0,
     view_mode: 'live',
+    source_epoch: 0,
+    latest_frame_id: null,
+    frame_width: null,
+    frame_height: null,
+    transport: 'mjpeg',
+    control_state: 'disabled',
+    controller_ip: null,
+    pending_control_request: null,
+    desktop_overlay_active: false,
+    media_metrics: emptyMediaMetrics(),
   };
+}
+
+async function respondControlRequest(allow: boolean) {
+  const request = status.value.pending_control_request;
+  if (!request || isRespondingControl.value) return;
+  isRespondingControl.value = true;
+  errorMsg.value = '';
+  try {
+    await screenShareRespondControlRequest(request.request_id, allow);
+    status.value.pending_control_request = null;
+    status.value.control_state = allow ? 'granted' : 'available';
+    await refreshStatus(true);
+  } catch (error) {
+    errorMsg.value = t('tools.screenShare.errControlResponseFailed', { error: String(error) });
+  } finally {
+    isRespondingControl.value = false;
+  }
+}
+
+async function revokeControl() {
+  if (isRevokingControl.value) return;
+  isRevokingControl.value = true;
+  errorMsg.value = '';
+  try {
+    await screenShareRevokeControl();
+    await refreshStatus(true);
+  } catch (error) {
+    errorMsg.value = t('tools.screenShare.errRevokeControlFailed', { error: String(error) });
+  } finally {
+    isRevokingControl.value = false;
+  }
 }
 
 async function openLocalPreview() {
@@ -312,18 +476,137 @@ async function openLocalPreview() {
   }
 }
 
+async function toggleDesktopOverlay() {
+  if (isTogglingDesktopOverlay.value) return;
+  isTogglingDesktopOverlay.value = true;
+  errorMsg.value = '';
+  try {
+    if (status.value.desktop_overlay_active) {
+      await screenShareCloseDesktopOverlay();
+    } else {
+      await screenShareOpenDesktopOverlay();
+    }
+    await refreshStatus(true);
+  } catch (error) {
+    errorMsg.value = t('tools.screenShare.errDesktopOverlayFailed', { error: String(error) });
+  } finally {
+    isTogglingDesktopOverlay.value = false;
+  }
+}
+
 async function clearAllAnnotations() {
+  if (isClearingAnnotations.value || annotationActionId.value) return;
   isClearingAnnotations.value = true;
   errorMsg.value = '';
   try {
     await screenShareClearAnnotations();
-    await refreshStatus(true);
+    await Promise.all([refreshStatus(true), refreshAnnotationState()]);
     pushToast(t('tools.screenShare.annotationsCleared'), 'success', { ttlMs: 1600 });
   } catch (error) {
     errorMsg.value = t('tools.screenShare.errClearAnnotationsFailed', { error: String(error) });
   } finally {
     isClearingAnnotations.value = false;
   }
+}
+
+async function undoLatestHostAnnotation() {
+  const latest = latestPersistentAnnotation.value;
+  if (!latest || annotationActionId.value || isClearingAnnotations.value) return;
+  await removeHostAnnotation(latest);
+}
+
+function applyAnnotationDocument(payload: ScreenShareAnnotationDocument) {
+  const current = annotationDocument.value;
+  if (payload.session_id === current.session_id
+    && (payload.source_epoch < current.source_epoch
+      || (payload.source_epoch === current.source_epoch && payload.revision < current.revision))) {
+    return;
+  }
+  annotationDocument.value = payload;
+}
+
+async function refreshAnnotationState(silent = true) {
+  if (!isActive.value) {
+    annotationDocument.value = {
+      session_id: 0,
+      source_epoch: 0,
+      revision: 0,
+      mode: 'live',
+      frozen_frame_id: null,
+      shapes: [],
+    };
+    return;
+  }
+  try {
+    applyAnnotationDocument(await screenShareGetAnnotationState());
+  } catch (error) {
+    if (!silent) errorMsg.value = String(error);
+  }
+}
+
+function annotationTypeLabel(shape: ScreenShareAnnotationShape): string {
+  if (shape.kind === 'arrow') return t('tools.screenShare.annotationArrow');
+  if (shape.kind === 'rect') return t('tools.screenShare.annotationRectangle');
+  return t('tools.screenShare.annotationLaser');
+}
+
+function annotationOwnerLabel(shape: ScreenShareAnnotationShape): string {
+  return shape.owner_client_id.length > 10
+    ? `${shape.owner_client_id.slice(0, 8)}…`
+    : shape.owner_client_id;
+}
+
+async function updateHostAnnotation(
+  shape: ScreenShareAnnotationShape,
+  color = shape.color,
+  width = shape.width,
+  points = shape.points,
+) {
+  if (annotationActionId.value) return;
+  annotationActionId.value = shape.id;
+  errorMsg.value = '';
+  try {
+    await screenShareUpdateAnnotation(shape.id, points, color, width);
+    await refreshAnnotationState();
+  } catch (error) {
+    errorMsg.value = t('tools.screenShare.errUpdateAnnotationFailed', { error: String(error) });
+  } finally {
+    annotationActionId.value = null;
+  }
+}
+
+async function removeHostAnnotation(shape: ScreenShareAnnotationShape) {
+  if (annotationActionId.value) return;
+  annotationActionId.value = shape.id;
+  errorMsg.value = '';
+  try {
+    await screenShareRemoveAnnotation(shape.id);
+    await refreshAnnotationState();
+    pushToast(t('tools.screenShare.annotationRemoved'), 'success', { ttlMs: 1400 });
+  } catch (error) {
+    errorMsg.value = t('tools.screenShare.errRemoveAnnotationFailed', { error: String(error) });
+  } finally {
+    annotationActionId.value = null;
+  }
+}
+
+async function nudgeHostAnnotation(shape: ScreenShareAnnotationShape, deltaX: number, deltaY: number) {
+  const minX = Math.min(...shape.points.map((point) => point.x));
+  const maxX = Math.max(...shape.points.map((point) => point.x));
+  const minY = Math.min(...shape.points.map((point) => point.y));
+  const maxY = Math.max(...shape.points.map((point) => point.y));
+  const boundedX = Math.min(1 - maxX, Math.max(-minX, deltaX));
+  const boundedY = Math.min(1 - maxY, Math.max(-minY, deltaY));
+  const points = shape.points.map((point) => ({
+    x: Math.min(1, Math.max(0, point.x + boundedX)),
+    y: Math.min(1, Math.max(0, point.y + boundedY)),
+  }));
+  await updateHostAnnotation(shape, shape.color, shape.width, points);
+}
+
+function changeHostAnnotationWidth(shape: ScreenShareAnnotationShape, event: Event) {
+  const nextWidth = Number((event.target as HTMLSelectElement).value);
+  if (Number.isFinite(nextWidth)) void updateHostAnnotation(shape, shape.color, nextWidth);
 }
 
 async function copyUrl(url: string) {
@@ -381,6 +664,9 @@ watch(serverUrl, () => {
 
 let unlistenStatus: UnlistenFn | null = null;
 let unlistenLog: UnlistenFn | null = null;
+let unlistenControlRequest: UnlistenFn | null = null;
+let unlistenDesktopOverlayError: UnlistenFn | null = null;
+let unlistenAnnotationState: UnlistenFn | null = null;
 let statusRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
 function applyStatus(payload: ScreenShareStatus) {
@@ -390,7 +676,10 @@ function applyStatus(payload: ScreenShareStatus) {
   if (payload.is_active) {
     lastUptimeUpdate = payload.uptime_secs;
   }
-  status.value = payload;
+  status.value = {
+    ...payload,
+    media_metrics: payload.media_metrics ?? emptyMediaMetrics(),
+  };
   if (payload.is_active && !isActive.value) {
     isActive.value = true;
     serverUrl.value = payload.server_url;
@@ -400,6 +689,7 @@ function applyStatus(payload: ScreenShareStatus) {
     serverUrl.value = '';
     showAllConnIps.value = false;
     lastUptimeUpdate = 0;
+    void refreshAnnotationState();
   }
 }
 
@@ -409,6 +699,7 @@ async function refreshStatus(silent = false) {
   }
   try {
     applyStatus(await screenShareGetStatus());
+    await refreshAnnotationState();
   } catch (error) {
     if (!silent) {
       errorMsg.value = String(error);
@@ -453,12 +744,28 @@ onMounted(async () => {
   unlistenLog = await listen<{ level: string; message: string }>('screen-share-log', (event) => {
     addLog(event.payload.level, event.payload.message);
   });
+  unlistenControlRequest = await listen<ScreenShareControlRequest>('screen-share-control-request', (event) => {
+    if (!isActive.value) return;
+    status.value.pending_control_request = event.payload;
+    status.value.control_state = 'requested';
+  });
+  unlistenDesktopOverlayError = await listen<string>('screen-share-desktop-overlay-error', (event) => {
+    errorMsg.value = t('tools.screenShare.errDesktopOverlayFailed', { error: event.payload });
+    void refreshStatus(true);
+  });
+  unlistenAnnotationState = await listen<ScreenShareAnnotationDocument>('screen-share-annotation-state', (event) => {
+    applyAnnotationDocument(event.payload);
+  });
+  await refreshAnnotationState();
   startStatusPolling();
 });
 
 onUnmounted(() => {
   unlistenStatus?.();
   unlistenLog?.();
+  unlistenControlRequest?.();
+  unlistenDesktopOverlayError?.();
+  unlistenAnnotationState?.();
   if (statusRefreshTimer) {
     clearInterval(statusRefreshTimer);
     statusRefreshTimer = null;
@@ -623,6 +930,29 @@ onUnmounted(() => {
               </div>
               <div>
                 <div class="mb-2 flex items-center justify-between gap-3">
+                  <label class="ss-label">{{ t('tools.screenShare.mediaTransport') }}</label>
+                  <span class="text-[11px] text-slate-400">{{ t('tools.screenShare.mediaTransportHint') }}</span>
+                </div>
+                <div class="grid grid-cols-3 gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1">
+                  <button
+                    v-for="option in mediaTransportOptions"
+                    :key="option.value"
+                    type="button"
+                    class="rounded-lg px-2 py-2 text-xs font-medium transition"
+                    :class="mediaTransport === option.value ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                    :disabled="isActive"
+                    :title="option.description"
+                    @click="mediaTransport = option.value"
+                  >
+                    {{ option.label }}
+                  </button>
+                </div>
+                <p class="mt-2 text-xs leading-5 text-slate-500">
+                  {{ mediaTransportOptions.find((option) => option.value === mediaTransport)?.description }}
+                </p>
+              </div>
+              <div>
+                <div class="mb-2 flex items-center justify-between gap-3">
                   <label class="ss-label">{{ t('tools.screenShare.backendMode') }}</label>
                   <span class="text-[11px] text-slate-400">{{ t('tools.screenShare.backendModeHint') }}</span>
                 </div>
@@ -678,6 +1008,42 @@ onUnmounted(() => {
                   </span>
                 </span>
                 <span class="text-sm font-medium text-slate-700">{{ t('tools.screenShare.autoStart') }}</span>
+              </span>
+            </label>
+            <label class="ss-toggle-card">
+              <span class="flex items-center gap-3">
+                <span class="ss-toggle">
+                  <input
+                    v-model="controlRequestsEnabled"
+                    type="checkbox"
+                    :disabled="isActive"
+                    class="sr-only"
+                  >
+                  <span class="ss-toggle-track" :class="controlRequestsEnabled ? 'bg-emerald-600' : 'bg-slate-300'">
+                    <span class="ss-toggle-thumb" :class="controlRequestsEnabled ? 'translate-x-4' : 'translate-x-0'"></span>
+                  </span>
+                </span>
+                <span class="text-sm font-medium text-slate-700">{{ t('tools.screenShare.allowControlRequests') }}</span>
+              </span>
+            </label>
+            <label
+              class="ss-toggle-card"
+              :class="isActive || !controlRequestsEnabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'"
+              :title="!controlRequestsEnabled ? t('tools.screenShare.keyboardControlRequiresRemote') : undefined"
+            >
+              <span class="flex items-center gap-3">
+                <span class="ss-toggle">
+                  <input
+                    v-model="keyboardControlEnabled"
+                    type="checkbox"
+                    :disabled="isActive || !controlRequestsEnabled"
+                    class="sr-only"
+                  >
+                  <span class="ss-toggle-track" :class="keyboardControlEnabled && controlRequestsEnabled ? 'bg-emerald-600' : 'bg-slate-300'">
+                    <span class="ss-toggle-thumb" :class="keyboardControlEnabled && controlRequestsEnabled ? 'translate-x-4' : 'translate-x-0'"></span>
+                  </span>
+                </span>
+                <span class="text-sm font-medium text-slate-700">{{ t('tools.screenShare.allowKeyboardControl') }}</span>
               </span>
             </label>
           </div>
@@ -740,9 +1106,137 @@ onUnmounted(() => {
                   <Eye class="h-3.5 w-3.5" />
                   {{ isOpeningPreview ? t('tools.screenShare.openingPreview') : t('tools.screenShare.openLocalPreview') }}
                 </button>
-                <button type="button" class="ss-detail-button" :disabled="isClearingAnnotations || status.annotation_count === 0" @click="clearAllAnnotations">
+                <button
+                  type="button"
+                  class="ss-detail-button"
+                  :class="status.desktop_overlay_active ? 'border-violet-300 bg-violet-50 text-violet-700' : ''"
+                  :disabled="isTogglingDesktopOverlay"
+                  :aria-pressed="status.desktop_overlay_active"
+                  @click="toggleDesktopOverlay"
+                >
+                  <Layers3 class="h-3.5 w-3.5" aria-hidden="true" />
+                  {{ isTogglingDesktopOverlay
+                    ? t('tools.screenShare.desktopOverlayUpdating')
+                    : status.desktop_overlay_active
+                      ? t('tools.screenShare.hideDesktopAnnotations')
+                      : t('tools.screenShare.showDesktopAnnotations') }}
+                </button>
+                <button type="button" class="ss-detail-button" :disabled="!latestPersistentAnnotation || isClearingAnnotations || annotationActionId !== null" @click="undoLatestHostAnnotation">
+                  <Undo2 class="h-3.5 w-3.5" />
+                  {{ t('tools.screenShare.undoLatestAnnotation') }}
+                </button>
+                <button type="button" class="ss-detail-button" :disabled="isClearingAnnotations || annotationActionId !== null || status.annotation_count === 0" @click="clearAllAnnotations">
                   <Eraser class="h-3.5 w-3.5" />
                   {{ isClearingAnnotations ? t('tools.screenShare.clearingAnnotations') : t('tools.screenShare.clearAllAnnotations') }}
+                </button>
+              </div>
+              <div v-if="persistentAnnotations.length" class="mb-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+                <div class="mb-2 flex items-center justify-between gap-3">
+                  <div>
+                    <p class="text-sm font-semibold text-slate-800">{{ t('tools.screenShare.annotationManagement') }}</p>
+                    <p class="mt-0.5 text-xs text-slate-500">{{ t('tools.screenShare.annotationManagementHint') }}</p>
+                  </div>
+                  <span class="rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-slate-500">
+                    {{ persistentAnnotations.length }}
+                  </span>
+                </div>
+                <div class="max-h-72 divide-y divide-slate-200 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                  <div v-for="shape in persistentAnnotations" :key="shape.id" class="flex flex-wrap items-center gap-2 px-3 py-2.5">
+                    <div class="mr-auto min-w-[130px]">
+                      <div class="flex items-center gap-2 text-xs font-semibold text-slate-800">
+                        <span class="h-3 w-3 rounded-full border border-slate-300" :style="{ backgroundColor: shape.color }" aria-hidden="true" />
+                        {{ annotationTypeLabel(shape) }}
+                      </div>
+                      <div class="mt-0.5 text-[11px] text-slate-500" :title="shape.owner_client_id">
+                        {{ t('tools.screenShare.annotationOwner') }}: {{ annotationOwnerLabel(shape) }}
+                      </div>
+                    </div>
+                    <div class="flex items-center gap-1" :aria-label="t('tools.screenShare.annotationColor')">
+                      <button
+                        v-for="swatch in hostAnnotationColors"
+                        :key="swatch"
+                        type="button"
+                        class="h-11 w-11 cursor-pointer rounded-full border-2 border-white shadow-sm ring-1 ring-slate-300 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                        :class="shape.color === swatch ? 'ring-2 ring-violet-500' : ''"
+                        :style="{ backgroundColor: swatch }"
+                        :aria-label="`${t('tools.screenShare.annotationSetColor')}: ${swatch}`"
+                        :aria-pressed="shape.color === swatch"
+                        :disabled="annotationActionId !== null"
+                        @click="updateHostAnnotation(shape, swatch, shape.width)"
+                      />
+                    </div>
+                    <label class="sr-only" :for="`annotation-width-${shape.id}`">{{ t('tools.screenShare.annotationLineWidth') }}</label>
+                    <select
+                      :id="`annotation-width-${shape.id}`"
+                      class="h-11 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"
+                      :value="shape.width"
+                      :disabled="annotationActionId !== null"
+                      @change="changeHostAnnotationWidth(shape, $event)"
+                    >
+                      <option v-for="widthOption in hostAnnotationWidths" :key="widthOption" :value="widthOption">{{ widthOption }}px</option>
+                    </select>
+                    <div class="flex items-center gap-1" :aria-label="t('tools.screenShare.annotationMove')">
+                      <button type="button" class="ss-icon-button inline-flex h-11 w-11 items-center justify-center" :title="t('tools.screenShare.annotationMoveLeft')" :aria-label="t('tools.screenShare.annotationMoveLeft')" :disabled="annotationActionId !== null" @click="nudgeHostAnnotation(shape, -0.01, 0)"><ArrowLeft class="h-4 w-4" /></button>
+                      <button type="button" class="ss-icon-button inline-flex h-11 w-11 items-center justify-center" :title="t('tools.screenShare.annotationMoveRight')" :aria-label="t('tools.screenShare.annotationMoveRight')" :disabled="annotationActionId !== null" @click="nudgeHostAnnotation(shape, 0.01, 0)"><ArrowRight class="h-4 w-4" /></button>
+                      <button type="button" class="ss-icon-button inline-flex h-11 w-11 items-center justify-center" :title="t('tools.screenShare.annotationMoveUp')" :aria-label="t('tools.screenShare.annotationMoveUp')" :disabled="annotationActionId !== null" @click="nudgeHostAnnotation(shape, 0, -0.01)"><ArrowUp class="h-4 w-4" /></button>
+                      <button type="button" class="ss-icon-button inline-flex h-11 w-11 items-center justify-center" :title="t('tools.screenShare.annotationMoveDown')" :aria-label="t('tools.screenShare.annotationMoveDown')" :disabled="annotationActionId !== null" @click="nudgeHostAnnotation(shape, 0, 0.01)"><ArrowDown class="h-4 w-4" /></button>
+                    </div>
+                    <button type="button" class="ss-icon-button inline-flex h-11 w-11 items-center justify-center text-red-600 hover:bg-red-50" :title="t('tools.screenShare.removeAnnotation')" :aria-label="t('tools.screenShare.removeAnnotation')" :disabled="annotationActionId !== null" @click="removeHostAnnotation(shape)"><Trash2 class="h-4 w-4" /></button>
+                  </div>
+                </div>
+              </div>
+              <div
+                v-if="status.pending_control_request"
+                class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900"
+                role="alert"
+              >
+                <div class="flex items-start gap-3">
+                  <MousePointer2 class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                  <div class="min-w-0 flex-1">
+                    <p class="font-semibold">{{ t('tools.screenShare.controlRequestTitle') }}</p>
+                    <p class="mt-1 truncate text-xs text-amber-800">
+                      {{ status.pending_control_request.ip }} · {{ status.pending_control_request.user_agent }}
+                    </p>
+                    <div class="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        class="ss-detail-button border-emerald-200 bg-emerald-50 text-emerald-700"
+                        :disabled="isRespondingControl"
+                        @click="respondControlRequest(true)"
+                      >
+                        <Check class="h-3.5 w-3.5" />
+                        {{ t('tools.screenShare.allowControl') }}
+                      </button>
+                      <button
+                        type="button"
+                        class="ss-detail-button border-red-200 bg-red-50 text-red-700"
+                        :disabled="isRespondingControl"
+                        @click="respondControlRequest(false)"
+                      >
+                        <X class="h-3.5 w-3.5" />
+                        {{ t('tools.screenShare.denyControl') }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div
+                v-else-if="status.control_state === 'granted'"
+                class="mb-3 flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm text-emerald-800"
+                role="status"
+              >
+                <ShieldCheck class="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span class="min-w-0 flex-1 truncate">
+                  {{ t('tools.screenShare.controlGranted', { ip: status.controller_ip || t('tools.screenShare.unknownViewer') }) }}
+                </span>
+                <button
+                  type="button"
+                  class="ss-detail-button border-red-200 bg-white text-red-700"
+                  :disabled="isRevokingControl"
+                  @click="revokeControl"
+                >
+                  <ShieldX class="h-3.5 w-3.5" />
+                  {{ t('tools.screenShare.revokeControl') }}
                 </button>
               </div>
               <div class="space-y-2">
@@ -797,6 +1291,18 @@ onUnmounted(() => {
                 </div>
                 <div class="font-mono text-2xl font-bold text-slate-900">{{ connectionCount }}</div>
               </div>
+
+              <div class="ss-stat-card">
+                <div class="mb-2 flex items-center gap-2 text-slate-500">
+                  <MousePointer2 class="h-4 w-4 text-violet-500" />
+                  <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">{{ t('tools.screenShare.controlStatus') }}</span>
+                </div>
+                <div class="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <ShieldCheck v-if="status.control_state === 'granted'" class="h-4 w-4 text-emerald-600" />
+                  <ShieldX v-else class="h-4 w-4 text-slate-400" />
+                  {{ t(`tools.screenShare.controlState.${status.control_state}`) }}
+                </div>
+              </div>
               <div class="ss-stat-card">
                 <div class="mb-2 flex items-center gap-2 text-slate-500">
                   <PencilRuler class="h-4 w-4 text-violet-500" />
@@ -830,6 +1336,9 @@ onUnmounted(() => {
                   <span class="text-[11px] font-semibold uppercase tracking-[0.14em]">{{ t('tools.screenShare.bitrate') }}</span>
                 </div>
                 <div class="font-mono text-2xl font-bold text-slate-900">{{ formattedBitrate }}</div>
+                <div class="mt-1 text-xs text-slate-500">
+                  {{ t('tools.screenShare.activeTransport') }}: {{ activeTransportLabel }}
+                </div>
               </div>
             </div>
 
@@ -1040,6 +1549,7 @@ onUnmounted(() => {
   background: white;
   padding: 0.45rem;
   color: rgb(100 116 139);
+  cursor: pointer;
   transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
 }
 
@@ -1067,14 +1577,21 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+  min-height: 2.75rem;
   border: 1px solid rgb(226 232 240);
   border-radius: 9999px;
   background: rgb(248 250 252);
-  padding: 0.35rem 0.7rem;
+  padding: 0.5rem 0.85rem;
   font-size: 0.75rem;
   font-weight: 600;
   color: rgb(71 85 105);
+  cursor: pointer;
   transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.ss-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .ss-detail-button:hover {
@@ -1086,5 +1603,16 @@ onUnmounted(() => {
 .ss-detail-button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.ss-detail-button:focus-visible {
+  outline: 2px solid rgb(139 92 246 / 0.7);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ss-detail-button {
+    transition: none;
+  }
 }
 </style>

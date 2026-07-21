@@ -15,10 +15,13 @@ mod fileshare;
 mod local_exec;
 mod network;
 mod notepad_extensions;
+mod paper_todo;
 mod persist;
 mod remote_package_patch;
 mod scanner;
 mod screenshare;
+mod screenshare_input;
+mod screenshare_media;
 mod screenshare_web_assets;
 mod single_instance_guard;
 mod task_commands;
@@ -27,6 +30,7 @@ mod task_events;
 mod task_manager;
 mod task_persist;
 mod task_runtime;
+mod tftp_server;
 mod updater;
 mod webview2_bootstrap;
 mod windows_copy;
@@ -52,10 +56,14 @@ use tauri::{Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder, Window
 
 const TRAY_SHOW_ID: &str = "tray_show_main";
 const TRAY_CLIPBOARD_PANEL_ID: &str = "tray_toggle_clipboard_panel";
+const TRAY_PAPER_TODO_ID: &str = "tray_paper_todo";
+const TRAY_NEW_TODO_ID: &str = "tray_new_todo";
+const TRAY_NEW_NOTE_ID: &str = "tray_new_note";
 const TRAY_QUIT_ID: &str = "tray_quit";
 const MANUAL_COPY_RECOVERY_DELAY: Duration = Duration::from_secs(60);
 /// Must match `identifier` in tauri.conf.json (used for AUMID and the fallback data dir).
 const APP_IDENTIFIER: &str = "com.filesync.tool";
+const APP_DISPLAY_NAME: &str = "File Sync Tool";
 const CLIPBOARD_INIT_MAX_ATTEMPTS: u32 = 5;
 const CLIPBOARD_INIT_RETRY_DELAY: Duration = Duration::from_millis(600);
 const WATCHDOG_PING_INTERVAL: Duration = Duration::from_secs(2);
@@ -218,11 +226,13 @@ struct AppState {
     task_manager: task_manager::TaskManager,
     task_runtime: task_runtime::TaskRuntimeRegistry,
     executor_active: Arc<AtomicBool>,
+    executor_admission: Arc<Mutex<()>>,
     run_control_target: Arc<Mutex<Option<task_runtime::ActiveRunExecution>>>,
     is_scanning: Arc<AtomicBool>,
     is_manual_copying: Arc<AtomicBool>,
     is_manually_deploying: Arc<AtomicBool>,
     manual_copy_queue: Arc<Mutex<VecDeque<ManualCopyQueueItem>>>,
+    active_manual_copy_item: Arc<Mutex<Option<ManualCopyQueueItem>>>,
     manual_copy_keys: Arc<Mutex<HashSet<String>>>,
     manual_copy_worker_running: Arc<AtomicBool>,
     should_cancel: Arc<AtomicBool>,
@@ -254,6 +264,8 @@ struct ManualCopyQueueItem {
     skip_stability_check: bool,
     task_handle: Option<task_manager::TaskRunHandle>,
     trigger_source: task_domain::TaskTriggerSource,
+    task_id: Option<String>,
+    allow_deploy: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -353,6 +365,12 @@ fn reserve_scan_executor(
     state: &AppState,
     already_running_message: &'static str,
 ) -> Result<ExecutorReservation, String> {
+    let _admission = state.executor_admission.lock().unwrap();
+    if state.manual_copy_worker_running.load(Ordering::SeqCst)
+        || !state.manual_copy_queue.lock().unwrap().is_empty()
+    {
+        return Err("Manual copy queue already in progress".to_string());
+    }
     try_reserve_executor(state.executor_active.clone(), state.is_scanning.clone()).ok_or_else(
         || {
             if state.is_manually_deploying.load(Ordering::SeqCst) {
@@ -690,6 +708,7 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
     let config = state.config.clone();
     let task_manager = state.task_manager.clone();
     let manual_copy_queue = state.manual_copy_queue.clone();
+    let active_manual_copy_item = state.active_manual_copy_item.clone();
     let manual_copy_keys = state.manual_copy_keys.clone();
     let manual_copy_worker_running = state.manual_copy_worker_running.clone();
     let executor_active = state.executor_active.clone();
@@ -711,11 +730,21 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-                let queue_empty = manual_copy_queue.lock().unwrap().is_empty();
-                if queue_empty {
+                let queue_has_ready = manual_copy_queue.lock().unwrap().iter().any(|item| {
+                    item.task_handle.as_ref().map_or(true, |handle| {
+                        !task_manager.is_run_paused(&handle.task_group_id, &handle.run_id)
+                    })
+                });
+                if !queue_has_ready {
                     manual_copy_worker_running.store(false, Ordering::SeqCst);
-                    let queue_still_empty = manual_copy_queue.lock().unwrap().is_empty();
-                    if queue_still_empty || manual_copy_worker_running.swap(true, Ordering::SeqCst)
+                    let queue_still_has_ready =
+                        manual_copy_queue.lock().unwrap().iter().any(|item| {
+                            item.task_handle.as_ref().map_or(true, |handle| {
+                                !task_manager.is_run_paused(&handle.task_group_id, &handle.run_id)
+                            })
+                        });
+                    if !queue_still_has_ready
+                        || manual_copy_worker_running.swap(true, Ordering::SeqCst)
                     {
                         return;
                     }
@@ -723,10 +752,20 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
             };
 
             loop {
-                let next_task = { manual_copy_queue.lock().unwrap().pop_front() };
+                let next_task = {
+                    let mut queue = manual_copy_queue.lock().unwrap();
+                    let position = queue.iter().position(|item| {
+                        item.task_handle.as_ref().map_or(true, |handle| {
+                            !task_manager.is_run_paused(&handle.task_group_id, &handle.run_id)
+                        })
+                    });
+                    position.and_then(|index| queue.remove(index))
+                };
                 let Some(task) = next_task else {
                     break;
                 };
+
+                *active_manual_copy_item.lock().unwrap() = Some(task.clone());
 
                 should_cancel.store(false, Ordering::SeqCst);
                 should_skip_current.store(false, Ordering::SeqCst);
@@ -746,6 +785,7 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     ) {
                         Ok(handle) => handle,
                         Err(error) => {
+                            *active_manual_copy_item.lock().unwrap() = None;
                             manual_copy_keys.lock().unwrap().remove(&task.key);
                             emit_runtime_log(
                                 &app_handle,
@@ -761,6 +801,7 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                 {
                     Ok(active_execution) => active_execution,
                     Err(error) => {
+                        *active_manual_copy_item.lock().unwrap() = None;
                         let _ = task_manager.mark_copy_failed(
                             &run_handle.task_group_id,
                             &run_handle.run_id,
@@ -808,8 +849,11 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     task.file_extensions.clone(),
                     task.filename_includes.clone(),
                     task.skip_stability_check,
+                    task.task_id.clone(),
+                    task.allow_deploy,
                 )
                 .await;
+                *active_manual_copy_item.lock().unwrap() = None;
                 let _ = task_runtime.clear(&run_handle.task_group_id, &run_handle.run_id);
                 clear_finished_targeted_run_controls(
                     &active_execution,
@@ -821,13 +865,14 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
 
                 if let Err(error) = result {
                     let error_lower = error.to_lowercase();
-                    let state =
-                        if error_lower.contains("cancelled") || error_lower.contains("skipped") {
-                            "cancelled"
-                        } else {
-                            "failed"
-                        };
-                    let level = if state == "cancelled" {
+                    let state = if error_lower.contains("paused") {
+                        "paused"
+                    } else if error_lower.contains("cancelled") || error_lower.contains("skipped") {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    };
+                    let level = if matches!(state, "cancelled" | "paused") {
                         "warn"
                     } else {
                         "error"
@@ -837,7 +882,9 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                         format!("Manual copy task failed: {}", error),
                         level,
                     );
-                    if state == "cancelled" {
+                    if state == "paused" {
+                        // The same run remains queued and resumes from its .part file.
+                    } else if state == "cancelled" {
                         manual_copy_keys.lock().unwrap().remove(&task.key);
                     } else {
                         emit_runtime_log(
@@ -864,8 +911,12 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
             drop(execution_reservation);
 
             manual_copy_worker_running.store(false, Ordering::SeqCst);
-            let queue_has_items = !manual_copy_queue.lock().unwrap().is_empty();
-            if !queue_has_items || manual_copy_worker_running.swap(true, Ordering::SeqCst) {
+            let queue_has_ready = manual_copy_queue.lock().unwrap().iter().any(|item| {
+                item.task_handle.as_ref().map_or(true, |handle| {
+                    !task_manager.is_run_paused(&handle.task_group_id, &handle.run_id)
+                })
+            });
+            if !queue_has_ready || manual_copy_worker_running.swap(true, Ordering::SeqCst) {
                 break;
             }
         }
@@ -1107,6 +1158,152 @@ async fn confirm_quit(
     }
 }
 
+fn enqueue_manual_copy(state: &AppState, item: ManualCopyQueueItem) -> (usize, bool) {
+    let _admission = state.executor_admission.lock().unwrap();
+    let mut queue = state.manual_copy_queue.lock().unwrap();
+    let queued_ahead = queue.len()
+        + usize::from(
+            state.executor_active.load(Ordering::SeqCst)
+                || state.manual_copy_worker_running.load(Ordering::SeqCst),
+        );
+    queue.push_back(item);
+    let should_start_worker = !state
+        .manual_copy_worker_running
+        .swap(true, Ordering::SeqCst);
+    (queued_ahead, should_start_worker)
+}
+
+fn build_paused_copy_item(
+    state: &AppState,
+    task_group_id: &str,
+    run_id: &str,
+) -> Result<ManualCopyQueueItem, String> {
+    if let Some(item) = state.active_manual_copy_item.lock().unwrap().as_ref() {
+        if item
+            .task_handle
+            .as_ref()
+            .is_some_and(|handle| handle.task_group_id == task_group_id && handle.run_id == run_id)
+        {
+            return Ok(item.clone());
+        }
+    }
+
+    let group = state
+        .task_manager
+        .get_group_detail(task_group_id)
+        .ok_or_else(|| format!("Task group not found: {task_group_id}"))?;
+    let target_root_path = Path::new(&group.local_target_path)
+        .parent()
+        .ok_or_else(|| "Task target path has no parent directory".to_string())?
+        .to_path_buf();
+    let source_path = PathBuf::from(&group.source_path);
+    let key = manual_copy_queue_key(&source_path, &target_root_path)?;
+    let config = state.config.lock().unwrap().clone();
+
+    Ok(ManualCopyQueueItem {
+        key,
+        folder_name: group.folder_name,
+        source_path: group.source_path,
+        local_path: group.local_target_path,
+        target_root_path: target_root_path.to_string_lossy().to_string(),
+        overwrite_existing: false,
+        file_extensions: config.file_extensions,
+        filename_includes: config.filename_includes,
+        skip_stability_check: true,
+        task_handle: Some(task_manager::TaskRunHandle {
+            task_group_id: task_group_id.to_string(),
+            run_id: run_id.to_string(),
+        }),
+        trigger_source: task_domain::TaskTriggerSource::Recovery,
+        task_id: group.task_config_id,
+        allow_deploy: group.source_type == task_domain::TaskSourceType::Scheduled,
+    })
+}
+
+fn enqueue_paused_copy(state: &AppState, item: ManualCopyQueueItem) -> bool {
+    let _admission = state.executor_admission.lock().unwrap();
+    let mut queue = state.manual_copy_queue.lock().unwrap();
+    let duplicate = item.task_handle.as_ref().is_some_and(|candidate| {
+        queue.iter().any(|queued| {
+            queued.task_handle.as_ref().is_some_and(|handle| {
+                handle.task_group_id == candidate.task_group_id && handle.run_id == candidate.run_id
+            })
+        })
+    });
+    if !duplicate {
+        state
+            .manual_copy_keys
+            .lock()
+            .unwrap()
+            .insert(item.key.clone());
+        queue.push_front(item);
+    }
+    !state
+        .manual_copy_worker_running
+        .swap(true, Ordering::SeqCst)
+}
+
+#[cfg(target_os = "windows")]
+fn register_windows_notification_identity() -> Result<(), String> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let key_path = format!(r"Software\Classes\AppUserModelId\{APP_IDENTIFIER}");
+    let (key, _) = current_user
+        .create_subkey(key_path)
+        .map_err(|error| format!("create notification identity: {error}"))?;
+    key.set_value("DisplayName", &APP_DISPLAY_NAME)
+        .map_err(|error| format!("set notification display name: {error}"))?;
+    key.set_value("IconBackgroundColor", &"0")
+        .map_err(|error| format!("set notification icon background: {error}"))?;
+
+    if let Ok(executable) = std::env::current_exe() {
+        let icon_path = executable.to_string_lossy().to_string();
+        key.set_value("IconUri", &icon_path)
+            .map_err(|error| format!("set notification icon: {error}"))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn show_app_notification(
+    _app_handle: tauri::AppHandle,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        return tauri::async_runtime::spawn_blocking(move || {
+            tauri_winrt_notification::Toast::new(APP_IDENTIFIER)
+                .title(&title)
+                .text1(&body)
+                .show()
+                .map_err(|error| format!("show Windows notification: {error}"))
+        })
+        .await
+        .map_err(|error| format!("Windows notification task failed: {error}"))?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        _app_handle
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[tauri::command]
+fn cancel_quit(state: State<'_, AppState>) {
+    state.is_quitting.store(false, Ordering::SeqCst);
+}
+
 // Async so it runs on the tokio pool instead of the main thread: it spawns reg.exe
 // and does file IO, which would otherwise freeze the UI and tray while it runs.
 #[tauri::command]
@@ -1262,30 +1459,58 @@ fn cancel_task_run(
 
 #[tauri::command]
 fn pause_task_run(
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     task_group_id: String,
     run_id: String,
 ) -> Result<(), String> {
+    let queued_item = build_paused_copy_item(state.inner(), &task_group_id, &run_id)?;
+    state
+        .task_manager
+        .requeue_paused_copy(&task_group_id, &run_id)?;
+    let should_start_worker = enqueue_paused_copy(state.inner(), queued_item);
     set_targeted_run_controls(
         state.inner(),
         &task_group_id,
         &run_id,
-        None,
+        Some(true),
         Some(true),
         None,
     )?;
-    let _ = state
-        .task_manager
-        .set_run_paused(&task_group_id, &run_id, true);
+    if should_start_worker {
+        start_manual_copy_worker(app_handle, state.inner());
+    }
     Ok(())
 }
 
 #[tauri::command]
 fn resume_task_run(
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     task_group_id: String,
     run_id: String,
 ) -> Result<(), String> {
+    let is_queued = state.manual_copy_queue.lock().unwrap().iter().any(|item| {
+        item.task_handle
+            .as_ref()
+            .is_some_and(|handle| handle.task_group_id == task_group_id && handle.run_id == run_id)
+    });
+    if is_queued {
+        state
+            .task_manager
+            .set_run_paused(&task_group_id, &run_id, false)?;
+        let should_start_worker = {
+            let _admission = state.executor_admission.lock().unwrap();
+            !state
+                .manual_copy_worker_running
+                .swap(true, Ordering::SeqCst)
+        };
+        if should_start_worker {
+            start_manual_copy_worker(app_handle, state.inner());
+        }
+        return Ok(());
+    }
+
     set_targeted_run_controls(
         state.inner(),
         &task_group_id,
@@ -1727,6 +1952,8 @@ async fn temporary_copy(
         file_extensions,
         filename_includes,
         false,
+        None,
+        false,
     )
     .await;
 
@@ -1782,11 +2009,9 @@ async fn start_manual_copy_task(
     let (folder_name, local_path, _, _) =
         validate_manual_copy_request(&source_path, &target_root_path)?;
 
-    state
-        .manual_copy_queue
-        .lock()
-        .unwrap()
-        .push_back(ManualCopyQueueItem {
+    let (_, should_start_worker) = enqueue_manual_copy(
+        state.inner(),
+        ManualCopyQueueItem {
             key: task_key,
             folder_name,
             source_path: source_path.to_string_lossy().to_string(),
@@ -1798,7 +2023,10 @@ async fn start_manual_copy_task(
             skip_stability_check: request.skip_stability_check,
             task_handle: Some(run_handle.clone()),
             trigger_source: task_domain::TaskTriggerSource::Manual,
-        });
+            task_id: None,
+            allow_deploy: false,
+        },
+    );
 
     emit_runtime_log(
         &app_handle,
@@ -1810,10 +2038,7 @@ async fn start_manual_copy_task(
         "info",
     );
 
-    if !state
-        .manual_copy_worker_running
-        .swap(true, Ordering::SeqCst)
-    {
+    if should_start_worker {
         start_manual_copy_worker(app_handle, state.inner());
     }
 
@@ -1865,14 +2090,9 @@ async fn queue_temporary_copy(
             }
         };
 
-    let queued_ahead = state.manual_copy_queue.lock().unwrap().len()
-        + usize::from(state.manual_copy_worker_running.load(Ordering::SeqCst));
-
-    state
-        .manual_copy_queue
-        .lock()
-        .unwrap()
-        .push_back(ManualCopyQueueItem {
+    let (queued_ahead, should_start_worker) = enqueue_manual_copy(
+        state.inner(),
+        ManualCopyQueueItem {
             key: task_key,
             folder_name: folder_name.clone(),
             source_path: source_path.to_string_lossy().to_string(),
@@ -1884,7 +2104,10 @@ async fn queue_temporary_copy(
             skip_stability_check,
             task_handle: Some(run_handle),
             trigger_source: task_domain::TaskTriggerSource::Manual,
-        });
+            task_id: None,
+            allow_deploy: false,
+        },
+    );
 
     emit_runtime_log(
         &app_handle,
@@ -1896,10 +2119,7 @@ async fn queue_temporary_copy(
         "info",
     );
 
-    if !state
-        .manual_copy_worker_running
-        .swap(true, Ordering::SeqCst)
-    {
+    if should_start_worker {
         start_manual_copy_worker(app_handle, state.inner());
     }
 
@@ -2195,7 +2415,8 @@ mod tests {
     use super::schedule_dialog_task;
     use super::{
         appliance_ssh_api_port, build_appliance_ssh_api_url, build_iptables_whitelist_rule,
-        resolve_appliance_ssh_creds, resolve_jump_host_ssh_port, ApplianceSshApiVersion,
+        resolve_appliance_ssh_creds, resolve_jump_host_ssh_port,
+        reverse_appliance_ssh_failover_target, ApplianceSshApiVersion, ApplianceSshTarget,
         ApplianceSshWhitelistScope,
     };
     #[cfg(target_os = "windows")]
@@ -2377,6 +2598,37 @@ mod tests {
             ("jump".to_string(), " jpass ".to_string())
         );
     }
+
+    #[test]
+    fn appliance_ssh_failover_reverses_api_and_ssh_hop_once() {
+        let target = ApplianceSshTarget {
+            ip: "192.115.1.55".to_string(),
+            jump_host: Some("192.115.1.17".to_string()),
+            allow_failover: true,
+        };
+        assert_eq!(
+            reverse_appliance_ssh_failover_target(&target).map(|reversed| (
+                reversed.ip,
+                reversed.jump_host,
+                reversed.allow_failover
+            )),
+            Some((
+                "192.115.1.17".to_string(),
+                Some("192.115.1.55".to_string()),
+                false,
+            ))
+        );
+    }
+
+    #[test]
+    fn appliance_ssh_failover_is_disabled_for_direct_targets() {
+        assert!(reverse_appliance_ssh_failover_target(&ApplianceSshTarget {
+            ip: "192.115.1.55".to_string(),
+            jump_host: None,
+            allow_failover: true,
+        })
+        .is_none());
+    }
 }
 
 #[tauri::command]
@@ -2443,6 +2695,26 @@ pub struct ApplianceSshTarget {
     pub ip: String,
     #[serde(default)]
     pub jump_host: Option<String>,
+    /// When true, retry the pair with the API and SSH hop reversed if the
+    /// preferred HA direction cannot complete.
+    #[serde(default)]
+    pub allow_failover: bool,
+}
+
+fn reverse_appliance_ssh_failover_target(
+    target: &ApplianceSshTarget,
+) -> Option<ApplianceSshTarget> {
+    let jump_host = target.jump_host.as_ref()?.trim();
+    let ip = target.ip.trim();
+    if jump_host.is_empty() || ip.is_empty() || !target.allow_failover {
+        return None;
+    }
+
+    Some(ApplianceSshTarget {
+        ip: jump_host.to_string(),
+        jump_host: Some(ip.to_string()),
+        allow_failover: false,
+    })
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -3704,6 +3976,7 @@ async fn enable_appliance_ssh(
         targets.push(ApplianceSshTarget {
             ip,
             jump_host: None,
+            allow_failover: false,
         });
     }
 
@@ -3732,7 +4005,16 @@ async fn enable_appliance_ssh(
             let jump_user = jump_user.clone();
             let jump_pass = jump_pass.clone();
             async move {
-                enable_appliance_ssh_for_target(
+                let failover_target = reverse_appliance_ssh_failover_target(&target);
+                let retry_app_handle = app_handle.clone();
+                let retry_client = client.clone();
+                let retry_ssh_username = ssh_username.clone();
+                let retry_ssh_password = ssh_password.clone();
+                let retry_whitelist_cidr = whitelist_cidr.clone();
+                let retry_jump_user = jump_user.clone();
+                let retry_jump_pass = jump_pass.clone();
+
+                let first_result = enable_appliance_ssh_for_target(
                     app_handle,
                     client,
                     target,
@@ -3746,7 +4028,61 @@ async fn enable_appliance_ssh(
                     jump_pass,
                     jump_host_ssh_port,
                 )
+                .await;
+
+                let first_failed = first_result
+                    .as_ref()
+                    .is_some_and(|result| !result.success);
+                let Some(failover_target) = failover_target.filter(|_| first_failed) else {
+                    return first_result;
+                };
+                let first_message = first_result
+                    .as_ref()
+                    .map(|result| result.message.clone())
+                    .unwrap_or_default();
+                emit_runtime_log(
+                    &retry_app_handle,
+                    format!(
+                        "[appliance-access] preferred HA direction failed ({}); retrying apiHost={} target={}",
+                        first_message,
+                        failover_target.jump_host.as_deref().unwrap_or_default(),
+                        failover_target.ip
+                    ),
+                    "warn",
+                );
+
+                match enable_appliance_ssh_for_target(
+                    retry_app_handle,
+                    retry_client,
+                    failover_target,
+                    api_version,
+                    retry_ssh_username,
+                    retry_ssh_password,
+                    add_whitelist_rule,
+                    whitelist_scope,
+                    retry_whitelist_cidr,
+                    retry_jump_user,
+                    retry_jump_pass,
+                    jump_host_ssh_port,
+                )
                 .await
+                {
+                    Some(mut result) if result.success => {
+                        result.message = format!(
+                            "HA direction switched after the preferred path failed ({}). {}",
+                            first_message, result.message
+                        );
+                        Some(result)
+                    }
+                    Some(mut result) => {
+                        result.message = format!(
+                            "Preferred HA path failed ({}); reverse path also failed ({})",
+                            first_message, result.message
+                        );
+                        Some(result)
+                    }
+                    None => first_result,
+                }
             }
         },
     )
@@ -3786,15 +4122,22 @@ fn main() {
     // 这里直接退出，不会走到窗口创建。
     single_instance_guard::ensure_single_instance(APP_IDENTIFIER);
 
-    // Register an explicit AppUserModelID so Windows notifications show the app
-    // name ("File Sync Tool") rather than the launching shell ("PowerShell").
-    // Must run before any notification or WinRT call. Failures are non-fatal.
+    // Register the unpackaged app identity before any notification or WinRT call.
+    // The bare EXE and dev builds do not have an installer-created Start Menu identity.
     #[cfg(target_os = "windows")]
-    unsafe {
-        use windows::core::PCWSTR;
-        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
-        let aumid: Vec<u16> = format!("{APP_IDENTIFIER}\0").encode_utf16().collect();
-        let _ = SetCurrentProcessExplicitAppUserModelID(PCWSTR(aumid.as_ptr()));
+    {
+        if let Err(error) = register_windows_notification_identity() {
+            startup_log(
+                "warn",
+                &format!("Windows notification identity registration failed: {error}"),
+            );
+        }
+        unsafe {
+            use windows::core::PCWSTR;
+            use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+            let aumid: Vec<u16> = format!("{APP_IDENTIFIER}\0").encode_utf16().collect();
+            let _ = SetCurrentProcessExplicitAppUserModelID(PCWSTR(aumid.as_ptr()));
+        }
     }
 
     tauri::Builder::default()
@@ -3805,8 +4148,10 @@ fn main() {
                 let _ = webview.window().show();
             }
         })
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main_window(app, "重复启动实例唤起");
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !paper_todo::handle_startup_args(app, &args) {
+                show_main_window(app, "重复启动实例唤起");
+            }
             let _ = app.emit("single-instance", ());
         }))
         .plugin(tauri_plugin_log::Builder::default().build())
@@ -3935,17 +4280,21 @@ fn main() {
 
             app.manage(network::NetworkState::default());
             app.manage(device_simulator_commands::DeviceSimulatorCommandState::default());
+            app.manage(tftp_server::TftpServerState::default());
+            app.manage(paper_todo::PaperTodoRuntime::default());
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
                 updater: Arc::new(updater::UpdaterState::new()),
                 task_manager,
                 task_runtime: task_runtime::TaskRuntimeRegistry::new(),
                 executor_active: Arc::new(AtomicBool::new(false)),
+                executor_admission: Arc::new(Mutex::new(())),
                 run_control_target: Arc::new(Mutex::new(None)),
                 is_scanning: Arc::new(AtomicBool::new(false)),
                 is_manual_copying: Arc::new(AtomicBool::new(false)),
                 is_manually_deploying: Arc::new(AtomicBool::new(false)),
                 manual_copy_queue: Arc::new(Mutex::new(VecDeque::new())),
+                active_manual_copy_item: Arc::new(Mutex::new(None)),
                 manual_copy_keys: Arc::new(Mutex::new(HashSet::new())),
                 manual_copy_worker_running: Arc::new(AtomicBool::new(false)),
                 should_cancel: Arc::new(AtomicBool::new(false)),
@@ -3959,6 +4308,8 @@ fn main() {
                 clipboard: clipboard_state,
                 error_code: std::sync::Mutex::new(error_code::ErrorCodeStore::default()),
             });
+
+            paper_todo::initialize(app.handle());
 
             if let Some(state) = app.try_state::<AppState>() {
                 updater::commands::initialize_on_startup(app.handle().clone(), state.inner());
@@ -4059,6 +4410,10 @@ fn main() {
                 .text(TRAY_SHOW_ID, "显示主窗口")
                 .text(TRAY_CLIPBOARD_PANEL_ID, "Clipboard Panel")
                 .separator()
+                .text(TRAY_PAPER_TODO_ID, "桌面便签")
+                .text(TRAY_NEW_TODO_ID, "新建待办纸")
+                .text(TRAY_NEW_NOTE_ID, "新建笔记纸")
+                .separator()
                 .text(TRAY_QUIT_ID, "退出")
                 .build()?;
 
@@ -4071,6 +4426,22 @@ fn main() {
                     TRAY_SHOW_ID => show_main_window(app, "托盘菜单「显示主窗口」"),
                     TRAY_CLIPBOARD_PANEL_ID => {
                         let _ = clipboard::commands::cb_toggle_panel_internal(app.clone());
+                    }
+                    TRAY_PAPER_TODO_ID => {
+                        show_main_window(app, "托盘菜单「桌面便签」");
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.eval("window.location.hash = '#/tools/paper-todo'");
+                        }
+                    }
+                    TRAY_NEW_TODO_ID => {
+                        if let Err(error) = paper_todo::create_and_open(app, "todo") {
+                            log::warn!("[paper-todo] tray create todo failed: {error}");
+                        }
+                    }
+                    TRAY_NEW_NOTE_ID => {
+                        if let Err(error) = paper_todo::create_and_open(app, "note") {
+                            log::warn!("[paper-todo] tray create note failed: {error}");
+                        }
                     }
                     TRAY_QUIT_ID => {
                         if let Some(state) = app.try_state::<AppState>() {
@@ -4100,6 +4471,9 @@ fn main() {
 
             let _ = tray_builder.build(app)?;
 
+            let initial_args: Vec<String> = std::env::args().collect();
+            let _ = paper_todo::handle_startup_args(app.handle(), &initial_args);
+
             // Boot-time ground truth for "no window after logon" field reports:
             // whether the main window is actually visible when setup finishes.
             if let Some(window) = app.get_webview_window("main") {
@@ -4121,17 +4495,16 @@ fn main() {
             // Fire a startup toast so users know the watcher is live and how to open the panel.
             // Delayed 500ms so the notification plugin + tray finish initializing first.
             if clipboard_enabled_at_start && config_show_startup_notification {
-                use tauri_plugin_notification::NotificationExt;
                 let handle = app.handle().clone();
                 let hotkey_display = clipboard_hotkey_at_start.clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    let _ = handle
-                        .notification()
-                        .builder()
-                        .title("File-Sync-Tool 剪贴板")
-                        .body(format!("剪贴板监听已启动，按 {hotkey_display} 呼出面板"))
-                        .show();
+                    let _ = show_app_notification(
+                        handle,
+                        "File-Sync-Tool 剪贴板".into(),
+                        format!("剪贴板监听已启动，按 {hotkey_display} 呼出面板"),
+                    )
+                    .await;
                 });
             }
 
@@ -4245,14 +4618,41 @@ fn main() {
             notepad_extensions::notepad_extensions_install_plugin,
             notepad_extensions::notepad_extensions_read_enhance_config,
             notepad_extensions::notepad_extensions_save_enhance_config,
+            paper_todo::paper_todo_load,
+            paper_todo::paper_todo_save_paper,
+            paper_todo::paper_todo_delete_paper,
+            paper_todo::paper_todo_save_settings,
+            paper_todo::paper_todo_save_order,
+            paper_todo::paper_todo_open_window,
+            paper_todo::paper_todo_create_paper,
+            paper_todo::paper_todo_set_launcher_expanded,
+            paper_todo::paper_todo_open_settings,
+            paper_todo::paper_todo_set_window_mode,
+            paper_todo::paper_todo_dock_window,
+            paper_todo::paper_todo_set_all_windows,
+            paper_todo::paper_todo_import_image,
+            paper_todo::paper_todo_resolve_assets,
+            paper_todo::paper_todo_open_external,
+            paper_todo::paper_todo_run_script,
+            paper_todo::paper_todo_export,
+            paper_todo::paper_todo_import,
+            paper_todo::paper_todo_clean_assets,
             screenshare::screen_share_list_monitors,
             screenshare::screen_share_list_interfaces,
             screenshare::screen_share_start,
             screenshare::screen_share_stop,
             screenshare::screen_share_get_status,
             screenshare::screen_share_clear_annotations,
+            screenshare::screen_share_remove_annotation,
+            screenshare::screen_share_update_annotation,
+            screenshare::screen_share_get_annotation_state,
+            screenshare::screen_share_respond_control_request,
+            screenshare::screen_share_revoke_control,
             screenshare::screen_share_open_local_preview,
             screenshare::screen_share_close_local_preview,
+            screenshare::screen_share_open_desktop_overlay,
+            screenshare::screen_share_desktop_overlay_ready,
+            screenshare::screen_share_close_desktop_overlay,
             display_control::monitor_control_list,
             display_control::monitor_control_set,
             fileshare::file_share_pick_directory,
@@ -4262,10 +4662,18 @@ fn main() {
             fileshare::file_share_start,
             fileshare::file_share_stop,
             fileshare::file_share_get_status,
+            tftp_server::tftp_server_pick_directory,
+            tftp_server::tftp_server_pick_file,
+            tftp_server::tftp_server_list_files,
+            tftp_server::tftp_server_start,
+            tftp_server::tftp_server_stop,
+            tftp_server::tftp_server_get_status,
             error_code::commands::error_code_sync,
             error_code::commands::error_code_query,
             error_code::commands::error_code_get_meta,
+            show_app_notification,
             confirm_quit,
+            cancel_quit,
             clipboard::commands::cb_is_enabled,
             clipboard::commands::cb_enable,
             clipboard::commands::cb_disable,
