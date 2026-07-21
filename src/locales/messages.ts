@@ -1184,6 +1184,7 @@ export const messages = {
       launcher: {
         expand: 'Expand edge launcher',
         collapse: 'Collapse edge launcher',
+        moveHint: 'Click to expand or collapse; drag to move vertically',
       },
       settings: {
         edgeLauncher: 'Edge launcher',
@@ -3968,6 +3969,7 @@ export const messages = {
       launcher: {
         expand: '展开边缘入口',
         collapse: '收起边缘入口',
+        moveHint: '单击展开或收起，拖动可上下移动',
       },
       settings: {
         edgeLauncher: '屏幕边缘入口',

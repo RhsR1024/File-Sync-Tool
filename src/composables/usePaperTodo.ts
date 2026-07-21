@@ -35,6 +35,7 @@ const error = ref('');
 const savingIds = ref(new Set<string>());
 const histories = new Map<string, PaperHistory>();
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingPaperSaves = new Map<string, Promise<void>>();
 let settingsTimer: ReturnType<typeof setTimeout> | null = null;
 let initPromise: Promise<void> | null = null;
 let unlisten: UnlistenFn | null = null;
@@ -77,17 +78,30 @@ async function persistPaper(paper: PaperDocument): Promise<void> {
   }
 }
 
+function enqueuePaperSave(paper: PaperDocument): Promise<void> {
+  const snapshot = clonePaper(paper);
+  const previous = pendingPaperSaves.get(paper.id) ?? Promise.resolve();
+  const pending = previous.then(() => persistPaper(snapshot));
+  pendingPaperSaves.set(paper.id, pending);
+  void pending.finally(() => {
+    if (pendingPaperSaves.get(paper.id) === pending) {
+      pendingPaperSaves.delete(paper.id);
+    }
+  });
+  return pending;
+}
+
 function schedulePaperSave(paper: PaperDocument, immediate = false): void {
   const current = saveTimers.get(paper.id);
   if (current) clearTimeout(current);
   if (immediate) {
     saveTimers.delete(paper.id);
-    void persistPaper(paper);
+    void enqueuePaperSave(paper);
     return;
   }
   saveTimers.set(paper.id, setTimeout(() => {
     saveTimers.delete(paper.id);
-    void persistPaper(paper);
+    void enqueuePaperSave(paper);
   }, 280));
 }
 
@@ -136,6 +150,7 @@ async function removePaper(id: string): Promise<void> {
   const timer = saveTimers.get(id);
   if (timer) clearTimeout(timer);
   saveTimers.delete(id);
+  await pendingPaperSaves.get(id);
   state.value.papers = state.value.papers.filter((paper) => paper.id !== id);
   histories.delete(id);
   try {
@@ -217,8 +232,9 @@ async function flush(): Promise<void> {
     if (timer) clearTimeout(timer);
     saveTimers.delete(id);
     const paper = state.value.papers.find((candidate) => candidate.id === id);
-    if (paper) await persistPaper(paper);
+    if (paper) void enqueuePaperSave(paper);
   }
+  await Promise.all([...pendingPaperSaves.values()]);
   if (settingsTimer) {
     clearTimeout(settingsTimer);
     settingsTimer = null;

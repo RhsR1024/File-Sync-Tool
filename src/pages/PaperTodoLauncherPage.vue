@@ -9,6 +9,7 @@ import {
   Settings2,
   StickyNote,
 } from 'lucide-vue-next';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
@@ -16,6 +17,7 @@ import { usePaperTodo } from '@/composables/usePaperTodo';
 import {
   createDesktopPaper,
   openPaperTodoSettings,
+  savePaperLauncherPosition,
   setAllPaperWindows,
   setPaperLauncherExpanded,
   type PaperKind,
@@ -28,6 +30,11 @@ const store = usePaperTodo();
 const expanded = ref(false);
 const busy = ref(false);
 let collapseTimer: ReturnType<typeof setTimeout> | null = null;
+let dragSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let dragArmTimer: ReturnType<typeof setTimeout> | null = null;
+let unlistenMoved: (() => void) | null = null;
+let dragArmed = false;
+let lastDragMoveAt = 0;
 
 const edge = computed(() => store.settings.value.launcherEdge);
 const paperCount = computed(() => store.papers.value.length);
@@ -43,6 +50,41 @@ async function setExpanded(value: boolean): Promise<void> {
   await setPaperLauncherExpanded(value);
 }
 
+function toggleExpanded(): void {
+  if (Date.now() - lastDragMoveAt < 450) return;
+  void setExpanded(!expanded.value);
+}
+
+function startLauncherDrag(event: MouseEvent): void {
+  if (event.button !== 0) return;
+  dragArmed = true;
+  if (dragArmTimer) clearTimeout(dragArmTimer);
+  dragArmTimer = setTimeout(() => {
+    dragArmed = false;
+    dragArmTimer = null;
+  }, 1_500);
+  void getCurrentWindow().startDragging().catch((reason) => {
+    dragArmed = false;
+    store.error.value = String(reason);
+  });
+}
+
+function scheduleLauncherPositionSave(): void {
+  if (!dragArmed) return;
+  lastDragMoveAt = Date.now();
+  if (dragSaveTimer) clearTimeout(dragSaveTimer);
+  dragSaveTimer = setTimeout(async () => {
+    dragArmed = false;
+    dragSaveTimer = null;
+    try {
+      await savePaperLauncherPosition();
+      await store.refreshFromDisk();
+    } catch (reason) {
+      store.error.value = String(reason);
+    }
+  }, 300);
+}
+
 function scheduleCollapse(): void {
   cancelCollapse();
   collapseTimer = setTimeout(() => void setExpanded(false), 550);
@@ -55,6 +97,8 @@ async function createPaper(kind: PaperKind): Promise<void> {
     await createDesktopPaper(kind);
     await store.refreshFromDisk();
     await setExpanded(false);
+  } catch (reason) {
+    store.error.value = String(reason);
   } finally {
     busy.value = false;
   }
@@ -70,8 +114,16 @@ async function openSettings(): Promise<void> {
   await setExpanded(false);
 }
 
-onMounted(() => void store.initialize());
-onBeforeUnmount(cancelCollapse);
+onMounted(async () => {
+  await store.initialize();
+  unlistenMoved = await getCurrentWindow().onMoved(scheduleLauncherPositionSave);
+});
+onBeforeUnmount(() => {
+  cancelCollapse();
+  if (dragSaveTimer) clearTimeout(dragSaveTimer);
+  if (dragArmTimer) clearTimeout(dragArmTimer);
+  unlistenMoved?.();
+});
 </script>
 
 <template>
@@ -88,9 +140,10 @@ onBeforeUnmount(cancelCollapse);
         type="button"
         class="launcher-handle"
         :class="edge === 'left' ? 'order-2' : 'order-1'"
-        :title="expanded ? t('paperTodo.launcher.collapse') : t('paperTodo.launcher.expand')"
+        :title="t('paperTodo.launcher.moveHint')"
         :aria-label="expanded ? t('paperTodo.launcher.collapse') : t('paperTodo.launcher.expand')"
-        @click="setExpanded(!expanded)"
+        @mousedown="startLauncherDrag"
+        @click="toggleExpanded"
       >
         <ChevronRight v-if="expanded && edge === 'left'" class="h-3.5 w-3.5" />
         <ChevronLeft v-else-if="expanded" class="h-3.5 w-3.5" />
@@ -124,7 +177,7 @@ onBeforeUnmount(cancelCollapse);
   width: 2.5rem;
   height: 100%;
   flex: 0 0 2.5rem;
-  cursor: pointer;
+  cursor: grab;
   flex-direction: column;
   align-items: center;
   justify-content: center;
@@ -132,6 +185,7 @@ onBeforeUnmount(cancelCollapse);
   border-color: rgb(71 85 105 / 0.7);
   background: rgb(30 41 59 / 0.95);
 }
+.launcher-handle:active { cursor: grabbing; }
 .launcher-action {
   display: inline-flex;
   width: 2rem;

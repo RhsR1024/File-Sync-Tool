@@ -214,7 +214,7 @@ export function normalizePaperTodoState(value: unknown): PaperTodoState {
   } as PaperTodoSettings;
   settings.titleMaxLength = Math.min(20, Math.max(2, finiteNumber(settings.titleMaxLength, 20)));
   settings.interfaceScale = Math.min(120, Math.max(80, finiteNumber(settings.interfaceScale, 100)));
-  settings.launcherOffset = Math.min(80, Math.max(10, finiteNumber(settings.launcherOffset, 35)));
+  settings.launcherOffset = Math.min(100, Math.max(0, finiteNumber(settings.launcherOffset, 35)));
   settings.launcherEdge = settings.launcherEdge === 'left' ? 'left' : 'right';
 
   const papers = Array.isArray(input.papers)
@@ -355,6 +355,11 @@ export async function createDesktopPaper(kind: PaperKind): Promise<void> {
 export async function setPaperLauncherExpanded(expanded: boolean): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke('paper_todo_set_launcher_expanded', { expanded });
+}
+
+export async function savePaperLauncherPosition(): Promise<number> {
+  if (!isTauriRuntime()) return 35;
+  return invoke<number>('paper_todo_save_launcher_position');
 }
 
 export async function openPaperTodoSettings(): Promise<void> {

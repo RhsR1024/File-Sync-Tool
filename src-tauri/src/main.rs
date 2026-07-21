@@ -4626,6 +4626,7 @@ fn main() {
             paper_todo::paper_todo_open_window,
             paper_todo::paper_todo_create_paper,
             paper_todo::paper_todo_set_launcher_expanded,
+            paper_todo::paper_todo_save_launcher_position,
             paper_todo::paper_todo_open_settings,
             paper_todo::paper_todo_set_window_mode,
             paper_todo::paper_todo_dock_window,

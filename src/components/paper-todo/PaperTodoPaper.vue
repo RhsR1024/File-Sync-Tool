@@ -60,6 +60,7 @@ const newTodoText = ref('');
 const noteTextarea = ref<HTMLTextAreaElement | null>(null);
 const previewMode = ref<'edit' | 'split' | 'preview'>('edit');
 const pendingImage = ref(false);
+const deleteConfirmationOpen = ref(false);
 
 const paper = computed(() => store.state.value.papers.find((item) => item.id === props.paperId) ?? null);
 const settings = computed(() => store.state.value.settings);
@@ -273,8 +274,13 @@ async function openDesktop(): Promise<void> {
 async function createSiblingPaper(kind: 'todo' | 'note'): Promise<void> {
   const created = store.addPaper(kind);
   if (!created) return;
-  store.updatePaper(created.id, (value) => { value.desktopOpen = true; }, { immediate: true });
-  await openPaperWindow(created, settings.value);
+  try {
+    store.updatePaper(created.id, (value) => { value.desktopOpen = true; }, { immediate: true });
+    await store.flush();
+    await openPaperWindow(created, settings.value);
+  } catch (reason) {
+    store.error.value = String(reason);
+  }
 }
 
 async function openLinkedNote(id: string | null): Promise<void> {
@@ -323,9 +329,10 @@ async function dock(edge: 'left' | 'right'): Promise<void> {
   update((value) => { value.geometry.dockEdge = edge; }, false, true);
 }
 
-async function deletePaper(): Promise<void> {
-  if (!paper.value || !window.confirm(t('paperTodo.confirmDeletePaper'))) return;
+async function confirmDeletePaper(): Promise<void> {
+  if (!paper.value) return;
   const id = paper.value.id;
+  deleteConfirmationOpen.value = false;
   await store.removePaper(id);
   emit('deleted', id);
 }
@@ -341,7 +348,7 @@ function startWindowDrag(event: MouseEvent): void {
 <template>
   <section
     v-if="paper"
-    class="flex min-h-0 flex-col overflow-hidden border shadow-[0_18px_45px_var(--tw-shadow-color)]"
+    class="relative flex min-h-0 flex-col overflow-hidden border shadow-[0_18px_45px_var(--tw-shadow-color)]"
     :class="[
       paletteClass,
       standalone ? 'h-screen rounded-[7px]' : 'h-[520px] rounded-lg',
@@ -462,7 +469,7 @@ function startWindowDrag(event: MouseEvent): void {
           <button class="paper-icon-button" type="button" :disabled="!store.canUndo(paper.id)" :title="t('paperTodo.undo')" @click="store.undoPaper(paper.id)"><Undo2 class="h-4 w-4" /></button>
           <button class="paper-icon-button" type="button" :disabled="!store.canRedo(paper.id)" :title="t('paperTodo.redo')" @click="store.redoPaper(paper.id)"><Redo2 class="h-4 w-4" /></button>
           <button class="paper-icon-button" type="button" :disabled="!completedCount" :title="t('paperTodo.clearCompleted')" @click="clearCompleted"><RotateCcw class="h-4 w-4" /></button>
-          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="deletePaper"><Trash2 class="h-4 w-4" /></button>
+          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="deleteConfirmationOpen = true"><Trash2 class="h-4 w-4" /></button>
         </footer>
       </div>
 
@@ -501,10 +508,27 @@ function startWindowDrag(event: MouseEvent): void {
           <span class="mr-auto text-xs opacity-45">{{ paper.content.length.toLocaleString() }} / {{ MAX_NOTE_LENGTH.toLocaleString() }}</span>
           <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="t('paperTodo.dockLeft')" @click="dock('left')"><PanelLeftClose class="h-4 w-4" /></button>
           <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="t('paperTodo.dockRight')" @click="dock('right')"><PanelRightClose class="h-4 w-4" /></button>
-          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="deletePaper"><Trash2 class="h-4 w-4" /></button>
+          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="deleteConfirmationOpen = true"><Trash2 class="h-4 w-4" /></button>
         </footer>
       </div>
     </template>
+
+    <div
+      v-if="deleteConfirmationOpen"
+      class="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/25 p-5 backdrop-blur-[1px]"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="t('paperTodo.deletePaper')"
+      @keydown.esc="deleteConfirmationOpen = false"
+    >
+      <div class="w-full max-w-72 rounded-md border border-current/15 bg-white p-4 text-slate-800 shadow-xl dark:bg-zinc-900 dark:text-zinc-100">
+        <p class="text-sm leading-6">{{ t('paperTodo.confirmDeletePaper') }}</p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button type="button" class="paper-confirm-button" @click="deleteConfirmationOpen = false">{{ t('common.cancel') }}</button>
+          <button type="button" class="paper-confirm-button border-rose-300 text-rose-700 hover:bg-rose-50 dark:text-rose-300" @click="confirmDeletePaper">{{ t('paperTodo.deletePaper') }}</button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -543,6 +567,17 @@ function startWindowDrag(event: MouseEvent): void {
   font-weight: 600;
   cursor: pointer;
 }
+.paper-confirm-button {
+  min-height: 2.25rem;
+  cursor: pointer;
+  border: 1px solid rgb(203 213 225);
+  border-radius: 0.375rem;
+  padding: 0 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.paper-confirm-button:hover { background: rgb(248 250 252 / 0.85); }
+.paper-confirm-button:focus-visible { outline: 2px solid rgb(14 165 233 / 0.55); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .paper-icon-button { transition: none; }
 }

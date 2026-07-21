@@ -93,7 +93,7 @@ const toggleFields: Array<{ key: keyof PaperTodoSettings; label: string; descrip
         </label>
         <label class="paper-setting-field md:col-span-2">
           <span>{{ t('paperTodo.settings.launcherOffset') }} · {{ settings.launcherOffset }}%</span>
-          <input class="max-w-xl" type="range" min="10" max="80" step="5" :value="settings.launcherOffset" :disabled="!settings.launcherEnabled" @input="setNumber('launcherOffset', $event)">
+          <input class="max-w-xl" type="range" min="0" max="100" step="5" :value="settings.launcherOffset" :disabled="!settings.launcherEnabled" @input="setNumber('launcherOffset', $event)">
         </label>
       </div>
     </section>

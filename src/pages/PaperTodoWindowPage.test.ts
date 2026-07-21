@@ -1,18 +1,18 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
 const pageSource = readFileSync(
-  fileURLToPath(new URL('./PaperTodoWindowPage.vue', import.meta.url)),
+  resolve(process.cwd(), 'src/pages/PaperTodoWindowPage.vue'),
   'utf8',
 );
 const backendSource = readFileSync(
-  fileURLToPath(new URL('../../src-tauri/src/paper_todo.rs', import.meta.url)),
+  resolve(process.cwd(), 'src-tauri/src/paper_todo.rs'),
   'utf8',
 );
 const styleSource = readFileSync(
-  fileURLToPath(new URL('../style.css', import.meta.url)),
+  resolve(process.cwd(), 'src/style.css'),
   'utf8',
 );
 

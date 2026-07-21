@@ -401,7 +401,7 @@ fn launcher_position(
         .get("launcherOffset")
         .and_then(Value::as_i64)
         .unwrap_or(35)
-        .clamp(10, 80) as i32;
+        .clamp(0, 100) as i32;
     let available_height = monitor_size.height as i32 - window_size.height as i32;
     let y = monitor_position.y + available_height.max(0) * offset / 100;
     let x = if edge == "left" {
@@ -482,6 +482,41 @@ pub fn paper_todo_set_launcher_expanded(app: AppHandle, expanded: bool) -> Resul
         load_document_unlocked(&app)
     };
     sync_launcher_window(&app, &document["settings"])
+}
+
+#[tauri::command]
+pub fn paper_todo_save_launcher_position(
+    app: AppHandle,
+    runtime: tauri::State<'_, PaperTodoRuntime>,
+) -> Result<i64, String> {
+    let window = app
+        .get_webview_window(LAUNCHER_LABEL)
+        .ok_or_else(|| "边缘入口窗口不存在".to_string())?;
+    let monitor = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+        .or_else(|| window.primary_monitor().ok().flatten())
+        .ok_or_else(|| "未找到显示器".to_string())?;
+    let position = window.outer_position().map_err(|error| error.to_string())?;
+    let window_size = window.outer_size().map_err(|error| error.to_string())?;
+    let available_height = monitor.size().height.saturating_sub(window_size.height) as i64;
+    let relative_y = i64::from(position.y - monitor.position().y).clamp(0, available_height);
+    let offset = if available_height == 0 {
+        0
+    } else {
+        ((relative_y * 100 + available_height / 2) / available_height).clamp(0, 100)
+    };
+
+    let settings = {
+        let _guard = runtime.io_lock.lock().map_err(|error| error.to_string())?;
+        let mut document = load_document_unlocked(&app);
+        document["settings"]["launcherOffset"] = json!(offset);
+        let settings = document["settings"].clone();
+        persist_and_emit(&app, document, None, Some("launcher-drag"))?;
+        settings
+    };
+    sync_launcher_window(&app, &settings)?;
+    Ok(offset)
 }
 
 #[tauri::command]
