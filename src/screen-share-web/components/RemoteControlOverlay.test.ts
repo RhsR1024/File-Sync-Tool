@@ -16,8 +16,9 @@ const geometry = {
 };
 
 let cleanup: (() => void) | null = null;
+let animationFrameCallback: FrameRequestCallback | null = null;
 
-function pointerEvent(type: string, x: number, y: number, button = 0): MouseEvent {
+function pointerEvent(type: string, x: number, y: number, button = 0, timeStamp = 100): MouseEvent {
   const event = new MouseEvent(type, {
     bubbles: true,
     cancelable: true,
@@ -26,6 +27,7 @@ function pointerEvent(type: string, x: number, y: number, button = 0): MouseEven
     button,
   });
   Object.defineProperty(event, 'pointerId', { value: 7 });
+  Object.defineProperty(event, 'timeStamp', { value: timeStamp });
   return event;
 }
 
@@ -38,8 +40,8 @@ async function mountOverlay(events: string[]) {
       h(RemoteControlOverlay, {
         geometry,
         enabled: true,
-        onMove: (point: { x: number; y: number }) => events.push(`move:${point.x},${point.y}`),
-        onButton: (payload: { button: string; pressed: boolean }) => events.push(`button:${payload.button}:${payload.pressed}`),
+        onMove: (point: { x: number; y: number }, timeStamp: number) => events.push(`move:${point.x},${point.y}:${timeStamp}`),
+        onButton: (payload: { button: string; pressed: boolean }, timeStamp?: number) => events.push(`button:${payload.button}:${payload.pressed}:${timeStamp ?? 'none'}`),
         onWheel: (delta: number) => events.push(`wheel:${delta}`),
       }),
     ]),
@@ -77,13 +79,18 @@ async function mountOverlay(events: string[]) {
 
 describe('RemoteControlOverlay input ordering', () => {
   beforeEach(() => {
-    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 41));
+    animationFrameCallback = null;
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      animationFrameCallback = callback;
+      return 41;
+    }));
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
   });
 
   afterEach(() => {
     cleanup?.();
     cleanup = null;
+    animationFrameCallback = null;
     vi.unstubAllGlobals();
   });
 
@@ -91,15 +98,15 @@ describe('RemoteControlOverlay input ordering', () => {
     const events: string[] = [];
     const layer = await mountOverlay(events);
 
-    layer.dispatchEvent(pointerEvent('pointerdown', 25, 30));
-    expect(events).toEqual(['move:0.25,0.3', 'button:left:true']);
+    layer.dispatchEvent(pointerEvent('pointerdown', 25, 30, 0, 101));
+    expect(events).toEqual(['move:0.25,0.3:101', 'button:left:true:101']);
 
     events.length = 0;
-    layer.dispatchEvent(pointerEvent('pointermove', 50, 60));
-    layer.dispatchEvent(pointerEvent('pointerup', 75, 80));
+    layer.dispatchEvent(pointerEvent('pointermove', 50, 60, 0, 102));
+    layer.dispatchEvent(pointerEvent('pointerup', 75, 80, 0, 103));
 
     expect(cancelAnimationFrame).toHaveBeenCalledWith(41);
-    expect(events).toEqual(['move:0.75,0.8', 'button:left:false']);
+    expect(events).toEqual(['move:0.75,0.8:103', 'button:left:false:103']);
   });
 
   it('sends the pointer position before wheel input', async () => {
@@ -114,6 +121,19 @@ describe('RemoteControlOverlay input ordering', () => {
       deltaY: 120,
     }));
 
-    expect(events).toEqual(['move:0.4,0.55', 'wheel:-120']);
+    expect(events[0]).toMatch(/^move:0\.4,0\.55:\d+(?:\.\d+)?$/);
+    expect(events[1]).toBe('wheel:-120');
+  });
+
+  it('keeps only the newest pointer move and its timestamp until the next animation frame', async () => {
+    const events: string[] = [];
+    const layer = await mountOverlay(events);
+
+    layer.dispatchEvent(pointerEvent('pointermove', 20, 30, 0, 201));
+    layer.dispatchEvent(pointerEvent('pointermove', 70, 80, 0, 202));
+    expect(events).toEqual([]);
+
+    animationFrameCallback?.(16);
+    expect(events).toEqual(['move:0.7,0.8:202']);
   });
 });

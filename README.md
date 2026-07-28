@@ -27,7 +27,7 @@ File Sync Tool 是一个面向 Windows 的桌面工具箱，使用 **Tauri 2 + V
 
 ### 运维工具
 
-- 一体机 SSH 访问控制与框架密码修改。
+- 一体机 SSH 访问控制与 UMS 初始密码修改（框架 / UMS / CDM）。
 - 远程产品包替换。
 - 网络诊断与端口扫描。
 - Windows/Linux 磁盘缓存清理。

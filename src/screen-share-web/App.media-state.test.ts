@@ -9,7 +9,7 @@ describe('screen share viewer media visibility', () => {
     expect(appSource).toMatch(/function setImageSource\([^)]*\)\s*\{[\s\S]*?imageReady\.value = false;[\s\S]*?imageSource\.value = source;/);
     expect(appSource).toMatch(/function markImageLoaded\(\)\s*\{[\s\S]*?imageReady\.value = true;/);
     expect(appSource).toContain(":class=\"{ 'is-image-error': !imageReady }\"");
-    expect(appSource).toContain('v-if="statusActive && !showH264Video && !imageReady"');
+    expect(appSource).toContain('v-if="statusActive && !showPrimaryMedia && !imageReady"');
   });
 
   it('does not expose broken-image alternative text during reconnects', () => {
@@ -17,7 +17,24 @@ describe('screen share viewer media visibility', () => {
   });
 
   it('does not reconnect media for annotation-only document revisions', () => {
-    expect(appSource).toMatch(/const mediaStateChanged = incoming\.sessionId !== current\.sessionId[\s\S]*?incoming\.frozenFrameId !== current\.frozenFrameId;/);
-    expect(appSource).toContain('if (!localPaused.value && mediaStateChanged)');
+    expect(appSource).toMatch(/const mediaStateChanged = incoming\.sessionId !== current\.sessionId\s*\|\| incoming\.sourceEpoch !== current\.sourceEpoch;/);
+    expect(appSource).toContain('if (mediaStateChanged) startLiveStream();');
+  });
+
+  it('keeps automatic MJPEG fallback without legacy polling, pause, or freeze controls', () => {
+    expect(appSource).toContain('setImageSource(`/stream?reconnect=1&t=${Date.now()}`)');
+    expect(appSource).not.toContain('/stream?single=1');
+    expect(appSource).not.toContain('/snapshot/');
+    expect(appSource).not.toContain('refreshRateMs');
+    expect(appSource).not.toContain('toggleLocalPause');
+    expect(appSource).not.toContain('shared_freeze_enabled');
+    expect(appSource).not.toContain("message.type === 'view.state'");
+    expect(appSource).not.toContain("sessionClient.send('view.freeze')");
+    expect(appSource).not.toContain("sessionClient.send('view.resume')");
+  });
+
+  it('forwards DOM pointer timestamps to the session transport', () => {
+    expect(appSource).toContain("sessionClient.send('input.pointer_move', point, eventOccurredAtMs)");
+    expect(appSource).toContain("sessionClient.send('input.pointer_button', payload, eventOccurredAtMs)");
   });
 });

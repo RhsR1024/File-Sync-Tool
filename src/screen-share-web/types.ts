@@ -29,7 +29,6 @@ export interface AnnotationDocument {
 
 export interface SessionFeatures {
   annotations_enabled?: boolean;
-  shared_freeze_enabled?: boolean;
   control_requests_enabled?: boolean;
   keyboard_control_enabled?: boolean;
   [key: string]: unknown;
@@ -49,7 +48,6 @@ export interface SessionHelloPayload {
   client_id: string;
   session_id?: number;
   source_epoch?: number;
-  frame_id?: number | null;
   width?: number;
   height?: number;
   features?: SessionFeatures;
@@ -81,15 +79,6 @@ export interface AnnotationAppliedPayload {
   owner_client_id?: string;
   document?: AnnotationDocument;
   shapes?: AnnotationShape[];
-}
-
-export interface ViewStatePayload {
-  document?: AnnotationDocument;
-  control?: ControlStateSnapshot;
-  snapshot_url?: string | null;
-  mode?: ViewMode;
-  frame_id?: number | null;
-  frozen_frame_id?: number | null;
 }
 
 export interface SourceChangedPayload {
@@ -128,7 +117,6 @@ export type SessionServerMessage = SessionEnvelope<
   SessionHelloPayload
   | AnnotationDocument
   | AnnotationAppliedPayload
-  | ViewStatePayload
   | SourceChangedPayload
   | SessionErrorPayload
   | ControlRequestedPayload
@@ -144,15 +132,10 @@ export interface ScreenShareHttpStatus {
   session_id?: number;
   source_epoch?: number;
   annotation_count?: number;
-  view_mode?: ViewMode;
-  frozen_frame_id?: number | null;
   interaction_connected_count?: number;
-  latest_frame_id?: number | null;
-  frame_width?: number | null;
-  frame_height?: number | null;
   capture_paused?: boolean;
   capture_issue?: 'retrying' | 'privacy_mode_or_display_off' | string | null;
-  transport?: 'mjpeg' | 'mse_h264' | 'webrtc';
+  transport?: 'mjpeg' | 'mse_h264' | 'web_codecs' | 'web_rtc';
   h264_media?: {
     ready?: boolean;
     codec?: string | null;
@@ -167,6 +150,10 @@ export interface ScreenShareHttpStatus {
     dropped_input_frames?: number;
     error?: string | null;
   };
+  media_metrics?: Record<string, unknown>;
+  input_metrics?: Record<string, unknown> | null;
+  webrtc?: Record<string, unknown> | null;
+  transport_degradation_reason?: string | null;
   control_state?: ControlState;
   controller_ip?: string | null;
 }

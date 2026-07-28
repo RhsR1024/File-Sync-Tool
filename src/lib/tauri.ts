@@ -618,6 +618,10 @@ export async function openDirectory(): Promise<string | null> {
   return await invoke('open_directory');
 }
 
+export async function openFile(): Promise<string | null> {
+  return await invoke('open_file');
+}
+
 export async function saveTextFile(
   content: string,
   defaultFileName: string,
@@ -632,13 +636,38 @@ export async function saveTextFile(
   });
 }
 
-// Framework password management types
-export interface FrameworkPasswordResult {
-  ip: string;
+// UMS initial password management types
+export type UmsInitPasswordKind = 'framework' | 'ums' | 'cdm';
+
+export interface UmsInitPasswordTargets {
+  framework: boolean;
+  ums: boolean;
+  cdm: boolean;
+}
+
+export interface UmsInitPasswordTargetResult {
+  kind: UmsInitPasswordKind;
   success: boolean;
   message: string;
-  /** If success is false, indicates where the failure occurred. */
-  failedAt?: 'login' | 'changePasswd';
+  /** If success is false, indicates which protocol step failed. */
+  failedAt?: 'login' | 'publicKey' | 'changePasswd' | 'dictionary';
+}
+
+export interface UmsInitPasswordResult {
+  ip: string;
+  /** True only when every selected flow succeeded on this IP. */
+  success: boolean;
+  targets: UmsInitPasswordTargetResult[];
+}
+
+export interface UmsInitPasswordRequest {
+  ips: string[];
+  targets: UmsInitPasswordTargets;
+  /** Shared new password applied to every selected flow. */
+  newPassword: string;
+  frameworkOldPassword: string;
+  umsOldPassword: string;
+  cdmOldPassword: string;
 }
 
 export interface ApplianceSshResult {
@@ -806,20 +835,13 @@ export async function codeCountListScopeTree(
 }
 
 /**
- * Change framework password for specified IPs.
- * @param ips - Array of IP addresses to change password for
- * @returns Array of results indicating success/failure for each IP
+ * Run the selected framework / UMS / CDM password initialization flows against every IP.
+ * @returns One entry per IP, each carrying a per-flow result.
  */
-export async function changeFrameworkPassword(
-  ips: string[],
-  oldPassword?: string,
-  newPassword?: string,
-): Promise<FrameworkPasswordResult[]> {
-  return await invoke<FrameworkPasswordResult[]>('change_framework_password', {
-    ips,
-    oldPassword,
-    newPassword,
-  });
+export async function changeUmsInitPassword(
+  request: UmsInitPasswordRequest,
+): Promise<UmsInitPasswordResult[]> {
+  return await invoke<UmsInitPasswordResult[]>('change_ums_init_password', { request });
 }
 
 export async function enableApplianceSsh(request: EnableApplianceSshRequest): Promise<ApplianceSshResult[]> {
@@ -1250,7 +1272,7 @@ export const monitorControlApi = {
 // ─── Screen Share ─────────────────────────────────────
 
 export type ScreenShareBackendMode = 'auto' | 'wgc' | 'dxgi';
-export type ScreenShareMediaTransport = 'auto' | 'mjpeg' | 'mse_h264' | 'webrtc';
+export type ScreenShareMediaTransport = 'auto' | 'mjpeg' | 'mse_h264' | 'web_codecs' | 'web_rtc';
 export type ScreenShareControlState = 'disabled' | 'available' | 'requested' | 'granted' | 'revoked';
 
 export interface ScreenShareControlRequest {
@@ -1299,7 +1321,6 @@ export interface ScreenShareConfig {
   control_requests_enabled?: boolean;
   keyboard_control_enabled?: boolean;
   annotations_enabled?: boolean;
-  shared_freeze_enabled?: boolean;
   transport?: ScreenShareMediaTransport;
 }
 
@@ -1318,25 +1339,138 @@ export interface MonitorInfo {
 
 export type ScreenShareCaptureIssue = 'retrying' | 'privacy_mode_or_display_off';
 
+export interface ScreenShareDurationMetrics {
+  sample_count: number;
+  total_sample_count: number;
+  retained_sample_count: number;
+  sample_window_capacity: number;
+  measurement_scope: string;
+  p50_us: number;
+  p95_us: number;
+  p99_us: number;
+  max_us: number;
+}
+
+export interface ScreenShareByteWindowMetrics {
+  sample_count: number;
+  total_sample_count: number;
+  retained_sample_count: number;
+  sample_window_capacity: number;
+  measurement_scope: string;
+  total_bytes: number;
+  retained_total_bytes: number;
+  p50_bytes: number;
+  p95_bytes: number;
+  p99_bytes: number;
+  max_bytes: number;
+}
+
+export interface ScreenShareLatestCaptureMetadata {
+  sequence: number;
+  observed_at_ms: number;
+  system_relative_time_100ns: number | null;
+  width: number;
+  height: number;
+}
+
 export interface ScreenShareMediaMetrics {
+  capture_frame_count: number;
+  mjpeg_encoded_frame_count: number;
+  mjpeg_encoded_bytes: number;
+  outbound_bytes_total: number;
+  capture_fps_actual: number;
+  mjpeg_fps_actual: number;
+  mjpeg_consumer_count: number;
+  jpeg_active: boolean;
+  jpeg_enable_count: number;
+  jpeg_disable_count: number;
+  jpeg_fallback_reason: string | null;
+  latest_capture: ScreenShareLatestCaptureMetadata | null;
+  frame_wait: ScreenShareDurationMetrics;
+  capture_queue_age: ScreenShareDurationMetrics;
+  gpu_readback: ScreenShareDurationMetrics;
+  black_frame_classification: ScreenShareDurationMetrics;
+  jpeg_color_conversion: ScreenShareDurationMetrics;
+  jpeg_encode: ScreenShareDurationMetrics;
+  stream_send_wait: ScreenShareDurationMetrics;
+  outbound_100ms: ScreenShareByteWindowMetrics;
+  outbound_1s: ScreenShareByteWindowMetrics;
+  stream_send_timeout_count: number;
+  stream_disconnect_count: number;
   encoded_frame_count: number;
   jpeg_sample_count: number;
+  jpeg_total_sample_count: number;
+  jpeg_retained_sample_count: number;
+  jpeg_sample_window_capacity: number;
+  jpeg_measurement_scope: string;
   jpeg_size_avg_bytes: number;
   jpeg_size_p50_bytes: number;
   jpeg_size_p95_bytes: number;
+  jpeg_size_p99_bytes: number;
+  jpeg_size_max_bytes: number;
   first_frame_delay_ms: number | null;
   frame_age_ms: number | null;
   slow_client_dropped_frames: number;
   stream_connection_count: number;
   stream_first_frame_sample_count: number;
+  stream_first_frame_total_sample_count: number;
+  stream_first_frame_retained_sample_count: number;
+  stream_first_frame_sample_window_capacity: number;
+  stream_first_frame_measurement_scope: string;
   stream_first_frame_avg_ms: number | null;
+  stream_first_frame_p50_ms: number | null;
   stream_first_frame_p95_ms: number | null;
+  stream_first_frame_p99_ms: number | null;
+  stream_first_frame_max_ms: number | null;
   stream_reconnect_count: number;
   stream_reconnect_sample_count: number;
+  stream_reconnect_total_sample_count: number;
+  stream_reconnect_retained_sample_count: number;
+  stream_reconnect_sample_window_capacity: number;
+  stream_reconnect_measurement_scope: string;
   stream_reconnect_avg_ms: number | null;
+  stream_reconnect_p50_ms: number | null;
   stream_reconnect_p95_ms: number | null;
+  stream_reconnect_p99_ms: number | null;
+  stream_reconnect_max_ms: number | null;
   fps_actual: number;
   bitrate_kbps: number;
+}
+
+export interface ScreenShareInputMetrics {
+  measurement_scope: string;
+  enqueue_attempted_total: number;
+  enqueue_queued_total: number;
+  enqueue_rejected_total: number;
+  move_coalesced_total: number;
+  queue_full_total: number;
+  dequeued_total: number;
+  stale_context_dropped_total: number;
+  queue_cleared_events_total: number;
+  queue_depth_current: number;
+  queue_depth_peak: number;
+  queue_age_samples: number;
+  queue_age_p50_us: number;
+  queue_age_p95_us: number;
+  queue_age_p99_us: number;
+  queue_age_max_us: number;
+  injection_samples: number;
+  injection_duration_p50_us: number;
+  injection_duration_p95_us: number;
+  injection_duration_p99_us: number;
+  injection_duration_max_us: number;
+  receive_to_send_input_samples: number;
+  receive_to_send_input_p50_us: number;
+  receive_to_send_input_p95_us: number;
+  receive_to_send_input_p99_us: number;
+  receive_to_send_input_max_us: number;
+  injection_succeeded_total: number;
+  injection_failed_total: number;
+  release_all_requests_total: number;
+  release_all_rejected_total: number;
+  release_all_executions_total: number;
+  release_all_succeeded_total: number;
+  release_all_failed_total: number;
 }
 
 export interface ScreenShareH264MediaMetrics {
@@ -1351,12 +1485,124 @@ export interface ScreenShareH264MediaMetrics {
   cached_segment_count: number;
   cached_bytes: number;
   dropped_input_frames: number;
+  encoder_name: string | null;
+  encoder_hardware: boolean | null;
+  encoder_async_mode: boolean | null;
+  encoder_adapter_luid: string | null;
+  encoder_hardware_url: string | null;
+  encoder_driver_version: string | null;
+  encoder_fallback_reason: string | null;
+  encoder_input_width: number | null;
+  encoder_input_height: number | null;
+  encoder_fps: number | null;
+  software_fallback_limited: boolean;
+  encoder_self_test: ScreenShareH264EncoderSelfTest;
+  capabilities: ScreenShareH264EncoderCapabilities;
+  encoder_candidate_report_total_count: number;
+  encoder_candidate_report_capacity: number;
+  encoder_candidate_reports: ScreenShareH264EncoderCandidateReport[];
+  runtime_bitrate_update_count: number;
+  runtime_bitrate_update_failure_count: number;
+  runtime_bitrate_update_error: string | null;
+  input_queue_age: ScreenShareH264Distribution;
+  bgra_to_nv12: ScreenShareH264Distribution;
+  gpu_preprocess: ScreenShareH264Distribution;
+  gpu_backpressure_dropped_frames: number;
+  gpu_fallback_count: number;
+  gpu_pipeline_active: boolean;
+  gpu_fallback_reason: string | null;
+  mft_encode: ScreenShareH264Distribution;
+  mux: ScreenShareH264Distribution;
+  idr_size_bytes: ScreenShareH264Distribution;
+  idr_request_scheduled_count: number;
+  idr_request_coalesced_count: number;
+  idr_request_rate_limited_count: number;
+  idr_request_stale_count: number;
+  idr_request_dispatch_count: number;
+  idr_force_failure_count: number;
   error: string | null;
+}
+
+export interface ScreenShareH264EncoderSelfTest {
+  attempted: boolean;
+  passed: boolean;
+  duration_ms: number;
+  produced_access_units: number;
+  found_sps: boolean;
+  found_pps: boolean;
+  found_idr: boolean;
+  timeline_monotonic: boolean;
+  timestamps_from_encoder: boolean;
+  durations_from_encoder: boolean;
+  baseline_profile_confirmed: boolean;
+  b_slice_count: number;
+  decoder_frame_count: number;
+  gpu_surface_input: boolean;
+  dynamic_pattern_input: boolean;
+  failure_reason: string | null;
+}
+
+export interface ScreenShareH264Distribution {
+  sample_count: number;
+  retained_sample_count: number;
+  retained_sample_capacity: number;
+  measurement_scope: string;
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
+}
+
+export interface ScreenShareH264EncoderCapability {
+  supported: boolean;
+  modifiable: boolean;
+  set_succeeded: boolean;
+  readback_succeeded: boolean;
+  value_matches: boolean;
+  requested_value: string | null;
+  final_value: string | null;
+  hresult: string | null;
+  detail: string | null;
+}
+
+export interface ScreenShareH264EncoderCapabilities {
+  low_latency: ScreenShareH264EncoderCapability;
+  rate_control: ScreenShareH264EncoderCapability;
+  rate_control_attempts: ScreenShareH264EncoderCapability[];
+  buffer_size: ScreenShareH264EncoderCapability;
+  max_bitrate: ScreenShareH264EncoderCapability;
+  reference_frames: ScreenShareH264EncoderCapability;
+  cabac: ScreenShareH264EncoderCapability;
+  b_frames_disabled: ScreenShareH264EncoderCapability;
+  dynamic_bitrate: ScreenShareH264EncoderCapability;
+  force_keyframe: ScreenShareH264EncoderCapability;
+  degradation_reasons: string[];
+}
+
+export interface ScreenShareH264EncoderCandidateReport {
+  name: string;
+  hardware: boolean;
+  adapter_luid: string | null;
+  hardware_url: string | null;
+  driver_version: string | null;
+  input_width: number;
+  input_height: number;
+  fps: number;
+  gpu_surface_input: boolean;
+  activation_succeeded: boolean;
+  configuration_succeeded: boolean;
+  admitted: boolean;
+  failure_stage: string | null;
+  failure_reason: string | null;
+  self_test: ScreenShareH264EncoderSelfTest;
+  capabilities: ScreenShareH264EncoderCapabilities;
 }
 
 export interface ScreenShareStatus {
   is_active: boolean;
   viewer_count: number;
+  viewer_ip_reference_count: number;
+  active_media_task_count: number;
   connection_count: number;
   fps_actual: number;
   bitrate_kbps: number;
@@ -1380,6 +1626,7 @@ export interface ScreenShareStatus {
   pending_control_request: ScreenShareControlRequest | null;
   desktop_overlay_active: boolean;
   media_metrics: ScreenShareMediaMetrics;
+  input_metrics: ScreenShareInputMetrics | null;
 }
 
 export async function screenShareListMonitors(): Promise<MonitorInfo[]> {

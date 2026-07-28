@@ -1,9 +1,10 @@
 //! Serialized Windows input injection for an approved screen-share controller.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -339,16 +340,85 @@ fn keyboard_combo_allowed(key: KeyboardKey, pressed: &[KeyboardKey]) -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct QueuedInput {
     pub context: InputContext,
     pub event: InputEvent,
+    pub client_sequence: Option<u64>,
+    received_at: Instant,
+    enqueued_at: Instant,
 }
 
 impl QueuedInput {
     pub fn new(context: InputContext, event: InputEvent) -> Self {
-        Self { context, event }
+        Self::with_client_sequence(context, event, None)
     }
+
+    pub fn with_client_sequence(
+        context: InputContext,
+        event: InputEvent,
+        client_sequence: Option<u64>,
+    ) -> Self {
+        let now = Instant::now();
+        Self::new_at_with_client_sequence(context, event, client_sequence, now, now)
+    }
+
+    pub fn with_client_sequence_received_at(
+        context: InputContext,
+        event: InputEvent,
+        client_sequence: Option<u64>,
+        received_at: Instant,
+    ) -> Self {
+        Self::new_at_with_client_sequence(
+            context,
+            event,
+            client_sequence,
+            received_at,
+            Instant::now(),
+        )
+    }
+
+    fn new_at(context: InputContext, event: InputEvent, enqueued_at: Instant) -> Self {
+        Self::new_at_with_client_sequence(context, event, None, enqueued_at, enqueued_at)
+    }
+
+    fn new_at_with_client_sequence(
+        context: InputContext,
+        event: InputEvent,
+        client_sequence: Option<u64>,
+        received_at: Instant,
+        enqueued_at: Instant,
+    ) -> Self {
+        Self {
+            context,
+            event,
+            client_sequence,
+            received_at,
+            enqueued_at,
+        }
+    }
+
+    fn queue_age_at(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.enqueued_at)
+    }
+
+    fn mark_enqueued_at(&mut self, now: Instant) {
+        self.enqueued_at = now;
+    }
+}
+
+impl PartialEq for QueuedInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.event == other.event
+            && self.client_sequence == other.client_sequence
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedInputSnapshot {
+    pub client_sequence: u64,
+    pub applied_at_server_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +430,284 @@ pub enum QueuePushOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputQueueError {
     Full,
+}
+
+/// Remote-input metrics start at [`InputWorkerHandle::enqueue`]. The WebSocket
+/// receive and JSON parsing stages live in `screenshare.rs` and are deliberately
+/// excluded so the reported queue latency has one stable boundary.
+pub const INPUT_METRICS_SCOPE: &str = "input_worker_enqueue_to_send_input";
+
+const LATENCY_BUCKET_UPPER_BOUNDS_US: [u64; 24] = [
+    0,
+    50,
+    100,
+    200,
+    500,
+    1_000,
+    2_000,
+    4_000,
+    8_000,
+    16_000,
+    32_000,
+    64_000,
+    128_000,
+    256_000,
+    512_000,
+    1_000_000,
+    2_000_000,
+    4_000_000,
+    8_000_000,
+    16_000_000,
+    32_000_000,
+    60_000_000,
+    120_000_000,
+    u64::MAX,
+];
+
+/// Bounded, serializable snapshot intended for the screen-share status and
+/// diagnostics APIs. Latency percentiles are histogram upper bounds; `max_us`
+/// is the exact maximum observed since the worker was spawned.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InputMetricsSnapshot {
+    pub measurement_scope: &'static str,
+    /// Calls entering `InputWorkerHandle::enqueue`.
+    pub enqueue_attempted_total: u64,
+    /// Events that occupied a new queue slot (excludes coalesced moves).
+    pub enqueue_queued_total: u64,
+    pub enqueue_rejected_total: u64,
+    pub move_coalesced_total: u64,
+    /// Rejections caused specifically by bounded queue saturation.
+    pub queue_full_total: u64,
+    pub dequeued_total: u64,
+    pub stale_context_dropped_total: u64,
+    pub queue_cleared_events_total: u64,
+    pub queue_depth_current: u64,
+    pub queue_depth_peak: u64,
+    /// Time from the enqueue API boundary until worker dequeue.
+    pub queue_age_samples: u64,
+    pub queue_age_p50_us: u64,
+    pub queue_age_p95_us: u64,
+    pub queue_age_p99_us: u64,
+    pub queue_age_max_us: u64,
+    /// Synchronous `InputSink::execute`, including coordinate mapping and the
+    /// platform `SendInput` call. Release-all execution is counted separately.
+    pub injection_samples: u64,
+    pub injection_duration_p50_us: u64,
+    pub injection_duration_p95_us: u64,
+    pub injection_duration_p99_us: u64,
+    pub injection_duration_max_us: u64,
+    /// End-to-end server input latency for the same event, measured from the
+    /// WebSocket receive boundary until `InputSink::execute` (and therefore
+    /// `SendInput` on Windows) returned.
+    pub receive_to_send_input_samples: u64,
+    pub receive_to_send_input_p50_us: u64,
+    pub receive_to_send_input_p95_us: u64,
+    pub receive_to_send_input_p99_us: u64,
+    pub receive_to_send_input_max_us: u64,
+    pub injection_succeeded_total: u64,
+    pub injection_failed_total: u64,
+    pub release_all_requests_total: u64,
+    pub release_all_rejected_total: u64,
+    pub release_all_executions_total: u64,
+    pub release_all_succeeded_total: u64,
+    pub release_all_failed_total: u64,
+}
+
+#[derive(Debug)]
+struct LatencyHistogram {
+    buckets: [AtomicU64; LATENCY_BUCKET_UPPER_BOUNDS_US.len()],
+    samples: AtomicU64,
+    max_us: AtomicU64,
+}
+
+impl LatencyHistogram {
+    fn new() -> Self {
+        Self {
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            samples: AtomicU64::new(0),
+            max_us: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, duration: Duration) {
+        self.record_us(duration_as_micros(duration));
+    }
+
+    fn record_us(&self, duration_us: u64) {
+        let bucket = LATENCY_BUCKET_UPPER_BOUNDS_US
+            .iter()
+            .position(|upper| duration_us <= *upper)
+            .unwrap_or(LATENCY_BUCKET_UPPER_BOUNDS_US.len() - 1);
+        self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+        self.samples.fetch_add(1, Ordering::Relaxed);
+        self.max_us.fetch_max(duration_us, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> LatencySnapshot {
+        let samples = self.samples.load(Ordering::Relaxed);
+        let buckets = std::array::from_fn(|index| self.buckets[index].load(Ordering::Relaxed));
+        let max_us = self.max_us.load(Ordering::Relaxed);
+        LatencySnapshot {
+            samples,
+            p50_us: percentile_upper_bound(&buckets, samples, 50, max_us),
+            p95_us: percentile_upper_bound(&buckets, samples, 95, max_us),
+            p99_us: percentile_upper_bound(&buckets, samples, 99, max_us),
+            max_us,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LatencySnapshot {
+    samples: u64,
+    p50_us: u64,
+    p95_us: u64,
+    p99_us: u64,
+    max_us: u64,
+}
+
+fn duration_as_micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn percentile_upper_bound(
+    buckets: &[u64; LATENCY_BUCKET_UPPER_BOUNDS_US.len()],
+    samples: u64,
+    percentile: u64,
+    max_us: u64,
+) -> u64 {
+    if samples == 0 {
+        return 0;
+    }
+    let target = samples.saturating_mul(percentile).div_ceil(100).max(1);
+    let mut cumulative = 0_u64;
+    for (index, count) in buckets.iter().enumerate() {
+        cumulative = cumulative.saturating_add(*count);
+        if cumulative >= target {
+            let upper = LATENCY_BUCKET_UPPER_BOUNDS_US[index];
+            return if upper == u64::MAX { max_us } else { upper };
+        }
+    }
+    max_us
+}
+
+#[derive(Debug)]
+struct InputMetrics {
+    enqueue_attempted_total: AtomicU64,
+    enqueue_queued_total: AtomicU64,
+    enqueue_rejected_total: AtomicU64,
+    move_coalesced_total: AtomicU64,
+    queue_full_total: AtomicU64,
+    dequeued_total: AtomicU64,
+    stale_context_dropped_total: AtomicU64,
+    queue_cleared_events_total: AtomicU64,
+    queue_depth_peak: AtomicU64,
+    queue_age: LatencyHistogram,
+    injection_duration: LatencyHistogram,
+    receive_to_send_input: LatencyHistogram,
+    injection_succeeded_total: AtomicU64,
+    injection_failed_total: AtomicU64,
+    release_all_requests_total: AtomicU64,
+    release_all_rejected_total: AtomicU64,
+    release_all_executions_total: AtomicU64,
+    release_all_succeeded_total: AtomicU64,
+    release_all_failed_total: AtomicU64,
+}
+
+impl InputMetrics {
+    fn new() -> Self {
+        Self {
+            enqueue_attempted_total: AtomicU64::new(0),
+            enqueue_queued_total: AtomicU64::new(0),
+            enqueue_rejected_total: AtomicU64::new(0),
+            move_coalesced_total: AtomicU64::new(0),
+            queue_full_total: AtomicU64::new(0),
+            dequeued_total: AtomicU64::new(0),
+            stale_context_dropped_total: AtomicU64::new(0),
+            queue_cleared_events_total: AtomicU64::new(0),
+            queue_depth_peak: AtomicU64::new(0),
+            queue_age: LatencyHistogram::new(),
+            injection_duration: LatencyHistogram::new(),
+            receive_to_send_input: LatencyHistogram::new(),
+            injection_succeeded_total: AtomicU64::new(0),
+            injection_failed_total: AtomicU64::new(0),
+            release_all_requests_total: AtomicU64::new(0),
+            release_all_rejected_total: AtomicU64::new(0),
+            release_all_executions_total: AtomicU64::new(0),
+            release_all_succeeded_total: AtomicU64::new(0),
+            release_all_failed_total: AtomicU64::new(0),
+        }
+    }
+
+    fn record_queue_depth(&self, depth: usize) {
+        self.queue_depth_peak
+            .fetch_max(depth as u64, Ordering::Relaxed);
+    }
+
+    fn record_queue_cleared(&self, count: usize) {
+        self.queue_cleared_events_total
+            .fetch_add(count as u64, Ordering::Relaxed);
+    }
+
+    fn record_dequeue(&self, age: Duration) {
+        self.dequeued_total.fetch_add(1, Ordering::Relaxed);
+        self.queue_age.record(age);
+    }
+
+    fn record_injection(&self, duration: Duration, succeeded: bool) {
+        self.injection_duration.record(duration);
+        if succeeded {
+            self.injection_succeeded_total
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.injection_failed_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_receive_to_send_input(&self, duration: Duration) {
+        self.receive_to_send_input.record(duration);
+    }
+
+    fn snapshot(&self, queue_depth_current: usize) -> InputMetricsSnapshot {
+        let queue_age = self.queue_age.snapshot();
+        let injection_duration = self.injection_duration.snapshot();
+        let receive_to_send_input = self.receive_to_send_input.snapshot();
+        InputMetricsSnapshot {
+            measurement_scope: INPUT_METRICS_SCOPE,
+            enqueue_attempted_total: self.enqueue_attempted_total.load(Ordering::Relaxed),
+            enqueue_queued_total: self.enqueue_queued_total.load(Ordering::Relaxed),
+            enqueue_rejected_total: self.enqueue_rejected_total.load(Ordering::Relaxed),
+            move_coalesced_total: self.move_coalesced_total.load(Ordering::Relaxed),
+            queue_full_total: self.queue_full_total.load(Ordering::Relaxed),
+            dequeued_total: self.dequeued_total.load(Ordering::Relaxed),
+            stale_context_dropped_total: self.stale_context_dropped_total.load(Ordering::Relaxed),
+            queue_cleared_events_total: self.queue_cleared_events_total.load(Ordering::Relaxed),
+            queue_depth_current: queue_depth_current as u64,
+            queue_depth_peak: self.queue_depth_peak.load(Ordering::Relaxed),
+            queue_age_samples: queue_age.samples,
+            queue_age_p50_us: queue_age.p50_us,
+            queue_age_p95_us: queue_age.p95_us,
+            queue_age_p99_us: queue_age.p99_us,
+            queue_age_max_us: queue_age.max_us,
+            injection_samples: injection_duration.samples,
+            injection_duration_p50_us: injection_duration.p50_us,
+            injection_duration_p95_us: injection_duration.p95_us,
+            injection_duration_p99_us: injection_duration.p99_us,
+            injection_duration_max_us: injection_duration.max_us,
+            receive_to_send_input_samples: receive_to_send_input.samples,
+            receive_to_send_input_p50_us: receive_to_send_input.p50_us,
+            receive_to_send_input_p95_us: receive_to_send_input.p95_us,
+            receive_to_send_input_p99_us: receive_to_send_input.p99_us,
+            receive_to_send_input_max_us: receive_to_send_input.max_us,
+            injection_succeeded_total: self.injection_succeeded_total.load(Ordering::Relaxed),
+            injection_failed_total: self.injection_failed_total.load(Ordering::Relaxed),
+            release_all_requests_total: self.release_all_requests_total.load(Ordering::Relaxed),
+            release_all_rejected_total: self.release_all_rejected_total.load(Ordering::Relaxed),
+            release_all_executions_total: self.release_all_executions_total.load(Ordering::Relaxed),
+            release_all_succeeded_total: self.release_all_succeeded_total.load(Ordering::Relaxed),
+            release_all_failed_total: self.release_all_failed_total.load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -404,8 +752,10 @@ impl PendingInputQueue {
         self.entries.pop_front()
     }
 
-    fn clear(&mut self) {
+    fn clear(&mut self) -> usize {
+        let cleared = self.entries.len();
         self.entries.clear();
+        cleared
     }
 }
 
@@ -445,6 +795,7 @@ impl WorkerState {
 
 struct WorkerShared {
     state: Mutex<WorkerState>,
+    latest_applied: Mutex<Option<AppliedInputSnapshot>>,
     wake: Condvar,
 }
 
@@ -453,6 +804,7 @@ struct WorkerShared {
 pub struct InputWorkerHandle {
     shared: Arc<WorkerShared>,
     failed: Arc<AtomicBool>,
+    metrics: Arc<InputMetrics>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -475,18 +827,22 @@ impl InputWorkerHandle {
                 stopping: false,
                 failed: false,
             }),
+            latest_applied: Mutex::new(None),
             wake: Condvar::new(),
         });
         let failed = Arc::new(AtomicBool::new(false));
+        let metrics = Arc::new(InputMetrics::new());
         let thread_shared = shared.clone();
         let thread_failed = failed.clone();
+        let thread_metrics = metrics.clone();
         let join = thread::Builder::new()
             .name("screen-input-worker".into())
-            .spawn(move || worker_loop(thread_shared, thread_failed))
+            .spawn(move || worker_loop(thread_shared, thread_failed, thread_metrics))
             .map_err(|error| format!("failed to start screen input worker: {error}"))?;
         Ok(Arc::new(Self {
             shared,
             failed,
+            metrics,
             join: Mutex::new(Some(join)),
         }))
     }
@@ -509,8 +865,15 @@ impl InputWorkerHandle {
             source,
             desktop,
         });
-        state.queue.clear();
+        if let Ok(mut latest) = self.shared.latest_applied.lock() {
+            *latest = None;
+        }
+        let cleared = state.queue.clear();
         state.release_pending = true;
+        self.metrics.record_queue_cleared(cleared);
+        self.metrics
+            .release_all_requests_total
+            .fetch_add(1, Ordering::Relaxed);
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -518,42 +881,113 @@ impl InputWorkerHandle {
     pub fn revoke(&self) {
         if let Ok(mut state) = self.shared.state.lock() {
             state.active = None;
-            state.queue.clear();
+            let cleared = state.queue.clear();
             state.release_pending = true;
+            self.metrics.record_queue_cleared(cleared);
+            self.metrics
+                .release_all_requests_total
+                .fetch_add(1, Ordering::Relaxed);
             self.shared.wake.notify_one();
+        }
+        if let Ok(mut latest) = self.shared.latest_applied.lock() {
+            *latest = None;
         }
     }
 
-    pub fn enqueue(&self, input: QueuedInput) -> Result<QueuePushOutcome, InputQueueError> {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .map_err(|_| InputQueueError::Full)?;
+    pub fn enqueue(&self, mut input: QueuedInput) -> Result<QueuePushOutcome, InputQueueError> {
+        // Pin the timestamp to the public enqueue boundary rather than object
+        // construction in the WebSocket handler.
+        input.mark_enqueued_at(Instant::now());
+        self.metrics
+            .enqueue_attempted_total
+            .fetch_add(1, Ordering::Relaxed);
+        let mut state = match self.shared.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                self.metrics
+                    .enqueue_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(InputQueueError::Full);
+            }
+        };
         let Some(active) = state.active.as_ref() else {
+            self.metrics
+                .enqueue_rejected_total
+                .fetch_add(1, Ordering::Relaxed);
             return Err(InputQueueError::Full);
         };
         if active.context != input.context || state.stopping {
+            self.metrics
+                .enqueue_rejected_total
+                .fetch_add(1, Ordering::Relaxed);
             return Err(InputQueueError::Full);
         }
         let result = state.queue.push(input);
-        if result.is_ok() {
-            self.shared.wake.notify_one();
+        match result {
+            Ok(QueuePushOutcome::Queued) => {
+                self.metrics
+                    .enqueue_queued_total
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics.record_queue_depth(state.queue.len());
+                self.shared.wake.notify_one();
+            }
+            Ok(QueuePushOutcome::Coalesced) => {
+                self.metrics
+                    .move_coalesced_total
+                    .fetch_add(1, Ordering::Relaxed);
+                self.shared.wake.notify_one();
+            }
+            Err(InputQueueError::Full) => {
+                self.metrics
+                    .enqueue_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .queue_full_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
         result
     }
 
     pub fn release_all(&self, context: &InputContext) -> Result<(), InputQueueError> {
-        let mut state = self
+        self.metrics
+            .release_all_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+        let mut state = match self.shared.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                self.metrics
+                    .release_all_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(InputQueueError::Full);
+            }
+        };
+        let queued_before = state.queue.len();
+        if !state.request_release_all(context) {
+            self.metrics
+                .release_all_rejected_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(InputQueueError::Full);
+        }
+        self.metrics.record_queue_cleared(queued_before);
+        self.shared.wake.notify_one();
+        Ok(())
+    }
+
+    /// Returns a self-contained metrics snapshot for status/diagnostics JSON.
+    /// The only fallible part is reading the current queue depth after a poisoned
+    /// worker-state lock; all lifetime counters remain lock-free atomics.
+    pub fn metrics_snapshot(&self) -> Result<InputMetricsSnapshot, String> {
+        let state = self
             .shared
             .state
             .lock()
-            .map_err(|_| InputQueueError::Full)?;
-        if !state.request_release_all(context) {
-            return Err(InputQueueError::Full);
-        }
-        self.shared.wake.notify_one();
-        Ok(())
+            .map_err(|_| "input worker state is unavailable".to_string())?;
+        Ok(self.metrics.snapshot(state.queue.len()))
+    }
+
+    pub fn latest_applied_input(&self) -> Option<AppliedInputSnapshot> {
+        self.shared.latest_applied.lock().ok()?.clone()
     }
 
     pub fn failed(&self) -> bool {
@@ -564,8 +998,12 @@ impl InputWorkerHandle {
         if let Ok(mut state) = self.shared.state.lock() {
             state.stopping = true;
             state.active = None;
-            state.queue.clear();
+            let cleared = state.queue.clear();
             state.release_pending = true;
+            self.metrics.record_queue_cleared(cleared);
+            self.metrics
+                .release_all_requests_total
+                .fetch_add(1, Ordering::Relaxed);
             self.shared.wake.notify_one();
         }
         if let Ok(mut join) = self.join.lock() {
@@ -582,7 +1020,7 @@ impl Drop for InputWorkerHandle {
     }
 }
 
-fn worker_loop(shared: Arc<WorkerShared>, failed: Arc<AtomicBool>) {
+fn worker_loop(shared: Arc<WorkerShared>, failed: Arc<AtomicBool>, metrics: Arc<InputMetrics>) {
     let mut sink = InputSink::new();
     loop {
         let (input, active, release) = {
@@ -605,37 +1043,75 @@ fn worker_loop(shared: Arc<WorkerShared>, failed: Arc<AtomicBool>) {
             let release = state.release_pending;
             state.release_pending = false;
             let input = state.queue.pop_front();
+            if let Some(input) = input.as_ref() {
+                metrics.record_dequeue(input.queue_age_at(Instant::now()));
+            }
             let active = state.active.clone();
             let stopping = state.stopping;
             (input, active, release || stopping)
         };
 
-        if release && sink.release_all().is_err() {
-            failed.store(true, Ordering::Relaxed);
-            if let Ok(mut state) = shared.state.lock() {
-                state.failed = true;
-                state.active = None;
-                state.queue.clear();
-            }
-            if let Ok(state) = shared.state.lock() {
-                if state.stopping {
-                    return;
-                }
-            }
-        }
-
-        if let Some(input) = input {
-            let Some(active) = active else { continue };
-            if active.context != input.context {
-                continue;
-            }
-            if sink.execute(&input.event, &active).is_err() {
+        if release {
+            metrics
+                .release_all_executions_total
+                .fetch_add(1, Ordering::Relaxed);
+            if sink.release_all().is_err() {
+                metrics
+                    .release_all_failed_total
+                    .fetch_add(1, Ordering::Relaxed);
                 failed.store(true, Ordering::Relaxed);
                 if let Ok(mut state) = shared.state.lock() {
                     state.failed = true;
                     state.active = None;
-                    state.queue.clear();
+                    let cleared = state.queue.clear();
+                    metrics.record_queue_cleared(cleared);
+                }
+                if let Ok(state) = shared.state.lock() {
+                    if state.stopping {
+                        return;
+                    }
+                }
+            } else {
+                metrics
+                    .release_all_succeeded_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        if let Some(input) = input {
+            let Some(active) = active else {
+                metrics
+                    .stale_context_dropped_total
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            };
+            if active.context != input.context {
+                metrics
+                    .stale_context_dropped_total
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            let injection_started = Instant::now();
+            let injection_result = sink.execute(&input.event, &active);
+            metrics.record_injection(injection_started.elapsed(), injection_result.is_ok());
+            metrics.record_receive_to_send_input(input.received_at.elapsed());
+            record_applied_input_result(
+                &shared.latest_applied,
+                &input,
+                injection_result.is_ok(),
+                input_unix_time_ms(),
+            );
+            if injection_result.is_err() {
+                failed.store(true, Ordering::Relaxed);
+                if let Ok(mut state) = shared.state.lock() {
+                    state.failed = true;
+                    state.active = None;
+                    let cleared = state.queue.clear();
+                    metrics.record_queue_cleared(cleared);
                     state.release_pending = true;
+                    metrics
+                        .release_all_requests_total
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -645,6 +1121,34 @@ fn worker_loop(shared: Arc<WorkerShared>, failed: Arc<AtomicBool>) {
                 return;
             }
         }
+    }
+}
+
+fn input_unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn record_applied_input_result(
+    latest: &Mutex<Option<AppliedInputSnapshot>>,
+    input: &QueuedInput,
+    succeeded: bool,
+    applied_at_server_unix_ms: u64,
+) {
+    let Some(client_sequence) = input.client_sequence.filter(|sequence| *sequence > 0) else {
+        return;
+    };
+    if !succeeded {
+        return;
+    }
+    if let Ok(mut latest) = latest.lock() {
+        *latest = Some(AppliedInputSnapshot {
+            client_sequence,
+            applied_at_server_unix_ms,
+        });
     }
 }
 
@@ -991,6 +1495,40 @@ mod tests {
     };
 
     #[test]
+    fn latest_applied_sequence_advances_only_after_successful_injection() {
+        let latest = Mutex::new(None);
+        let context = InputContext::new("controller", 7, 3);
+        let successful = QueuedInput::with_client_sequence(
+            context.clone(),
+            InputEvent::PointerMove(NormalizedInputPoint { x: 0.2, y: 0.4 }),
+            Some(41),
+        );
+        record_applied_input_result(&latest, &successful, true, 1_001);
+        assert_eq!(
+            *latest.lock().unwrap(),
+            Some(AppliedInputSnapshot {
+                client_sequence: 41,
+                applied_at_server_unix_ms: 1_001,
+            })
+        );
+
+        let failed = QueuedInput::with_client_sequence(
+            context.clone(),
+            InputEvent::PointerMove(NormalizedInputPoint { x: 0.5, y: 0.6 }),
+            Some(42),
+        );
+        record_applied_input_result(&latest, &failed, false, 1_002);
+        assert_eq!(latest.lock().unwrap().as_ref().unwrap().client_sequence, 41);
+
+        let uncorrelated = QueuedInput::new(
+            context,
+            InputEvent::PointerMove(NormalizedInputPoint { x: 0.7, y: 0.8 }),
+        );
+        record_applied_input_result(&latest, &uncorrelated, true, 1_003);
+        assert_eq!(latest.lock().unwrap().as_ref().unwrap().client_sequence, 41);
+    }
+
+    #[test]
     fn normalized_points_map_to_source_monitor_edges() {
         assert_eq!(
             normalized_to_physical(NormalizedInputPoint { x: 0.0, y: 0.0 }, PRIMARY).unwrap(),
@@ -1140,6 +1678,116 @@ mod tests {
                 y: 0.9
             }))
         ));
+    }
+
+    #[test]
+    fn coalesced_move_queue_age_starts_at_the_newest_move() {
+        let context = InputContext::new("controller", 7, 3);
+        let base = Instant::now();
+        let mut queue = PendingInputQueue::new(2);
+        queue
+            .push(QueuedInput::new_at(
+                context.clone(),
+                InputEvent::PointerMove(NormalizedInputPoint { x: 0.1, y: 0.1 }),
+                base,
+            ))
+            .unwrap();
+        queue
+            .push(QueuedInput::new_at(
+                context,
+                InputEvent::PointerMove(NormalizedInputPoint { x: 0.8, y: 0.9 }),
+                base + Duration::from_millis(5),
+            ))
+            .unwrap();
+
+        let newest = queue.pop_front().unwrap();
+        assert_eq!(
+            newest.queue_age_at(base + Duration::from_millis(15)),
+            Duration::from_millis(10)
+        );
+    }
+
+    #[test]
+    fn latency_histogram_percentiles_are_deterministic_bucket_bounds() {
+        let histogram = LatencyHistogram::new();
+        for duration_us in 1..=100 {
+            histogram.record_us(duration_us);
+        }
+
+        assert_eq!(
+            histogram.snapshot(),
+            LatencySnapshot {
+                samples: 100,
+                p50_us: 50,
+                p95_us: 100,
+                p99_us: 100,
+                max_us: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn input_metrics_snapshot_covers_queue_injection_and_release_counters() {
+        let metrics = InputMetrics::new();
+        metrics
+            .enqueue_attempted_total
+            .fetch_add(4, Ordering::Relaxed);
+        metrics.enqueue_queued_total.fetch_add(2, Ordering::Relaxed);
+        metrics.move_coalesced_total.fetch_add(1, Ordering::Relaxed);
+        metrics
+            .enqueue_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
+        metrics.queue_full_total.fetch_add(1, Ordering::Relaxed);
+        metrics.record_queue_depth(3);
+        metrics.record_dequeue(Duration::from_micros(75));
+        metrics.record_injection(Duration::from_micros(175), true);
+        metrics.record_injection(Duration::from_micros(225), false);
+        metrics.record_receive_to_send_input(Duration::from_micros(325));
+        metrics
+            .release_all_requests_total
+            .fetch_add(2, Ordering::Relaxed);
+        metrics
+            .release_all_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
+        metrics
+            .release_all_executions_total
+            .fetch_add(1, Ordering::Relaxed);
+        metrics
+            .release_all_succeeded_total
+            .fetch_add(1, Ordering::Relaxed);
+
+        let snapshot = metrics.snapshot(2);
+        assert_eq!(snapshot.measurement_scope, INPUT_METRICS_SCOPE);
+        assert_eq!(snapshot.enqueue_attempted_total, 4);
+        assert_eq!(snapshot.enqueue_queued_total, 2);
+        assert_eq!(snapshot.move_coalesced_total, 1);
+        assert_eq!(snapshot.enqueue_rejected_total, 1);
+        assert_eq!(snapshot.queue_full_total, 1);
+        assert_eq!(snapshot.queue_depth_current, 2);
+        assert_eq!(snapshot.queue_depth_peak, 3);
+        assert_eq!(snapshot.queue_age_samples, 1);
+        assert_eq!(snapshot.queue_age_p50_us, 100);
+        assert_eq!(snapshot.queue_age_max_us, 75);
+        assert_eq!(snapshot.injection_samples, 2);
+        assert_eq!(snapshot.receive_to_send_input_samples, 1);
+        assert!(snapshot.receive_to_send_input_p50_us >= 325);
+        assert_eq!(snapshot.injection_duration_p50_us, 200);
+        assert_eq!(snapshot.injection_duration_p95_us, 500);
+        assert_eq!(snapshot.injection_duration_max_us, 225);
+        assert_eq!(snapshot.injection_succeeded_total, 1);
+        assert_eq!(snapshot.injection_failed_total, 1);
+        assert_eq!(snapshot.release_all_requests_total, 2);
+        assert_eq!(snapshot.release_all_rejected_total, 1);
+        assert_eq!(snapshot.release_all_executions_total, 1);
+        assert_eq!(snapshot.release_all_succeeded_total, 1);
+        assert_eq!(snapshot.release_all_failed_total, 0);
+
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            json["measurement_scope"],
+            serde_json::json!("input_worker_enqueue_to_send_input")
+        );
+        assert_eq!(json["queue_age_p95_us"], serde_json::json!(100));
     }
 
     #[test]

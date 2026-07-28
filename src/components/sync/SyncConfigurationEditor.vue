@@ -560,7 +560,7 @@ async function testAllServers() {
 const manualLocalPath = ref('');
 const manualRemotePath = ref('/root');
 const manualServerBindings = ref<TaskServerBinding[]>([]);
-const manualDeployMsgType = ref<'success' | 'error' | ''>('');
+const manualDeployMsgType = ref<'info' | 'error' | ''>('');
 
 function addManualBinding() {
     manualServerBindings.value.push({ server_id: '', command_group_ids: [] });
@@ -630,8 +630,10 @@ async function handleManualDeploy() {
             bindings: validBindings,
         });
 
-        appStore.manualDeployMsg = t('settings.deploySuccess', { count: validBindings.length });
-        manualDeployMsgType.value = 'success';
+        // The command only queues the run; success or failure shows up in the
+        // execution log, so never claim the deployment already succeeded here.
+        appStore.manualDeployMsg = t('settings.deployStarted', { count: validBindings.length });
+        manualDeployMsgType.value = 'info';
     } catch (e) {
         appStore.manualDeployMsg = t('settings.deployError', { error: String(e) });
         manualDeployMsgType.value = 'error';
@@ -690,8 +692,11 @@ async function copyToClipboard(text: string) {
     }
 }
 
-function handleDirectoryPickError(error: string) {
-    pushToast(t('settings.selectDirectoryFailed', { error }), 'error', { ttlMs: 4000 });
+function handleDirectoryPickError(error: string, mode: 'directory' | 'file' = 'directory') {
+    const message = mode === 'file'
+        ? t('settings.selectFileFailed', { error })
+        : t('settings.selectDirectoryFailed', { error });
+    pushToast(message, 'error', { ttlMs: 4000 });
 }
 
 async function load() {
@@ -1519,23 +1524,21 @@ onMounted(load);
 
           <div v-else class="space-y-2">
             <div v-for="(group, idx) in config.command_groups" :key="group.id"
-              class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-center justify-between gap-3">
-              <div class="flex items-center gap-3 flex-1 min-w-0">
+              class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-start justify-between gap-3">
+              <div class="flex items-start gap-3 flex-1 min-w-0">
                 <div class="w-7 h-7 rounded-lg bg-sky-100 text-sky-600 flex items-center justify-center shrink-0">
                   <Terminal class="w-3.5 h-3.5" />
                 </div>
-                <div class="min-w-0">
+                <div class="min-w-0 flex-1">
                   <div class="font-medium text-slate-800 text-sm flex items-center gap-1.5">
                     {{ builtinDisplayName(group) }}
                     <span v-if="group.id.startsWith('__builtin_')" class="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full font-normal leading-none">{{ t('settings.builtinBadge') }}</span>
                   </div>
                   <div class="text-xs text-slate-400">{{ group.commands.length }} {{ group.commands.length === 1 ? 'command' : 'commands' }}</div>
-                </div>
-                <div class="flex flex-wrap gap-1 ml-2">
-                  <code v-for="(cmd, ci) in group.commands.slice(0, 2)" :key="ci"
-                    :title="cmd"
-                    class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-mono truncate max-w-[120px] cursor-default">{{ cmd }}</code>
-                  <span v-if="group.commands.length > 2" class="text-[10px] text-slate-400">+{{ group.commands.length - 2 }}</span>
+                  <div class="mt-1.5 flex flex-col gap-1">
+                    <code v-for="(cmd, ci) in group.commands" :key="ci"
+                      class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-1 rounded font-mono whitespace-pre-wrap break-all cursor-default">{{ cmd }}</code>
+                  </div>
                 </div>
               </div>
               <div class="flex items-center gap-1 shrink-0">
@@ -1572,8 +1575,8 @@ onMounted(load);
                 </div>
                 <ul class="space-y-1.5 bg-slate-900 rounded-lg p-3 max-h-48 overflow-y-auto">
                   <li v-for="(cmd, i) in commandGroupForm.commands" :key="i"
-                    class="flex justify-between items-center text-sky-300 font-mono text-xs group/cmd">
-                    <span class="truncate mr-2" :title="cmd">$ {{ cmd }}</span>
+                    class="flex justify-between items-start text-sky-300 font-mono text-xs group/cmd">
+                    <span class="flex-1 min-w-0 mr-2 whitespace-pre-wrap break-all">$ {{ cmd }}</span>
                     <div class="flex items-center gap-0.5 shrink-0">
                       <button @click="copyToClipboard(cmd)" type="button"
                         class="text-slate-600 hover:text-sky-400 p-1 opacity-0 group-hover/cmd:opacity-100 transition-opacity"
@@ -1607,11 +1610,13 @@ onMounted(load);
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.localPath') }}</label>
+              <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.manualLocalPath') }}</label>
               <DirectoryPathInput
                 v-model="manualLocalPath"
                 :placeholder="t('settings.manualLocalPlaceholder')"
                 :title="t('settings.selectDirectory')"
+                allow-file
+                :file-title="t('settings.selectFile')"
                 @pick-error="handleDirectoryPickError"
               />
             </div>
@@ -1730,7 +1735,7 @@ onMounted(load);
               <UploadCloud class="w-4 h-4" />
               {{ appStore.isManualDeploying ? t('settings.deploying') : t('settings.deployNow') }}
             </button>
-            <span v-if="appStore.manualDeployMsg" :class="manualDeployMsgType === 'success' ? 'text-green-600' : 'text-red-500'" class="text-sm font-medium">
+            <span v-if="appStore.manualDeployMsg" :class="manualDeployMsgType === 'error' ? 'text-red-500' : 'text-sky-600'" class="text-sm font-medium">
               {{ appStore.manualDeployMsg }}
               <span v-if="appStore.isManualDeploying && appStore.progress" class="ml-2 text-blue-600">
                 ({{ appStore.progress.percentage.toFixed(0) }}%)
@@ -1773,12 +1778,12 @@ onMounted(load);
 
         <div v-else class="space-y-2">
           <div v-for="(group, gi) in config.local_command_groups" :key="group.id"
-            class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-center justify-between gap-3">
-            <div class="flex items-center gap-3 flex-1 min-w-0">
+            class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-start justify-between gap-3">
+            <div class="flex items-start gap-3 flex-1 min-w-0">
               <div class="w-7 h-7 rounded-lg bg-teal-100 text-teal-600 flex items-center justify-center shrink-0">
                 <Terminal class="w-3.5 h-3.5" />
               </div>
-              <div class="min-w-0">
+              <div class="min-w-0 flex-1">
                 <div class="font-medium text-slate-800 text-sm flex items-center gap-2">
                   {{ group.name }}
                   <span class="text-xs px-2 py-0.5 rounded-full"
@@ -1787,11 +1792,10 @@ onMounted(load);
                   </span>
                 </div>
                 <div class="text-xs text-slate-400">{{ group.commands.length }} {{ group.commands.length === 1 ? 'command' : 'commands' }}</div>
-              </div>
-              <div class="flex flex-wrap gap-1 ml-2">
-                <code v-for="(cmd, ci) in group.commands.slice(0, 2)" :key="ci"
-                  class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-mono truncate max-w-[120px]">{{ cmd }}</code>
-                <span v-if="group.commands.length > 2" class="text-[10px] text-slate-400">+{{ group.commands.length - 2 }}</span>
+                <div class="mt-1.5 flex flex-col gap-1">
+                  <code v-for="(cmd, ci) in group.commands" :key="ci"
+                    class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-1 rounded font-mono whitespace-pre-wrap break-all">{{ cmd }}</code>
+                </div>
               </div>
             </div>
             <div class="flex items-center gap-1 shrink-0">
@@ -1837,8 +1841,8 @@ onMounted(load);
             </div>
             <ul class="space-y-1.5 bg-slate-900 rounded-lg p-3 max-h-48 overflow-y-auto">
               <li v-for="(cmd, ci) in localGroupForm.commands" :key="ci"
-                class="flex justify-between items-center text-green-400 font-mono text-xs">
-                <span class="truncate mr-2">$ {{ cmd }}</span>
+                class="flex justify-between items-start text-green-400 font-mono text-xs">
+                <span class="flex-1 min-w-0 mr-2 whitespace-pre-wrap break-all">$ {{ cmd }}</span>
                 <button @click="removeLocalGroupCommand(ci)" type="button" class="text-slate-500 hover:text-red-400 p-1 shrink-0">
                   <Trash2 class="w-3 h-3" />
                 </button>

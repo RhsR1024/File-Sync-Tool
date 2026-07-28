@@ -76,7 +76,7 @@ mod platform {
         IcmpSendEcho, SendARP, ICMP_ECHO_REPLY, IP_SUCCESS, MIB_IPNET_TABLE2,
         MIB_UNICASTIPADDRESS_TABLE,
     };
-    use windows::Win32::Networking::WinSock::{AF_INET, NlnsIncomplete, NlnsUnreachable};
+    use windows::Win32::Networking::WinSock::{NlnsIncomplete, NlnsUnreachable, AF_INET};
 
     /// Same payload size `ping.exe` uses, so targets that filter on packet size
     /// behave identically for both.

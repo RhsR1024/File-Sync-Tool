@@ -3,7 +3,7 @@ export type SidebarIconKey =
   | 'console'
   | 'settings'
   | 'toolsOverview'
-  | 'frameworkPassword'
+  | 'umsInitialPassword'
   | 'applianceSsh'
   | 'portalAutoLogin'
   | 'remotePackagePatch'
@@ -85,10 +85,10 @@ export const SIDEBAR_NAV_SECTIONS = [
         matchMode: 'prefix',
       },
       {
-        key: 'framework-password',
-        labelKey: 'sidebar.frameworkPassword',
-        path: '/tools/framework-password',
-        iconKey: 'frameworkPassword',
+        key: 'ums-initial-password',
+        labelKey: 'sidebar.umsInitialPassword',
+        path: '/tools/ums-initial-password',
+        iconKey: 'umsInitialPassword',
         matchMode: 'prefix',
       },
       {

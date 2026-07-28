@@ -42,7 +42,7 @@ const iconMap: Record<SidebarIconKey, Component> = {
   console: Terminal,
   settings: Settings,
   toolsOverview: Server,
-  frameworkPassword: KeyRound,
+  umsInitialPassword: KeyRound,
   applianceSsh: Shield,
   portalAutoLogin: LogIn,
   remotePackagePatch: PackageSearch,

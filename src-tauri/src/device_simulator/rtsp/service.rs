@@ -109,12 +109,33 @@ impl RtspStreamSource {
         let scheduler =
             SharedFrameScheduler::from_media(Arc::clone(&media), scheduler_queue_capacity)
                 .map_err(|error| service_error(error.code, error.message))?;
+        Self::from_scheduler(
+            stream_id,
+            sdp,
+            scheduler,
+            media.manifest().codec,
+            media.manifest().payload_type,
+            max_rtp_payload_bytes,
+        )
+    }
+
+    pub fn from_scheduler(
+        stream_id: impl Into<String>,
+        sdp: impl Into<Arc<[u8]>>,
+        scheduler: SharedFrameScheduler,
+        codec: Codec,
+        payload_type: u8,
+        max_rtp_payload_bytes: usize,
+    ) -> Result<Self, RtspServiceError> {
+        let stream_id = stream_id.into();
+        let sdp = sdp.into();
+        validate_sdp_media_contract(&sdp, codec, payload_type, scheduler.clock_rate())?;
         Ok(Self {
             stream_id,
             sdp,
             scheduler,
-            codec: media.manifest().codec,
-            payload_type: media.manifest().payload_type,
+            codec,
+            payload_type,
             max_rtp_payload_bytes,
             metadata_only: false,
         })
@@ -346,7 +367,7 @@ pub async fn start_rtsp_server(
     for source in config
         .routes
         .values()
-        .filter(|source| !source.metadata_only)
+        .filter(|source| !source.metadata_only && source.scheduler.owns_indexed_producer())
     {
         if !schedulers
             .iter()

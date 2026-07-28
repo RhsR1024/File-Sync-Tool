@@ -7,6 +7,20 @@ use crate::device_simulator::windows::ip_alias::{AddressConflictAssessment, Conf
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::Ipv4Addr;
 
+/// What the installed profile documents say about the selected
+/// profile/platform combination. Only reachable once the packs are on disk,
+/// because the documents live inside them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileEvidenceVerdict {
+    /// At least one selected profile lacks an approved static review.
+    Unreviewed,
+    /// Every selected profile is approved for local execution, but the
+    /// profile/platform pair is still unverified against a real platform.
+    StaticReviewed,
+    /// Every selected profile is verified against the selected platform.
+    PlatformVerified,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PreflightEnvironment {
     pub interfaces: Vec<NetworkInterfaceInfo>,
@@ -15,8 +29,9 @@ pub struct PreflightEnvironment {
     pub unavailable_tcp_ports: BTreeSet<u16>,
     pub assets_ready: bool,
     pub asset_details: Option<String>,
-    pub profiles_static_reviewed: bool,
-    pub profiles_platform_verified: bool,
+    /// `None` means no profile document could be read because the packs are not
+    /// installed yet — not a verdict about the device type.
+    pub profile_evidence: Option<ProfileEvidenceVerdict>,
     pub worker_available: bool,
     pub firewall_required: bool,
     pub firewall_available: bool,
@@ -69,31 +84,34 @@ pub fn run_preflight(
         )
     });
 
-    checks.push(if environment.profiles_platform_verified {
-        passed(
+    match environment.profile_evidence {
+        Some(ProfileEvidenceVerdict::PlatformVerified) => checks.push(passed(
             "profile-evidence",
             "deviceSimulator.preflight.checks.profileEvidence",
             None,
-        )
-    } else if environment.profiles_static_reviewed {
-        warning(
+        )),
+        Some(ProfileEvidenceVerdict::StaticReviewed) => checks.push(warning(
             "profile-evidence",
             "deviceSimulator.preflight.checks.profileEvidence",
             Some(
                 "static legacy evidence was reviewed and approved for local execution; the selected profile/platform combination remains unverified on a real platform"
                     .into(),
             ),
-        )
-    } else {
-        failed(
+        )),
+        Some(ProfileEvidenceVerdict::Unreviewed) => checks.push(failed(
             "profile-evidence",
             "deviceSimulator.preflight.checks.profileEvidence",
             Some(
                 "the selected profile/platform combination still requires approved golden fixtures and real-platform evidence"
                     .into(),
             ),
-        )
-    });
+        )),
+        // No document was read, so there is nothing to judge. The assets check
+        // is already failing for the very same reason — reporting it twice, the
+        // second time as a device-type verdict, only sends people looking for a
+        // profile problem that does not exist.
+        None => {}
+    }
 
     checks.push(match environment.residual_session_id.as_deref() {
         Some(session_id) => failed(
@@ -446,6 +464,7 @@ mod tests {
                     DeviceSimulatorStreamKind::Third,
                 ],
                 audio_enabled: false,
+                time_watermark_enabled: true,
             },
         }
     }
@@ -465,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_evidence_and_assets_block_start_but_risk_checks_remain_structured() {
+    fn missing_assets_block_start_without_blaming_the_device_type() {
         let report = run_preflight(
             &request(),
             &PreflightEnvironment {
@@ -481,8 +500,51 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.id == "address-conflicts" && check.status == PreflightCheckStatus::Warning
         }));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.id == "assets" && check.status == PreflightCheckStatus::Failed));
+        assert!(!report.checks.iter().any(|check| check.id == "profile-evidence"));
+    }
+
+    #[test]
+    fn unreviewed_profile_evidence_blocks_start() {
+        let report = run_preflight(
+            &request(),
+            &PreflightEnvironment {
+                interfaces: vec![interface()],
+                assets_ready: true,
+                profile_evidence: Some(ProfileEvidenceVerdict::Unreviewed),
+                worker_available: true,
+                firewall_required: true,
+                firewall_available: true,
+                ..Default::default()
+            },
+        );
+        assert!(!report.ok);
         assert!(report.checks.iter().any(|check| {
             check.id == "profile-evidence" && check.status == PreflightCheckStatus::Failed
+        }));
+    }
+
+    #[test]
+    fn static_review_stays_advisory() {
+        let report = run_preflight(
+            &request(),
+            &PreflightEnvironment {
+                interfaces: vec![interface()],
+                assets_ready: true,
+                profile_evidence: Some(ProfileEvidenceVerdict::StaticReviewed),
+                worker_available: true,
+                firewall_required: true,
+                firewall_available: true,
+                platform_connectivity: BTreeMap::from([("ums-1".into(), Some(true))]),
+                ..Default::default()
+            },
+        );
+        assert!(report.ok);
+        assert!(report.checks.iter().any(|check| {
+            check.id == "profile-evidence" && check.status == PreflightCheckStatus::Warning
         }));
     }
 
@@ -506,8 +568,7 @@ mod tests {
                     }],
                 )],
                 assets_ready: true,
-                profiles_static_reviewed: true,
-                profiles_platform_verified: true,
+                profile_evidence: Some(ProfileEvidenceVerdict::PlatformVerified),
                 worker_available: true,
                 firewall_required: true,
                 firewall_available: true,

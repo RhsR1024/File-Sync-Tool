@@ -53,13 +53,13 @@ function onCardKeydown(event: KeyboardEvent, card: ToolCard) {
 
 const toolCards = computed<ToolCard[]>(() => [
   {
-    key: 'framework-password',
-    titleKey: 'sidebar.frameworkPassword',
-    descriptionKey: 'tools.frameworkPassword.description',
-    path: '/tools/framework-password',
+    key: 'ums-initial-password',
+    titleKey: 'sidebar.umsInitialPassword',
+    descriptionKey: 'tools.umsInitialPassword.description',
+    path: '/tools/ums-initial-password',
     icon: markRaw(KeyRound as LucideIcon),
     iconClasses: 'from-amber-500 to-orange-600 shadow-amber-500/20',
-    chipKey: 'toolsHub.cards.frameworkPassword.chip',
+    chipKey: 'toolsHub.cards.umsInitialPassword.chip',
   },
   {
     key: 'appliance-ssh',

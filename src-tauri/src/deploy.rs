@@ -272,6 +272,62 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     Ok(())
 }
 
+/// `${filename}` is the package base name, i.e. the archive name without its
+/// suffix (`pkg_x86.tar.gz` -> `pkg_x86`). A folder deploy looks for the
+/// archive inside the folder; a single-file deploy uses the file itself.
+fn resolve_package_base_name(local_path: &Path, folder_name: &str) -> String {
+    if local_path.is_file() {
+        return local_path
+            .file_name()
+            .map(|name| strip_archive_suffix(&name.to_string_lossy()))
+            .unwrap_or_else(|| folder_name.to_string());
+    }
+
+    if let Ok(entries) = fs::read_dir(local_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(name) = path.file_name() {
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".tar.gz") {
+                    return name_str.trim_end_matches(".tar.gz").to_string();
+                }
+            }
+        }
+    }
+
+    folder_name.to_string()
+}
+
+/// `.tar.gz` is a double extension, so `Path::file_stem` alone would leave a
+/// trailing `.tar`.
+fn strip_archive_suffix(file_name: &str) -> String {
+    match file_name.strip_suffix(".tar.gz") {
+        Some(stem) => stem.to_string(),
+        None => Path::new(file_name)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| file_name.to_string()),
+    }
+}
+
+/// `${remote_target}` must name a directory that post commands can `cd` into.
+/// A file upload lands at `<dir>/<file name>`, so its commands run against the
+/// containing directory; folder deploys already target a directory.
+fn remote_command_target(local_path: &Path, remote_target: &str) -> String {
+    if !local_path.is_file() {
+        return remote_target.to_string();
+    }
+
+    match remote_target.rsplit_once('/') {
+        Some(("", _)) => "/".to_string(),
+        Some((parent, _)) => parent.to_string(),
+        None => ".".to_string(),
+    }
+}
+
 fn substitute_variables(
     cmd: &str,
     folder_name: &str,
@@ -284,25 +340,7 @@ fn substitute_variables(
     result = result.replace("${remote_target}", remote_target);
 
     if result.contains("${filename}") {
-        let replacement = if let Ok(entries) = fs::read_dir(local_path) {
-            let mut found_name = folder_name.to_string();
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Some(name) = path.file_name() {
-                        let name_str = name.to_string_lossy();
-                        if name_str.ends_with(".tar.gz") {
-                            found_name = name_str.trim_end_matches(".tar.gz").to_string();
-                            break;
-                        }
-                    }
-                }
-            }
-            found_name
-        } else {
-            folder_name.to_string()
-        };
-
+        let replacement = resolve_package_base_name(local_path, folder_name);
         result = result.replace("${filename}", &replacement);
     }
 
@@ -711,6 +749,42 @@ fn calculate_size(path: &Path) -> u64 {
     size
 }
 
+/// Expands a file upload aimed at an existing remote directory into
+/// `<dir>/<file name>`. `sftp.create` against a directory path fails with
+/// `[SFTP(4)] failure`, so `/root` must become `/root/package.tar.gz`.
+/// Returns `None` when the target is already usable as-is.
+fn join_remote_file_target(
+    local_path: &Path,
+    remote_target: &str,
+    local_is_dir: bool,
+    remote_is_dir: bool,
+) -> Option<String> {
+    if local_is_dir || !remote_is_dir {
+        return None;
+    }
+    let name = local_path.file_name()?;
+    Some(format!(
+        "{}/{}",
+        remote_target.trim_end_matches('/'),
+        name.to_string_lossy()
+    ))
+}
+
+fn resolve_remote_file_target(
+    sftp: &ssh2::Sftp,
+    local_path: &Path,
+    remote_target: &str,
+) -> Option<String> {
+    if local_path.is_dir() {
+        return None;
+    }
+    let remote_is_dir = sftp
+        .stat(Path::new(remote_target))
+        .map(|stat| stat.is_dir())
+        .unwrap_or(false);
+    join_remote_file_target(local_path, remote_target, false, remote_is_dir)
+}
+
 pub fn deploy_manual<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     server: &DeployServer,
@@ -780,8 +854,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
             name
         );
     }
-    let target_path_str = target_path_str.replace('\\', "/");
-    let target_p = Path::new(&target_path_str);
+    let mut target_path_str = target_path_str.replace('\\', "/");
 
     if let Some(tracking) = tracking.as_ref() {
         let _ = tracking.mark_stage(
@@ -869,6 +942,21 @@ pub fn deploy_manual<R: tauri::Runtime>(
             format!("SFTP init failed: {}", e),
         )
     })?;
+
+    // Only now, with an SFTP session, can we tell whether a bare target like
+    // `/root` is an existing directory the file should be placed into.
+    if let Some(resolved) = resolve_remote_file_target(&sftp, local_p, &target_path_str) {
+        target_path_str = resolved;
+        if let Some(tracking) = tracking.as_ref() {
+            let _ = tracking.mark_stage(
+                &server.id,
+                DeployStage::Uploading,
+                None,
+                Some(target_path_str.clone()),
+            );
+        }
+    }
+    let target_p = Path::new(&target_path_str);
 
     emit_log_with_tracking(
         app_handle,
@@ -1019,6 +1107,8 @@ pub fn deploy_manual<R: tauri::Runtime>(
             Some(server.name.as_str()),
         );
 
+        let command_target = remote_command_target(local_p, &target_path_str);
+
         for cmd in post_commands {
             if should_cancel.load(Ordering::SeqCst) {
                 return Err(report_transfer_issue(
@@ -1029,7 +1119,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
                 ));
             }
 
-            let final_cmd = substitute_variables(cmd, &folder_display, local_p, &target_path_str);
+            let final_cmd = substitute_variables(cmd, &folder_display, local_p, &command_target);
             emit_log_with_tracking(
                 app_handle,
                 format!("$ {}", final_cmd),
@@ -1329,6 +1419,103 @@ mod tests {
     use super::*;
     use crate::task_domain::{AttemptStatus, DeployStage, TaskTriggerSource};
     use crate::task_manager::{DeployTarget, StartManualDeployRequest, TaskManager};
+
+    #[test]
+    fn file_upload_into_existing_remote_directory_appends_file_name() {
+        let local = Path::new("E:\\UMS_TEMP\\D012\\VMS_U500_x86.tar.gz");
+
+        // `/root` exists as a directory: the file must land inside it.
+        assert_eq!(
+            join_remote_file_target(local, "/root", false, true).as_deref(),
+            Some("/root/VMS_U500_x86.tar.gz")
+        );
+        assert_eq!(
+            join_remote_file_target(local, "/root/", false, true).as_deref(),
+            Some("/root/VMS_U500_x86.tar.gz")
+        );
+
+        // A target that is not an existing directory is a full file path.
+        assert_eq!(
+            join_remote_file_target(local, "/root/renamed.tar.gz", false, false),
+            None
+        );
+
+        // Folder uploads keep their own recursive mkdir behaviour.
+        assert_eq!(join_remote_file_target(local, "/root", true, true), None);
+    }
+
+    #[test]
+    fn package_base_name_strips_archive_suffix() {
+        assert_eq!(strip_archive_suffix("VMS_U500_x86.tar.gz"), "VMS_U500_x86");
+        assert_eq!(strip_archive_suffix("VMS_U500_x86.zip"), "VMS_U500_x86");
+        assert_eq!(strip_archive_suffix("VMS_U500_x86"), "VMS_U500_x86");
+    }
+
+    #[test]
+    fn single_file_deploy_resolves_filename_and_target_from_the_file() {
+        let dir = std::env::temp_dir().join(format!("fst-deploy-vars-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let package = dir.join("VMS_U500_H16-B2101.12.0.260724_x86.tar.gz");
+        fs::write(&package, b"payload").unwrap();
+
+        // `${remote_target}` becomes the directory the file was uploaded into.
+        assert_eq!(
+            remote_command_target(&package, "/root/VMS_U500_H16-B2101.12.0.260724_x86.tar.gz"),
+            "/root"
+        );
+        assert_eq!(
+            remote_command_target(&package, "/VMS_U500_H16-B2101.12.0.260724_x86.tar.gz"),
+            "/"
+        );
+
+        // `${filename}` is the archive name without its `.tar.gz` suffix, so
+        // the built-in extract command does not end up with `.tar.gz.tar.gz`.
+        let extract = substitute_variables(
+            "cd ${remote_target} && tar -zxvf ${filename}.tar.gz",
+            "VMS_U500_H16-B2101.12.0.260724_x86.tar.gz",
+            &package,
+            &remote_command_target(&package, "/root/VMS_U500_H16-B2101.12.0.260724_x86.tar.gz"),
+        );
+        assert_eq!(
+            extract,
+            "cd /root && tar -zxvf VMS_U500_H16-B2101.12.0.260724_x86.tar.gz"
+        );
+
+        let install = substitute_variables(
+            "cd ${remote_target}/${filename} && ./update -f",
+            "VMS_U500_H16-B2101.12.0.260724_x86.tar.gz",
+            &package,
+            &remote_command_target(&package, "/root/VMS_U500_H16-B2101.12.0.260724_x86.tar.gz"),
+        );
+        assert_eq!(
+            install,
+            "cd /root/VMS_U500_H16-B2101.12.0.260724_x86 && ./update -f"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_deploy_keeps_scanning_the_folder_for_the_archive() {
+        let dir = std::env::temp_dir().join(format!("fst-deploy-folder-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("VMS_U500_x86.tar.gz"), b"payload").unwrap();
+
+        assert_eq!(remote_command_target(&dir, "/root/pkg"), "/root/pkg");
+        assert_eq!(
+            substitute_variables(
+                "cd ${remote_target} && tar -zxvf ${filename}.tar.gz",
+                "pkg",
+                &dir,
+                "/root/pkg"
+            ),
+            "cd /root/pkg && tar -zxvf VMS_U500_x86.tar.gz"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn report_stage_failure_records_structured_task_log_excerpt() {

@@ -1,32 +1,39 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { FolderOpen } from 'lucide-vue-next';
+import { FileSearch, FolderOpen } from 'lucide-vue-next';
 
-import { openDirectory } from '@/lib/tauri';
+import { openDirectory, openFile } from '@/lib/tauri';
 
 defineOptions({ name: 'DirectoryPathInput' });
+
+type PickMode = 'directory' | 'file';
 
 interface Props {
   modelValue: string;
   placeholder?: string;
   title?: string;
   disabled?: boolean;
+  /** Also render a file picker button. Use when the field accepts a file or a folder. */
+  allowFile?: boolean;
+  fileTitle?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   placeholder: '',
   title: '',
   disabled: false,
+  allowFile: false,
+  fileTitle: '',
 });
 
 const emit = defineEmits<{
   'update:modelValue': [value: string];
-  'pick-error': [error: string];
+  'pick-error': [error: string, mode: PickMode];
 }>();
 
 const isPicking = ref(false);
 
-async function pickDirectory() {
+async function pick(mode: PickMode) {
   if (props.disabled || isPicking.value) {
     return;
   }
@@ -34,12 +41,12 @@ async function pickDirectory() {
   isPicking.value = true;
 
   try {
-    const selected = await openDirectory();
+    const selected = mode === 'file' ? await openFile() : await openDirectory();
     if (selected) {
       emit('update:modelValue', selected);
     }
   } catch (error) {
-    emit('pick-error', String(error));
+    emit('pick-error', String(error), mode);
   } finally {
     isPicking.value = false;
   }
@@ -57,11 +64,21 @@ async function pickDirectory() {
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
     />
     <button
+      v-if="allowFile"
+      type="button"
+      :disabled="disabled || isPicking"
+      :title="fileTitle"
+      class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent disabled:hover:border-transparent"
+      @click="pick('file')"
+    >
+      <FileSearch class="w-4 h-4" />
+    </button>
+    <button
       type="button"
       :disabled="disabled || isPicking"
       :title="title"
       class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:text-slate-400 disabled:hover:bg-transparent disabled:hover:border-transparent"
-      @click="pickDirectory"
+      @click="pick('directory')"
     >
       <FolderOpen class="w-4 h-4" />
     </button>

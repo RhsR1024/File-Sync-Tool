@@ -22,9 +22,12 @@ mod portal_login;
 mod remote_package_patch;
 mod scanner;
 mod screenshare;
+mod screenshare_gpu;
 mod screenshare_input;
 mod screenshare_media;
 mod screenshare_web_assets;
+#[cfg(feature = "screen-share-webrtc-prototype")]
+mod screenshare_webrtc;
 mod single_instance_guard;
 mod task_commands;
 mod task_domain;
@@ -33,6 +36,7 @@ mod task_manager;
 mod task_persist;
 mod task_runtime;
 mod tftp_server;
+mod ums_init_password;
 mod updater;
 mod webview2_bootstrap;
 mod windows_copy;
@@ -383,7 +387,8 @@ fn reserve_scan_executor(
     already_running_message: &'static str,
 ) -> Result<ExecutorReservation, String> {
     let _admission = state.executor_admission.lock().unwrap();
-    if state.manual_copy_worker_running.load(Ordering::SeqCst) || copy_queue_has_ready_items(state) {
+    if state.manual_copy_worker_running.load(Ordering::SeqCst) || copy_queue_has_ready_items(state)
+    {
         return Err("Manual copy queue already in progress".to_string());
     }
     try_reserve_executor(state.executor_active.clone(), state.is_scanning.clone()).ok_or_else(
@@ -2733,6 +2738,21 @@ async fn open_directory(window: WebviewWindow) -> Result<Option<String>, String>
 }
 
 #[tauri::command]
+async fn open_file(window: WebviewWindow) -> Result<Option<String>, String> {
+    // Same main-thread dispatch as `open_directory`: Windows shell dialogs must
+    // run on the thread that owns the COM apartment.
+    pick_directory_on_main_thread_with(
+        |task| {
+            window
+                .run_on_main_thread(task)
+                .map_err(|error| format!("MAIN_THREAD_DIALOG_DISPATCH_FAILED::{}", error))
+        },
+        || rfd::FileDialog::new().pick_file(),
+    )
+    .await
+}
+
+#[tauri::command]
 async fn save_text_file(
     content: String,
     default_file_name: String,
@@ -2763,15 +2783,6 @@ async fn save_text_file(
     std::fs::write(&target_path, content).map_err(|e| e.to_string())?;
 
     Ok(Some(target_path.to_string_lossy().to_string()))
-}
-
-#[allow(non_snake_case)]
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct PasswordChangeResult {
-    pub ip: String,
-    pub success: bool,
-    pub message: String,
-    pub failedAt: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -3403,204 +3414,6 @@ fn sha256_hex(plaintext: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(plaintext.as_bytes());
     format!("{:x}", hasher.finalize())
-}
-
-fn password_change_failure(ip: &str, message: String, failed_at: &str) -> PasswordChangeResult {
-    PasswordChangeResult {
-        ip: ip.to_string(),
-        success: false,
-        message,
-        failedAt: Some(failed_at.to_string()),
-    }
-}
-
-async fn change_framework_password_for_ip(
-    client: reqwest::Client,
-    ip_input: String,
-    old_passwd: String,
-    new_passwd: String,
-) -> Option<PasswordChangeResult> {
-    let ip = ip_input.trim().to_string();
-    if ip.is_empty() {
-        return None;
-    }
-
-    if !validate_ip(&ip) {
-        return Some(password_change_failure(
-            &ip,
-            format!("Invalid IP address: {}", ip),
-            "login",
-        ));
-    }
-
-    let hashed_old = sha256_hex(&old_passwd);
-    let hashed_new = sha256_hex(&new_passwd);
-
-    let login_url = format!("http://{}:21900/openAPI/userMgr/v1/login", ip);
-    let login_body = json!({
-        "userName": "admin",
-        "userPasswd": hashed_old,
-        "isUnlockLogin": false
-    });
-
-    let token = match client
-        .post(&login_url)
-        .header("Authorization", "")
-        .header("content-type", "application/json")
-        .json(&login_body)
-        .send()
-        .await
-    {
-        Ok(response) => match response.json::<serde_json::Value>().await {
-            Ok(json) => {
-                if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
-                    match json
-                        .get("data")
-                        .and_then(|d| d.get("token"))
-                        .and_then(|t| t.as_str())
-                    {
-                        Some(token) => token.to_string(),
-                        None => {
-                            return Some(password_change_failure(
-                                &ip,
-                                "Login response missing token".to_string(),
-                                "login",
-                            ));
-                        }
-                    }
-                } else {
-                    let msg = json
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("Unknown error");
-                    return Some(password_change_failure(
-                        &ip,
-                        format!("Login failed: {}", msg),
-                        "login",
-                    ));
-                }
-            }
-            Err(e) => {
-                return Some(password_change_failure(
-                    &ip,
-                    format!("Login response parse error: {}", e),
-                    "login",
-                ));
-            }
-        },
-        Err(e) => {
-            return Some(password_change_failure(
-                &ip,
-                format!("Login request failed: {}", e),
-                "login",
-            ));
-        }
-    };
-
-    let change_passwd_url = format!("http://{}:21900/openAPI/userMgr/v1/changePasswd", ip);
-    let change_passwd_body = json!({
-        "userName": "admin",
-        "oldUserPasswd": hashed_old,
-        "newUserPasswd": hashed_new
-    });
-
-    let change_success = match client
-        .post(&change_passwd_url)
-        .header("Authorization", &token)
-        .header("content-type", "application/json")
-        .json(&change_passwd_body)
-        .send()
-        .await
-    {
-        Ok(response) => match response.json::<serde_json::Value>().await {
-            Ok(json) => {
-                if json.get("code").and_then(|v| v.as_i64()) == Some(0) {
-                    true
-                } else {
-                    let msg = json
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("Unknown error");
-                    return Some(password_change_failure(
-                        &ip,
-                        format!("Change password failed: {}", msg),
-                        "changePasswd",
-                    ));
-                }
-            }
-            Err(e) => {
-                return Some(password_change_failure(
-                    &ip,
-                    format!("Change password response parse error: {}", e),
-                    "changePasswd",
-                ));
-            }
-        },
-        Err(e) => {
-            return Some(password_change_failure(
-                &ip,
-                format!("Change password request failed: {}", e),
-                "changePasswd",
-            ));
-        }
-    };
-
-    if !change_success {
-        return None;
-    }
-
-    let logout_url = format!("http://{}:21900/openAPI/userMgr/v1/logout", ip);
-    let logout_body = json!({
-        "userName": "admin",
-        "userPasswd": hashed_old,
-        "token": token
-    });
-
-    let _ = client
-        .post(&logout_url)
-        .header("Authorization", &token)
-        .header("content-type", "application/json")
-        .json(&logout_body)
-        .send()
-        .await;
-
-    Some(PasswordChangeResult {
-        ip,
-        success: true,
-        message: "Success".to_string(),
-        failedAt: None,
-    })
-}
-
-#[tauri::command]
-async fn change_framework_password(
-    ips: Vec<String>,
-    old_password: Option<String>,
-    new_password: Option<String>,
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<PasswordChangeResult>, String> {
-    let old_passwd = old_password.unwrap_or_else(|| "123456".to_string());
-    let new_passwd = new_password.unwrap_or_else(|| "admin_123".to_string());
-    let api_timeout_secs = state
-        .config
-        .lock()
-        .unwrap()
-        .framework_password_api_timeout_secs;
-    let client = build_device_http_client_with_timeout(Duration::from_secs(api_timeout_secs))?;
-
-    let results = crate::async_utils::run_ordered_with_limit(
-        ips,
-        DEVICE_BATCH_CONCURRENCY_LIMIT,
-        move |ip| {
-            let client = client.clone();
-            let old_passwd = old_passwd.clone();
-            let new_passwd = new_passwd.clone();
-            async move { change_framework_password_for_ip(client, ip, old_passwd, new_passwd).await }
-        },
-    )
-    .await?;
-
-    Ok(results.into_iter().flatten().collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4656,13 +4469,14 @@ fn main() {
             open_path_parent,
             open_url,
             open_directory,
+            open_file,
             remote_package_patch::remote_package_test_connection,
             remote_package_patch::remote_package_list_dir,
             remote_package_patch::remote_package_pick_local_file,
             remote_package_patch::remote_package_scan_package,
             remote_package_patch::remote_package_start_patch,
             save_text_file,
-            change_framework_password,
+            ums_init_password::change_ums_init_password,
             enable_appliance_ssh,
             portal_login::portal_login_get_runtime_status,
             portal_login::portal_login_check_status,

@@ -24,6 +24,7 @@ pub mod runtime_assets;
 pub mod session_journal;
 pub mod telemetry;
 pub mod template;
+pub mod watermark_runtime;
 pub mod windows;
 pub mod worker_entry;
 pub mod worker_protocol;

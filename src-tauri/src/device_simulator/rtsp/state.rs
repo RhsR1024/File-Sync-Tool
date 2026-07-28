@@ -86,20 +86,18 @@ impl RtspSession {
             // extra track some platforms set up after PLAY. The service only
             // ever spawns one stream task, so a late SETUP cannot disturb the
             // video already in flight.
-            RtspMethod::Setup => {
-                match parse_tcp_interleaved(request.headers.get("transport")) {
-                    Ok((rtp_channel, rtcp_channel)) => {
-                        if self.state != RtspSessionState::Playing {
-                            self.state = RtspSessionState::Ready;
-                        }
-                        RtspDecision::SetupTcpInterleaved {
-                            rtp_channel,
-                            rtcp_channel,
-                        }
+            RtspMethod::Setup => match parse_tcp_interleaved(request.headers.get("transport")) {
+                Ok((rtp_channel, rtcp_channel)) => {
+                    if self.state != RtspSessionState::Playing {
+                        self.state = RtspSessionState::Ready;
                     }
-                    Err(()) => error(461, "Unsupported Transport"),
+                    RtspDecision::SetupTcpInterleaved {
+                        rtp_channel,
+                        rtcp_channel,
+                    }
                 }
-            }
+                Err(()) => error(461, "Unsupported Transport"),
+            },
             // The legacy server started streaming on the first PLAY it saw and
             // never tracked SETUP state, so clients that PLAY an aggregate URL
             // without a per-track SETUP still get video. Rejecting those with
@@ -196,7 +194,9 @@ pub fn parse_rtsp_request(bytes: &[u8]) -> Result<RtspRequest, RtspParseError> {
         // Legacy read the first occurrence of each header and ignored the rest.
         // Rejecting duplicates dropped sessions from clients that repeat a
         // header, so keep the first value instead.
-        headers.entry(name).or_insert_with(|| value.trim().to_string());
+        headers
+            .entry(name)
+            .or_insert_with(|| value.trim().to_string());
     }
     let cseq = headers
         .get("cseq")
@@ -315,7 +315,10 @@ mod tests {
             declared_body_length(b"GET_PARAMETER * RTSP/1.0\r\nContent-Length: 12\r\n"),
             12
         );
-        assert_eq!(declared_body_length(b"OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n"), 0);
+        assert_eq!(
+            declared_body_length(b"OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n"),
+            0
+        );
     }
 
     #[test]

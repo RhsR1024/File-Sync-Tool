@@ -34,7 +34,7 @@ assert.deepEqual(toolPaths, [
   '/tools',
   '/tools/appliance-ssh',
   '/tools/remote-package-patch',
-  '/tools/framework-password',
+  '/tools/ums-initial-password',
   '/tools/code-statistics',
   '/tools/network',
   '/tools/portal-auto-login',

@@ -28,6 +28,7 @@ export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
   last_http_port: 81,
   last_rtsp_ports: { main: 554, sub: 555, third: 556 },
   last_media_theme_id: 'classic',
+  last_time_watermark_enabled: true,
   auto_check_asset_updates: true,
   manage_firewall: true,
 };
@@ -57,6 +58,7 @@ export const simulatorStartRequestContract: SimulatorStartRequest = {
     transport: 'tcp_interleaved',
     enabled_streams: ['main', 'sub', 'third'],
     audio_enabled: false,
+    time_watermark_enabled: true,
   },
 };
 

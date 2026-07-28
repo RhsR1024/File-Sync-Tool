@@ -896,10 +896,7 @@ const ENHANCE_PRESETS: &[(&str, &str)] = &[
     ("version", r"\bv?\d+(?:\.\d+){1,3}\b"),
     ("url", r#"\bhttps?://[^\s"'<>]+"#),
     ("win_path", r#"\b[A-Za-z]:\\[^\s"'<>|]*"#),
-    (
-        "timestamp",
-        r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\b",
-    ),
+    ("timestamp", r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\b"),
     (
         "guid",
         r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b",
@@ -1331,9 +1328,7 @@ pub async fn notepad_extensions_read_enhance_config(
 
 /// 供规则卡片实时显示「生成的正则」。编译逻辑只在 Rust 侧存在一份，避免前后端实现漂移。
 #[tauri::command]
-pub async fn notepad_extensions_compile_matcher(
-    matcher: EnhanceMatcher,
-) -> Result<String, String> {
+pub async fn notepad_extensions_compile_matcher(matcher: EnhanceMatcher) -> Result<String, String> {
     Ok(compile_matcher(&matcher)?.unwrap_or_default())
 }
 
@@ -1506,7 +1501,10 @@ mod tests {
             close: "\"".into(),
             ..EnhanceMatcher::default()
         };
-        assert_eq!(compile_matcher(&between).unwrap(), Some("\"[^\"]*\"".into()));
+        assert_eq!(
+            compile_matcher(&between).unwrap(),
+            Some("\"[^\"]*\"".into())
+        );
         // 原始正则模式不编译，pattern 自身就是权威值。
         assert_eq!(compile_matcher(&EnhanceMatcher::default()).unwrap(), None);
     }

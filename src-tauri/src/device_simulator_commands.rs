@@ -1,3 +1,4 @@
+use crate::network_probe::{arp_resolve, format_mac, is_on_link, local_prefixes};
 use crate::{config, AppState};
 use app_lib::device_simulator::alarms::{AlarmHandlerId, AlarmTypeId};
 use app_lib::device_simulator::api::{
@@ -25,7 +26,9 @@ use app_lib::device_simulator::errors::SimulatorErrorBody;
 use app_lib::device_simulator::events::WorkerEventPayload;
 use app_lib::device_simulator::manager::{ManagerNotification, SimulatorManager};
 use app_lib::device_simulator::models::{AssetState, SessionState, SimulatorStatus};
-use app_lib::device_simulator::preflight::{run_preflight, PreflightEnvironment};
+use app_lib::device_simulator::preflight::{
+    run_preflight, PreflightEnvironment, ProfileEvidenceVerdict,
+};
 use app_lib::device_simulator::profiles::loader::load_profile_from_pack;
 use app_lib::device_simulator::profiles::schema::EvidenceStatus;
 use app_lib::device_simulator::runtime_assets::{list_media_themes, PinnedPackDirectory};
@@ -34,7 +37,9 @@ use app_lib::device_simulator::windows::interfaces::{
     list_system_interfaces, NetworkInterfaceInfo,
 };
 use app_lib::device_simulator::windows::ip_alias::{
-    assess_system_address_conflicts, unknown_address_conflict_assessments, ConflictEvidenceKind,
+    assess_address_conflict, assess_system_address_conflicts, unknown_address_conflict_assessments,
+    AddressConflictAssessment, ConflictEvidence, ConflictEvidenceKind, ConflictObservationResult,
+    ConflictVerdict,
 };
 use app_lib::device_simulator::windows::named_pipe::PipeIdentity;
 use app_lib::device_simulator::worker_protocol::{
@@ -45,7 +50,7 @@ use semver::Version;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener};
@@ -54,7 +59,19 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Semaphore};
+use tokio::task::JoinSet;
+
+/// ARP attempts per address. `SendARP` retries internally, but it returns
+/// immediately against a negative neighbour-cache entry — which is exactly what
+/// a first failed attempt leaves behind — so a single attempt reports a live
+/// host as free.
+const ADDRESS_PROBE_ATTEMPTS: usize = 2;
+/// Addresses probed at once.
+const ADDRESS_PROBE_CONCURRENCY: usize = 64;
+/// Ceiling on the whole address sweep, so a large device count cannot stall the
+/// start the user asked for.
+const ADDRESS_PROBE_BUDGET: Duration = Duration::from_secs(15);
 
 const MAX_IMPORTED_ALARM_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ALARM_TYPES_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
@@ -1380,6 +1397,18 @@ async fn build_preflight(
         }
     };
     attach_local_address_owners(&mut conflict_assessments, &interfaces);
+    // Reading the neighbour table alone leaves every quiet address "unconfirmed",
+    // which left the address check permanently amber even on a free range. Ask
+    // the addresses that are still open directly.
+    let open_addresses = conflict_assessments
+        .iter()
+        .filter(|assessment| assessment.verdict != ConflictVerdict::Conflict)
+        .map(|assessment| assessment.address)
+        .collect::<Vec<_>>();
+    let conflict_assessments = merge_probe_evidence(
+        conflict_assessments,
+        probe_planned_addresses(open_addresses).await,
+    );
     let requested_ports = [
         request.device_http_port,
         request.rtsp_ports.main,
@@ -1417,7 +1446,7 @@ async fn build_preflight(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let (assets_ready, asset_details, profiles_static_reviewed, profiles_platform_verified) =
+    let (assets_ready, asset_details, profile_evidence) =
         match load_catalog_context(app_handle, app_state, false).await {
             Ok(context) => {
                 let paths = context.paths;
@@ -1427,9 +1456,13 @@ async fn build_preflight(
                 tokio::task::spawn_blocking(move || {
                     let status = asset_status_from_catalog(&paths, &catalog, selected.clone())?;
                     let assets_ready = status.state == AssetState::Ready;
-                    let mut static_reviewed = true;
-                    let mut platform_verified = true;
+                    // The profile documents ship inside the packs, so an
+                    // unprepared selection leaves the evidence unread rather
+                    // than unapproved.
+                    let mut profile_evidence = None;
                     if assets_ready {
+                        let mut static_reviewed = true;
+                        let mut platform_verified = true;
                         for profile_id in &selected {
                             let profile_pack = catalog
                                 .profiles
@@ -1476,9 +1509,13 @@ async fn build_preflight(
                                     && evidence.verified_platforms.contains(&platform)
                             });
                         }
-                    } else {
-                        static_reviewed = false;
-                        platform_verified = false;
+                        profile_evidence = Some(if platform_verified {
+                            ProfileEvidenceVerdict::PlatformVerified
+                        } else if static_reviewed {
+                            ProfileEvidenceVerdict::StaticReviewed
+                        } else {
+                            ProfileEvidenceVerdict::Unreviewed
+                        });
                     }
                     Ok::<_, SimulatorErrorBody>((
                         assets_ready,
@@ -1487,8 +1524,7 @@ async fn build_preflight(
                             status.packs.len(),
                             catalog.generated_at
                         )),
-                        static_reviewed,
-                        platform_verified,
+                        profile_evidence,
                     ))
                 })
                 .await
@@ -1500,12 +1536,7 @@ async fn build_preflight(
                     )
                 })??
             }
-            Err(error) => (
-                false,
-                Some(error.details.unwrap_or(error.code)),
-                false,
-                false,
-            ),
+            Err(error) => (false, Some(error.details.unwrap_or(error.code)), None),
         };
     let environment = PreflightEnvironment {
         interfaces,
@@ -1514,8 +1545,7 @@ async fn build_preflight(
         unavailable_tcp_ports,
         assets_ready,
         asset_details,
-        profiles_static_reviewed,
-        profiles_platform_verified,
+        profile_evidence,
         worker_available: cfg!(target_os = "windows")
             && std::env::current_exe().is_ok_and(|path| path.is_absolute()),
         firewall_required: settings.manage_firewall,
@@ -1527,8 +1557,113 @@ async fn build_preflight(
     Ok(run_preflight(request, &environment))
 }
 
+/// Answers "is this address free?" with an active probe instead of leaving every
+/// quiet address unconfirmed.
+///
+/// ARP is the decisive signal: a host on the local link must answer ARP to use
+/// the network at all, while plenty of live devices never answer ICMP and
+/// fake-IP proxy adapters answer ICMP for *every* address. ARP only reaches
+/// on-link addresses, so anything off-link is reported as unconfirmed rather
+/// than resolving the gateway and marking the whole range occupied.
+async fn probe_planned_addresses(addresses: Vec<Ipv4Addr>) -> Vec<ConflictEvidence> {
+    if addresses.is_empty() {
+        return Vec::new();
+    }
+    let Ok(prefixes) = tokio::task::spawn_blocking(local_prefixes).await else {
+        return Vec::new();
+    };
+
+    let mut evidence = Vec::with_capacity(addresses.len());
+    let limiter = Arc::new(Semaphore::new(ADDRESS_PROBE_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+    for address in addresses {
+        if !is_on_link(address, &prefixes) {
+            evidence.push(ConflictEvidence {
+                address,
+                kind: ConflictEvidenceKind::Probe,
+                result: ConflictObservationResult::Inconclusive,
+                details: Some(
+                    "address is not on-link for any local interface, so ARP cannot reach it".into(),
+                ),
+            });
+            continue;
+        }
+        let limiter = Arc::clone(&limiter);
+        tasks.spawn(async move {
+            let _permit = limiter.acquire_owned().await.ok()?;
+            tokio::task::spawn_blocking(move || arp_probe_evidence(address))
+                .await
+                .ok()
+        });
+    }
+
+    // Every `SendARP` holds a blocking thread for its full duration and ignores
+    // any timeout we could pass it, so bound the sweep instead: addresses still
+    // outstanding stay unconfirmed rather than holding up the start.
+    let mut probed = Vec::new();
+    let _ = tokio::time::timeout(ADDRESS_PROBE_BUDGET, async {
+        while let Some(joined) = tasks.join_next().await {
+            if let Ok(Some(item)) = joined {
+                probed.push(item);
+            }
+        }
+    })
+    .await;
+    evidence.extend(probed);
+    evidence
+}
+
+fn arp_probe_evidence(address: Ipv4Addr) -> ConflictEvidence {
+    for _ in 0..ADDRESS_PROBE_ATTEMPTS {
+        if let (Some(mac), _) = arp_resolve(address) {
+            return ConflictEvidence {
+                address,
+                kind: ConflictEvidenceKind::Probe,
+                result: ConflictObservationResult::Occupied,
+                details: Some(format_mac(&mac)),
+            };
+        }
+    }
+    ConflictEvidence {
+        address,
+        kind: ConflictEvidenceKind::Probe,
+        result: ConflictObservationResult::Available,
+        details: Some(format!(
+            "no ARP reply after {ADDRESS_PROBE_ATTEMPTS} attempts"
+        )),
+    }
+}
+
+/// Folds the active probe into the passive neighbour-table reading. The "nothing
+/// was observed" placeholder is exactly what the probe answers, so it is
+/// dropped; local and neighbour evidence outrank a probe and is kept.
+fn merge_probe_evidence(
+    assessments: Vec<AddressConflictAssessment>,
+    probes: Vec<ConflictEvidence>,
+) -> Vec<AddressConflictAssessment> {
+    if probes.is_empty() {
+        return assessments;
+    }
+    let mut by_address = probes
+        .into_iter()
+        .map(|probe| (probe.address, probe))
+        .collect::<HashMap<_, _>>();
+    assessments
+        .into_iter()
+        .map(|assessment| {
+            let Some(probe) = by_address.remove(&assessment.address) else {
+                return assessment;
+            };
+            let mut evidence = assessment.evidence;
+            evidence.retain(|item| item.kind != ConflictEvidenceKind::Unknown);
+            evidence.push(probe);
+            assess_address_conflict(assessment.address, evidence)
+        })
+        .collect()
+}
+
 fn attach_local_address_owners(
-    assessments: &mut [app_lib::device_simulator::windows::ip_alias::AddressConflictAssessment],
+    assessments: &mut [AddressConflictAssessment],
     interfaces: &[NetworkInterfaceInfo],
 ) {
     for assessment in assessments {
@@ -2290,6 +2425,94 @@ mod tests {
         assert!(result.contains(&occupied));
         assert!(!result.contains(&free));
         assert!(TcpListener::bind((Ipv4Addr::LOCALHOST, free)).is_ok());
+    }
+
+    fn assessment(address: Ipv4Addr, evidence: Vec<ConflictEvidence>) -> AddressConflictAssessment {
+        assess_address_conflict(address, evidence)
+    }
+
+    fn unknown_evidence(address: Ipv4Addr) -> ConflictEvidence {
+        ConflictEvidence {
+            address,
+            kind: ConflictEvidenceKind::Unknown,
+            result: ConflictObservationResult::Inconclusive,
+            details: Some("nothing was observed".into()),
+        }
+    }
+
+    #[test]
+    fn an_active_probe_settles_addresses_the_neighbour_table_left_unconfirmed() {
+        let free = Ipv4Addr::new(192, 168, 50, 10);
+        let taken = Ipv4Addr::new(192, 168, 50, 11);
+        let merged = merge_probe_evidence(
+            vec![
+                assessment(free, vec![unknown_evidence(free)]),
+                assessment(taken, vec![unknown_evidence(taken)]),
+            ],
+            vec![
+                ConflictEvidence {
+                    address: free,
+                    kind: ConflictEvidenceKind::Probe,
+                    result: ConflictObservationResult::Available,
+                    details: Some("no ARP reply after 2 attempts".into()),
+                },
+                ConflictEvidence {
+                    address: taken,
+                    kind: ConflictEvidenceKind::Probe,
+                    result: ConflictObservationResult::Occupied,
+                    details: Some("00:1A:2B:3C:4D:5E".into()),
+                },
+            ],
+        );
+
+        assert_eq!(merged[0].verdict, ConflictVerdict::Clear);
+        assert_eq!(merged[1].verdict, ConflictVerdict::Conflict);
+        // The placeholder the probe answered must not survive as a second,
+        // contradictory reading of the same address.
+        assert!(merged.iter().all(|item| item
+            .evidence
+            .iter()
+            .all(|evidence| evidence.kind != ConflictEvidenceKind::Unknown)));
+    }
+
+    #[test]
+    fn a_probe_cannot_clear_an_address_a_local_interface_already_owns() {
+        let address = Ipv4Addr::new(192, 168, 50, 10);
+        let merged = merge_probe_evidence(
+            vec![assessment(
+                address,
+                vec![
+                    ConflictEvidence {
+                        address,
+                        kind: ConflictEvidenceKind::Local,
+                        result: ConflictObservationResult::Occupied,
+                        details: Some("Ethernet".into()),
+                    },
+                    unknown_evidence(address),
+                ],
+            )],
+            vec![ConflictEvidence {
+                address,
+                kind: ConflictEvidenceKind::Probe,
+                result: ConflictObservationResult::Available,
+                details: None,
+            }],
+        );
+
+        assert_eq!(merged[0].verdict, ConflictVerdict::Conflict);
+        assert_eq!(merged[0].strongest_evidence, ConflictEvidenceKind::Local);
+    }
+
+    #[tokio::test]
+    async fn off_link_addresses_are_reported_unconfirmed_rather_than_probed() {
+        // 198.51.100.0/24 is reserved for documentation, so no development
+        // machine can have it on-link and turn this into a live ARP sweep.
+        let address = Ipv4Addr::new(198, 51, 100, 7);
+        let evidence = probe_planned_addresses(vec![address]).await;
+
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].kind, ConflictEvidenceKind::Probe);
+        assert_eq!(evidence[0].result, ConflictObservationResult::Inconclusive);
     }
 
     #[test]

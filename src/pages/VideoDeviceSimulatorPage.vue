@@ -10,6 +10,7 @@ import {
   Cable,
   CheckCircle2,
   ChevronDown,
+  Clock3,
   Clipboard,
   Download,
   FileDown,
@@ -123,6 +124,69 @@ const assetTone = computed(() => {
   if (state === 'failed') return 'error';
   return 'attention';
 });
+
+/**
+ * Checks that can only ever report the state of the world, never something the
+ * user can act on. They stay in the report — the raw payload still reaches the
+ * run log — but repeating them on every start only trains people to ignore the
+ * banner that also carries the blocking failures.
+ */
+const ADVISORY_CHECK_IDS = new Set(['profile-evidence']);
+const attentionChecks = computed(() => (simulator.preflight.value?.checks ?? []).filter((check) => {
+  if (check.status === 'passed') return false;
+  return !(check.status === 'warning' && ADVISORY_CHECK_IDS.has(check.id));
+}));
+const preflightTone = computed<'blocked' | 'warning' | 'clear' | null>(() => {
+  if (!simulator.preflight.value) return null;
+  if (attentionChecks.value.some((check) => check.status === 'failed')) return 'blocked';
+  if (attentionChecks.value.length > 0) return 'warning';
+  // Once the devices are up, the running state in the header is the answer to
+  // "did it work"; a standing "check passed" would only add to the stack.
+  return runtimeActive.value ? null : 'clear';
+});
+const preflightBanner = computed(() => {
+  if (preflightTone.value === 'blocked') {
+    return {
+      container: 'border-rose-200 bg-rose-50',
+      icon: XCircle,
+      icon_color: 'text-rose-600',
+      title: 'text-rose-950',
+      body: 'text-rose-800',
+      badge: 'bg-rose-600 text-white',
+      button: 'border-rose-300 bg-white text-rose-800 hover:bg-rose-100',
+    };
+  }
+  if (preflightTone.value === 'warning') {
+    return {
+      container: 'border-amber-200 bg-amber-50',
+      icon: AlertTriangle,
+      icon_color: 'text-amber-600',
+      title: 'text-amber-950',
+      body: 'text-amber-800',
+      badge: 'bg-amber-500 text-white',
+      button: 'border-amber-300 bg-white text-amber-900 hover:bg-amber-100',
+    };
+  }
+  return {
+    container: 'border-emerald-200 bg-emerald-50',
+    icon: CheckCircle2,
+    icon_color: 'text-emerald-600',
+    title: 'text-emerald-950',
+    body: 'text-emerald-800',
+    badge: 'bg-emerald-600 text-white',
+    button: 'border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-100',
+  };
+});
+
+/**
+ * A blocked start reports the generic "fix the failed checks" sentence, which
+ * says strictly less than the banner listing those very checks. Show one.
+ */
+const visibleError = computed(() => (
+  simulator.errorMessage.value === 'deviceSimulator.errors.preflightBlocked' && preflightTone.value === 'blocked'
+    ? ''
+    : displayedError.value
+));
 
 const alarmError = computed(() => simulator.alarmStats.value?.last_error ?? null);
 /**
@@ -257,6 +321,27 @@ watch(() => simulator.assets.value?.state ?? 'unknown', (state) => {
 
 const configuredDeviceCount = computed(() => simulator.request.groups
   .reduce((total, group) => total + Math.max(0, Number(group.count) || 0), 0));
+// Both figures come off the draft rather than the last preview, so the launch
+// panel never lags a keystroke behind what the user just typed.
+const configuredChannelCount = computed(() => simulator.request.groups.reduce((total, group) => {
+  const count = Math.max(0, Number(group.count) || 0);
+  const channels = group.profile_id.startsWith('nvr-')
+    ? Math.max(1, Number(group.nvr_channel_count) || 1)
+    : 1;
+  return total + count * channels;
+}, 0));
+const plannedAddresses = computed(() => simulator.preview.value?.devices.map((device) => device.ip) ?? []);
+const plannedAddressSummary = computed(() => {
+  const addresses = plannedAddresses.value;
+  if (addresses.length === 0) return '';
+  if (ipAllocationMode.value === 'explicit') {
+    return addresses.length === 1
+      ? addresses[0]
+      : t('deviceSimulator.launch.explicitAddresses', { count: addresses.length });
+  }
+  const last = addresses[addresses.length - 1];
+  return addresses[0] === last ? addresses[0] : `${addresses[0]} – ${last}`;
+});
 const explicitIpCountMismatch = computed(() => ipAllocationMode.value === 'explicit'
   && simulator.request.device_ips.length !== configuredDeviceCount.value);
 const addressAssessments = computed(() => simulator.preflight.value?.address_assessments ?? []);
@@ -376,8 +461,17 @@ function preflightDetails(check: PreflightCheck) {
       });
     }
   }
-  if (check.id === 'profile-evidence' && check.status === 'warning') {
-    return t('deviceSimulator.preflight.evidence.profileUnverified');
+  // The backend detail counts the packs the selection resolves to, which reads
+  // like a success line. Say what to do about it, and keep the raw detail: for
+  // a catalog or validation fault it carries the only identifying code.
+  if (check.id === 'assets' && check.status === 'failed') {
+    const guidance = t('deviceSimulator.preflight.evidence.assetsNotPrepared');
+    return check.details ? `${guidance} (${check.details})` : guidance;
+  }
+  if (check.id === 'profile-evidence') {
+    return t(check.status === 'failed'
+      ? 'deviceSimulator.preflight.evidence.profileUnreviewed'
+      : 'deviceSimulator.preflight.evidence.profileUnverified');
   }
   if (check.id === 'platform-connectivity' && check.status === 'warning') {
     return t('deviceSimulator.preflight.evidence.serverConnectivity', {
@@ -418,6 +512,13 @@ function addressEvidenceText(evidence: ConflictEvidence) {
       state: evidence.details || 'unknown',
     });
   }
+  if (evidence.kind === 'probe' && evidence.result === 'occupied') {
+    return t('deviceSimulator.preflight.evidence.probe', {
+      mac: evidence.details || t('deviceSimulator.preflight.evidence.unknownMac'),
+    });
+  }
+  // ARP reaches the local link only, which is the one case a probe leaves open.
+  if (evidence.kind === 'probe') return t('deviceSimulator.preflight.evidence.probeOffLink');
   return t('deviceSimulator.preflight.evidence.notProbed');
 }
 
@@ -682,10 +783,76 @@ async function openPingScanner() {
         </div>
       </section>
 
-      <div v-if="displayedError" role="alert" class="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+      <div v-if="visibleError" role="alert" class="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
         <XCircle class="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
-        <div class="min-w-0"><strong>{{ t('deviceSimulator.errors.title') }}</strong><p class="mt-1 whitespace-pre-wrap break-words">{{ displayedError }}</p></div>
+        <div class="min-w-0"><strong>{{ t('deviceSimulator.errors.title') }}</strong><p class="mt-1 whitespace-pre-wrap break-words">{{ visibleError }}</p></div>
       </div>
+
+      <section
+        v-if="preflightTone"
+        :role="preflightTone === 'blocked' ? 'alert' : 'status'"
+        class="rounded-2xl border p-4 sm:p-5"
+        :class="preflightBanner.container"
+        aria-labelledby="preflight-banner-title"
+      >
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div class="flex min-w-0 items-start gap-3">
+            <component :is="preflightBanner.icon" class="mt-0.5 h-5 w-5 shrink-0" :class="preflightBanner.icon_color" aria-hidden="true" />
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <h2 id="preflight-banner-title" class="font-bold" :class="preflightBanner.title">
+                  {{ t(`deviceSimulator.preflight.banner.${preflightTone}`) }}
+                </h2>
+                <span
+                  v-if="attentionChecks.length > 0"
+                  class="inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-xs font-bold tabular-nums"
+                  :class="preflightBanner.badge"
+                  :aria-label="t('deviceSimulator.preflight.banner.countLabel')"
+                >{{ attentionChecks.length }}</span>
+              </div>
+              <p class="mt-1 text-sm leading-6" :class="preflightBanner.body">
+                {{ t(`deviceSimulator.preflight.banner.${preflightTone}Hint`) }}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            class="inline-flex min-h-11 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+            :class="[buttonFocus, preflightBanner.button]"
+            :disabled="simulator.busyAction.value !== null"
+            @click="simulator.runPreflight"
+          >
+            <LoaderCircle v-if="simulator.busyAction.value === 'preflight'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            <RefreshCw v-else class="h-4 w-4" aria-hidden="true" />
+            {{ t(simulator.busyAction.value === 'preflight' ? 'deviceSimulator.preflight.banner.checking' : 'deviceSimulator.actions.recheck') }}
+          </button>
+        </div>
+
+        <ul v-if="attentionChecks.length > 0" class="mt-4 space-y-2">
+          <li
+            v-for="check in attentionChecks"
+            :key="check.id"
+            class="rounded-xl border bg-white/70 p-3 text-sm"
+            :class="check.status === 'failed' ? 'border-rose-200' : 'border-amber-200'"
+          >
+            <div class="flex flex-wrap items-center gap-2">
+              <span
+                class="rounded-md px-2 py-0.5 text-xs font-bold"
+                :class="check.status === 'failed' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-900'"
+              >{{ t(`deviceSimulator.preflight.banner.${check.status === 'failed' ? 'failedBadge' : 'warningBadge'}`) }}</span>
+              <strong class="text-slate-900">{{ t(check.message_key) }}</strong>
+            </div>
+            <p v-if="preflightDetails(check)" class="mt-1.5 break-words leading-6 text-slate-700">{{ preflightDetails(check) }}</p>
+            <div v-if="check.id === 'address-conflicts' && visibleAddressAssessments.length > 0" class="mt-2 space-y-1 text-xs leading-5 text-slate-600">
+              <div v-for="assessment in visibleAddressAssessments" :key="assessment.address" class="font-mono">
+                <span class="font-semibold text-slate-800">{{ assessment.address }}</span><span class="ml-2 font-sans">{{ addressVerdictLabel(assessment) }}</span>
+                <p v-for="evidence in assessment.evidence.filter((item) => item.result !== 'available')" :key="`${assessment.address}-${evidence.kind}-${evidence.result}`" class="pl-2 font-sans">{{ addressEvidenceText(evidence) }}</p>
+              </div>
+              <p v-if="hiddenAddressAssessmentCount > 0" class="font-sans">{{ t('deviceSimulator.preflight.evidence.more', { count: hiddenAddressAssessmentCount }) }}</p>
+            </div>
+          </li>
+        </ul>
+      </section>
 
       <nav class="flex gap-1 overflow-x-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-sm" :aria-label="t('deviceSimulator.tabs.label')">
         <button
@@ -851,6 +1018,15 @@ async function openPingScanner() {
                   <span class="pointer-events-none absolute inset-0 rounded-xl peer-focus-visible:ring-2 peer-focus-visible:ring-sky-500 peer-focus-visible:ring-offset-2" aria-hidden="true" />
                 </label>
               </div>
+              <label class="mt-4 flex min-h-16 cursor-pointer items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 transition-colors duration-200 hover:border-sky-300 hover:bg-sky-50/60 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60 motion-reduce:transition-none">
+                <input v-model="simulator.request.stream.time_watermark_enabled" class="peer sr-only" type="checkbox" role="switch" :disabled="simulator.topologyLocked.value" />
+                <span class="relative h-7 w-12 shrink-0 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 after:content-[''] peer-checked:bg-sky-600 peer-checked:after:translate-x-5 peer-focus-visible:ring-2 peer-focus-visible:ring-sky-500 peer-focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:after:transition-none" aria-hidden="true" />
+                <Clock3 class="h-5 w-5 shrink-0 text-sky-700" aria-hidden="true" />
+                <span class="min-w-0">
+                  <span class="block text-sm font-semibold text-slate-900">{{ t('deviceSimulator.mediaThemes.timeWatermark') }}</span>
+                  <span class="mt-1 block text-xs font-normal leading-5 text-slate-600">{{ t('deviceSimulator.mediaThemes.timeWatermarkHint') }}</span>
+                </span>
+              </label>
               <p class="mt-3 flex items-start gap-2 text-xs leading-5 text-slate-500">
                 <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                 {{ t('deviceSimulator.mediaThemes.restartHint') }}
@@ -871,35 +1047,36 @@ async function openPingScanner() {
           </div>
 
           <div class="space-y-5">
-            <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm xl:sticky xl:top-5" aria-labelledby="preflight-title">
-              <h2 id="preflight-title" class="font-bold text-slate-900">{{ t('deviceSimulator.preflight.title') }}</h2>
-              <p class="mt-1 text-sm leading-6 text-slate-600">{{ t('deviceSimulator.preflight.description') }}</p>
-              <div class="mt-4 flex flex-wrap gap-2">
-                <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.previewDevices"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preview') }}</button>
-                <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.runPreflight"><ShieldAlert class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preflight') }}</button>
+            <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm xl:sticky xl:top-5" aria-labelledby="launch-title">
+              <h2 id="launch-title" class="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">
+                {{ t(simulator.topologyLocked.value ? 'deviceSimulator.launch.runningTitle' : 'deviceSimulator.launch.title') }}
+              </h2>
+              <dl class="mt-4 divide-y divide-slate-100 border-y border-slate-200 text-sm">
+                <div class="flex items-baseline justify-between gap-3 py-2.5">
+                  <dt class="text-slate-500">{{ t('deviceSimulator.launch.devices') }}</dt>
+                  <dd class="text-2xl font-bold leading-none tabular-nums text-slate-900">{{ configuredDeviceCount }}</dd>
+                </div>
+                <div class="flex items-baseline justify-between gap-3 py-2.5">
+                  <dt class="text-slate-500">{{ t('deviceSimulator.launch.channels') }}</dt>
+                  <dd class="text-2xl font-bold leading-none tabular-nums text-slate-900">{{ configuredChannelCount }}</dd>
+                </div>
+                <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 py-2.5">
+                  <dt class="text-slate-500">{{ t('deviceSimulator.launch.addresses') }}</dt>
+                  <dd class="min-w-0 break-all text-right font-mono text-xs font-semibold text-slate-800">{{ plannedAddressSummary || '—' }}</dd>
+                </div>
+                <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 py-2.5">
+                  <dt class="text-slate-500">{{ t('deviceSimulator.launch.adapter') }}</dt>
+                  <dd class="min-w-0 break-words text-right text-xs font-semibold text-slate-800">{{ simulator.selectedInterface.value?.name || '—' }}</dd>
+                </div>
+              </dl>
+              <div class="mt-5 grid gap-2">
+                <button v-if="!stoppable && !recoveryRequired" type="button" class="inline-flex min-h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.start"><LoaderCircle v-if="simulator.busyAction.value === 'start'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><RadioTower v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.start') }}</button>
+                <button type="button" class="inline-flex min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || simulator.topologyLocked.value" @click="simulator.saveSettings">{{ t('common.save') }}</button>
               </div>
-              <ul v-if="simulator.preflight.value" class="mt-4 space-y-2" aria-live="polite">
-                <li v-for="check in simulator.preflight.value.checks" :key="check.id" class="flex items-start gap-2 rounded-xl border p-3 text-sm" :class="check.status === 'failed' ? 'border-rose-200 bg-rose-50 text-rose-800' : check.status === 'warning' ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'">
-                  <XCircle v-if="check.status === 'failed'" class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /><AlertTriangle v-else-if="check.status === 'warning'" class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /><CheckCircle2 v-else class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                   <div class="min-w-0"><strong>{{ t(check.message_key) }}</strong><p v-if="preflightDetails(check)" class="mt-1 break-words">{{ preflightDetails(check) }}</p>
-                     <div v-if="check.id === 'address-conflicts' && visibleAddressAssessments.length > 0" class="mt-2 space-y-1 text-xs leading-5">
-                       <div v-for="assessment in visibleAddressAssessments" :key="assessment.address" class="font-mono">
-                         <span class="font-semibold">{{ assessment.address }}</span><span class="ml-2 font-sans">{{ addressVerdictLabel(assessment) }}</span>
-                         <p v-for="evidence in assessment.evidence.filter((item) => item.result !== 'available')" :key="`${assessment.address}-${evidence.kind}-${evidence.result}`" class="pl-2 font-sans text-current/80">{{ addressEvidenceText(evidence) }}</p>
-                       </div>
-                       <p v-if="hiddenAddressAssessmentCount > 0" class="font-sans">{{ t('deviceSimulator.preflight.evidence.more', { count: hiddenAddressAssessmentCount }) }}</p>
-                     </div>
-                   </div>
-                </li>
-              </ul>
-              <div v-if="simulator.preview.value" class="mt-5 grid grid-cols-2 gap-3">
-                <div class="rounded-xl bg-slate-100 p-3"><p class="text-xs font-semibold text-slate-500">{{ t('deviceSimulator.metrics.devices') }}</p><p class="mt-1 text-2xl font-bold tabular-nums text-slate-900">{{ simulator.preview.value.total_devices }}</p></div>
-                <div class="rounded-xl bg-slate-100 p-3"><p class="text-xs font-semibold text-slate-500">{{ t('deviceSimulator.metrics.channels') }}</p><p class="mt-1 text-2xl font-bold tabular-nums text-slate-900">{{ simulator.preview.value.total_channels }}</p></div>
-              </div>
-              <div class="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
-                <button v-if="!stoppable && !recoveryRequired" type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.start"><LoaderCircle v-if="simulator.busyAction.value === 'start'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><RadioTower v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.start') }}</button>
-                <button type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || simulator.topologyLocked.value" @click="simulator.saveSettings">{{ t('common.save') }}</button>
-              </div>
+              <p v-if="!simulator.topologyLocked.value" class="mt-3 flex items-start gap-2 text-xs leading-5 text-slate-500">
+                <ShieldCheck class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                {{ t('deviceSimulator.preflight.startHint') }}
+              </p>
               <p v-if="simulator.topologyLocked.value" class="mt-3 flex items-start gap-2 text-xs leading-5 text-amber-800"><AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{{ t('deviceSimulator.configuration.locked') }}</p>
             </section>
           </div>
@@ -1022,7 +1199,7 @@ async function openPingScanner() {
                   </div>
                 </div>
               </div>
-              <p v-if="!running && !simulator.preflight.value" class="mt-3 text-xs leading-5 text-slate-500">{{ t('deviceSimulator.preflight.startHint') }}</p>
+              <p v-if="!running" class="sm:col-span-2 flex items-start gap-2 text-xs leading-5 text-slate-500"><AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{{ t('deviceSimulator.alarms.requiresRunning') }}</p>
             </div>
             <div class="mt-5 flex flex-wrap gap-2">
               <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="triggerAlarm"><BellRing class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.triggerOnce') }}</button>

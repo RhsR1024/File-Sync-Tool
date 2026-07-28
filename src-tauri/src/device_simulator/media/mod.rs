@@ -6,6 +6,8 @@
 
 mod loader;
 mod manifest;
+pub(crate) mod mf_h264;
+pub(crate) mod watermark;
 
 pub use loader::{
     load_media_pack, MediaPackCache, MediaPackError, SharedMediaFrame, SharedMediaNal,

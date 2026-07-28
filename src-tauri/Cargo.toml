@@ -8,6 +8,10 @@ repository = ""
 edition = "2021"
 rust-version = "1.77.2"
 
+[features]
+default = []
+screen-share-webrtc-prototype = ["dep:webrtc", "dep:rtcp"]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
@@ -42,6 +46,11 @@ encoding_rs = "0.8"
 chardetng = "0.1"
 csv = "1.3"
 base64 = "0.22"
+# UMS/CDM legacy device APIs mandate MD5 digests and RSA PKCS#1 v1.5 encryption.
+# Both are weak by modern standards and are used here solely for wire compatibility
+# with those appliances -- never as this project's own security primitives.
+md-5 = "0.10"
+rsa = "0.9"
 ed25519-dalek = "2"
 semver = "1"
 redis = { version = "0.25", features = ["tokio-comp"] }
@@ -61,12 +70,15 @@ zip = "2"
 async_zip = { version = "0.0.17", features = ["tokio"] }
 tokio-util = { version = "0.7", features = ["io", "codec", "compat"] }
 futures-lite = "2"
+futures-util = { version = "0.3", features = ["sink"] }
 async-tftp = "0.4.2"
 mime_guess = "2"
 ipnet = "2"
 trash = "5"
 rust-embed = "8"
 mse_fmp4 = "0.2"
+webrtc = { version = "0.17.2", optional = true }
+rtcp = { version = "0.17.2", optional = true }
 
 # Clipboard manager tool (spec §14.1)
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }

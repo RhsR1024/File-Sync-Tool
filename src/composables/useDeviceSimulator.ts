@@ -76,6 +76,7 @@ const defaultSettings = (): DeviceSimulatorSettings => ({
   last_http_port: 81,
   last_rtsp_ports: { main: 554, sub: 555, third: 556 },
   last_media_theme_id: 'classic',
+  last_time_watermark_enabled: true,
   auto_check_asset_updates: true,
   manage_firewall: true,
 });
@@ -105,6 +106,7 @@ function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartR
       transport: 'tcp_interleaved',
       enabled_streams: ['main', 'sub', 'third'],
       audio_enabled: false,
+      time_watermark_enabled: settings.last_time_watermark_enabled ?? true,
     },
   };
 }
@@ -141,6 +143,7 @@ function createDeviceSimulator() {
   const initialized = ref(false);
   const manualInterfaceSelection = ref(false);
   let unlisteners: UnlistenFn[] = [];
+  let previewTimer: number | null = null;
 
   const topologyLocked = computed(() => isDeviceSimulatorTopologyLocked(status.value.state));
   const selectedProfileIds = computed(() => [...new Set(request.groups.map((group) => group.profile_id))]);
@@ -236,6 +239,7 @@ function createDeviceSimulator() {
       last_http_port: request.device_http_port,
       last_rtsp_ports: { ...request.rtsp_ports },
       last_media_theme_id: request.media_theme_id,
+      last_time_watermark_enabled: request.stream.time_watermark_enabled,
     };
   }
 
@@ -403,6 +407,7 @@ function createDeviceSimulator() {
     if (failure?.status === 'rejected') errorMessage.value = errorText(failure.reason);
     busyAction.value = null;
     initialized.value = true;
+    await refreshPreview();
     if (selectedProfileIds.value.length > 0) await refreshAssets();
   }
 
@@ -424,12 +429,15 @@ function createDeviceSimulator() {
       .find((result) => result.status === 'rejected');
     if (failure?.status === 'rejected') errorMessage.value = errorText(failure.reason);
     busyAction.value = null;
+    await refreshPreview();
     if (selectedProfileIds.value.length > 0) await refreshAssets();
   }
 
   function dispose() {
     for (const unlisten of unlisteners) unlisten();
     unlisteners = [];
+    if (previewTimer !== null) window.clearTimeout(previewTimer);
+    previewTimer = null;
     initialized.value = false;
   }
 
@@ -439,25 +447,27 @@ function createDeviceSimulator() {
     if (saved) settings.value = saved;
   }
 
-  async function refreshAssets() {
-    const result = await run('check-assets', () => deviceSimulatorApi.getAssetStatus(selectedProfileIds.value));
-    if (result) {
-      assets.value = result;
-      if (result.state === 'ready' || result.state === 'update_available') {
-        try {
-          const [nextAlarmTypes] = await Promise.all([
-            deviceSimulatorApi.listAlarmTypes(),
-            refreshMediaThemes(),
-          ]);
-          alarmTypes.value = nextAlarmTypes;
-        } catch {
-          // Alarm names are an optional convenience; sending all types still works.
-          alarmTypes.value = [];
-        }
-      } else {
+  async function applyAssetStatus(status: AssetStatus) {
+    assets.value = status;
+    if (status.state === 'ready' || status.state === 'update_available') {
+      try {
+        const [nextAlarmTypes] = await Promise.all([
+          deviceSimulatorApi.listAlarmTypes(),
+          refreshMediaThemes(),
+        ]);
+        alarmTypes.value = nextAlarmTypes;
+      } catch {
+        // Alarm names are an optional convenience; sending all types still works.
         alarmTypes.value = [];
       }
+    } else {
+      alarmTypes.value = [];
     }
+  }
+
+  async function refreshAssets() {
+    const result = await run('check-assets', () => deviceSimulatorApi.getAssetStatus(selectedProfileIds.value));
+    if (result) await applyAssetStatus(result);
   }
 
   async function prepareAssets() {
@@ -504,10 +514,54 @@ function createDeviceSimulator() {
     await run('cancel-assets', () => deviceSimulatorApi.cancelAssetDownload(assetProgress.value!.job_id));
   }
 
-  async function previewDevices() {
-    const result = await run('preview', () => deviceSimulatorApi.previewDevices(request));
-    if (result) preview.value = result;
+  /**
+   * The device identities are read straight off the draft, so keep them in step
+   * with it instead of behind a button. This deliberately avoids the shared busy
+   * latch and swallows failures: a half-typed address is not an error the user
+   * needs to see, and `start` reports the real validation result.
+   */
+  async function refreshPreview() {
+    try {
+      preview.value = await deviceSimulatorApi.previewDevices(request);
+    } catch {
+      // Keep the last layout that resolved; the draft is mid-edit.
+    }
   }
+
+  watch(
+    () => [
+      request.start_ip,
+      request.device_ips.join('|'),
+      request.subnet_prefix,
+      request.device_http_port,
+      request.groups.map((group) => `${group.id}:${group.profile_id}:${group.count}:${group.nvr_channel_count}`).join('|'),
+    ],
+    () => {
+      if (!initialized.value || topologyLocked.value) return;
+      // A completed check describes the draft it ran against, so an edit retires
+      // it rather than leaving stale findings on screen.
+      preflight.value = null;
+      if (previewTimer !== null) window.clearTimeout(previewTimer);
+      previewTimer = window.setTimeout(() => { void refreshPreview(); }, 300);
+    },
+  );
+
+  /**
+   * Each device type carries its own files, so switching type retires the
+   * answer the required-files card is showing — a stale "ready" there is how a
+   * start ends up blocked by files nobody was told to prepare. Re-check it here
+   * instead of behind a button, and keep it off the shared busy latch: this
+   * reacts to an edit, not to an action waiting on a result.
+   */
+  watch(
+    () => selectedProfileIds.value.join('|'),
+    (next) => {
+      if (!initialized.value || topologyLocked.value || next.length === 0) return;
+      deviceSimulatorApi.getAssetStatus(selectedProfileIds.value)
+        .then(applyAssetStatus)
+        .catch(() => undefined);
+    },
+  );
 
   async function runPreflight() {
     const result = await run('preflight', () => deviceSimulatorApi.preflight(request));
@@ -672,7 +726,7 @@ function createDeviceSimulator() {
     refreshMediaThemes,
     prepareAssets,
     cancelAssetDownload,
-    previewDevices,
+    refreshPreview,
     runPreflight,
     start,
     stop,

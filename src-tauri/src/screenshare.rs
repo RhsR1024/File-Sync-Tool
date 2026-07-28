@@ -11,13 +11,17 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "windows")]
+use crate::screenshare_gpu::{
+    GpuFallbackCode, GpuFallbackReason, GpuNv12Surface, GpuPreprocessConfig, GpuVideoPreprocessor,
+};
 use crate::screenshare_input::{
-    parse_input_event, source_rect_for_monitor, InputContext, InputEvent, InputWorkerHandle,
-    QueuedInput, ScreenRect,
+    parse_input_event, source_rect_for_monitor, AppliedInputSnapshot, InputContext, InputEvent,
+    InputMetricsSnapshot, InputWorkerHandle, QueuePushOutcome, QueuedInput, ScreenRect,
 };
 use crate::screenshare_media::{
-    H264EncoderWorker, H264MediaEvent, H264MediaMetricsSnapshot, H264MediaState,
-    H264StreamDescriptor, H264StreamSnapshot,
+    H264EncoderWorker, H264MediaEvent, H264MediaMetricsSnapshot, H264MediaSegment, H264MediaState,
+    H264StreamDescriptor,
 };
 use crate::screenshare_web_assets;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -27,6 +31,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{body::Body, Form, Json, Router};
 use bytes::{Bytes, BytesMut};
+use futures_util::{SinkExt, StreamExt};
 use scrap::{Capturer, Display, Frame};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,7 +39,7 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Size, State, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, Notify};
 use uuid::Uuid;
 
 #[path = "screenshare_interaction.rs"]
@@ -62,14 +67,13 @@ use windows::Win32::Foundation::{BOOL, HMODULE, LPARAM, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Resource,
+    ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 #[cfg(target_os = "windows")]
@@ -88,10 +92,13 @@ use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 // ─── Public Data Types ──────────────────────────────────────
 
 const TOOL_NAME: &str = "屏幕共享";
+const WEBCODECS_AU_HEADER_BYTES: usize = 40;
+const WEBCODECS_MAX_ACCESS_UNIT_BYTES: usize = 32 * 1024 * 1024;
+#[cfg(feature = "screen-share-webrtc-prototype")]
+const WEBRTC_SIGNALING_MAX_BYTES: usize = 256 * 1024;
 const PREVIEW_WINDOW_LABEL_PREFIX: &str = "screen-share-preview";
 const DESKTOP_OVERLAY_WINDOW_LABEL_PREFIX: &str = "screen-share-desktop-overlay";
 
-const VIEWER_IP_TTL: Duration = Duration::from_secs(12);
 /// DXGI DuplicateOutput 偶发瞬时失败，创建时做 3 次短重试；
 /// 长退避由捕获循环的暂停-重试机制负责，此处不需要更长的重试梯子。
 const DXGI_CREATE_RETRY_DELAYS_MS: [u64; 3] = [0, 200, 400];
@@ -105,6 +112,9 @@ const CAPTURE_RECREATE_BACKOFF_MS: [u64; 6] = [1000, 2000, 4000, 8000, 15000, 30
 const SERVER_DRAIN_DEADLINE: Duration = Duration::from_secs(3);
 /// screen_share_stop 等待服务真正退出的上限（略大于 drain 上限）。
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(4);
+/// MJPEG is a compatibility fallback, not a second full-rate encode pipeline.
+/// Ten frames per second keeps recovery usable while bounding CPU and bandwidth.
+const MJPEG_FALLBACK_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 
 fn capture_recreate_backoff(attempt: u32) -> Duration {
     let index = (attempt as usize).min(CAPTURE_RECREATE_BACKOFF_MS.len() - 1);
@@ -138,8 +148,19 @@ const BLACK_FRAME_BRIGHT_THRESHOLD: u8 = 12;
 const BLACK_FRAME_MAX_BRIGHT_PIXELS_PER_10K: usize = 35;
 const MEDIA_JPEG_SAMPLE_WINDOW: usize = 512;
 const MEDIA_STREAM_SAMPLE_WINDOW: usize = 256;
+const MEDIA_PIPELINE_SAMPLE_WINDOW: usize = 1024;
+const MEDIA_SAMPLE_MEASUREMENT_SCOPE: &str = "rolling_last_n_samples";
 const H264_STREAM_SEND_TIMEOUT: Duration = Duration::from_secs(1);
-type ViewerIpMap = HashMap<String, Instant>;
+const MJPEG_STREAM_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const MJPEG_BODY_CHANNEL_CAPACITY: usize = 1;
+const MAX_MEDIA_VIEWERS: u32 = 40;
+
+#[derive(Debug, Clone, Copy)]
+struct ViewerIpEntry {
+    active_media_connections: u32,
+}
+
+type ViewerIpMap = HashMap<String, ViewerIpEntry>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaptureBackendKind {
@@ -243,12 +264,31 @@ pub struct ScreenShareConfig {
     pub transport: ScreenShareMediaTransport,
     #[serde(default = "default_true")]
     pub annotations_enabled: bool,
-    #[serde(default = "default_true")]
-    pub shared_freeze_enabled: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// 采集帧率下限。
+const MIN_CAPTURE_FPS: u8 = 1;
+/// 采集帧率上限，同时是界面 60 FPS 实验档的取值。30 FPS 及以下是默认档位；
+/// 60 FPS 必须与 30 FPS 分别采集 capture-to-display、资源和扇出数据后才能决定
+/// 默认值，因此这里只放开取值范围，不改变界面默认值。
+const MAX_CAPTURE_FPS: u8 = 60;
+
+fn validate_capture_fps(fps: u8) -> Result<(), String> {
+    if fps < MIN_CAPTURE_FPS || fps > MAX_CAPTURE_FPS {
+        return Err(format!("FPS must be {MIN_CAPTURE_FPS}-{MAX_CAPTURE_FPS}"));
+    }
+    Ok(())
+}
+
+/// 采集节拍。使用微秒而不是毫秒，避免 1000/fps 的整数除法把 30 FPS 抬到
+/// 30.3 FPS、把 60 FPS 抬到 62.5 FPS，从而污染两档的对比数据。
+fn capture_frame_interval(fps: u8) -> Duration {
+    let fps = u64::from(fps.clamp(MIN_CAPTURE_FPS, MAX_CAPTURE_FPS));
+    Duration::from_micros(1_000_000 / fps)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,6 +297,7 @@ pub enum ScreenShareMediaTransport {
     Auto,
     Mjpeg,
     MseH264,
+    WebCodecs,
     WebRtc,
 }
 
@@ -268,14 +309,25 @@ impl Default for ScreenShareMediaTransport {
 
 impl ScreenShareMediaTransport {
     fn wants_h264(self) -> bool {
-        matches!(self, Self::Auto | Self::MseH264)
+        matches!(
+            self,
+            Self::Auto | Self::MseH264 | Self::WebCodecs | Self::WebRtc
+        )
     }
 
     fn resolved_label(self) -> &'static str {
         match self {
             Self::Auto | Self::Mjpeg => "mjpeg",
             Self::MseH264 => "mse_h264",
-            Self::WebRtc => "webrtc",
+            Self::WebCodecs => "web_codecs",
+            Self::WebRtc => "web_rtc",
+        }
+    }
+
+    fn resolved_h264_transport(self) -> Self {
+        match self {
+            Self::Auto => Self::MseH264,
+            other => other,
         }
     }
 }
@@ -300,6 +352,10 @@ pub struct ScreenShareStatus {
     pub is_active: bool,
     pub viewer_count: u32,
     pub connection_count: u32,
+    /// Number of active media leases represented in the per-IP reference map.
+    pub viewer_ip_reference_count: u32,
+    /// Number of live media producer/socket tasks that still own a viewer lease.
+    pub active_media_task_count: u32,
     pub fps_actual: f32,
     pub bitrate_kbps: u32,
     pub uptime_secs: u64,
@@ -324,47 +380,172 @@ pub struct ScreenShareStatus {
     pub pending_control_request: Option<screenshare_interaction::ControlRequestInfo>,
     pub desktop_overlay_active: bool,
     pub media_metrics: ScreenShareMediaMetricsSnapshot,
+    pub input_metrics: Option<InputMetricsSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 pub struct ScreenShareMediaMetricsSnapshot {
+    pub capture_frame_count: u64,
+    pub mjpeg_encoded_frame_count: u64,
+    pub mjpeg_encoded_bytes: u64,
+    pub outbound_bytes_total: u64,
+    pub capture_fps_actual: f32,
+    pub mjpeg_fps_actual: f32,
+    pub mjpeg_consumer_count: u32,
+    pub jpeg_active: bool,
+    pub jpeg_enable_count: u64,
+    pub jpeg_disable_count: u64,
+    pub jpeg_fallback_reason: Option<String>,
+    pub latest_capture: Option<LatestCaptureMetadataSnapshot>,
+    pub frame_wait: DurationMetricsSnapshot,
+    pub capture_queue_age: DurationMetricsSnapshot,
+    pub gpu_readback: DurationMetricsSnapshot,
+    pub black_frame_classification: DurationMetricsSnapshot,
+    pub jpeg_color_conversion: DurationMetricsSnapshot,
+    pub jpeg_encode: DurationMetricsSnapshot,
+    pub stream_send_wait: DurationMetricsSnapshot,
+    pub outbound_100ms: ByteWindowMetricsSnapshot,
+    pub outbound_1s: ByteWindowMetricsSnapshot,
+    pub stream_send_timeout_count: u64,
+    pub stream_disconnect_count: u64,
+    /// Compatibility alias for `mjpeg_encoded_frame_count`.
     pub encoded_frame_count: u64,
+    /// Compatibility alias for `jpeg_retained_sample_count`.
     pub jpeg_sample_count: u32,
+    pub jpeg_total_sample_count: u64,
+    pub jpeg_retained_sample_count: u32,
+    pub jpeg_sample_window_capacity: u32,
+    pub jpeg_measurement_scope: &'static str,
     pub jpeg_size_avg_bytes: u64,
     pub jpeg_size_p50_bytes: u64,
     pub jpeg_size_p95_bytes: u64,
+    pub jpeg_size_p99_bytes: u64,
+    pub jpeg_size_max_bytes: u64,
     pub first_frame_delay_ms: Option<u64>,
     pub frame_age_ms: Option<u64>,
     pub slow_client_dropped_frames: u64,
     pub stream_connection_count: u64,
+    /// Compatibility alias for `stream_first_frame_retained_sample_count`.
     pub stream_first_frame_sample_count: u32,
+    pub stream_first_frame_total_sample_count: u64,
+    pub stream_first_frame_retained_sample_count: u32,
+    pub stream_first_frame_sample_window_capacity: u32,
+    pub stream_first_frame_measurement_scope: &'static str,
     pub stream_first_frame_avg_ms: Option<u64>,
+    pub stream_first_frame_p50_ms: Option<u64>,
     pub stream_first_frame_p95_ms: Option<u64>,
+    pub stream_first_frame_p99_ms: Option<u64>,
+    pub stream_first_frame_max_ms: Option<u64>,
     pub stream_reconnect_count: u64,
+    /// Compatibility alias for `stream_reconnect_retained_sample_count`.
     pub stream_reconnect_sample_count: u32,
+    pub stream_reconnect_total_sample_count: u64,
+    pub stream_reconnect_retained_sample_count: u32,
+    pub stream_reconnect_sample_window_capacity: u32,
+    pub stream_reconnect_measurement_scope: &'static str,
     pub stream_reconnect_avg_ms: Option<u64>,
+    pub stream_reconnect_p50_ms: Option<u64>,
     pub stream_reconnect_p95_ms: Option<u64>,
+    pub stream_reconnect_p99_ms: Option<u64>,
+    pub stream_reconnect_max_ms: Option<u64>,
     pub fps_actual: f32,
     pub bitrate_kbps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct DurationMetricsSnapshot {
+    /// Compatibility alias for `retained_sample_count`.
+    pub sample_count: u32,
+    pub total_sample_count: u64,
+    pub retained_sample_count: u32,
+    pub sample_window_capacity: u32,
+    pub measurement_scope: &'static str,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub max_us: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct ByteWindowMetricsSnapshot {
+    /// Compatibility alias for `retained_sample_count`.
+    pub sample_count: u32,
+    pub total_sample_count: u64,
+    pub retained_sample_count: u32,
+    pub sample_window_capacity: u32,
+    pub measurement_scope: &'static str,
+    /// Compatibility alias for `retained_total_bytes`.
+    pub total_bytes: u64,
+    pub retained_total_bytes: u64,
+    pub p50_bytes: u64,
+    pub p95_bytes: u64,
+    pub p99_bytes: u64,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LatestCaptureMetadataSnapshot {
+    pub sequence: u64,
+    pub observed_at_ms: u64,
+    pub system_relative_time_100ns: Option<i64>,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Default)]
 struct ScreenShareMediaSamples {
     jpeg_sizes: VecDeque<u32>,
+    jpeg_sizes_total: u64,
     first_frame_ms: VecDeque<u64>,
+    first_frame_ms_total: u64,
     reconnect_ms: VecDeque<u64>,
+    reconnect_ms_total: u64,
+    frame_wait_us: VecDeque<u64>,
+    frame_wait_us_total: u64,
+    capture_queue_age_us: VecDeque<u64>,
+    capture_queue_age_us_total: u64,
+    gpu_readback_us: VecDeque<u64>,
+    gpu_readback_us_total: u64,
+    black_frame_classification_us: VecDeque<u64>,
+    black_frame_classification_us_total: u64,
+    jpeg_color_conversion_us: VecDeque<u64>,
+    jpeg_color_conversion_us_total: u64,
+    jpeg_encode_us: VecDeque<u64>,
+    jpeg_encode_us_total: u64,
+    stream_send_wait_us: VecDeque<u64>,
+    stream_send_wait_us_total: u64,
+    outbound_100ms_bytes: VecDeque<u64>,
+    outbound_100ms_bytes_total: u64,
+    outbound_1s_bytes: VecDeque<u64>,
+    outbound_1s_bytes_total: u64,
 }
 
 #[derive(Debug)]
 struct ScreenShareMediaMetrics {
     started_at: Instant,
+    capture_frame_count: AtomicU64,
+    capture_interval_frames: AtomicU32,
+    mjpeg_interval_frames: AtomicU32,
+    mjpeg_encoded_bytes: AtomicU64,
+    outbound_bytes_total: AtomicU64,
+    latest_capture_sequence: AtomicU64,
+    latest_capture: Mutex<Option<LatestCaptureMetadataSnapshot>>,
     encoded_frame_count: AtomicU64,
     first_frame_delay_ms: AtomicU64,
     slow_client_dropped_frames: AtomicU64,
     stream_connection_count: AtomicU64,
     stream_reconnect_count: AtomicU64,
+    stream_send_timeout_count: AtomicU64,
+    stream_disconnect_count: AtomicU64,
     fps_actual: AtomicU32,
+    mjpeg_fps_actual: AtomicU32,
     bitrate_kbps: AtomicU32,
+    mjpeg_consumer_count: AtomicU32,
+    jpeg_state_initialized: AtomicBool,
+    jpeg_active: AtomicBool,
+    jpeg_enable_count: AtomicU64,
+    jpeg_disable_count: AtomicU64,
+    jpeg_fallback_reason: Mutex<Option<String>>,
     samples: Mutex<ScreenShareMediaSamples>,
 }
 
@@ -376,13 +557,29 @@ impl ScreenShareMediaMetrics {
     fn new_at(started_at: Instant) -> Self {
         Self {
             started_at,
+            capture_frame_count: AtomicU64::new(0),
+            capture_interval_frames: AtomicU32::new(0),
+            mjpeg_interval_frames: AtomicU32::new(0),
+            mjpeg_encoded_bytes: AtomicU64::new(0),
+            outbound_bytes_total: AtomicU64::new(0),
+            latest_capture_sequence: AtomicU64::new(0),
+            latest_capture: Mutex::new(None),
             encoded_frame_count: AtomicU64::new(0),
             first_frame_delay_ms: AtomicU64::new(u64::MAX),
             slow_client_dropped_frames: AtomicU64::new(0),
             stream_connection_count: AtomicU64::new(0),
             stream_reconnect_count: AtomicU64::new(0),
+            stream_send_timeout_count: AtomicU64::new(0),
+            stream_disconnect_count: AtomicU64::new(0),
             fps_actual: AtomicU32::new(0),
+            mjpeg_fps_actual: AtomicU32::new(0),
             bitrate_kbps: AtomicU32::new(0),
+            mjpeg_consumer_count: AtomicU32::new(0),
+            jpeg_state_initialized: AtomicBool::new(false),
+            jpeg_active: AtomicBool::new(false),
+            jpeg_enable_count: AtomicU64::new(0),
+            jpeg_disable_count: AtomicU64::new(0),
+            jpeg_fallback_reason: Mutex::new(None),
             samples: Mutex::new(ScreenShareMediaSamples::default()),
         }
     }
@@ -393,6 +590,9 @@ impl ScreenShareMediaMetrics {
 
     fn record_encoded_frame_at(&self, jpeg_size: usize, captured_at: Instant) {
         self.encoded_frame_count.fetch_add(1, Ordering::Relaxed);
+        self.mjpeg_interval_frames.fetch_add(1, Ordering::Relaxed);
+        self.mjpeg_encoded_bytes
+            .fetch_add(jpeg_size as u64, Ordering::Relaxed);
         let delay_ms = captured_at
             .checked_duration_since(self.started_at)
             .unwrap_or_default()
@@ -405,11 +605,148 @@ impl ScreenShareMediaMetrics {
             Ordering::Relaxed,
         );
         if let Ok(mut samples) = self.samples.lock() {
+            samples.jpeg_sizes_total = samples.jpeg_sizes_total.saturating_add(1);
             push_bounded(
                 &mut samples.jpeg_sizes,
                 jpeg_size.min(u32::MAX as usize) as u32,
                 MEDIA_JPEG_SAMPLE_WINDOW,
             );
+        }
+    }
+
+    fn record_capture_frame(
+        &self,
+        width: u32,
+        height: u32,
+        system_relative_time_100ns: Option<i64>,
+        frame_wait: Duration,
+        capture_queue_age: Option<Duration>,
+        gpu_readback: Option<Duration>,
+    ) -> (u64, u64) {
+        let sequence = self
+            .latest_capture_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        self.capture_frame_count.fetch_add(1, Ordering::Relaxed);
+        self.capture_interval_frames.fetch_add(1, Ordering::Relaxed);
+        let observed_at_ms = unix_time_ms();
+        // WGC's SystemRelativeTime is monotonic rather than wall-clock time.
+        // The measured delivery queue age is therefore the best wall-clock
+        // approximation of when this frame was captured. DXGI has no source
+        // timestamp, so its capture time is the observation time.
+        let captured_at_unix_ms = observed_at_ms.saturating_sub(
+            capture_queue_age
+                .unwrap_or_default()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        if let Ok(mut latest) = self.latest_capture.lock() {
+            *latest = Some(LatestCaptureMetadataSnapshot {
+                sequence,
+                observed_at_ms,
+                system_relative_time_100ns,
+                width,
+                height,
+            });
+        }
+        let delay_ms = Instant::now()
+            .checked_duration_since(self.started_at)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let _ = self.first_frame_delay_ms.compare_exchange(
+            u64::MAX,
+            delay_ms,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        if let Ok(mut samples) = self.samples.lock() {
+            samples.frame_wait_us_total = samples.frame_wait_us_total.saturating_add(1);
+            push_duration_sample(&mut samples.frame_wait_us, frame_wait);
+            if let Some(duration) = capture_queue_age {
+                samples.capture_queue_age_us_total =
+                    samples.capture_queue_age_us_total.saturating_add(1);
+                push_duration_sample(&mut samples.capture_queue_age_us, duration);
+            }
+            if let Some(duration) = gpu_readback {
+                samples.gpu_readback_us_total = samples.gpu_readback_us_total.saturating_add(1);
+                push_duration_sample(&mut samples.gpu_readback_us, duration);
+            }
+        }
+        (sequence, captured_at_unix_ms)
+    }
+
+    fn record_black_frame_classification(&self, elapsed: Duration) {
+        if let Ok(mut samples) = self.samples.lock() {
+            samples.black_frame_classification_us_total = samples
+                .black_frame_classification_us_total
+                .saturating_add(1);
+            push_duration_sample(&mut samples.black_frame_classification_us, elapsed);
+        }
+    }
+
+    fn record_jpeg_timings(&self, color_conversion: Duration, encode: Duration) {
+        if let Ok(mut samples) = self.samples.lock() {
+            samples.jpeg_color_conversion_us_total =
+                samples.jpeg_color_conversion_us_total.saturating_add(1);
+            samples.jpeg_encode_us_total = samples.jpeg_encode_us_total.saturating_add(1);
+            push_duration_sample(&mut samples.jpeg_color_conversion_us, color_conversion);
+            push_duration_sample(&mut samples.jpeg_encode_us, encode);
+        }
+    }
+
+    fn update_jpeg_state(&self, active: bool, consumer_count: u32, reason: &str) -> bool {
+        self.mjpeg_consumer_count
+            .store(consumer_count, Ordering::Relaxed);
+        let previous = self.jpeg_active.swap(active, Ordering::Relaxed);
+        let initialized = self.jpeg_state_initialized.swap(true, Ordering::Relaxed);
+        let changed = !initialized || previous != active;
+        if !initialized && active || initialized && !previous && active {
+            self.jpeg_enable_count.fetch_add(1, Ordering::Relaxed);
+        } else if initialized && previous && !active {
+            self.jpeg_disable_count.fetch_add(1, Ordering::Relaxed);
+        }
+        if changed {
+            if let Ok(mut current_reason) = self.jpeg_fallback_reason.lock() {
+                *current_reason = Some(reason.to_owned());
+            }
+        }
+        changed
+    }
+
+    fn record_stream_send(&self, elapsed: Duration, timed_out: bool) {
+        if let Ok(mut samples) = self.samples.lock() {
+            samples.stream_send_wait_us_total = samples.stream_send_wait_us_total.saturating_add(1);
+            push_duration_sample(&mut samples.stream_send_wait_us, elapsed);
+        }
+        if timed_out {
+            self.stream_send_timeout_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_stream_disconnect(&self) {
+        self.stream_disconnect_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_outbound_window(&self, window: Duration, bytes: u64) {
+        if let Ok(mut samples) = self.samples.lock() {
+            if window == Duration::from_millis(100) {
+                samples.outbound_100ms_bytes_total =
+                    samples.outbound_100ms_bytes_total.saturating_add(1);
+                push_bounded(
+                    &mut samples.outbound_100ms_bytes,
+                    bytes,
+                    MEDIA_PIPELINE_SAMPLE_WINDOW,
+                );
+            } else {
+                samples.outbound_1s_bytes_total = samples.outbound_1s_bytes_total.saturating_add(1);
+                push_bounded(
+                    &mut samples.outbound_1s_bytes,
+                    bytes,
+                    MEDIA_PIPELINE_SAMPLE_WINDOW,
+                );
+            }
         }
     }
 
@@ -423,12 +760,21 @@ impl ScreenShareMediaMetrics {
     fn record_stream_first_frame(&self, elapsed: Duration, reconnect: bool) {
         let elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
         if let Ok(mut samples) = self.samples.lock() {
-            let target = if reconnect {
-                &mut samples.reconnect_ms
+            if reconnect {
+                samples.reconnect_ms_total = samples.reconnect_ms_total.saturating_add(1);
+                push_bounded(
+                    &mut samples.reconnect_ms,
+                    elapsed_ms,
+                    MEDIA_STREAM_SAMPLE_WINDOW,
+                );
             } else {
-                &mut samples.first_frame_ms
-            };
-            push_bounded(target, elapsed_ms, MEDIA_STREAM_SAMPLE_WINDOW);
+                samples.first_frame_ms_total = samples.first_frame_ms_total.saturating_add(1);
+                push_bounded(
+                    &mut samples.first_frame_ms,
+                    elapsed_ms,
+                    MEDIA_STREAM_SAMPLE_WINDOW,
+                );
+            }
         }
     }
 
@@ -437,9 +783,15 @@ impl ScreenShareMediaMetrics {
             .fetch_add(skipped, Ordering::Relaxed);
     }
 
-    fn update_rates(&self, fps_actual: u32, bitrate_kbps: u32) {
+    fn update_rates(&self, fps_actual: u32, bitrate_kbps: u32, outbound_bytes_total: u64) {
         self.fps_actual.store(fps_actual, Ordering::Relaxed);
+        self.mjpeg_fps_actual.store(
+            self.mjpeg_interval_frames.swap(0, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         self.bitrate_kbps.store(bitrate_kbps, Ordering::Relaxed);
+        self.outbound_bytes_total
+            .store(outbound_bytes_total, Ordering::Relaxed);
     }
 
     fn snapshot(
@@ -454,7 +806,16 @@ impl ScreenShareMediaMetrics {
         latest_frame_captured_at_ms: Option<u64>,
         now_ms: u64,
     ) -> ScreenShareMediaMetricsSnapshot {
-        let (jpeg, first_frame, reconnect) = self
+        let (
+            jpeg,
+            first_frame,
+            reconnect,
+            pipeline,
+            outbound,
+            jpeg_total,
+            first_frame_total,
+            reconnect_total,
+        ) = self
             .samples
             .lock()
             .map(|samples| {
@@ -462,6 +823,40 @@ impl ScreenShareMediaMetrics {
                     summarize_samples(&samples.jpeg_sizes),
                     summarize_samples(&samples.first_frame_ms),
                     summarize_samples(&samples.reconnect_ms),
+                    [
+                        duration_snapshot(&samples.frame_wait_us, samples.frame_wait_us_total),
+                        duration_snapshot(
+                            &samples.capture_queue_age_us,
+                            samples.capture_queue_age_us_total,
+                        ),
+                        duration_snapshot(&samples.gpu_readback_us, samples.gpu_readback_us_total),
+                        duration_snapshot(
+                            &samples.black_frame_classification_us,
+                            samples.black_frame_classification_us_total,
+                        ),
+                        duration_snapshot(
+                            &samples.jpeg_color_conversion_us,
+                            samples.jpeg_color_conversion_us_total,
+                        ),
+                        duration_snapshot(&samples.jpeg_encode_us, samples.jpeg_encode_us_total),
+                        duration_snapshot(
+                            &samples.stream_send_wait_us,
+                            samples.stream_send_wait_us_total,
+                        ),
+                    ],
+                    [
+                        byte_window_snapshot(
+                            &samples.outbound_100ms_bytes,
+                            samples.outbound_100ms_bytes_total,
+                        ),
+                        byte_window_snapshot(
+                            &samples.outbound_1s_bytes,
+                            samples.outbound_1s_bytes_total,
+                        ),
+                    ],
+                    samples.jpeg_sizes_total,
+                    samples.first_frame_ms_total,
+                    samples.reconnect_ms_total,
                 )
             })
             .unwrap_or_default();
@@ -469,24 +864,81 @@ impl ScreenShareMediaMetrics {
             u64::MAX => None,
             value => Some(value),
         };
+        let latest_capture = self
+            .latest_capture
+            .lock()
+            .ok()
+            .and_then(|value| value.clone());
+        let frame_age_ms = latest_capture
+            .as_ref()
+            .map(|capture| now_ms.saturating_sub(capture.observed_at_ms))
+            .or_else(|| {
+                latest_frame_captured_at_ms.map(|captured_at| now_ms.saturating_sub(captured_at))
+            });
         ScreenShareMediaMetricsSnapshot {
+            capture_frame_count: self.capture_frame_count.load(Ordering::Relaxed),
+            mjpeg_encoded_frame_count: self.encoded_frame_count.load(Ordering::Relaxed),
+            mjpeg_encoded_bytes: self.mjpeg_encoded_bytes.load(Ordering::Relaxed),
+            outbound_bytes_total: self.outbound_bytes_total.load(Ordering::Relaxed),
+            capture_fps_actual: self.fps_actual.load(Ordering::Relaxed) as f32,
+            mjpeg_fps_actual: self.mjpeg_fps_actual.load(Ordering::Relaxed) as f32,
+            mjpeg_consumer_count: self.mjpeg_consumer_count.load(Ordering::Relaxed),
+            jpeg_active: self.jpeg_active.load(Ordering::Relaxed),
+            jpeg_enable_count: self.jpeg_enable_count.load(Ordering::Relaxed),
+            jpeg_disable_count: self.jpeg_disable_count.load(Ordering::Relaxed),
+            jpeg_fallback_reason: self
+                .jpeg_fallback_reason
+                .lock()
+                .ok()
+                .and_then(|value| value.clone()),
+            latest_capture,
+            frame_wait: pipeline[0].clone(),
+            capture_queue_age: pipeline[1].clone(),
+            gpu_readback: pipeline[2].clone(),
+            black_frame_classification: pipeline[3].clone(),
+            jpeg_color_conversion: pipeline[4].clone(),
+            jpeg_encode: pipeline[5].clone(),
+            stream_send_wait: pipeline[6].clone(),
+            outbound_100ms: outbound[0].clone(),
+            outbound_1s: outbound[1].clone(),
+            stream_send_timeout_count: self.stream_send_timeout_count.load(Ordering::Relaxed),
+            stream_disconnect_count: self.stream_disconnect_count.load(Ordering::Relaxed),
             encoded_frame_count: self.encoded_frame_count.load(Ordering::Relaxed),
             jpeg_sample_count: jpeg.count,
+            jpeg_total_sample_count: jpeg_total,
+            jpeg_retained_sample_count: jpeg.count,
+            jpeg_sample_window_capacity: MEDIA_JPEG_SAMPLE_WINDOW as u32,
+            jpeg_measurement_scope: MEDIA_SAMPLE_MEASUREMENT_SCOPE,
             jpeg_size_avg_bytes: jpeg.average,
             jpeg_size_p50_bytes: jpeg.p50,
             jpeg_size_p95_bytes: jpeg.p95,
+            jpeg_size_p99_bytes: jpeg.p99,
+            jpeg_size_max_bytes: jpeg.max,
             first_frame_delay_ms,
-            frame_age_ms: latest_frame_captured_at_ms
-                .map(|captured_at| now_ms.saturating_sub(captured_at)),
+            frame_age_ms,
             slow_client_dropped_frames: self.slow_client_dropped_frames.load(Ordering::Relaxed),
             stream_connection_count: self.stream_connection_count.load(Ordering::Relaxed),
             stream_first_frame_sample_count: first_frame.count,
+            stream_first_frame_total_sample_count: first_frame_total,
+            stream_first_frame_retained_sample_count: first_frame.count,
+            stream_first_frame_sample_window_capacity: MEDIA_STREAM_SAMPLE_WINDOW as u32,
+            stream_first_frame_measurement_scope: MEDIA_SAMPLE_MEASUREMENT_SCOPE,
             stream_first_frame_avg_ms: first_frame.optional_average(),
+            stream_first_frame_p50_ms: first_frame.optional_p50(),
             stream_first_frame_p95_ms: first_frame.optional_p95(),
+            stream_first_frame_p99_ms: first_frame.optional_p99(),
+            stream_first_frame_max_ms: first_frame.optional_max(),
             stream_reconnect_count: self.stream_reconnect_count.load(Ordering::Relaxed),
             stream_reconnect_sample_count: reconnect.count,
+            stream_reconnect_total_sample_count: reconnect_total,
+            stream_reconnect_retained_sample_count: reconnect.count,
+            stream_reconnect_sample_window_capacity: MEDIA_STREAM_SAMPLE_WINDOW as u32,
+            stream_reconnect_measurement_scope: MEDIA_SAMPLE_MEASUREMENT_SCOPE,
             stream_reconnect_avg_ms: reconnect.optional_average(),
+            stream_reconnect_p50_ms: reconnect.optional_p50(),
             stream_reconnect_p95_ms: reconnect.optional_p95(),
+            stream_reconnect_p99_ms: reconnect.optional_p99(),
+            stream_reconnect_max_ms: reconnect.optional_max(),
             fps_actual: self.fps_actual.load(Ordering::Relaxed) as f32,
             bitrate_kbps: self.bitrate_kbps.load(Ordering::Relaxed),
         }
@@ -499,6 +951,8 @@ struct SampleSummary {
     average: u64,
     p50: u64,
     p95: u64,
+    p99: u64,
+    max: u64,
 }
 
 impl SampleSummary {
@@ -508,6 +962,18 @@ impl SampleSummary {
 
     fn optional_p95(&self) -> Option<u64> {
         (self.count > 0).then_some(self.p95)
+    }
+
+    fn optional_p50(&self) -> Option<u64> {
+        (self.count > 0).then_some(self.p50)
+    }
+
+    fn optional_p99(&self) -> Option<u64> {
+        (self.count > 0).then_some(self.p99)
+    }
+
+    fn optional_max(&self) -> Option<u64> {
+        (self.count > 0).then_some(self.max)
     }
 }
 
@@ -535,6 +1001,57 @@ where
         average,
         p50: nearest_rank(&sorted, 50),
         p95: nearest_rank(&sorted, 95),
+        p99: nearest_rank(&sorted, 99),
+        max: sorted.last().copied().unwrap_or_default(),
+    }
+}
+
+fn push_duration_sample(samples: &mut VecDeque<u64>, duration: Duration) {
+    push_bounded(
+        samples,
+        duration.as_micros().min(u128::from(u64::MAX)) as u64,
+        MEDIA_PIPELINE_SAMPLE_WINDOW,
+    );
+}
+
+fn duration_snapshot(samples: &VecDeque<u64>, total_sample_count: u64) -> DurationMetricsSnapshot {
+    let summary = summarize_samples(samples);
+    DurationMetricsSnapshot {
+        sample_count: summary.count,
+        total_sample_count,
+        retained_sample_count: summary.count,
+        sample_window_capacity: MEDIA_PIPELINE_SAMPLE_WINDOW as u32,
+        measurement_scope: MEDIA_SAMPLE_MEASUREMENT_SCOPE,
+        p50_us: summary.p50,
+        p95_us: summary.p95,
+        p99_us: summary.p99,
+        max_us: summary.max,
+    }
+}
+
+fn byte_window_snapshot(
+    samples: &VecDeque<u64>,
+    total_sample_count: u64,
+) -> ByteWindowMetricsSnapshot {
+    let summary = summarize_samples(samples);
+    let total = samples
+        .iter()
+        .copied()
+        .map(u128::from)
+        .sum::<u128>()
+        .min(u128::from(u64::MAX)) as u64;
+    ByteWindowMetricsSnapshot {
+        sample_count: summary.count,
+        total_sample_count,
+        retained_sample_count: summary.count,
+        sample_window_capacity: MEDIA_PIPELINE_SAMPLE_WINDOW as u32,
+        measurement_scope: MEDIA_SAMPLE_MEASUREMENT_SCOPE,
+        total_bytes: total,
+        retained_total_bytes: total,
+        p50_bytes: summary.p50,
+        p95_bytes: summary.p95,
+        p99_bytes: summary.p99,
+        max_bytes: summary.max,
     }
 }
 
@@ -549,6 +1066,16 @@ fn unix_time_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
+}
+
+/// A frame cannot visibly contain input that was injected after that frame was captured.
+/// Keep this check at the capture boundary so all downstream transports share the same
+/// causal lower bound. This remains a controlled-scene proxy; it does not inspect pixels.
+fn applied_input_visible_at_capture(
+    input: Option<AppliedInputSnapshot>,
+    captured_at_unix_ms: u64,
+) -> Option<AppliedInputSnapshot> {
+    input.filter(|snapshot| snapshot.applied_at_server_unix_ms <= captured_at_unix_ms)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -575,6 +1102,8 @@ pub struct ScreenShareHandle {
     cancel: Mutex<Arc<AtomicBool>>,
     session_id: AtomicU64,
     viewer_count: Arc<AtomicU32>,
+    viewer_ip_reference_count: Arc<AtomicU32>,
+    active_media_task_count: Arc<AtomicU32>,
     fps_counter: Arc<AtomicU32>,
     bytes_sent: Arc<AtomicU64>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
@@ -606,6 +1135,8 @@ impl ScreenShareHandle {
             cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             session_id: AtomicU64::new(0),
             viewer_count: Arc::new(AtomicU32::new(0)),
+            viewer_ip_reference_count: Arc::new(AtomicU32::new(0)),
+            active_media_task_count: Arc::new(AtomicU32::new(0)),
             fps_counter: Arc::new(AtomicU32::new(0)),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             shutdown_tx: Mutex::new(None),
@@ -661,6 +1192,8 @@ fn inactive_status() -> ScreenShareStatus {
         is_active: false,
         viewer_count: 0,
         connection_count: 0,
+        viewer_ip_reference_count: 0,
+        active_media_task_count: 0,
         fps_actual: 0.0,
         bitrate_kbps: 0,
         uptime_secs: 0,
@@ -683,6 +1216,7 @@ fn inactive_status() -> ScreenShareStatus {
         pending_control_request: None,
         desktop_overlay_active: false,
         media_metrics: ScreenShareMediaMetricsSnapshot::default(),
+        input_metrics: None,
     }
 }
 
@@ -699,6 +1233,8 @@ fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
         }
     }
     handle.viewer_count.store(0, Ordering::Relaxed);
+    handle.viewer_ip_reference_count.store(0, Ordering::Relaxed);
+    handle.active_media_task_count.store(0, Ordering::Relaxed);
     handle.fps_counter.store(0, Ordering::Relaxed);
     handle.bytes_sent.store(0, Ordering::Relaxed);
     *handle.shutdown_tx.lock().unwrap() = None;
@@ -804,33 +1340,31 @@ fn interaction_event_updates_annotations(message_type: &str) -> bool {
     )
 }
 
-fn record_viewer_ip(viewer_ips: &Arc<Mutex<ViewerIpMap>>, ip: impl Into<String>) {
-    record_viewer_ip_at(viewer_ips, ip, Instant::now());
+fn record_viewer_connection(viewer_ips: &Arc<Mutex<ViewerIpMap>>, ip: &str) {
+    if let Ok(mut ips) = viewer_ips.lock() {
+        let entry = ips.entry(ip.to_owned()).or_insert(ViewerIpEntry {
+            active_media_connections: 0,
+        });
+        entry.active_media_connections = entry.active_media_connections.saturating_add(1);
+    }
 }
 
-fn record_viewer_ip_at(
-    viewer_ips: &Arc<Mutex<ViewerIpMap>>,
-    ip: impl Into<String>,
-    seen_at: Instant,
-) {
+fn release_viewer_connection(viewer_ips: &Arc<Mutex<ViewerIpMap>>, ip: &str) {
     if let Ok(mut ips) = viewer_ips.lock() {
-        ips.insert(ip.into(), seen_at);
+        let should_remove = ips.get_mut(ip).is_some_and(|entry| {
+            entry.active_media_connections = entry.active_media_connections.saturating_sub(1);
+            entry.active_media_connections == 0
+        });
+        if should_remove {
+            ips.remove(ip);
+        }
     }
 }
 
 fn snapshot_viewer_ips(viewer_ips: &Arc<Mutex<ViewerIpMap>>) -> Vec<String> {
-    snapshot_viewer_ips_at(viewer_ips, Instant::now())
-}
-
-fn snapshot_viewer_ips_at(viewer_ips: &Arc<Mutex<ViewerIpMap>>, now: Instant) -> Vec<String> {
     let mut ips: Vec<String> = viewer_ips
         .lock()
-        .map(|mut map| {
-            map.retain(|_, seen_at| {
-                now.checked_duration_since(*seen_at).unwrap_or_default() <= VIEWER_IP_TTL
-            });
-            map.keys().cloned().collect()
-        })
+        .map(|map| map.keys().cloned().collect())
         .unwrap_or_default();
     ips.sort_unstable();
     ips
@@ -847,6 +1381,9 @@ struct HttpServerState {
     broadcast_tx: broadcast::Sender<Arc<Bytes>>,
     interaction: Arc<InteractionState>,
     viewer_count: Arc<AtomicU32>,
+    viewer_ip_reference_count: Arc<AtomicU32>,
+    active_media_task_count: Arc<AtomicU32>,
+    mjpeg_viewer_count: Arc<AtomicU32>,
     cancel: Arc<AtomicBool>,
     auth_hash: Option<String>,
     auth_username: Option<String>,
@@ -862,6 +1399,8 @@ struct HttpServerState {
     preview_token: Arc<Mutex<Option<String>>>,
     transport: Arc<Mutex<ScreenShareMediaTransport>>,
     input_worker: Option<Arc<InputWorkerHandle>>,
+    #[cfg(feature = "screen-share-webrtc-prototype")]
+    webrtc: Option<Arc<crate::screenshare_webrtc::WebRtcTransportState>>,
 }
 
 trait ScreenShareEventSink: Send + Sync {
@@ -895,6 +1434,9 @@ impl ScreenShareEventSink for TauriScreenShareEventSink {
 struct ViewerGuard {
     events: Arc<dyn ScreenShareEventSink>,
     count: Arc<AtomicU32>,
+    ip_reference_count: Arc<AtomicU32>,
+    active_task_count: Arc<AtomicU32>,
+    transport_count: Option<Arc<AtomicU32>>,
     ips: Arc<Mutex<ViewerIpMap>>,
     ip: String,
 }
@@ -914,9 +1456,12 @@ impl Drop for ViewerGuard {
                 break current - 1;
             }
         };
-        if let Ok(mut set) = self.ips.lock() {
-            set.remove(&self.ip);
+        if let Some(transport_count) = self.transport_count.as_ref() {
+            decrement_nonzero(transport_count);
         }
+        release_viewer_connection(&self.ips, &self.ip);
+        decrement_nonzero(&self.ip_reference_count);
+        decrement_nonzero(&self.active_task_count);
         self.events.emit_tool_log(
             &format!(
                 "Viewer disconnected: ip={}, remaining_viewers={}",
@@ -924,6 +1469,37 @@ impl Drop for ViewerGuard {
             ),
             "info",
         );
+    }
+}
+
+fn decrement_nonzero(counter: &AtomicU32) -> u32 {
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        if current == 0 {
+            return 0;
+        }
+        if counter
+            .compare_exchange_weak(current, current - 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return current - 1;
+        }
+    }
+}
+
+fn try_reserve_media_viewer(counter: &AtomicU32) -> Option<u32> {
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        if current >= MAX_MEDIA_VIEWERS {
+            return None;
+        }
+        let next = current + 1;
+        if counter
+            .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Some(next);
+        }
     }
 }
 
@@ -998,8 +1574,13 @@ pub async fn screen_share_start(
     if config.quality < 10 || config.quality > 100 {
         return Err("Quality must be 10-100".into());
     }
-    if config.fps < 1 || config.fps > 30 {
-        return Err("FPS must be 1-30".into());
+    validate_capture_fps(config.fps)?;
+    #[cfg(not(feature = "screen-share-webrtc-prototype"))]
+    if config.transport == ScreenShareMediaTransport::WebRtc {
+        return Err(
+            "WebRTC experimental transport is unavailable in this build; rebuild with feature 'screen-share-webrtc-prototype' or choose MSE/MJPEG"
+                .into(),
+        );
     }
 
     let start_guard = begin_screen_share_start(handle)?;
@@ -1052,6 +1633,7 @@ pub async fn screen_share_start(
     // Broadcast channel for JPEG frames. Interaction state is per session and
     // is deliberately kept separate from the lossy MJPEG channel.
     let (broadcast_tx, _) = broadcast::channel::<Arc<Bytes>>(8);
+    let mjpeg_viewer_count = Arc::new(AtomicU32::new(0));
     let media_metrics = Arc::new(ScreenShareMediaMetrics::new());
     let h264_media = Arc::new(H264MediaState::new());
     *handle.media_metrics.lock().unwrap() = Some(media_metrics.clone());
@@ -1061,7 +1643,6 @@ pub async fn screen_share_start(
         session_id,
         InteractionConfig {
             annotations_enabled: config.annotations_enabled,
-            shared_freeze_enabled: config.shared_freeze_enabled,
             control_requests_enabled: config.control_requests_enabled,
             keyboard_control_enabled: config.control_requests_enabled
                 && config.keyboard_control_enabled,
@@ -1085,6 +1666,9 @@ pub async fn screen_share_start(
     } else {
         None
     };
+    #[cfg(feature = "screen-share-webrtc-prototype")]
+    let webrtc = (config.transport == ScreenShareMediaTransport::WebRtc)
+        .then(|| crate::screenshare_webrtc::WebRtcTransportState::new(h264_media.clone()));
     if config.control_requests_enabled {
         let worker = InputWorkerHandle::spawn().map_err(|error| {
             reset_runtime_state(handle);
@@ -1104,6 +1688,7 @@ pub async fn screen_share_start(
     let capture_fps = handle.fps_counter.clone();
     let capture_media_metrics = media_metrics.clone();
     let capture_viewers = handle.viewer_count.clone();
+    let capture_mjpeg_viewers = mjpeg_viewer_count.clone();
     let capture_handle = handle.clone();
     let monitor_index = config.monitor_index;
     let quality = config.quality;
@@ -1113,7 +1698,9 @@ pub async fn screen_share_start(
     let capture_tx = broadcast_tx.clone();
     let capture_interaction = interaction.clone();
     let capture_h264_media = h264_media.clone();
+    let capture_input_worker = handle.input_worker.lock().unwrap().clone();
     let capture_app = app_handle.clone();
+    let requested_transport = config.transport;
     let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
 
     if let Err(e) = std::thread::Builder::new()
@@ -1125,6 +1712,7 @@ pub async fn screen_share_start(
                 fps,
                 show_cursor,
                 backend_mode,
+                requested_transport,
                 h264_worker,
                 capture_h264_media,
                 capture_tx,
@@ -1133,6 +1721,8 @@ pub async fn screen_share_start(
                 capture_fps,
                 capture_media_metrics,
                 capture_viewers,
+                capture_mjpeg_viewers,
+                capture_input_worker,
                 capture_handle,
                 session_id,
                 Some(startup_tx),
@@ -1234,6 +1824,9 @@ pub async fn screen_share_start(
         broadcast_tx: broadcast_tx.clone(),
         interaction: interaction.clone(),
         viewer_count: handle.viewer_count.clone(),
+        viewer_ip_reference_count: handle.viewer_ip_reference_count.clone(),
+        active_media_task_count: handle.active_media_task_count.clone(),
+        mjpeg_viewer_count,
         cancel: session_cancel.clone(),
         auth_hash,
         auth_username,
@@ -1247,6 +1840,8 @@ pub async fn screen_share_start(
         preview_token: handle.preview_token.clone(),
         transport: handle.transport.clone(),
         input_worker: handle.input_worker.lock().unwrap().clone(),
+        #[cfg(feature = "screen-share-webrtc-prototype")]
+        webrtc,
     });
 
     // --- Spawn HTTP server ---
@@ -1301,6 +1896,22 @@ pub async fn screen_share_start(
     let reporter_viewers = handle.viewer_count.clone();
     let reporter_fps = handle.fps_counter.clone();
     let reporter_bytes = handle.bytes_sent.clone();
+    let outbound_active = handle.active.clone();
+    let outbound_cancel = session_cancel.clone();
+    let outbound_bytes = handle.bytes_sent.clone();
+    let outbound_media_metrics = media_metrics.clone();
+    let outbound_runtime_handle = handle.clone();
+    tokio::spawn(async move {
+        outbound_metrics_sampler(
+            outbound_active,
+            outbound_cancel,
+            outbound_bytes,
+            outbound_media_metrics,
+            outbound_runtime_handle,
+            session_id,
+        )
+        .await;
+    });
     let reporter_media_metrics = media_metrics;
     let reporter_url = server_url.clone();
     let reporter_all_urls = all_urls.clone();
@@ -1437,6 +2048,11 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         .as_ref()
         .map(|metrics| metrics.snapshot(latest_frame_captured_at_ms))
         .unwrap_or_default();
+    let input_metrics = handle.input_worker.lock().ok().and_then(|worker| {
+        worker
+            .as_ref()
+            .and_then(|worker| worker.metrics_snapshot().ok())
+    });
     let h264_media = handle
         .h264_media
         .lock()
@@ -1449,6 +2065,8 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         is_active: true,
         viewer_count: handle.viewer_count.load(Ordering::Relaxed),
         connection_count: connected_ips.len() as u32,
+        viewer_ip_reference_count: handle.viewer_ip_reference_count.load(Ordering::Relaxed),
+        active_media_task_count: handle.active_media_task_count.load(Ordering::Relaxed),
         fps_actual: media_metrics.fps_actual,
         bitrate_kbps: media_metrics.bitrate_kbps,
         uptime_secs: uptime,
@@ -1496,6 +2114,7 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
             .and_then(|interaction| interaction.pending_control_request()),
         desktop_overlay_active: handle.desktop_overlay_active.load(Ordering::Relaxed),
         media_metrics,
+        input_metrics,
     }
 }
 
@@ -2695,24 +3314,185 @@ fn is_nearly_black_bgra_frame(bgra: &[u8], width: usize, height: usize, stride: 
 }
 
 enum CapturedFrame<'a> {
-    Dxgi(Frame<'a>, usize),
-    Borrowed { pixels: &'a [u8], stride: usize },
+    Dxgi {
+        frame: Frame<'a>,
+        stride: usize,
+    },
+    #[cfg(target_os = "windows")]
+    Wgc {
+        pixels: Option<&'a [u8]>,
+        stride: usize,
+        width: usize,
+        height: usize,
+        gpu_surface: Option<GpuNv12Surface>,
+        near_black: Option<bool>,
+        gpu_preprocess_elapsed: Option<Duration>,
+        gpu_backpressure: bool,
+        gpu_pipeline_active: bool,
+        gpu_fallback_reason: Option<String>,
+        system_relative_time_100ns: Option<i64>,
+        capture_queue_age: Option<Duration>,
+        gpu_readback: Option<Duration>,
+    },
 }
 
 impl CapturedFrame<'_> {
-    fn pixels(&self) -> &[u8] {
+    fn pixels(&self) -> Option<&[u8]> {
         match self {
-            Self::Dxgi(frame, _) => frame,
-            Self::Borrowed { pixels, .. } => pixels,
+            Self::Dxgi { frame, .. } => Some(frame),
+            #[cfg(target_os = "windows")]
+            Self::Wgc { pixels, .. } => *pixels,
         }
     }
 
     fn stride(&self) -> usize {
         match self {
-            Self::Dxgi(_, stride) => *stride,
-            Self::Borrowed { stride, .. } => *stride,
+            Self::Dxgi { stride, .. } => *stride,
+            #[cfg(target_os = "windows")]
+            Self::Wgc { stride, .. } => *stride,
         }
     }
+
+    fn dimensions(&self, fallback_width: usize, fallback_height: usize) -> (usize, usize) {
+        match self {
+            Self::Dxgi { .. } => (fallback_width, fallback_height),
+            #[cfg(target_os = "windows")]
+            Self::Wgc { width, height, .. } => (*width, *height),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn take_gpu_surface(&mut self) -> Option<GpuNv12Surface> {
+        match self {
+            Self::Dxgi { .. } => None,
+            Self::Wgc { gpu_surface, .. } => gpu_surface.take(),
+        }
+    }
+
+    fn probed_near_black(&self) -> Option<bool> {
+        match self {
+            Self::Dxgi { .. } => None,
+            #[cfg(target_os = "windows")]
+            Self::Wgc { near_black, .. } => *near_black,
+        }
+    }
+
+    fn report_gpu_metrics(&self, media: &H264MediaState) {
+        #[cfg(target_os = "windows")]
+        if let Self::Wgc {
+            gpu_preprocess_elapsed,
+            gpu_backpressure,
+            gpu_pipeline_active,
+            gpu_fallback_reason,
+            ..
+        } = self
+        {
+            if let Some(elapsed) = gpu_preprocess_elapsed {
+                media.record_gpu_preprocess(*elapsed);
+            }
+            if *gpu_backpressure {
+                media.record_gpu_backpressure_drop();
+            }
+            if *gpu_pipeline_active {
+                media.set_gpu_pipeline_active();
+            }
+            if let Some(reason) = gpu_fallback_reason {
+                media.record_gpu_fallback(reason.clone());
+            }
+        }
+    }
+
+    fn system_relative_time_100ns(&self) -> Option<i64> {
+        match self {
+            Self::Dxgi { .. } => None,
+            #[cfg(target_os = "windows")]
+            Self::Wgc {
+                system_relative_time_100ns,
+                ..
+            } => *system_relative_time_100ns,
+        }
+    }
+
+    fn capture_queue_age(&self) -> Option<Duration> {
+        match self {
+            Self::Dxgi { .. } => None,
+            #[cfg(target_os = "windows")]
+            Self::Wgc {
+                capture_queue_age, ..
+            } => *capture_queue_age,
+        }
+    }
+
+    fn gpu_readback(&self) -> Option<Duration> {
+        match self {
+            Self::Dxgi { .. } => None,
+            #[cfg(target_os = "windows")]
+            Self::Wgc { gpu_readback, .. } => *gpu_readback,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CaptureFrameOptions {
+    gpu_h264: bool,
+    cpu_pixels: bool,
+    fps: u8,
+}
+
+fn select_capture_frame_options(
+    backend: CaptureBackendKind,
+    h264_available: bool,
+    gpu_input_allowed: bool,
+    mjpeg_consumers: u32,
+    fps: u8,
+) -> CaptureFrameOptions {
+    let gpu_h264 = backend == CaptureBackendKind::Wgc && h264_available && gpu_input_allowed;
+    CaptureFrameOptions {
+        gpu_h264,
+        cpu_pixels: backend != CaptureBackendKind::Wgc || !gpu_h264 || mjpeg_consumers > 0,
+        fps,
+    }
+}
+
+fn select_jpeg_state(
+    consumers: u32,
+    cpu_pixels_available: bool,
+    h264_ready: bool,
+    h264_available: bool,
+) -> (bool, &'static str) {
+    if consumers == 0 {
+        return (false, "no_mjpeg_consumers");
+    }
+    if !cpu_pixels_available {
+        return (false, "mjpeg_cpu_readback_pending");
+    }
+    (
+        true,
+        if h264_ready {
+            "mjpeg_compatibility_viewer"
+        } else if h264_available {
+            "h264_not_ready"
+        } else {
+            "h264_unavailable"
+        },
+    )
+}
+
+fn relative_capture_queue_age(
+    anchor: &mut Option<(i64, Instant)>,
+    system_time_100ns: i64,
+    observed_at: Instant,
+) -> Option<Duration> {
+    let reset_anchor = anchor.is_none_or(|(base, _)| system_time_100ns < base);
+    if reset_anchor {
+        *anchor = Some((system_time_100ns, observed_at));
+        return Some(Duration::ZERO);
+    }
+    let (base_system_time, base_instant) = *anchor.as_ref()?;
+    let elapsed_ticks = u64::try_from(system_time_100ns - base_system_time).ok()?;
+    let elapsed = Duration::from_nanos(elapsed_ticks.saturating_mul(100));
+    let captured_at = base_instant.checked_add(elapsed)?;
+    Some(observed_at.saturating_duration_since(captured_at))
 }
 
 enum CaptureSource {
@@ -2746,16 +3526,16 @@ impl CaptureSource {
         }
     }
 
-    fn frame(&mut self) -> io::Result<CapturedFrame<'_>> {
+    fn frame(&mut self, options: CaptureFrameOptions) -> io::Result<CapturedFrame<'_>> {
         match self {
             Self::Dxgi(capturer) => {
                 let height = capturer.height();
                 let frame: Frame<'_> = capturer.frame()?;
                 let stride = frame.len() / height;
-                Ok(CapturedFrame::Dxgi(frame, stride))
+                Ok(CapturedFrame::Dxgi { frame, stride })
             }
             #[cfg(target_os = "windows")]
-            Self::Wgc(capturer) => capturer.frame(),
+            Self::Wgc(capturer) => capturer.frame(options),
         }
     }
 }
@@ -2766,6 +3546,7 @@ fn capture_loop(
     fps: u8,
     show_cursor: bool,
     backend_mode: ScreenShareBackendMode,
+    requested_transport: ScreenShareMediaTransport,
     h264_worker: Option<H264EncoderWorker>,
     h264_media: Arc<H264MediaState>,
     tx: broadcast::Sender<Arc<Bytes>>,
@@ -2774,6 +3555,8 @@ fn capture_loop(
     fps_counter: Arc<AtomicU32>,
     media_metrics: Arc<ScreenShareMediaMetrics>,
     viewer_count: Arc<AtomicU32>,
+    mjpeg_viewer_count: Arc<AtomicU32>,
+    input_worker: Option<Arc<InputWorkerHandle>>,
     runtime_handle: Arc<ScreenShareHandle>,
     session_id: u64,
     startup_tx: Option<oneshot::Sender<Result<(), String>>>,
@@ -2783,6 +3566,7 @@ fn capture_loop(
     let h264_worker = h264_worker;
     let mut h264_failure_logged = false;
     let mut h264_ready_logged = false;
+    let mut last_jpeg_encoded_at: Option<Instant> = None;
     let mut source = match create_capture_source(
         monitor_index,
         show_cursor,
@@ -2820,7 +3604,7 @@ fn capture_loop(
     let mut width = source.width();
     let mut height = source.height();
     let mut active_monitor_index = monitor_index;
-    let frame_interval = Duration::from_millis(1000 / fps.max(1) as u64);
+    let frame_interval = capture_frame_interval(fps);
     let mut first_real_frame = false;
     // 会话内是否推送过真实帧：决定 WouldBlock 时是否继续发占位帧
     //（仅初始预热阶段发；重建等待期让观看端保留最后一帧真实画面）。
@@ -2916,6 +3700,7 @@ fn capture_loop(
         }
 
         let mut scan_capture_candidates = false;
+        let frame_wait_started = Instant::now();
         let frame_result =
             if let Some((error, should_scan_candidates)) = forced_recreate_error.take() {
                 scan_capture_candidates = should_scan_candidates;
@@ -2929,13 +3714,35 @@ fn capture_loop(
                             format!("frame starvation watchdog: {}", verdict.describe()),
                         ))
                     }
-                    None => source.frame(),
+                    None => {
+                        #[cfg(target_os = "windows")]
+                        let gpu_h264 = current_backend == CaptureBackendKind::Wgc
+                            && h264_worker
+                                .as_ref()
+                                .is_some_and(H264EncoderWorker::gpu_input_allowed);
+                        #[cfg(not(target_os = "windows"))]
+                        let gpu_h264 = false;
+                        source.frame(select_capture_frame_options(
+                            current_backend,
+                            h264_worker.is_some(),
+                            gpu_h264,
+                            mjpeg_viewer_count.load(Ordering::Relaxed),
+                            fps,
+                        ))
+                    }
                 }
             };
 
         match frame_result {
-            Ok(frame) => {
+            Ok(mut frame) => {
+                frame.report_gpu_metrics(&h264_media);
+                let frame_wait = frame_wait_started.elapsed();
+                let system_relative_time_100ns = frame.system_relative_time_100ns();
+                let capture_queue_age = frame.capture_queue_age();
+                let gpu_readback = frame.gpu_readback();
                 let stride = frame.stride();
+                #[cfg(target_os = "windows")]
+                let mut gpu_surface = frame.take_gpu_surface();
                 let frame_pixels = frame.pixels();
 
                 // WGC 分辨率变化时帧尺寸会静默改变（staging 缓冲已随帧重建），
@@ -2943,7 +3750,7 @@ fn capture_loop(
                 // DXGI 的 stride 含行对齐填充，不适用此推导；其分辨率变化
                 // 会直接报错走重建路径，重建后尺寸在恢复分支同步。
                 if current_backend == CaptureBackendKind::Wgc && stride >= 4 {
-                    let (frame_w, frame_h) = (stride / 4, frame_pixels.len() / stride);
+                    let (frame_w, frame_h) = frame.dimensions(width, height);
                     if frame_w > 0 && frame_h > 0 && (frame_w != width || frame_h != height) {
                         invalidate_interaction_source(&runtime_handle, &interaction);
                         emit_capture_create_diagnostic(
@@ -2964,8 +3771,9 @@ fn capture_loop(
                 }
 
                 #[cfg(target_os = "windows")]
-                let source_pixels: &[u8] =
+                let source_pixels: Option<&[u8]> =
                     if show_cursor && current_backend == CaptureBackendKind::Dxgi {
+                        let frame_pixels = frame_pixels.expect("DXGI frame must expose CPU pixels");
                         if let Some(ref mon_rect) = monitor_rect {
                             // Copy frame into persistent scratch buffer (avoids per-frame reallocation)
                             if frame_scratch.len() != frame_pixels.len() {
@@ -2980,18 +3788,32 @@ fn capture_loop(
                                 mon_rect,
                                 &mut cursor_cache,
                             );
-                            &frame_scratch
+                            Some(&frame_scratch)
                         } else {
-                            frame_pixels
+                            Some(frame_pixels)
                         }
                     } else {
                         frame_pixels
                     };
 
                 #[cfg(not(target_os = "windows"))]
-                let source_pixels: &[u8] = frame_pixels;
+                let source_pixels: Option<&[u8]> = frame_pixels;
 
-                let near_black = is_nearly_black_bgra_frame(source_pixels, width, height, stride);
+                let (capture_sequence, captured_at_unix_ms) = media_metrics.record_capture_frame(
+                    width as u32,
+                    height as u32,
+                    system_relative_time_100ns,
+                    frame_wait,
+                    capture_queue_age,
+                    gpu_readback,
+                );
+                let black_frame_started = Instant::now();
+                let near_black = frame.probed_near_black().unwrap_or_else(|| {
+                    source_pixels.is_some_and(|pixels| {
+                        is_nearly_black_bgra_frame(pixels, width, height, stride)
+                    })
+                });
+                media_metrics.record_black_frame_classification(black_frame_started.elapsed());
                 let black_desktop_sample =
                     if black_frame_watchdog.should_sample_desktop(tick_start, near_black) {
                         Some(is_input_desktop_available())
@@ -3015,6 +3837,10 @@ fn capture_loop(
                         privacy_issue_logged = false;
                     }
                     BlackFrameDecision::Suppress => {
+                        #[cfg(target_os = "windows")]
+                        if let Some(surface) = gpu_surface.take() {
+                            let _ = surface.release_after_encoder_done();
+                        }
                         if is_current_session(&runtime_handle, session_id) {
                             if current_capture_issue(&runtime_handle)
                                 != Some(ScreenShareCaptureIssue::PrivacyModeOrDisplayOff)
@@ -3045,6 +3871,10 @@ fn capture_loop(
                         continue;
                     }
                     BlackFrameDecision::ForceRecreate { reason } => {
+                        #[cfg(target_os = "windows")]
+                        if let Some(surface) = gpu_surface.take() {
+                            let _ = surface.release_after_encoder_done();
+                        }
                         forced_recreate_error = Some((
                             io::Error::new(
                                 io::ErrorKind::TimedOut,
@@ -3081,28 +3911,78 @@ fn capture_loop(
                     }
                 }
 
+                fps_counter.fetch_add(1, Ordering::Relaxed);
+                first_real_frame = true;
+                session_ever_had_frame = true;
+                let interaction_frame_id =
+                    interaction.record_frame_metadata(width as u32, height as u32);
+                if pending_resume {
+                    // Recovery is complete when a real capture frame is accepted;
+                    // it must not depend on the optional compatibility JPEG path.
+                    pending_resume = false;
+                    if is_current_session(&runtime_handle, session_id) {
+                        set_capture_issue(&runtime_handle, None);
+                    }
+                    emit_capture_create_diagnostic(
+                        &app_handle,
+                        "success",
+                        format!(
+                            "画面推流已恢复: backend={}, size={}x{}",
+                            current_backend.label(),
+                            width,
+                            height
+                        ),
+                    );
+                }
+
                 // Submit the captured pixels to the low-latency encoder before
                 // spending time on the compatibility JPEG path.
                 if let Some(worker) = h264_worker.as_ref() {
-                    let _ = worker.try_submit(source_pixels, width, height, stride);
+                    let applied_input = applied_input_visible_at_capture(
+                        input_worker
+                            .as_ref()
+                            .and_then(|input_worker| input_worker.latest_applied_input()),
+                        captured_at_unix_ms,
+                    );
+                    let visible_input_sequence =
+                        applied_input.as_ref().map(|input| input.client_sequence);
+                    let input_applied_at_server_unix_ms = applied_input
+                        .as_ref()
+                        .map(|input| input.applied_at_server_unix_ms);
+                    #[cfg(target_os = "windows")]
+                    let gpu_submitted = gpu_surface.is_some_and(|surface| {
+                        worker.try_submit_gpu_with_metadata(
+                            surface,
+                            capture_sequence,
+                            captured_at_unix_ms,
+                            visible_input_sequence,
+                            input_applied_at_server_unix_ms,
+                        )
+                    });
+                    #[cfg(not(target_os = "windows"))]
+                    let gpu_submitted = false;
+                    if !gpu_submitted {
+                        if let Some(source_pixels) = source_pixels {
+                            let _ = worker.try_submit_with_metadata(
+                                source_pixels,
+                                width,
+                                height,
+                                stride,
+                                capture_sequence,
+                                captured_at_unix_ms,
+                                visible_input_sequence,
+                                input_applied_at_server_unix_ms,
+                            );
+                        }
+                    }
                 }
-
-                let jpeg = encode_jpeg_reuse(
-                    source_pixels,
-                    width,
-                    height,
-                    stride,
-                    quality,
-                    &mut rgb_buf,
-                    &mut jpeg_buf,
-                );
 
                 if h264_worker.is_some() {
                     let current_transport = *runtime_handle.transport.lock().unwrap();
                     if h264_media.is_ready() {
-                        if current_transport != ScreenShareMediaTransport::MseH264 {
-                            *runtime_handle.transport.lock().unwrap() =
-                                ScreenShareMediaTransport::MseH264;
+                        let ready_transport = requested_transport.resolved_h264_transport();
+                        if current_transport != ready_transport {
+                            *runtime_handle.transport.lock().unwrap() = ready_transport;
                         }
                         if !h264_ready_logged {
                             h264_ready_logged = true;
@@ -3113,7 +3993,7 @@ fn capture_loop(
                                 "H.264 媒体流已就绪，观看端将优先使用低带宽传输".to_string(),
                             );
                         }
-                    } else if current_transport == ScreenShareMediaTransport::MseH264 {
+                    } else if current_transport != ScreenShareMediaTransport::Mjpeg {
                         *runtime_handle.transport.lock().unwrap() =
                             ScreenShareMediaTransport::Mjpeg;
                         h264_ready_logged = false;
@@ -3130,36 +4010,56 @@ fn capture_loop(
                     }
                 }
 
-                if !jpeg.is_empty() {
-                    let data = Arc::new(Bytes::from(jpeg));
-                    media_metrics.record_encoded_frame(data.len());
-                    interaction.record_frame_with_metadata(
-                        data.clone(),
-                        width as u32,
-                        height as u32,
+                let mjpeg_consumers = mjpeg_viewer_count.load(Ordering::Relaxed);
+                // Viewer demand can race with the frame-options snapshot taken
+                // before WGC capture. If a viewer arrived mid-frame, defer JPEG
+                // by one frame instead of assuming a CPU readback exists.
+                let (jpeg_active, jpeg_reason) = select_jpeg_state(
+                    mjpeg_consumers,
+                    source_pixels.is_some(),
+                    h264_media.is_ready(),
+                    h264_worker.is_some(),
+                );
+                if media_metrics.update_jpeg_state(jpeg_active, mjpeg_consumers, jpeg_reason) {
+                    emit_capture_create_diagnostic(
+                        &app_handle,
+                        "info",
+                        format!(
+                            "MJPEG compatibility encoder {}: consumers={}, reason={}, max_fps={}",
+                            if jpeg_active { "enabled" } else { "disabled" },
+                            mjpeg_consumers,
+                            jpeg_reason,
+                            1000 / MJPEG_FALLBACK_FRAME_INTERVAL.as_millis()
+                        ),
                     );
-                    let _ = tx.send(data);
-                    fps_counter.fetch_add(1, Ordering::Relaxed);
-                    first_real_frame = true;
-                    session_ever_had_frame = true;
-                    if pending_resume {
-                        // 重建后的首个真实帧才是"恢复"——此前观看端一直
-                        // 显示"画面中断，重试中"提示（capture_paused=true）。
-                        pending_resume = false;
-                        if is_current_session(&runtime_handle, session_id) {
-                            set_capture_issue(&runtime_handle, None);
-                        }
-                        emit_capture_create_diagnostic(
-                            &app_handle,
-                            "success",
-                            format!(
-                                "画面推流已恢复: backend={}, size={}x{}",
-                                current_backend.label(),
-                                width,
-                                height
-                            ),
+                }
+
+                let jpeg_due = last_jpeg_encoded_at.is_none_or(|last| {
+                    tick_start.saturating_duration_since(last) >= MJPEG_FALLBACK_FRAME_INTERVAL
+                });
+                let jpeg = (jpeg_active && jpeg_due)
+                    .then_some(source_pixels)
+                    .flatten()
+                    .map(|source_pixels| {
+                        last_jpeg_encoded_at = Some(tick_start);
+                        let encoded = encode_jpeg_reuse(
+                            source_pixels,
+                            width,
+                            height,
+                            stride,
+                            quality,
+                            &mut rgb_buf,
+                            &mut jpeg_buf,
                         );
-                    }
+                        media_metrics.record_jpeg_timings(encoded.color_conversion, encoded.encode);
+                        encoded
+                    });
+
+                if let Some(jpeg) = jpeg.filter(|jpeg| !jpeg.bytes.is_empty()) {
+                    let data = Arc::new(Bytes::from(jpeg.bytes));
+                    media_metrics.record_encoded_frame(data.len());
+                    let _ = interaction.record_frame_bytes(interaction_frame_id, data.clone());
+                    let _ = tx.send(data);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -3697,6 +4597,13 @@ struct WgcCapturer {
     last_frame_delivered: Instant,
     last_probe_at: Option<Instant>,
     probe_recovery_logged: bool,
+    /// Maps WGC's monotonic SystemRelativeTime clock to this process's
+    /// `Instant` clock without pretending either value is a wall-clock timestamp.
+    system_time_anchor: Option<(i64, Instant)>,
+    gpu_preprocessor: Option<GpuVideoPreprocessor>,
+    gpu_generation: u64,
+    gpu_pipeline_disabled: bool,
+    pending_gpu_fallback: Option<String>,
     staging: Option<ID3D11Texture2D>,
     frame_buf: Vec<u8>,
     stride: usize,
@@ -3771,7 +4678,7 @@ impl WgcCapturer {
 
         let width = size.Width as usize;
         let height = size.Height as usize;
-        let mut capturer = Self {
+        let capturer = Self {
             _item: item,
             _d3d_device: d3d_device,
             _winrt_device: winrt_device,
@@ -3787,13 +4694,17 @@ impl WgcCapturer {
             last_frame_delivered: Instant::now(),
             last_probe_at: None,
             probe_recovery_logged: false,
+            system_time_anchor: None,
+            gpu_preprocessor: None,
+            gpu_generation: 1,
+            gpu_pipeline_disabled: false,
+            pending_gpu_fallback: None,
             staging: None,
             frame_buf: Vec::with_capacity(width * height * 4),
             stride: width * 4,
             width,
             height,
         };
-        capturer.ensure_staging(width as u32, height as u32, DXGI_FORMAT_B8G8R8A8_UNORM)?;
         Ok(capturer)
     }
 
@@ -3821,7 +4732,7 @@ impl WgcCapturer {
         true
     }
 
-    fn frame(&mut self) -> io::Result<CapturedFrame<'_>> {
+    fn frame(&mut self, options: CaptureFrameOptions) -> io::Result<CapturedFrame<'_>> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
@@ -3893,18 +4804,188 @@ impl WgcCapturer {
             ));
         }
 
+        let system_relative_time_100ns = frame
+            .SystemRelativeTime()
+            .ok()
+            .map(|time| time.Duration)
+            .filter(|ticks| *ticks >= 0);
+
         let surface = frame
             .Surface()
             .map_err(|error| windows_error_to_io("Direct3D11CaptureFrame::Surface", error))?;
-        self.copy_surface_to_frame_buffer(&surface)
+        let texture = wgc_surface_texture(&surface)
             .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        let mut descriptor = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut descriptor) };
+        self.width = descriptor.Width as usize;
+        self.height = descriptor.Height as usize;
+        self.stride = self.width.saturating_mul(4);
+
+        let gpu_attempted = options.gpu_h264 && !self.gpu_pipeline_disabled;
+        let gpu_preprocess_started = Instant::now();
+        let (gpu_surface, near_black, gpu_backpressure) = if gpu_attempted {
+            self.preprocess_gpu_frame(&texture, options.fps)
+        } else {
+            (None, None, false)
+        };
+        let gpu_preprocess_elapsed = gpu_attempted.then_some(gpu_preprocess_started.elapsed());
+        let cpu_readback_required = options.cpu_pixels
+            || (options.gpu_h264 && gpu_surface.is_none() && self.gpu_pipeline_disabled);
+        let gpu_readback = if cpu_readback_required {
+            let readback_started = Instant::now();
+            self.copy_texture_to_frame_buffer(&texture)
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+            Some(readback_started.elapsed())
+        } else {
+            None
+        };
         let _ = frame.Close();
 
-        self.last_frame_delivered = Instant::now();
-        Ok(CapturedFrame::Borrowed {
-            pixels: &self.frame_buf,
+        let delivered_at = Instant::now();
+        let capture_queue_age = system_relative_time_100ns.and_then(|ticks| {
+            relative_capture_queue_age(&mut self.system_time_anchor, ticks, delivered_at)
+        });
+        self.last_frame_delivered = delivered_at;
+        Ok(CapturedFrame::Wgc {
+            pixels: cpu_readback_required.then_some(self.frame_buf.as_slice()),
             stride: self.stride,
+            width: self.width,
+            height: self.height,
+            gpu_surface,
+            near_black,
+            gpu_preprocess_elapsed,
+            gpu_backpressure,
+            // A configured preprocessor is not evidence that the live encoder
+            // still accepts DXGI surfaces. Once the encoder disables GPU input,
+            // later CPU fallback frames must not clear the recorded failure and
+            // falsely advertise the GPU path as active.
+            gpu_pipeline_active: gpu_attempted
+                && self.gpu_preprocessor.is_some()
+                && !self.gpu_pipeline_disabled,
+            gpu_fallback_reason: self.pending_gpu_fallback.take(),
+            system_relative_time_100ns,
+            capture_queue_age,
+            gpu_readback,
         })
+    }
+
+    fn preprocess_gpu_frame(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        fps: u8,
+    ) -> (Option<GpuNv12Surface>, Option<bool>, bool) {
+        let output_width = (self.width as u32) & !1;
+        let output_height = (self.height as u32) & !1;
+        let generation = self
+            .gpu_preprocessor
+            .as_ref()
+            .filter(|preprocessor| {
+                let active = preprocessor.config();
+                active.input_width != self.width as u32
+                    || active.input_height != self.height as u32
+                    || active.output_width != output_width
+                    || active.output_height != output_height
+                    || active.frame_rate_numerator != u32::from(fps.max(1))
+            })
+            .map_or(self.gpu_generation, |_| {
+                self.gpu_generation.saturating_add(1)
+            });
+        let config = GpuPreprocessConfig {
+            input_width: self.width as u32,
+            input_height: self.height as u32,
+            output_width,
+            output_height,
+            frame_rate_numerator: u32::from(fps.max(1)),
+            frame_rate_denominator: 1,
+            generation,
+        };
+        if config.output_width < 2 || config.output_height < 2 {
+            self.disable_gpu_pipeline(GpuFallbackReason {
+                code: GpuFallbackCode::InvalidConfiguration,
+                operation: "WGC GPU pipeline dimensions",
+                hresult: None,
+                detail: format!("invalid WGC size {}x{}", self.width, self.height),
+            });
+            return (None, None, false);
+        }
+
+        let setup_result = match self.gpu_preprocessor.as_mut() {
+            Some(preprocessor) if preprocessor.config() != config => {
+                preprocessor.reconfigure(config)
+            }
+            Some(_) => Ok(()),
+            None => match GpuVideoPreprocessor::new(
+                self._d3d_device.clone(),
+                self.context.clone(),
+                config,
+            ) {
+                Ok(preprocessor) => {
+                    let capabilities = preprocessor.capabilities();
+                    log::info!(
+                        "screen_share_gpu_preprocessor enabled=true input={}x{} output={}x{} pool={} bgra_input={} nv12_output={} rate_modes={}",
+                        config.input_width,
+                        config.input_height,
+                        config.output_width,
+                        config.output_height,
+                        capabilities.pool_size,
+                        capabilities.bgra_input,
+                        capabilities.nv12_output,
+                        capabilities.rate_conversion_modes,
+                    );
+                    self.gpu_preprocessor = Some(preprocessor);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            },
+        };
+        if let Err(error) = setup_result {
+            if is_transient_gpu_backpressure(&error) {
+                return (None, None, true);
+            }
+            self.disable_gpu_pipeline(error);
+            return (None, None, false);
+        }
+        self.gpu_generation = generation;
+
+        let Some(preprocessor) = self.gpu_preprocessor.as_mut() else {
+            return (None, None, false);
+        };
+        let near_black = match preprocessor.poll_black_frame_probe(texture, Instant::now()) {
+            Ok(value) => value,
+            Err(error) => {
+                self.disable_gpu_pipeline(error);
+                return (None, None, false);
+            }
+        };
+        match preprocessor.preprocess(texture) {
+            Ok(surface) => (Some(surface), near_black, false),
+            Err(error) if is_transient_gpu_backpressure(&error) => (None, near_black, true),
+            Err(error) => {
+                self.disable_gpu_pipeline(error);
+                (None, near_black, false)
+            }
+        }
+    }
+
+    fn disable_gpu_pipeline(&mut self, error: GpuFallbackReason) {
+        if !self.gpu_pipeline_disabled {
+            log::warn!(
+                "screen_share_gpu_preprocessor enabled=false code={:?} operation={} hresult={:?} detail={}",
+                error.code,
+                error.operation,
+                error.hresult,
+                sanitize_log_field(&error.detail),
+            );
+        }
+        self.gpu_pipeline_disabled = true;
+        self.pending_gpu_fallback = Some(format!(
+            "code={:?}; operation={}; hresult={:?}; detail={}",
+            error.code,
+            error.operation,
+            error.hresult,
+            sanitize_log_field(&error.detail),
+        ));
+        self.gpu_preprocessor = None;
     }
 
     fn ensure_staging(
@@ -3953,15 +5034,7 @@ impl WgcCapturer {
         Ok(())
     }
 
-    fn copy_surface_to_frame_buffer(&mut self, surface: &IDirect3DSurface) -> Result<(), String> {
-        let access: IDirect3DDxgiInterfaceAccess = surface
-            .cast()
-            .map_err(|error| format_windows_error("IDirect3DSurface::cast", &error))?;
-        let texture: ID3D11Texture2D = unsafe {
-            access.GetInterface().map_err(|error| {
-                format_windows_error("IDirect3DDxgiInterfaceAccess::GetInterface", &error)
-            })?
-        };
+    fn copy_texture_to_frame_buffer(&mut self, texture: &ID3D11Texture2D) -> Result<(), String> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
             texture.GetDesc(&mut desc);
@@ -3997,6 +5070,26 @@ impl WgcCapturer {
             mapped_result
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn wgc_surface_texture(surface: &IDirect3DSurface) -> Result<ID3D11Texture2D, String> {
+    let access: IDirect3DDxgiInterfaceAccess = surface
+        .cast()
+        .map_err(|error| format_windows_error("IDirect3DSurface::cast", &error))?;
+    unsafe {
+        access.GetInterface().map_err(|error| {
+            format_windows_error("IDirect3DDxgiInterfaceAccess::GetInterface", &error)
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_transient_gpu_backpressure(error: &GpuFallbackReason) -> bool {
+    matches!(
+        error.code,
+        GpuFallbackCode::PoolExhausted | GpuFallbackCode::PoolBusy
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -4131,25 +5224,57 @@ fn create_graphics_capture_item_for_monitor(
 fn create_wgc_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice), String> {
     let mut d3d_device = None;
     let mut d3d_context = None;
-    unsafe {
+    let video_device_result = unsafe {
         D3D11CreateDevice(
             None,
             D3D_DRIVER_TYPE_HARDWARE,
             HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
             None,
             D3D11_SDK_VERSION,
             Some(&mut d3d_device),
             None,
             Some(&mut d3d_context),
         )
-        .map_err(|error| format_windows_error("D3D11CreateDevice", &error))?;
+    };
+    if let Err(video_error) = video_device_result {
+        log::warn!(
+            "screen_share_wgc_video_device enabled=false operation=D3D11CreateDevice(VIDEO_SUPPORT) hresult=0x{:08X} detail={}",
+            video_error.code().0 as u32,
+            sanitize_log_field(&video_error.message()),
+        );
+        d3d_device = None;
+        d3d_context = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut d3d_device),
+                None,
+                Some(&mut d3d_context),
+            )
+            .map_err(|error| format_windows_error("D3D11CreateDevice(WGC fallback)", &error))?;
+        }
     }
 
     let d3d_device =
         d3d_device.ok_or_else(|| "D3D11CreateDevice returned no device".to_string())?;
     let d3d_context =
         d3d_context.ok_or_else(|| "D3D11CreateDevice returned no immediate context".to_string())?;
+    match d3d_context.cast::<ID3D11Multithread>() {
+        Ok(multithread) => unsafe {
+            let _ = multithread.SetMultithreadProtected(true);
+        },
+        Err(error) => log::warn!(
+            "screen_share_wgc_multithread_protection enabled=false hresult=0x{:08X} detail={}",
+            error.code().0 as u32,
+            sanitize_log_field(&error.message()),
+        ),
+    }
     let dxgi_device: IDXGIDevice = d3d_device
         .cast()
         .map_err(|error| format_windows_error("ID3D11Device::cast IDXGIDevice", &error))?;
@@ -4445,6 +5570,14 @@ fn encode_jpeg(bgra: &[u8], width: usize, height: usize, stride: usize, quality:
         &mut rgb_buf,
         &mut jpeg_buf,
     )
+    .bytes
+}
+
+#[derive(Debug, Default)]
+struct JpegEncodeResult {
+    bytes: Vec<u8>,
+    color_conversion: Duration,
+    encode: Duration,
 }
 
 /// Same as encode_jpeg but reuses caller-provided buffers to avoid allocations.
@@ -4456,12 +5589,13 @@ fn encode_jpeg_reuse(
     quality: u8,
     rgb_buf: &mut Vec<u8>,
     jpeg_buf: &mut Vec<u8>,
-) -> Vec<u8> {
+) -> JpegEncodeResult {
     if width == 0 || height == 0 || stride < width * 4 || bgra.len() < height * stride {
-        return Vec::new();
+        return JpegEncodeResult::default();
     }
 
     // Convert BGRA (with stride padding) to packed RGB — reusing buffer
+    let color_started = Instant::now();
     rgb_buf.clear();
     let needed = width * height * 3;
     if rgb_buf.capacity() < needed {
@@ -4480,8 +5614,10 @@ fn encode_jpeg_reuse(
             rgb_buf.push(pixel[0]); // B
         }
     }
+    let color_conversion = color_started.elapsed();
 
     jpeg_buf.clear();
+    let encode_started = Instant::now();
     {
         use image::ImageEncoder;
         let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut *jpeg_buf, quality);
@@ -4492,10 +5628,18 @@ fn encode_jpeg_reuse(
             image::ExtendedColorType::Rgb8,
         ) {
             log::warn!("JPEG encode failed: {}", e);
-            return Vec::new();
+            return JpegEncodeResult {
+                bytes: Vec::new(),
+                color_conversion,
+                encode: encode_started.elapsed(),
+            };
         }
     }
-    jpeg_buf.clone()
+    JpegEncodeResult {
+        bytes: jpeg_buf.clone(),
+        color_conversion,
+        encode: encode_started.elapsed(),
+    }
 }
 
 // ─── HTTP Server ────────────────────────────────────────────
@@ -4505,6 +5649,8 @@ async fn run_http_server(
     state: Arc<HttpServerState>,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
+    #[cfg(feature = "screen-share-webrtc-prototype")]
+    let webrtc = state.webrtc.clone();
     let app = screen_share_router(state);
 
     let (drain_started_tx, drain_started_rx) = oneshot::channel::<()>();
@@ -4538,20 +5684,32 @@ async fn run_http_server(
         }
     }
 
+    #[cfg(feature = "screen-share-webrtc-prototype")]
+    if let Some(webrtc) = webrtc {
+        webrtc.shutdown_all().await;
+    }
+
     log::info!("Screen share HTTP server stopped");
 }
 
 fn screen_share_router(state: Arc<HttpServerState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/", get(handler_index))
         .route("/assets/*path", get(handler_web_asset))
         .route("/stream", get(handler_stream))
         .route("/media/ws", get(handler_media_ws))
+        .route("/media/webcodecs/ws", get(handler_webcodecs_ws))
         .route("/auth", post(handler_auth))
+        .route("/time", get(handler_time))
         .route("/status", get(handler_status))
-        .route("/session/ws", get(handler_session_ws))
-        .route("/snapshot/:frame_id", get(handler_snapshot))
-        .with_state(state)
+        .route("/session/ws", get(handler_session_ws));
+    #[cfg(feature = "screen-share-webrtc-prototype")]
+    let router = router.route("/api/screenshare/webrtc/offer", post(handler_webrtc_offer));
+    router.with_state(state)
+}
+
+async fn handler_time() -> impl IntoResponse {
+    Json(serde_json::json!({ "server_unix_ms": unix_time_ms() }))
 }
 
 // ─── HTTP Handlers ──────────────────────────────────────────
@@ -4563,11 +5721,8 @@ struct IndexQuery {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StreamQuery {
-    /// `single=1` returns the newest cached JPEG and closes the response. It
-    /// is used by the viewer's optional refresh limiter; the default remains a
-    /// long-lived MJPEG response for backwards compatibility.
-    single: Option<u8>,
     /// Browser retries mark the replacement stream so reconnect first-frame
     /// latency can be measured separately from initial connections.
     reconnect: Option<u8>,
@@ -4690,6 +5845,17 @@ fn drain_to_latest_mjpeg_frame(
     (latest, skipped)
 }
 
+fn media_viewer_limit_response() -> Response {
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("Retry-After", "5")
+        .header("Cache-Control", "no-store")
+        .body(Body::from(format!(
+            "Screen-share viewer limit reached ({MAX_MEDIA_VIEWERS})"
+        )))
+        .unwrap()
+}
+
 async fn handler_stream(
     AxumState(state): AxumState<Arc<HttpServerState>>,
     Query(query): Query<StreamQuery>,
@@ -4709,41 +5875,17 @@ async fn handler_stream(
     }
 
     let client_ip = addr.ip().to_string();
-    let single = query.single == Some(1);
-    record_viewer_ip(&state.viewer_ips, client_ip.clone());
-
-    // A rate-limited viewer must still work when the desktop is static and
-    // the capture loop has no new broadcast frame to deliver. Reuse the
-    // server-side cached JPEG and avoid counting this short request as a
-    // long-lived viewer connection.
-    if single {
-        if state.cancel.load(Ordering::Relaxed) {
-            return Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Cache-Control", "no-store")
-                .body(Body::from("Screen share is not active"))
-                .unwrap();
-        }
-        let Some(frame) = state.interaction.latest_frame_bytes() else {
-            return Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("Cache-Control", "no-store")
-                .body(Body::from("Screen frame is not ready"))
-                .unwrap();
-        };
-        state
-            .bytes_sent
-            .fetch_add(frame.len() as u64, Ordering::Relaxed);
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "image/jpeg")
-            .header("Content-Length", frame.len())
-            .header("Cache-Control", "no-store, no-cache")
-            .body(Body::from(frame.as_ref().clone()))
-            .unwrap();
-    }
-
-    let viewer_total = state.viewer_count.fetch_add(1, Ordering::Relaxed) + 1;
+    let Some(viewer_total) = try_reserve_media_viewer(&state.viewer_count) else {
+        return media_viewer_limit_response();
+    };
+    record_viewer_connection(&state.viewer_ips, &client_ip);
+    state
+        .viewer_ip_reference_count
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .active_media_task_count
+        .fetch_add(1, Ordering::Relaxed);
+    state.mjpeg_viewer_count.fetch_add(1, Ordering::Relaxed);
     let is_reconnect = query.reconnect == Some(1);
     state.media_metrics.record_stream_open(is_reconnect);
     state.events.emit_tool_log(
@@ -4758,6 +5900,9 @@ async fn handler_stream(
     let viewer_guard = ViewerGuard {
         events: state.events.clone(),
         count: state.viewer_count.clone(),
+        ip_reference_count: state.viewer_ip_reference_count.clone(),
+        active_task_count: state.active_media_task_count.clone(),
+        transport_count: Some(state.mjpeg_viewer_count.clone()),
         ips: state.viewer_ips.clone(),
         ip: client_ip,
     };
@@ -4770,16 +5915,25 @@ async fn handler_stream(
     let mut rx = broadcast_tx.subscribe();
     let stream_started = Instant::now();
 
-    let stream = async_stream::stream! {
+    let (body_sender, body_receiver) =
+        tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(MJPEG_BODY_CHANNEL_CAPACITY);
+    tokio::spawn(async move {
         let _guard = viewer_guard;
         let mut first_frame_sent = false;
 
         if let Some(frame) = initial_frame {
             let chunk = mjpeg_frame_chunk(&frame);
-            bytes_sent.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            let chunk_len = chunk.len();
+            if send_mjpeg_body_chunk(&body_sender, chunk, &media_metrics)
+                .await
+                .is_err()
+            {
+                media_metrics.record_stream_disconnect();
+                return;
+            }
+            bytes_sent.fetch_add(chunk_len as u64, Ordering::Relaxed);
             media_metrics.record_stream_first_frame(stream_started.elapsed(), is_reconnect);
             first_frame_sent = true;
-            yield Ok::<_, Infallible>(chunk);
         }
 
         loop {
@@ -4799,12 +5953,19 @@ async fn handler_stream(
                         media_metrics.record_lagged_frames(skipped);
                     }
                     let chunk = mjpeg_frame_chunk(&frame);
-                    bytes_sent.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                    let chunk_len = chunk.len();
+                    if send_mjpeg_body_chunk(&body_sender, chunk, &media_metrics)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    bytes_sent.fetch_add(chunk_len as u64, Ordering::Relaxed);
                     if !first_frame_sent {
-                        media_metrics.record_stream_first_frame(stream_started.elapsed(), is_reconnect);
+                        media_metrics
+                            .record_stream_first_frame(stream_started.elapsed(), is_reconnect);
                         first_frame_sent = true;
                     }
-                    yield Ok::<_, Infallible>(chunk);
                 }
                 Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
                     media_metrics.record_lagged_frames(skipped);
@@ -4813,12 +5974,19 @@ async fn handler_stream(
                     rx = broadcast_tx.subscribe();
                     if let Some(frame) = interaction.latest_frame_bytes() {
                         let chunk = mjpeg_frame_chunk(&frame);
-                        bytes_sent.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                        let chunk_len = chunk.len();
+                        if send_mjpeg_body_chunk(&body_sender, chunk, &media_metrics)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        bytes_sent.fetch_add(chunk_len as u64, Ordering::Relaxed);
                         if !first_frame_sent {
-                            media_metrics.record_stream_first_frame(stream_started.elapsed(), is_reconnect);
+                            media_metrics
+                                .record_stream_first_frame(stream_started.elapsed(), is_reconnect);
                             first_frame_sent = true;
                         }
-                        yield Ok::<_, Infallible>(chunk);
                     }
                     continue;
                 }
@@ -4832,7 +6000,11 @@ async fn handler_stream(
                 }
             }
         }
-    };
+        media_metrics.record_stream_disconnect();
+    });
+    let stream = futures_util::stream::unfold(body_receiver, |mut receiver| async move {
+        receiver.recv().await.map(|item| (item, receiver))
+    });
 
     Response::builder()
         .header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -4841,6 +6013,38 @@ async fn handler_stream(
         .header("Access-Control-Allow-Origin", "*")
         .body(Body::from_stream(stream))
         .unwrap()
+}
+
+async fn send_mjpeg_body_chunk(
+    sender: &tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
+    chunk: Bytes,
+    media_metrics: &ScreenShareMediaMetrics,
+) -> Result<(), ()> {
+    send_mjpeg_body_chunk_with_timeout(MJPEG_STREAM_SEND_TIMEOUT, sender, chunk, media_metrics)
+        .await
+}
+
+async fn send_mjpeg_body_chunk_with_timeout(
+    timeout: Duration,
+    sender: &tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
+    chunk: Bytes,
+    media_metrics: &ScreenShareMediaMetrics,
+) -> Result<(), ()> {
+    let started_at = Instant::now();
+    match tokio::time::timeout(timeout, sender.send(Ok(chunk))).await {
+        Ok(Ok(())) => {
+            media_metrics.record_stream_send(started_at.elapsed(), false);
+            Ok(())
+        }
+        Ok(Err(_)) => {
+            media_metrics.record_stream_send(started_at.elapsed(), false);
+            Err(())
+        }
+        Err(_) => {
+            media_metrics.record_stream_send(started_at.elapsed(), true);
+            Err(())
+        }
+    }
 }
 
 async fn handler_media_ws(
@@ -4860,7 +6064,7 @@ async fn handler_media_ws(
                 .unwrap();
         }
     }
-    if state.h264_media.snapshot().is_none() {
+    if state.h264_media.descriptor().is_none() {
         return Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .header("Cache-Control", "no-store")
@@ -4873,8 +6077,16 @@ async fn handler_media_ws(
     };
 
     let client_ip = addr.ip().to_string();
-    record_viewer_ip(&state.viewer_ips, client_ip.clone());
-    let viewer_total = state.viewer_count.fetch_add(1, Ordering::Relaxed) + 1;
+    let Some(viewer_total) = try_reserve_media_viewer(&state.viewer_count) else {
+        return media_viewer_limit_response();
+    };
+    record_viewer_connection(&state.viewer_ips, &client_ip);
+    state
+        .viewer_ip_reference_count
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .active_media_task_count
+        .fetch_add(1, Ordering::Relaxed);
     let is_reconnect = query.reconnect == Some(1);
     state.media_metrics.record_stream_open(is_reconnect);
     state.events.emit_tool_log(
@@ -4889,6 +6101,9 @@ async fn handler_media_ws(
     let viewer_guard = ViewerGuard {
         events: state.events.clone(),
         count: state.viewer_count.clone(),
+        ip_reference_count: state.viewer_ip_reference_count.clone(),
+        active_task_count: state.active_media_task_count.clone(),
+        transport_count: None,
         ips: state.viewer_ips.clone(),
         ip: client_ip,
     };
@@ -4912,6 +6127,441 @@ async fn handler_media_ws(
         .into_response()
 }
 
+async fn handler_webcodecs_ws(
+    AxumState(state): AxumState<Arc<HttpServerState>>,
+    Query(query): Query<StreamQuery>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    websocket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> Response {
+    if let Some(hash) = &state.auth_hash {
+        if !check_auth_cookie(&headers, hash)
+            && !preview_token_matches(&headers, None, &state.preview_token)
+        {
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::from("Unauthorized"))
+                .unwrap();
+        }
+    }
+    if *state.transport.lock().unwrap() != ScreenShareMediaTransport::WebCodecs {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("Cache-Control", "no-store")
+            .body(Body::from(
+                "WebCodecs experimental transport is not selected for this session",
+            ))
+            .unwrap();
+    }
+    let Some(descriptor) = state.h264_media.descriptor() else {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("Cache-Control", "no-store")
+            .body(Body::from("H.264 media stream is not ready"))
+            .unwrap();
+    };
+    if descriptor.decoder_configuration.is_empty() {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("Cache-Control", "no-store")
+            .body(Body::from("H.264 decoder configuration is unavailable"))
+            .unwrap();
+    }
+    let websocket = match websocket {
+        Ok(websocket) => websocket,
+        Err(rejection) => return rejection.into_response(),
+    };
+    let Some(viewer_total) = try_reserve_media_viewer(&state.viewer_count) else {
+        return media_viewer_limit_response();
+    };
+    let client_ip = addr.ip().to_string();
+    record_viewer_connection(&state.viewer_ips, &client_ip);
+    state
+        .viewer_ip_reference_count
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .active_media_task_count
+        .fetch_add(1, Ordering::Relaxed);
+    let is_reconnect = query.reconnect == Some(1);
+    state.media_metrics.record_stream_open(is_reconnect);
+    state.events.emit_tool_log(
+        &format!(
+            "Viewer connected: ip={}, viewers={}, transport=web_codecs, user_agent={}",
+            client_ip,
+            viewer_total,
+            summarize_user_agent(&headers)
+        ),
+        "info",
+    );
+    let viewer_guard = ViewerGuard {
+        events: state.events.clone(),
+        count: state.viewer_count.clone(),
+        ip_reference_count: state.viewer_ip_reference_count.clone(),
+        active_task_count: state.active_media_task_count.clone(),
+        transport_count: None,
+        ips: state.viewer_ips.clone(),
+        ip: client_ip,
+    };
+    let media = state.h264_media.clone();
+    let cancel = state.cancel.clone();
+    let bytes_sent = state.bytes_sent.clone();
+    let media_metrics = state.media_metrics.clone();
+    websocket
+        .max_message_size(64 * 1024)
+        .on_upgrade(move |socket| {
+            run_webcodecs_media_socket(
+                socket,
+                media,
+                cancel,
+                bytes_sent,
+                media_metrics,
+                is_reconnect,
+                viewer_guard,
+            )
+        })
+        .into_response()
+}
+
+async fn run_webcodecs_media_socket(
+    mut socket: WebSocket,
+    media: Arc<H264MediaState>,
+    cancel: Arc<AtomicBool>,
+    bytes_sent: Arc<AtomicU64>,
+    media_metrics: Arc<ScreenShareMediaMetrics>,
+    is_reconnect: bool,
+    viewer_guard: ViewerGuard,
+) {
+    let _viewer_guard = viewer_guard;
+    let started_at = Instant::now();
+    let mut first_frame_sent = false;
+    let mut events = media.subscribe();
+    let Some(initial_descriptor) = media.descriptor() else {
+        media_metrics.record_stream_disconnect();
+        return;
+    };
+    let mut generation = initial_descriptor.generation;
+    let mut sequence = 0u64;
+    let mut waiting_for_keyframe = true;
+    if send_webcodecs_descriptor(
+        &mut socket,
+        &initial_descriptor,
+        &bytes_sent,
+        &media_metrics,
+    )
+    .await
+    .is_err()
+    {
+        media_metrics.record_stream_disconnect();
+        return;
+    }
+    let _ = media.request_keyframe(generation);
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            event = events.recv() => match event {
+                Ok(event) => match event.as_ref() {
+                    H264MediaEvent::Reset(descriptor) => {
+                        if send_webcodecs_descriptor(
+                            &mut socket,
+                            descriptor,
+                            &bytes_sent,
+                            &media_metrics,
+                        ).await.is_err() {
+                            break;
+                        }
+                        generation = descriptor.generation;
+                        sequence = 0;
+                        waiting_for_keyframe = true;
+                        first_frame_sent = false;
+                        let _ = media.request_keyframe(generation);
+                    }
+                    H264MediaEvent::Segment(segment) if segment.generation == generation => {
+                        let gap = sequence != 0 && segment.sequence != sequence.saturating_add(1);
+                        if gap {
+                            waiting_for_keyframe = true;
+                            let _ = media.request_keyframe(generation);
+                        }
+                        if waiting_for_keyframe && !segment.keyframe {
+                            continue;
+                        }
+                        let payload = match webcodecs_access_unit_message(segment, waiting_for_keyframe) {
+                            Ok(payload) => payload,
+                            Err(_) => break,
+                        };
+                        let trace = h264_media_trace_message(segment);
+                        let wire_bytes = payload.len().saturating_add(trace.len());
+                        if send_h264_message(
+                            &mut socket,
+                            Message::Text(trace),
+                            &media_metrics,
+                        ).await.is_err() {
+                            break;
+                        }
+                        if send_h264_message(
+                            &mut socket,
+                            Message::Binary(payload.to_vec()),
+                            &media_metrics,
+                        ).await.is_err() {
+                            break;
+                        }
+                        bytes_sent.fetch_add(wire_bytes as u64, Ordering::Relaxed);
+                        sequence = segment.sequence;
+                        waiting_for_keyframe = false;
+                        if !first_frame_sent {
+                            first_frame_sent = true;
+                            media_metrics.record_stream_first_frame(started_at.elapsed(), is_reconnect);
+                        }
+                    }
+                    H264MediaEvent::Segment(_) => {}
+                    H264MediaEvent::Unavailable { generation: next_generation, error } => {
+                        generation = *next_generation;
+                        sequence = 0;
+                        waiting_for_keyframe = true;
+                        first_frame_sent = false;
+                        let message = serde_json::json!({
+                            "v": 1,
+                            "type": "media.unavailable",
+                            "generation": next_generation,
+                            "error": error,
+                        }).to_string();
+                        if send_h264_message(
+                            &mut socket,
+                            Message::Text(message),
+                            &media_metrics,
+                        ).await.is_err() {
+                            break;
+                        }
+                    }
+                },
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    media_metrics.record_lagged_frames(skipped);
+                    sequence = 0;
+                    waiting_for_keyframe = true;
+                    // The one-shot Reset event may itself have been overwritten. Refresh the
+                    // descriptor from authoritative state instead of draining retained events;
+                    // otherwise this socket can wait forever for an IDR from an old generation.
+                    if let Some(descriptor) =
+                        webcodecs_newer_descriptor(generation, media.descriptor())
+                    {
+                        if send_webcodecs_descriptor(
+                            &mut socket,
+                            &descriptor,
+                            &bytes_sent,
+                            &media_metrics,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        generation = descriptor.generation;
+                        first_frame_sent = false;
+                    }
+                    let _ = media.request_keyframe(generation);
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            incoming = socket.recv() => {
+                let Some(Ok(message)) = incoming else { break; };
+                match message {
+                    Message::Ping(payload) => {
+                        if send_h264_message(
+                            &mut socket,
+                            Message::Pong(payload),
+                            &media_metrics,
+                        ).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Text(text) => {
+                        let request = serde_json::from_str::<serde_json::Value>(&text).ok();
+                        if request.as_ref().is_some_and(|request| {
+                            request["v"] == 1 && request["type"] == "media.keyframe.request"
+                        }) {
+                            let _ = media.request_keyframe(generation);
+                        }
+                    }
+                    Message::Close(_) => break,
+                    Message::Binary(_) | Message::Pong(_) => {}
+                }
+            }
+        }
+    }
+    media_metrics.record_stream_disconnect();
+}
+
+fn webcodecs_newer_descriptor(
+    current_generation: u64,
+    descriptor: Option<Arc<H264StreamDescriptor>>,
+) -> Option<Arc<H264StreamDescriptor>> {
+    descriptor.filter(|descriptor| descriptor.generation != current_generation)
+}
+
+fn webcodecs_access_unit_message(
+    segment: &H264MediaSegment,
+    discontinuity: bool,
+) -> Result<Bytes, String> {
+    let payload = segment.access_unit_avcc.as_ref();
+    if segment.generation == 0
+        || segment.sequence == 0
+        || segment.duration_us == 0
+        || segment.duration_us > u64::from(u32::MAX)
+        || payload.is_empty()
+        || payload.len() > WEBCODECS_MAX_ACCESS_UNIT_BYTES
+        || payload.len() > u32::MAX as usize
+    {
+        return Err("invalid WebCodecs access-unit metadata".to_owned());
+    }
+    let mut bytes = BytesMut::with_capacity(WEBCODECS_AU_HEADER_BYTES + payload.len());
+    bytes.extend_from_slice(b"FSTW");
+    bytes.extend_from_slice(&[1]);
+    let mut flags = if segment.keyframe { 1u8 } else { 2u8 };
+    if discontinuity {
+        flags |= 4;
+    }
+    bytes.extend_from_slice(&[flags]);
+    bytes.extend_from_slice(&(WEBCODECS_AU_HEADER_BYTES as u16).to_be_bytes());
+    bytes.extend_from_slice(&segment.generation.to_be_bytes());
+    bytes.extend_from_slice(&segment.sequence.to_be_bytes());
+    bytes.extend_from_slice(&segment.timestamp_us.to_be_bytes());
+    bytes.extend_from_slice(&(segment.duration_us as u32).to_be_bytes());
+    bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(payload);
+    Ok(bytes.freeze())
+}
+
+async fn send_webcodecs_descriptor(
+    socket: &mut WebSocket,
+    descriptor: &H264StreamDescriptor,
+    bytes_sent: &AtomicU64,
+    media_metrics: &ScreenShareMediaMetrics,
+) -> Result<(), axum::Error> {
+    let message = webcodecs_descriptor_message(descriptor)
+        .map_err(|error| axum::Error::new(io::Error::new(io::ErrorKind::InvalidData, error)))?;
+    let message_length = message.len();
+    send_h264_message(socket, Message::Text(message), media_metrics).await?;
+    bytes_sent.fetch_add(message_length as u64, Ordering::Relaxed);
+    Ok(())
+}
+
+fn webcodecs_descriptor_message(descriptor: &H264StreamDescriptor) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    if descriptor.decoder_configuration.is_empty() {
+        return Err("H.264 decoder configuration is empty".to_owned());
+    }
+    Ok(serde_json::json!({
+        "v": 1,
+        "type": "media.hello",
+        "transport": "webcodecs_h264",
+        "generation": descriptor.generation,
+        "codec": descriptor.codec,
+        "description_base64": STANDARD.encode(descriptor.decoder_configuration.as_ref()),
+        "width": descriptor.width,
+        "height": descriptor.height,
+        "fps": descriptor.fps,
+        "bitrate_bps": descriptor.bitrate_bps,
+        "color_space": null,
+    })
+    .to_string())
+}
+
+#[cfg(feature = "screen-share-webrtc-prototype")]
+async fn handler_webrtc_offer(
+    AxumState(state): AxumState<Arc<HttpServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    body: Bytes,
+) -> Response {
+    if let Some(hash) = &state.auth_hash {
+        if !check_auth_cookie(&headers, hash)
+            && !preview_token_matches(&headers, None, &state.preview_token)
+        {
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header("Cache-Control", "no-store")
+                .body(Body::from("Unauthorized"))
+                .unwrap();
+        }
+    }
+    if body.len() > WEBRTC_SIGNALING_MAX_BYTES {
+        return Response::builder()
+            .status(StatusCode::PAYLOAD_TOO_LARGE)
+            .header("Cache-Control", "no-store")
+            .body(Body::from("WebRTC SDP offer is too large"))
+            .unwrap();
+    }
+    let offer = match serde_json::from_slice::<
+        webrtc::peer_connection::sdp::session_description::RTCSessionDescription,
+    >(&body)
+    {
+        Ok(offer) => offer,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("Cache-Control", "no-store")
+                .body(Body::from("Invalid WebRTC SDP offer"))
+                .unwrap();
+        }
+    };
+    let Some(webrtc) = state.webrtc.as_ref() else {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("Cache-Control", "no-store")
+            .body(Body::from(
+                "WebRTC prototype is not selected for this screen-share session",
+            ))
+            .unwrap();
+    };
+    let Some(viewer_total) = try_reserve_media_viewer(&state.viewer_count) else {
+        return media_viewer_limit_response();
+    };
+    let client_ip = addr.ip().to_string();
+    record_viewer_connection(&state.viewer_ips, &client_ip);
+    state
+        .viewer_ip_reference_count
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .active_media_task_count
+        .fetch_add(1, Ordering::Relaxed);
+    state.events.emit_tool_log(
+        &format!(
+            "Viewer connected: ip={}, viewers={}, transport=web_rtc, user_agent={}",
+            client_ip,
+            viewer_total,
+            summarize_user_agent(&headers)
+        ),
+        "info",
+    );
+    let viewer_guard = ViewerGuard {
+        events: state.events.clone(),
+        count: state.viewer_count.clone(),
+        ip_reference_count: state.viewer_ip_reference_count.clone(),
+        active_task_count: state.active_media_task_count.clone(),
+        transport_count: None,
+        ips: state.viewer_ips.clone(),
+        ip: client_ip,
+    };
+    match webrtc
+        .answer_offer_with_lease(offer, Some(Box::new(viewer_guard)))
+        .await
+    {
+        Ok(answer) => Json(answer).into_response(),
+        Err(error) => Response::builder()
+            .status(error.status())
+            .header("Cache-Control", "no-store")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "error": error.message() }).to_string(),
+            ))
+            .unwrap(),
+    }
+}
+
 async fn run_h264_media_socket(
     mut socket: WebSocket,
     media: Arc<H264MediaState>,
@@ -4925,21 +6575,26 @@ async fn run_h264_media_socket(
     let started_at = Instant::now();
     let mut first_frame_sent = false;
     let mut events = media.subscribe();
-    let mut generation = 0u64;
+    let Some(initial_descriptor) = media.descriptor() else {
+        media_metrics.record_stream_disconnect();
+        return;
+    };
+    let mut generation = initial_descriptor.generation;
     let mut sequence = 0u64;
-    if let Some(snapshot) = media.snapshot() {
-        match send_h264_snapshot(&mut socket, &snapshot, &bytes_sent).await {
-            Ok((sent_generation, sent_sequence, sent_frame)) => {
-                generation = sent_generation;
-                sequence = sent_sequence;
-                first_frame_sent = sent_frame;
-                if sent_frame {
-                    media_metrics.record_stream_first_frame(started_at.elapsed(), is_reconnect);
-                }
-            }
-            Err(_) => return,
-        }
+    let mut waiting_for_keyframe = true;
+    if send_h264_descriptor(
+        &mut socket,
+        &initial_descriptor,
+        &bytes_sent,
+        &media_metrics,
+    )
+    .await
+    .is_err()
+    {
+        media_metrics.record_stream_disconnect();
+        return;
     }
+    let _ = media.request_keyframe(generation);
 
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     loop {
@@ -4953,23 +6608,65 @@ async fn run_h264_media_socket(
                 match event {
                     Ok(event) => match event.as_ref() {
                         H264MediaEvent::Reset(descriptor) => {
-                            if send_h264_descriptor(&mut socket, descriptor, &bytes_sent).await.is_err() {
+                            if send_h264_descriptor(
+                                &mut socket,
+                                descriptor,
+                                &bytes_sent,
+                                &media_metrics,
+                            )
+                            .await
+                            .is_err()
+                            {
                                 break;
                             }
                             generation = descriptor.generation;
                             sequence = 0;
                             first_frame_sent = false;
+                            waiting_for_keyframe = true;
+                            let _ = media.request_keyframe(generation);
                         }
                         H264MediaEvent::Segment(segment)
-                            if segment.generation == generation && segment.sequence > sequence =>
+                            if segment.generation == generation =>
                         {
-                            let payload = segment.bytes.as_ref().clone();
-                            let length = payload.len();
-                            if send_h264_message(&mut socket, Message::Binary(payload.to_vec())).await.is_err() {
+                            if waiting_for_keyframe && !segment.keyframe {
+                                continue;
+                            }
+                            if !waiting_for_keyframe
+                                && segment.sequence != sequence.saturating_add(1)
+                            {
+                                // Never continue a decoder dependency chain across a gap.
                                 break;
                             }
-                            bytes_sent.fetch_add(length as u64, Ordering::Relaxed);
+                            let payload = segment.bytes.as_ref().clone();
+                            let length = payload.len();
+                            let trace = h264_media_trace_message(segment);
+                            let trace_length = trace.len();
+                            if send_h264_message(
+                                &mut socket,
+                                Message::Text(trace),
+                                &media_metrics,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            if send_h264_message(
+                                &mut socket,
+                                Message::Binary(payload.to_vec()),
+                                &media_metrics,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            bytes_sent.fetch_add(
+                                length.saturating_add(trace_length) as u64,
+                                Ordering::Relaxed,
+                            );
                             sequence = segment.sequence;
+                            waiting_for_keyframe = false;
                             if !first_frame_sent {
                                 first_frame_sent = true;
                                 media_metrics.record_stream_first_frame(started_at.elapsed(), is_reconnect);
@@ -4980,6 +6677,7 @@ async fn run_h264_media_socket(
                             generation = *next_generation;
                             sequence = 0;
                             first_frame_sent = false;
+                            waiting_for_keyframe = true;
                             let message = serde_json::json!({
                                 "v": 1,
                                 "type": "media.unavailable",
@@ -4987,7 +6685,14 @@ async fn run_h264_media_socket(
                                 "error": error,
                             })
                             .to_string();
-                            if send_h264_message(&mut socket, Message::Text(message)).await.is_err() {
+                            if send_h264_message(
+                                &mut socket,
+                                Message::Text(message),
+                                &media_metrics,
+                            )
+                            .await
+                            .is_err()
+                            {
                                 break;
                             }
                         }
@@ -5006,7 +6711,14 @@ async fn run_h264_media_socket(
                 let Some(Ok(message)) = incoming else { break; };
                 match message {
                     Message::Ping(payload) => {
-                        if send_h264_message(&mut socket, Message::Pong(payload)).await.is_err() {
+                        if send_h264_message(
+                            &mut socket,
+                            Message::Pong(payload),
+                            &media_metrics,
+                        )
+                        .await
+                        .is_err()
+                        {
                             break;
                         }
                     }
@@ -5016,31 +6728,31 @@ async fn run_h264_media_socket(
             }
         }
     }
+    media_metrics.record_stream_disconnect();
 }
 
-async fn send_h264_snapshot(
-    socket: &mut WebSocket,
-    snapshot: &H264StreamSnapshot,
-    bytes_sent: &AtomicU64,
-) -> Result<(u64, u64, bool), axum::Error> {
-    send_h264_descriptor(socket, &snapshot.descriptor, bytes_sent).await?;
-    let mut sequence = 0;
-    let mut sent_frame = false;
-    for segment in &snapshot.segments {
-        let payload = segment.bytes.as_ref().clone();
-        let length = payload.len();
-        send_h264_message(socket, Message::Binary(payload.to_vec())).await?;
-        bytes_sent.fetch_add(length as u64, Ordering::Relaxed);
-        sequence = segment.sequence;
-        sent_frame = true;
-    }
-    Ok((snapshot.descriptor.generation, sequence, sent_frame))
+fn h264_media_trace_message(segment: &H264MediaSegment) -> String {
+    serde_json::json!({
+        "v": 1,
+        "type": "media.trace",
+        "generation": segment.generation,
+        "sequence": segment.sequence,
+        "keyframe": segment.keyframe,
+        "timestamp_us": segment.timestamp_us,
+        "duration_us": segment.duration_us,
+        "capture_sequence": segment.capture_sequence,
+        "captured_at_unix_ms": segment.captured_at_unix_ms,
+        "visible_input_sequence": segment.visible_input_sequence,
+        "input_applied_at_server_unix_ms": segment.input_applied_at_server_unix_ms,
+    })
+    .to_string()
 }
 
 async fn send_h264_descriptor(
     socket: &mut WebSocket,
     descriptor: &H264StreamDescriptor,
     bytes_sent: &AtomicU64,
+    media_metrics: &ScreenShareMediaMetrics,
 ) -> Result<(), axum::Error> {
     let message = serde_json::json!({
         "v": 1,
@@ -5055,18 +6767,37 @@ async fn send_h264_descriptor(
         "bitrate_bps": descriptor.bitrate_bps,
     })
     .to_string();
-    send_h264_message(socket, Message::Text(message)).await?;
+    let message_length = message.len();
+    send_h264_message(socket, Message::Text(message), media_metrics).await?;
     let init = descriptor.init_segment.as_ref().clone();
     let length = init.len();
-    send_h264_message(socket, Message::Binary(init.to_vec())).await?;
-    bytes_sent.fetch_add(length as u64, Ordering::Relaxed);
+    send_h264_message(socket, Message::Binary(init.to_vec()), media_metrics).await?;
+    bytes_sent.fetch_add(
+        length.saturating_add(message_length) as u64,
+        Ordering::Relaxed,
+    );
     Ok(())
 }
 
-async fn send_h264_message(socket: &mut WebSocket, message: Message) -> Result<(), axum::Error> {
-    with_h264_send_timeout(H264_STREAM_SEND_TIMEOUT, socket.send(message)).await
+async fn send_h264_message(
+    socket: &mut WebSocket,
+    message: Message,
+    media_metrics: &ScreenShareMediaMetrics,
+) -> Result<(), axum::Error> {
+    let started_at = Instant::now();
+    match tokio::time::timeout(H264_STREAM_SEND_TIMEOUT, socket.send(message)).await {
+        Ok(result) => {
+            media_metrics.record_stream_send(started_at.elapsed(), false);
+            result
+        }
+        Err(error) => {
+            media_metrics.record_stream_send(started_at.elapsed(), true);
+            Err(axum::Error::new(error))
+        }
+    }
 }
 
+#[cfg(test)]
 async fn with_h264_send_timeout<F>(timeout: Duration, send: F) -> Result<(), axum::Error>
 where
     F: Future<Output = Result<(), axum::Error>>,
@@ -5108,20 +6839,29 @@ async fn handler_auth(
         .unwrap()
 }
 
-async fn handler_status(
-    AxumState(state): AxumState<Arc<HttpServerState>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    record_viewer_ip(&state.viewer_ips, addr.ip().to_string());
+async fn handler_status(AxumState(state): AxumState<Arc<HttpServerState>>) -> impl IntoResponse {
     let interaction_document = state.interaction.snapshot();
     let latest_frame = state.interaction.latest_frame_info();
     let control = state.interaction.control_snapshot();
     let media_metrics = state
         .media_metrics
         .snapshot(latest_frame.as_ref().map(|frame| frame.captured_at_ms));
+    let input_metrics = state
+        .input_worker
+        .as_ref()
+        .and_then(|worker| worker.metrics_snapshot().ok());
+    #[cfg(feature = "screen-share-webrtc-prototype")]
+    let webrtc_metrics = state
+        .webrtc
+        .as_ref()
+        .map(|webrtc| webrtc.metrics_snapshot());
+    #[cfg(not(feature = "screen-share-webrtc-prototype"))]
+    let webrtc_metrics: Option<serde_json::Value> = None;
     Json(serde_json::json!({
         "active": !state.cancel.load(Ordering::Relaxed),
         "viewers": state.viewer_count.load(Ordering::Relaxed),
+        "viewer_ip_reference_count": state.viewer_ip_reference_count.load(Ordering::Relaxed),
+        "active_media_task_count": state.active_media_task_count.load(Ordering::Relaxed),
         "session_id": state.session_id,
         "source_epoch": interaction_document.source_epoch,
         "annotation_count": interaction_document.shapes.len(),
@@ -5136,8 +6876,10 @@ async fn handler_status(
         "fps_actual": media_metrics.fps_actual,
         "bitrate_kbps": media_metrics.bitrate_kbps,
         "media_metrics": media_metrics,
+        "input_metrics": input_metrics,
         "transport": state.transport.lock().unwrap().resolved_label(),
         "h264_media": state.h264_media.metrics(),
+        "webrtc": webrtc_metrics,
         "control_state": control.state,
         "controller_ip": control.controller_ip,
         "pending_control_request": state.interaction.pending_control_request(),
@@ -5146,36 +6888,167 @@ async fn handler_status(
     }))
 }
 
-async fn handler_snapshot(
-    AxumState(state): AxumState<Arc<HttpServerState>>,
-    Path(frame_id): Path<u64>,
-    headers: HeaderMap,
-) -> Response {
-    if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash)
-            && !preview_token_matches(&headers, None, &state.preview_token)
-        {
-            return Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .body(Body::from("Unauthorized"))
-                .unwrap();
+const INTERACTION_CRITICAL_QUEUE_CAPACITY: usize = 32;
+const INTERACTION_BULK_QUEUE_CAPACITY: usize = 128;
+const INTERACTION_SEND_TIMEOUT: Duration = Duration::from_millis(750);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionMessagePriority {
+    Critical,
+    Bulk,
+}
+
+fn interaction_message_priority(message_type: &str) -> InteractionMessagePriority {
+    match message_type {
+        // Annotation deltas can recover from an authoritative snapshot after a
+        // revision gap. Control, session state, errors, and input ACKs must not
+        // compete with the high-frequency drawing stream.
+        "annotation.applied" => InteractionMessagePriority::Bulk,
+        _ => InteractionMessagePriority::Critical,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionQueuePushOutcome {
+    Queued,
+    BulkDroppedOldest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionQueuePushError {
+    Closed,
+    CriticalFull,
+}
+
+struct InteractionOutboundQueueState {
+    critical: VecDeque<Message>,
+    bulk: VecDeque<Message>,
+    closed: bool,
+}
+
+struct InteractionOutboundQueue {
+    state: Mutex<InteractionOutboundQueueState>,
+    notify: Notify,
+    critical_capacity: usize,
+    bulk_capacity: usize,
+}
+
+impl InteractionOutboundQueue {
+    fn new(critical_capacity: usize, bulk_capacity: usize) -> Self {
+        Self {
+            state: Mutex::new(InteractionOutboundQueueState {
+                critical: VecDeque::with_capacity(critical_capacity),
+                bulk: VecDeque::with_capacity(bulk_capacity),
+                closed: false,
+            }),
+            notify: Notify::new(),
+            critical_capacity,
+            bulk_capacity,
         }
     }
 
-    let Some(frame) = state.interaction.frozen_frame(frame_id) else {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("Frozen frame is not available"))
-            .unwrap();
-    };
+    fn push(
+        &self,
+        message: Message,
+        priority: InteractionMessagePriority,
+    ) -> Result<InteractionQueuePushOutcome, InteractionQueuePushError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| InteractionQueuePushError::Closed)?;
+        if state.closed {
+            return Err(InteractionQueuePushError::Closed);
+        }
+        let outcome = match priority {
+            InteractionMessagePriority::Critical => {
+                if state.critical.len() >= self.critical_capacity {
+                    return Err(InteractionQueuePushError::CriticalFull);
+                }
+                state.critical.push_back(message);
+                InteractionQueuePushOutcome::Queued
+            }
+            InteractionMessagePriority::Bulk => {
+                let dropped = if state.bulk.len() >= self.bulk_capacity {
+                    state.bulk.pop_front();
+                    true
+                } else {
+                    false
+                };
+                state.bulk.push_back(message);
+                if dropped {
+                    InteractionQueuePushOutcome::BulkDroppedOldest
+                } else {
+                    InteractionQueuePushOutcome::Queued
+                }
+            }
+        };
+        drop(state);
+        self.notify.notify_one();
+        Ok(outcome)
+    }
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "image/jpeg")
-        .header("Cache-Control", "no-store, no-cache")
-        .header("Content-Length", frame.len())
-        .body(Body::from(frame.as_ref().clone()))
-        .unwrap()
+    #[cfg(test)]
+    fn pop_now(&self) -> Option<Message> {
+        let mut state = self.state.lock().ok()?;
+        state
+            .critical
+            .pop_front()
+            .or_else(|| state.bulk.pop_front())
+    }
+
+    async fn next(&self) -> Option<Message> {
+        loop {
+            let notified = self.notify.notified();
+            if let Ok(mut state) = self.state.lock() {
+                if let Some(message) = state
+                    .critical
+                    .pop_front()
+                    .or_else(|| state.bulk.pop_front())
+                {
+                    return Some(message);
+                }
+                if state.closed {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+            notified.await;
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.closed = true;
+        }
+        self.notify.notify_waiters();
+    }
+}
+
+fn serialize_interaction_message(
+    message: screenshare_interaction::ServerEnvelope,
+) -> Result<Message, String> {
+    serde_json::to_string(&message)
+        .map(Message::Text)
+        .map_err(|error| format!("failed to serialize interaction message: {error}"))
+}
+
+fn queue_interaction_message(
+    queue: &InteractionOutboundQueue,
+    message: screenshare_interaction::ServerEnvelope,
+) -> Result<InteractionQueuePushOutcome, InteractionQueuePushError> {
+    let priority = interaction_message_priority(&message.message_type);
+    queue_interaction_message_with_priority(queue, message, priority)
+}
+
+fn queue_interaction_message_with_priority(
+    queue: &InteractionOutboundQueue,
+    message: screenshare_interaction::ServerEnvelope,
+    priority: InteractionMessagePriority,
+) -> Result<InteractionQueuePushOutcome, InteractionQueuePushError> {
+    let serialized = serialize_interaction_message(message)
+        .map_err(|_| InteractionQueuePushError::CriticalFull)?;
+    queue.push(serialized, priority)
 }
 
 async fn handler_session_ws(
@@ -5235,7 +7108,7 @@ async fn run_interaction_socket(
         InteractionClientMetadata::new(client_ip.clone(), user_agent),
     ) {
         let _ = send_interaction_message(&mut socket, error.to_message(&interaction)).await;
-        let _ = socket.send(Message::Close(None)).await;
+        let _ = with_interaction_send_timeout(socket.send(Message::Close(None))).await;
         return;
     }
 
@@ -5245,24 +7118,38 @@ async fn run_interaction_socket(
         Err(error) => {
             let _ = send_interaction_message(&mut socket, error.to_message(&interaction)).await;
             interaction.unregister_client(&client_id);
-            let _ = socket.send(Message::Close(None)).await;
+            let _ = with_interaction_send_timeout(socket.send(Message::Close(None))).await;
             return;
         }
     };
-    if send_interaction_message(&mut socket, hello).await.is_err()
-        || send_interaction_message(&mut socket, interaction.snapshot_message())
-            .await
-            .is_err()
+
+    let (sender, mut receiver) = socket.split();
+    let outbound = Arc::new(InteractionOutboundQueue::new(
+        INTERACTION_CRITICAL_QUEUE_CAPACITY,
+        INTERACTION_BULK_QUEUE_CAPACITY,
+    ));
+    if queue_interaction_message(&outbound, hello).is_err()
+        || queue_interaction_message(&outbound, interaction.snapshot_message()).is_err()
     {
         interaction.unregister_client(&client_id);
         return;
     }
-
+    let writer_queue = outbound.clone();
+    let mut writer_task =
+        tokio::spawn(async move { run_interaction_writer(sender, writer_queue).await });
     log::info!("Interaction client connected: ip={client_ip}");
 
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     loop {
         tokio::select! {
+            writer_result = &mut writer_task => {
+                match writer_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => log::warn!("Interaction writer closed for {client_ip}: {error}"),
+                    Err(error) => log::warn!("Interaction writer task failed for {client_ip}: {error}"),
+                }
+                break;
+            }
             _ = ticker.tick() => {
                 if cancel.load(Ordering::Relaxed) {
                     break;
@@ -5274,28 +7161,34 @@ async fn run_interaction_socket(
             event = interaction_events.recv() => {
                 match event {
                     Ok(message) => {
-                        if send_interaction_message(&mut socket, message).await.is_err() {
-                            break;
+                        match queue_interaction_message(&outbound, message) {
+                            Ok(InteractionQueuePushOutcome::BulkDroppedOldest) => {
+                                log::debug!("Dropped oldest bulk interaction update for slow client {client_ip}");
+                            }
+                            Ok(InteractionQueuePushOutcome::Queued) => {}
+                            Err(_) => break,
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        if send_interaction_message(&mut socket, interaction.snapshot_message()).await.is_err() {
+                        if queue_interaction_message(&outbound, interaction.snapshot_message()).is_err() {
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-            incoming = socket.recv() => {
+            incoming = receiver.next() => {
                 let Some(Ok(message)) = incoming else { break; };
                 match message {
                     Message::Text(text) => {
+                        let message_received_at = Instant::now();
+                        let message_received_at_ms = unix_time_ms();
                         if text.len() > MAX_WS_MESSAGE_BYTES {
                             let error = screenshare_interaction::ProtocolError::new(
                                 "message_too_large",
                                 format!("message exceeds {MAX_WS_MESSAGE_BYTES} bytes"),
                             );
-                            if send_interaction_message(&mut socket, error.to_message(&interaction)).await.is_err() {
+                            if queue_interaction_message(&outbound, error.to_message(&interaction)).is_err() {
                                 break;
                             }
                             continue;
@@ -5307,7 +7200,7 @@ async fn run_interaction_socket(
                                     "invalid_json",
                                     format!("invalid interaction message: {error}"),
                                 );
-                                if send_interaction_message(&mut socket, protocol_error.to_message(&interaction)).await.is_err() {
+                                if queue_interaction_message(&outbound, protocol_error.to_message(&interaction)).is_err() {
                                     break;
                                 }
                                 continue;
@@ -5315,6 +7208,7 @@ async fn run_interaction_socket(
                         };
                         let message_type = envelope.message_type.clone();
                         if message_type.starts_with("input.") {
+                            let client_seq = envelope.client_seq;
                             let context = InputContext::new(
                                 client_id.clone(),
                                 envelope.session_id,
@@ -5340,36 +7234,75 @@ async fn run_interaction_socket(
                                         )
                                     })?;
                                     let queued = if matches!(&input, InputEvent::ReleaseAll) {
-                                        worker.release_all(&context).map(|_| ())
+                                        worker.release_all(&context).map(|_| "release_all")
                                     } else {
                                         worker
-                                            .enqueue(QueuedInput::new(context, input))
-                                            .map(|_| ())
+                                            .enqueue(QueuedInput::with_client_sequence_received_at(
+                                                context,
+                                                input,
+                                                client_seq,
+                                                message_received_at,
+                                            ))
+                                            .map(|outcome| match outcome {
+                                                QueuePushOutcome::Queued => "queued",
+                                                QueuePushOutcome::Coalesced => "coalesced",
+                                            })
                                     };
-                                    queued
-                                        .map_err(|_| {
-                                            screenshare_interaction::ProtocolError::new(
-                                                "input_queue_full",
-                                                "remote input queue is full; control was revoked",
-                                            )
-                                        })?;
-                                    Ok::<(), screenshare_interaction::ProtocolError>(())
+                                    queued.map_err(|_| {
+                                        screenshare_interaction::ProtocolError::new(
+                                            "input_queue_full",
+                                            "remote input queue is full; control was revoked",
+                                        )
+                                    })
                                 });
-                            if let Err(error) = input_result {
-                                if error.code == "input_queue_full" {
-                                    if let Some(worker) = input_worker.as_ref() {
-                                        worker.revoke();
+                            match input_result {
+                                Ok(queue_outcome) => {
+                                    let server_enqueued_at_ms = unix_time_ms();
+                                    let receive_to_enqueue_us = message_received_at
+                                        .elapsed()
+                                        .as_micros()
+                                        .min(u128::from(u64::MAX)) as u64;
+                                    log::trace!(
+                                        "Remote input accepted: client={client_id} seq={} receive_to_enqueue_us={receive_to_enqueue_us} outcome={queue_outcome}",
+                                        client_seq.unwrap_or_default(),
+                                    );
+                                    let ack = input_ack_message(
+                                        &message_type,
+                                        envelope.session_id,
+                                        envelope.source_epoch,
+                                        client_seq,
+                                        message_received_at_ms,
+                                        server_enqueued_at_ms,
+                                        receive_to_enqueue_us,
+                                        queue_outcome,
+                                    );
+                                    let ack_priority = if message_type == "input.pointer_move" {
+                                        InteractionMessagePriority::Bulk
+                                    } else {
+                                        InteractionMessagePriority::Critical
+                                    };
+                                    if queue_interaction_message_with_priority(
+                                        &outbound,
+                                        ack,
+                                        ack_priority,
+                                    )
+                                    .is_err()
+                                    {
+                                        break;
                                     }
-                                    interaction.revoke_control("input_queue_full");
                                 }
-                                if send_interaction_message(
-                                    &mut socket,
-                                    error.to_message(&interaction),
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    break;
+                                Err(error) => {
+                                    if error.code == "input_queue_full" {
+                                        if let Some(worker) = input_worker.as_ref() {
+                                            worker.revoke();
+                                        }
+                                        interaction.revoke_control("input_queue_full");
+                                    }
+                                    let mut error_message = error.to_message(&interaction);
+                                    error_message.client_seq = client_seq;
+                                    if queue_interaction_message(&outbound, error_message).is_err() {
+                                        break;
+                                    }
                                 }
                             }
                             continue;
@@ -5380,7 +7313,7 @@ async fn run_interaction_socket(
                                     events.emit_control_request(request);
                                 }
                             }
-                            Ok(Some(event)) if message_type == "control.release" || message_type == "view.freeze" => {
+                            Ok(Some(event)) if message_type == "control.release" => {
                                 if let Some(worker) = input_worker.as_ref() {
                                     worker.revoke();
                                 }
@@ -5388,7 +7321,7 @@ async fn run_interaction_socket(
                             }
                             Ok(_) => {}
                             Err(error) => {
-                                if send_interaction_message(&mut socket, error.to_message(&interaction)).await.is_err() {
+                                if queue_interaction_message(&outbound, error.to_message(&interaction)).is_err() {
                                     break;
                                 }
                             }
@@ -5399,12 +7332,12 @@ async fn run_interaction_socket(
                             "binary_not_supported",
                             "interaction messages must be UTF-8 JSON text",
                         );
-                        if bytes.len() > MAX_WS_MESSAGE_BYTES || send_interaction_message(&mut socket, protocol_error.to_message(&interaction)).await.is_err() {
+                        if bytes.len() > MAX_WS_MESSAGE_BYTES || queue_interaction_message(&outbound, protocol_error.to_message(&interaction)).is_err() {
                             break;
                         }
                     }
                     Message::Ping(bytes) => {
-                        if socket.send(Message::Pong(bytes)).await.is_err() {
+                        if outbound.push(Message::Pong(bytes), InteractionMessagePriority::Critical).is_err() {
                             break;
                         }
                     }
@@ -5412,6 +7345,14 @@ async fn run_interaction_socket(
                     Message::Close(_) => break,
                 }
             }
+        }
+    }
+
+    outbound.close();
+    if !writer_task.is_finished() {
+        match tokio::time::timeout(Duration::from_millis(100), &mut writer_task).await {
+            Ok(_) => {}
+            Err(_) => writer_task.abort(),
         }
     }
 
@@ -5429,13 +7370,112 @@ async fn run_interaction_socket(
 async fn send_interaction_message(
     socket: &mut WebSocket,
     message: screenshare_interaction::ServerEnvelope,
-) -> Result<(), axum::Error> {
-    let serialized = serde_json::to_string(&message)
-        .map_err(|error| axum::Error::new(std::io::Error::new(std::io::ErrorKind::Other, error)))?;
-    socket.send(Message::Text(serialized)).await
+) -> Result<(), String> {
+    let serialized = serialize_interaction_message(message)?;
+    with_interaction_send_timeout(socket.send(serialized)).await
+}
+
+async fn with_interaction_send_timeout<F>(send: F) -> Result<(), String>
+where
+    F: Future<Output = Result<(), axum::Error>>,
+{
+    with_interaction_send_deadline(send, INTERACTION_SEND_TIMEOUT).await
+}
+
+async fn with_interaction_send_deadline<F>(send: F, timeout: Duration) -> Result<(), String>
+where
+    F: Future<Output = Result<(), axum::Error>>,
+{
+    match tokio::time::timeout(timeout, send).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("interaction send failed: {error}")),
+        Err(_) => Err(format!(
+            "interaction send exceeded {}ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
+async fn run_interaction_writer(
+    mut sender: futures_util::stream::SplitSink<WebSocket, Message>,
+    outbound: Arc<InteractionOutboundQueue>,
+) -> Result<(), String> {
+    while let Some(message) = outbound.next().await {
+        with_interaction_send_timeout(sender.send(message)).await?;
+    }
+    with_interaction_send_timeout(sender.close()).await
+}
+
+fn input_ack_message(
+    input_type: &str,
+    session_id: u64,
+    source_epoch: u64,
+    client_seq: Option<u64>,
+    server_received_at_ms: u64,
+    server_enqueued_at_ms: u64,
+    receive_to_enqueue_us: u64,
+    queue_outcome: &str,
+) -> screenshare_interaction::ServerEnvelope {
+    screenshare_interaction::ServerEnvelope {
+        v: 1,
+        message_type: "input.ack".to_string(),
+        session_id,
+        source_epoch,
+        client_seq,
+        revision: None,
+        payload: Some(serde_json::json!({
+            "input_type": input_type,
+            "server_received_at_ms": server_received_at_ms,
+            "server_enqueued_at_ms": server_enqueued_at_ms,
+            "server_ack_queued_at_ms": unix_time_ms(),
+            "receive_to_enqueue_us": receive_to_enqueue_us,
+            "queue_outcome": queue_outcome,
+        })),
+    }
 }
 
 // ─── Status Reporter ────────────────────────────────────────
+
+async fn outbound_metrics_sampler(
+    active: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+    bytes_sent: Arc<AtomicU64>,
+    media_metrics: Arc<ScreenShareMediaMetrics>,
+    runtime_handle: Arc<ScreenShareHandle>,
+    session_id: u64,
+) {
+    const SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
+    const ONE_SECOND_BUCKETS: u8 = 10;
+
+    let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    let mut last_bytes = bytes_sent.load(Ordering::Relaxed);
+    let mut one_second_bytes = 0_u64;
+    let mut bucket_count = 0_u8;
+
+    loop {
+        interval.tick().await;
+        if cancel.load(Ordering::Relaxed)
+            || !active.load(Ordering::Relaxed)
+            || !is_current_session(&runtime_handle, session_id)
+        {
+            break;
+        }
+
+        let current_bytes = bytes_sent.load(Ordering::Relaxed);
+        let delta = current_bytes.saturating_sub(last_bytes);
+        last_bytes = current_bytes;
+        media_metrics.record_outbound_window(SAMPLE_INTERVAL, delta);
+        one_second_bytes = one_second_bytes.saturating_add(delta);
+        bucket_count = bucket_count.saturating_add(1);
+        if bucket_count == ONE_SECOND_BUCKETS {
+            media_metrics.record_outbound_window(Duration::from_secs(1), one_second_bytes);
+            one_second_bytes = 0;
+            bucket_count = 0;
+        }
+    }
+}
 
 async fn status_reporter(
     app_handle: AppHandle,
@@ -5485,7 +7525,7 @@ async fn status_reporter(
         let bytes_delta = current_bytes.saturating_sub(last_bytes);
         last_bytes = current_bytes;
         let bitrate_kbps = (bytes_delta * 8 / 1024).min(u64::from(u32::MAX)) as u32;
-        media_metrics.update_rates(fps_count, bitrate_kbps);
+        media_metrics.update_rates(fps_count, bitrate_kbps, current_bytes);
 
         let connected_ips = snapshot_viewer_ips(&viewer_ips);
         let interaction_document = interaction.snapshot();
@@ -5498,6 +7538,12 @@ async fn status_reporter(
             is_active: true,
             viewer_count: viewer_count.load(Ordering::Relaxed),
             connection_count: connected_ips.len() as u32,
+            viewer_ip_reference_count: runtime_handle
+                .viewer_ip_reference_count
+                .load(Ordering::Relaxed),
+            active_media_task_count: runtime_handle
+                .active_media_task_count
+                .load(Ordering::Relaxed),
             fps_actual: media_snapshot.fps_actual,
             bitrate_kbps: media_snapshot.bitrate_kbps,
             uptime_secs: start_time.elapsed().as_secs(),
@@ -5528,6 +7574,11 @@ async fn status_reporter(
                 .desktop_overlay_active
                 .load(Ordering::Relaxed),
             media_metrics: media_snapshot,
+            input_metrics: runtime_handle.input_worker.lock().ok().and_then(|worker| {
+                worker
+                    .as_ref()
+                    .and_then(|worker| worker.metrics_snapshot().ok())
+            }),
         };
 
         let _ = app_handle.emit("screen-share-status", &status);
@@ -5653,333 +7704,6 @@ fn make_placeholder_jpeg() -> Vec<u8> {
 
 // ─── Embedded HTML ──────────────────────────────────────────
 
-#[cfg(test)]
-fn viewer_html() -> String {
-    r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Screen Share</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2' y='4' width='20' height='14' rx='2'/%3E%3Cpath d='M12 18v4'/%3E%3Cpath d='M8 22h8'/%3E%3Cpath d='M12 14V8'/%3E%3Cpath d='m8 12 4-4 4 4'/%3E%3C/svg%3E">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;background:#060911;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}
-.wrap{display:flex;flex-direction:column;height:100%;position:relative}
-.view{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#060911;position:relative}
-#screen{max-width:100%;max-height:100%;object-fit:contain;display:block;transform:translateZ(0);will-change:transform;backface-visibility:hidden}
-.paused-overlay{display:none;position:absolute;inset:0;background:rgba(6,9,17,.75);backdrop-filter:blur(4px);align-items:center;justify-content:center;z-index:5}
-.paused-overlay.show{display:flex}
-.paused-badge{display:flex;align-items:center;gap:10px;background:rgba(15,23,42,.9);border:1px solid rgba(255,255,255,.08);padding:14px 28px;border-radius:14px;font-size:16px;font-weight:600;color:#94a3b8;letter-spacing:.02em}
-.bar{position:relative;flex-shrink:0;display:flex;align-items:center;gap:8px;padding:10px 14px;padding-bottom:max(10px,env(safe-area-inset-bottom));min-height:52px;background:rgba(10,14,22,.95);border-top:1px solid rgba(255,255,255,.06);backdrop-filter:blur(12px);flex-wrap:wrap;row-gap:8px}
-.status-pill{display:flex;align-items:center;gap:7px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);border-radius:20px;padding:5px 12px;font-size:12px;font-weight:500;color:#94a3b8;letter-spacing:.01em;white-space:nowrap}
-.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-.dot-on{background:#22c55e;box-shadow:0 0 8px #22c55e90;animation:pulse 2s infinite}
-.dot-off{background:#ef4444;box-shadow:0 0 6px #ef444460}
-.dot-pause{background:#f59e0b;box-shadow:0 0 6px #f59e0b60}
-.dot-retry{background:#f97316;animation:blink .7s infinite}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(.85)}}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
-.viewers-badge{font-size:11px;color:#475569;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:20px;padding:4px 10px;white-space:nowrap}
-.spacer{flex:1;min-width:8px}
-.ctrl{display:flex;align-items:center;gap:5px;font-size:12px;color:#475569}
-.ctrl label{color:#4b5563;white-space:nowrap}
-.ctrl select{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.09);color:#94a3b8;padding:4px 24px 4px 8px;border-radius:7px;font-size:11px;cursor:pointer;outline:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 6px center}
-.ctrl select:hover{border-color:rgba(255,255,255,.15)}
-.btn{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);color:#cbd5e1;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:500;transition:all .15s;white-space:nowrap;letter-spacing:.01em;display:inline-flex;align-items:center;gap:5px}
-.btn:hover{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.18)}
-.btn-play{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.25);color:#4ade80}
-.btn-play:hover{background:rgba(34,197,94,.2)}
-.btn-pause{background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.2);color:#fbbf24}
-.btn-pause:hover{background:rgba(245,158,11,.18)}
-.btn-fs{background:rgba(99,102,241,.1);border-color:rgba(99,102,241,.2);color:#a5b4fc}
-.btn-fs:hover{background:rgba(99,102,241,.18)}
-.capture-alert{display:none;position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:6;align-items:flex-start;gap:8px;max-width:min(92vw,720px);background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.35);color:#fbbf24;padding:9px 16px;border-radius:10px;font-size:13px;font-weight:500;line-height:1.45;backdrop-filter:blur(6px)}
-.capture-alert.privacy{background:rgba(239,68,68,.16);border-color:rgba(248,113,113,.45);color:#fecaca}
-.capture-alert.privacy .dot{background:#ef4444;box-shadow:0 0 6px #ef444460}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="view">
-    <img id="screen" src="/stream" alt="">
-    <div id="paused-overlay" class="paused-overlay">
-      <div class="paused-badge">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-        <span id="pausedText"></span>
-      </div>
-    </div>
-    <div id="captureRetry" class="capture-alert" role="status" aria-live="polite">
-      <span class="dot dot-retry"></span><span id="captureRetryText"></span>
-    </div>
-  </div>
-  <div class="bar">
-    <div class="status-pill">
-      <div id="dot" class="dot dot-on"></div>
-      <span id="status-text"></span>
-    </div>
-    <span class="viewers-badge" id="viewers" style="display:none"></span>
-    <div class="spacer"></div>
-    <div class="ctrl">
-      <label for="fpsLimit" id="refreshLabel"></label>
-      <select id="fpsLimit">
-        <option value="0" id="optOriginal"></option>
-        <option value="500">~2 FPS</option>
-        <option value="1000">~1 FPS</option>
-        <option value="2000">0.5 FPS</option>
-        <option value="5000">5 s</option>
-      </select>
-    </div>
-    <button id="btnPause" class="btn btn-pause" onclick="togglePause()">
-      <svg id="iconPause" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-      <svg id="iconPlay" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="display:none"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      <span id="btnPauseText"></span>
-    </button>
-    <button class="btn btn-fs" onclick="toggleFs()">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-      <span id="fsText"></span>
-    </button>
-  </div>
-</div>
-<script>
-// ── i18n ──
-const isZh=navigator.language&&navigator.language.toLowerCase().startsWith('zh');
-const T={
-  connected:isZh?'已连接':'Connected',
-  disconnected:isZh?'已断开':'Disconnected',
-  serverStopped:isZh?'服务已停止':'Server stopped',
-  reconnecting:isZh?'重新连接中':'Reconnecting',
-  paused:isZh?'已暂停':'Paused',
-  serverRetrying:isZh?'画面中断，服务端自动重试中':'Capture interrupted — server is retrying',
-  privacyMode:isZh?'检测到所有屏幕持续黑屏。请关闭远程控制软件的隐私模式，或保持显示器处于逻辑开启状态；服务端会继续自动检测。':'All screens remain black. Disable privacy mode in the remote-control app or keep the display logically enabled; the server will keep checking automatically.',
-  pause:isZh?'暂停':'Pause',
-  resume:isZh?'继续':'Resume',
-  refresh:isZh?'刷新率':'Refresh',
-  original:isZh?'原始':'Original',
-  fullscreen:isZh?'全屏':'Fullscreen',
-  viewer:isZh?'位观看者':'viewer',viewers:isZh?'位观看者':'viewers',
-};
-// Apply i18n to static elements
-document.getElementById('pausedText').textContent=T.paused;
-document.getElementById('captureRetryText').textContent=T.serverRetrying;
-document.getElementById('btnPauseText').textContent=T.pause;
-document.getElementById('refreshLabel').textContent=T.refresh;
-document.getElementById('optOriginal').textContent=T.original;
-document.getElementById('fsText').textContent=T.fullscreen;
-
-const img=document.getElementById('screen'),dot=document.getElementById('dot'),st=document.getElementById('status-text'),vw=document.getElementById('viewers');
-const btnPause=document.getElementById('btnPause'),overlay=document.getElementById('paused-overlay'),fpsSelect=document.getElementById('fpsLimit');
-let alive=true,paused=false,fpsLimitMs=0,refreshTimer=null;
-let lastFrameTime=Date.now(),reconnectAttempts=0;
-let reconnectPending=false,lastReconnectAt=0;
-const MIN_HEARTBEAT_RECONNECT_MS=60000;
-st.textContent=T.connected;
-
-// Ask the OS/browser to keep this tab treated as active — defeats Edge's
-// Efficiency Mode deprioritization that otherwise stalls fetch('/status').
-if('wakeLock' in navigator){navigator.wakeLock.request('screen').catch(()=>{});}
-
-// Hold the last rendered frame during a reconnect so the viewer never sees
-// a black frame while the new MJPEG stream is opening its first chunk.
-let heldFrame=null;
-function holdCurrentFrame(){
-  if(!img.naturalWidth)return;
-  releaseHeldFrame();
-  try{
-    const c=document.createElement('canvas');
-    c.width=img.naturalWidth;c.height=img.naturalHeight;
-    c.getContext('2d').drawImage(img,0,0);
-    const h=document.createElement('div');
-    h.style.cssText='position:absolute;inset:0;background-image:url('+c.toDataURL('image/jpeg',0.6)+');background-size:contain;background-position:center;background-repeat:no-repeat;pointer-events:none;z-index:2';
-    img.parentElement.appendChild(h);
-    heldFrame=h;
-  }catch(e){/* tainted canvas or decode error — fall back to black */}
-}
-function releaseHeldFrame(){if(heldFrame){heldFrame.remove();heldFrame=null;}}
-
-// ── Stream connection ──
-function connectStream(){
-  // Freeze last frame as a placeholder so reassigning img.src does not flash black.
-  if(img.naturalWidth>0)holdCurrentFrame();
-  img.src='/stream?t='+Date.now();
-  lastFrameTime=Date.now();
-}
-function disconnectStream(){
-  img.src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-}
-function setConnected(){
-  if(!alive){alive=true;reconnectAttempts=0}
-  dot.className='dot dot-on';st.textContent=T.connected;
-}
-function setDisconnected(msg){
-  alive=false;
-  dot.className='dot dot-off';st.textContent=msg||T.disconnected;
-}
-function setReconnecting(){
-  dot.className='dot dot-retry';
-  st.textContent=T.reconnecting+(reconnectAttempts>1?' ('+reconnectAttempts+')':'')+'...';
-}
-function tryReconnect(){
-  if(paused)return;
-  if(reconnectPending)return;  // debounce — avoid stacking concurrent reconnects
-  reconnectPending=true;
-  reconnectAttempts++;
-  setReconnecting();
-  // Exponential backoff: 2s, 3s, 4s, 5s max
-  let delay=Math.min(2000+reconnectAttempts*500,5000);
-  setTimeout(()=>{
-    reconnectPending=false;
-    if(paused)return;
-    if(fpsLimitMs>0){startPolling()}else{connectStream()}
-  },delay);
-}
-
-// Track when the MJPEG stream delivers a new frame
-// For MJPEG, onload fires on the first frame only in most browsers.
-// We use a combination of onerror + heartbeat to detect stream loss.
-img.onerror=function(){
-  if(paused)return;
-  holdCurrentFrame();
-  setDisconnected();
-  tryReconnect();
-};
-img.onload=function(){
-  clearTimeout(initialTimer);
-  lastFrameTime=Date.now();
-  setConnected();
-  releaseHeldFrame();
-  heartbeatFails=0;
-};
-
-// 5s timeout: if stream never delivers a frame, force reconnect
-let initialTimer=setTimeout(()=>{
-  if(img.naturalWidth===0){connectStream()}
-},5000);
-
-// ── Heartbeat: detect stream loss via /status polling ──
-// MJPEG streams don't fire onerror when the TCP connection drops mid-stream.
-// This heartbeat detects that and triggers reconnection.
-// Tolerances are tuned to survive Edge's Efficiency Mode / SDSM, which can
-// delay fetch() long enough to trip short timeouts even when the stream is fine.
-let heartbeatFails=0;
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)heartbeatFails=0;});
-setInterval(async()=>{
-  if(paused||document.hidden)return;
-  try{
-    const r=await fetch('/status',{signal:AbortSignal.timeout(6000),cache:'no-store'});
-    if(r.ok){
-      const d=await r.json();
-      heartbeatFails=0;
-      if(d.viewers>0){vw.textContent=d.viewers+' '+(d.viewers>1?T.viewers:T.viewer);vw.style.display=''}else{vw.style.display='none'}
-      // 会话纪元变化 = 服务端重启过共享（旧流已死但 TCP 可能还挂着）→ 主动重连
-      if(typeof d.session_id!=='undefined'){
-        if(window.__ssSession!==undefined&&window.__ssSession!==d.session_id&&!paused&&d.active){
-          window.__ssSession=d.session_id;
-          holdCurrentFrame();
-          tryReconnect();
-        } else {
-          window.__ssSession=d.session_id;
-        }
-      }
-      // 服务端采集暂停（锁屏等）→ 显示重试提示条；恢复后自动隐藏
-      const captureRetryEl=document.getElementById('captureRetry');
-      if(captureRetryEl){
-        const privacy=d.capture_issue==='privacy_mode_or_display_off';
-        captureRetryEl.classList.toggle('privacy',privacy);
-        document.getElementById('captureRetryText').textContent=privacy?T.privacyMode:T.serverRetrying;
-        captureRetryEl.style.display=(d.capture_paused&&!paused)?'flex':'none';
-      }
-      if(!d.active&&alive){
-        // Server stopped sharing
-        setDisconnected(T.serverStopped);
-        disconnectStream();
-        tryReconnect();
-      }
-    } else {
-      heartbeatFails++;
-    }
-  }catch{
-    heartbeatFails++;
-  }
-  // If heartbeat fails 10+ times in a row AND it's been >=60s since the last
-  // heartbeat-triggered reconnect, only then reconnect. This double gate stops
-  // the "flicker loop" we saw on Edge where fetch('/status') keeps timing out
-  // under Efficiency Mode even though the MJPEG stream is still delivering.
-  // Real TCP drops are caught by img.onerror and go through a separate path.
-  if(heartbeatFails>=10&&alive){
-    const now=Date.now();
-    if(now-lastReconnectAt<MIN_HEARTBEAT_RECONNECT_MS)return;
-    lastReconnectAt=now;
-    heartbeatFails=0;           // reset so the next fail does not instantly retrigger
-    holdCurrentFrame();         // freeze last frame as placeholder
-    setDisconnected();
-    // Skip disconnectStream() here — connectStream() will reassign img.src,
-    // which itself aborts the old MJPEG connection. Doing it twice caused the flash.
-    tryReconnect();
-  }
-},3000);
-
-// ── Stale frame detection ──
-// If we haven't received a new frame in a while via MJPEG stream,
-// proactively reconnect. For MJPEG, we can only detect the initial load,
-// so we use a periodic check against the heartbeat instead.
-// The above heartbeat covers this case.
-
-// ── Pause / Resume ──
-const iconPause=document.getElementById('iconPause'),iconPlay=document.getElementById('iconPlay'),btnPauseText=document.getElementById('btnPauseText');
-function togglePause(){
-  paused=!paused;
-  if(paused){
-    disconnectStream();
-    dot.className='dot dot-pause';st.textContent=T.paused;
-    iconPause.style.display='none';iconPlay.style.display='';btnPauseText.textContent=T.resume;
-    btnPause.className='btn btn-play';
-    overlay.classList.add('show');
-    if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}
-  } else {
-    overlay.classList.remove('show');
-    reconnectAttempts=0;
-    setConnected();
-    iconPause.style.display='';iconPlay.style.display='none';btnPauseText.textContent=T.pause;
-    btnPause.className='btn btn-pause';
-    if(fpsLimitMs>0){startPolling()}else{connectStream()}
-  }
-}
-
-// ── Client-side FPS limit (polling mode) ──
-function startPolling(){
-  disconnectStream();
-  if(refreshTimer)clearInterval(refreshTimer);
-  refreshTimer=setInterval(()=>{
-    if(!paused){
-      const pollImg=new Image();
-      pollImg.onload=function(){lastFrameTime=Date.now();setConnected();img.src=pollImg.src};
-      pollImg.onerror=function(){if(!paused){setDisconnected();tryReconnect()}};
-      pollImg.src='/stream?single=1&t='+Date.now();
-    }
-  },fpsLimitMs);
-  // Fetch first frame immediately
-  img.src='/stream?single=1&t='+Date.now();
-  lastFrameTime=Date.now();
-}
-fpsSelect.onchange=function(){
-  fpsLimitMs=parseInt(this.value)||0;
-  if(paused)return;
-  if(refreshTimer){clearInterval(refreshTimer);refreshTimer=null}
-  reconnectAttempts=0;
-  if(fpsLimitMs>0){startPolling()}else{connectStream()}
-};
-
-function toggleFs(){
-  if(!document.fullscreenElement)document.documentElement.requestFullscreen();
-  else document.exitFullscreen();
-}
-</script>
-</body>
-</html>"#
-        .to_string()
-}
-
 fn login_html(has_error: bool, need_username: bool) -> String {
     let error_block = if has_error {
         r#"<div class="err"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:inline;vertical-align:middle;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>Incorrect credentials</div>"#
@@ -6048,8 +7772,74 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::Request;
-    use futures_lite::StreamExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn wgc_gpu_path_avoids_full_frame_readback_without_mjpeg_demand() {
+        let options = select_capture_frame_options(CaptureBackendKind::Wgc, true, true, 0, 30);
+        assert!(options.gpu_h264);
+        assert!(!options.cpu_pixels);
+        assert_eq!(options.fps, 30);
+    }
+
+    #[test]
+    fn capture_fps_range_admits_the_60_fps_experiment_tier() {
+        assert!(validate_capture_fps(MIN_CAPTURE_FPS).is_ok());
+        assert!(validate_capture_fps(30).is_ok());
+        // 界面实验档发送的就是上限值。
+        assert_eq!(MAX_CAPTURE_FPS, 60);
+        assert!(validate_capture_fps(MAX_CAPTURE_FPS).is_ok());
+
+        let too_low = validate_capture_fps(0).unwrap_err();
+        assert!(too_low.contains("1-60"), "unexpected message: {too_low}");
+        assert!(validate_capture_fps(MAX_CAPTURE_FPS + 1).is_err());
+    }
+
+    #[test]
+    fn capture_frame_interval_does_not_inflate_either_fps_tier() {
+        // 毫秒整数除法会把 30 FPS 变成 33 ms（30.3 FPS）、60 FPS 变成 16 ms（62.5 FPS），
+        // 两档对比数据必须使用真实节拍。
+        assert_eq!(capture_frame_interval(30), Duration::from_micros(33_333));
+        assert_eq!(
+            capture_frame_interval(MAX_CAPTURE_FPS),
+            Duration::from_micros(16_666)
+        );
+        assert_eq!(capture_frame_interval(1), Duration::from_secs(1));
+        // 0 与超限值仍必须产生有限节拍，不能除零或退化成忙循环。
+        assert_eq!(capture_frame_interval(0), Duration::from_secs(1));
+        assert_eq!(
+            capture_frame_interval(u8::MAX),
+            Duration::from_micros(16_666)
+        );
+    }
+
+    #[test]
+    fn capture_selection_preserves_cpu_fallback_and_mjpeg_compatibility() {
+        let mjpeg = select_capture_frame_options(CaptureBackendKind::Wgc, true, true, 1, 60);
+        assert!(mjpeg.gpu_h264);
+        assert!(mjpeg.cpu_pixels);
+
+        let gpu_disabled =
+            select_capture_frame_options(CaptureBackendKind::Wgc, true, false, 0, 30);
+        assert!(!gpu_disabled.gpu_h264);
+        assert!(gpu_disabled.cpu_pixels);
+
+        let dxgi = select_capture_frame_options(CaptureBackendKind::Dxgi, true, true, 0, 30);
+        assert!(!dxgi.gpu_h264);
+        assert!(dxgi.cpu_pixels);
+    }
+
+    #[test]
+    fn mid_frame_mjpeg_arrival_defers_until_cpu_pixels_are_available() {
+        assert_eq!(
+            select_jpeg_state(1, false, true, true),
+            (false, "mjpeg_cpu_readback_pending")
+        );
+        assert_eq!(
+            select_jpeg_state(1, true, true, true),
+            (true, "mjpeg_compatibility_viewer")
+        );
+    }
 
     #[derive(Default)]
     struct TestScreenShareEvents;
@@ -6058,6 +7848,106 @@ mod tests {
         fn emit_tool_log(&self, _message: &str, _level: &str) {}
 
         fn emit_control_request(&self, _request: ControlRequestInfo) {}
+    }
+
+    fn interaction_text(message: Message) -> String {
+        match message {
+            Message::Text(text) => text,
+            other => panic!("expected text interaction message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interaction_outbound_queue_reserves_priority_for_critical_state() {
+        let queue = InteractionOutboundQueue::new(1, 1);
+        queue
+            .push(
+                Message::Text("annotation-1".to_string()),
+                InteractionMessagePriority::Bulk,
+            )
+            .unwrap();
+        assert_eq!(
+            queue.push(
+                Message::Text("annotation-2".to_string()),
+                InteractionMessagePriority::Bulk,
+            ),
+            Ok(InteractionQueuePushOutcome::BulkDroppedOldest)
+        );
+        queue
+            .push(
+                Message::Text("input-ack".to_string()),
+                InteractionMessagePriority::Critical,
+            )
+            .unwrap();
+
+        assert_eq!(interaction_text(queue.pop_now().unwrap()), "input-ack");
+        assert_eq!(interaction_text(queue.pop_now().unwrap()), "annotation-2");
+        assert!(queue.pop_now().is_none());
+    }
+
+    #[test]
+    fn interaction_queue_rejects_only_a_saturated_critical_lane() {
+        let queue = InteractionOutboundQueue::new(1, 4);
+        queue
+            .push(
+                Message::Text("control-state".to_string()),
+                InteractionMessagePriority::Critical,
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.push(
+                Message::Text("input-ack".to_string()),
+                InteractionMessagePriority::Critical,
+            ),
+            Err(InteractionQueuePushError::CriticalFull)
+        );
+        assert_eq!(
+            queue.push(
+                Message::Text("annotation".to_string()),
+                InteractionMessagePriority::Bulk,
+            ),
+            Ok(InteractionQueuePushOutcome::Queued)
+        );
+    }
+
+    #[tokio::test]
+    async fn interaction_slow_writer_send_is_bounded_by_deadline() {
+        let send = std::future::pending::<Result<(), axum::Error>>();
+        let started = Instant::now();
+
+        let error = with_interaction_send_deadline(send, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("exceeded 10ms"), "got: {error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn input_ack_correlates_sequence_and_server_enqueue_timing() {
+        let ack = input_ack_message(
+            "input.pointer_move",
+            42,
+            7,
+            Some(99),
+            1_000,
+            1_001,
+            750,
+            "coalesced",
+        );
+
+        assert_eq!(ack.message_type, "input.ack");
+        assert_eq!(ack.client_seq, Some(99));
+        assert_eq!(ack.session_id, 42);
+        assert_eq!(ack.source_epoch, 7);
+        let payload = ack.payload.unwrap();
+        assert_eq!(payload["input_type"], "input.pointer_move");
+        assert_eq!(payload["server_received_at_ms"], 1_000);
+        assert_eq!(payload["server_enqueued_at_ms"], 1_001);
+        assert_eq!(payload["receive_to_enqueue_us"], 750);
+        assert_eq!(payload["queue_outcome"], "coalesced");
+        assert!(payload["server_ack_queued_at_ms"].as_u64().is_some());
     }
 
     #[test]
@@ -6107,7 +7997,7 @@ mod tests {
         metrics.record_stream_open(true);
         metrics.record_stream_first_frame(Duration::from_millis(140), true);
         metrics.record_lagged_frames(7);
-        metrics.update_rates(15, 8_192);
+        metrics.update_rates(15, 8_192, 1_048_576);
 
         let snapshot = metrics.snapshot_at(Some(9_950), 10_000);
         assert_eq!(snapshot.frame_age_ms, Some(50));
@@ -6120,6 +8010,96 @@ mod tests {
         assert_eq!(snapshot.stream_reconnect_p95_ms, Some(140));
         assert_eq!(snapshot.fps_actual, 15.0);
         assert_eq!(snapshot.bitrate_kbps, 8_192);
+        assert_eq!(snapshot.outbound_bytes_total, 1_048_576);
+    }
+
+    #[test]
+    fn media_metrics_separate_capture_jpeg_pipeline_and_send_timings() {
+        let metrics = ScreenShareMediaMetrics::new();
+        metrics.record_capture_frame(
+            1_920,
+            1_080,
+            Some(42_000_000),
+            Duration::from_millis(2),
+            Some(Duration::from_millis(3)),
+            Some(Duration::from_millis(4)),
+        );
+        metrics.record_black_frame_classification(Duration::from_micros(500));
+        metrics.record_jpeg_timings(Duration::from_millis(5), Duration::from_millis(6));
+        metrics.record_encoded_frame(12_345);
+        metrics.record_stream_send(Duration::from_millis(7), true);
+        metrics.record_stream_disconnect();
+        metrics.update_rates(30, 4_096, 99_999);
+
+        let snapshot = metrics.snapshot(None);
+        assert_eq!(snapshot.capture_frame_count, 1);
+        assert_eq!(snapshot.mjpeg_encoded_frame_count, 1);
+        assert_eq!(snapshot.encoded_frame_count, 1);
+        assert_eq!(snapshot.mjpeg_encoded_bytes, 12_345);
+        assert_eq!(snapshot.capture_fps_actual, 30.0);
+        assert_eq!(snapshot.mjpeg_fps_actual, 1.0);
+        assert_eq!(snapshot.outbound_bytes_total, 99_999);
+        assert_eq!(snapshot.latest_capture.as_ref().unwrap().sequence, 1);
+        assert_eq!(snapshot.latest_capture.as_ref().unwrap().width, 1_920);
+        assert_eq!(
+            snapshot
+                .latest_capture
+                .as_ref()
+                .unwrap()
+                .system_relative_time_100ns,
+            Some(42_000_000)
+        );
+        assert_eq!(snapshot.frame_wait.p99_us, 2_000);
+        assert_eq!(snapshot.capture_queue_age.max_us, 3_000);
+        assert_eq!(snapshot.gpu_readback.p95_us, 4_000);
+        assert_eq!(snapshot.black_frame_classification.p50_us, 500);
+        assert_eq!(snapshot.jpeg_color_conversion.max_us, 5_000);
+        assert_eq!(snapshot.jpeg_encode.max_us, 6_000);
+        assert_eq!(snapshot.stream_send_wait.max_us, 7_000);
+        assert_eq!(snapshot.stream_send_timeout_count, 1);
+        assert_eq!(snapshot.stream_disconnect_count, 1);
+    }
+
+    #[test]
+    fn media_metrics_report_bounded_outbound_windows() {
+        let metrics = ScreenShareMediaMetrics::new();
+        for bytes in 1_u64..=1_100 {
+            metrics.record_outbound_window(Duration::from_millis(100), bytes);
+        }
+        metrics.record_outbound_window(Duration::from_secs(1), 4_000);
+        metrics.record_outbound_window(Duration::from_secs(1), 8_000);
+
+        let snapshot = metrics.snapshot(None);
+        assert_eq!(snapshot.outbound_100ms.sample_count, 1_024);
+        assert_eq!(snapshot.outbound_100ms.max_bytes, 1_100);
+        assert_eq!(snapshot.outbound_100ms.p50_bytes, 588);
+        assert_eq!(
+            snapshot.outbound_100ms.total_bytes,
+            (77_u64..=1_100).sum::<u64>()
+        );
+        assert_eq!(snapshot.outbound_1s.sample_count, 2);
+        assert_eq!(snapshot.outbound_1s.total_bytes, 12_000);
+        assert_eq!(snapshot.outbound_1s.p95_bytes, 8_000);
+    }
+
+    #[test]
+    fn wgc_system_relative_clock_reports_queue_age_without_wall_clock_assumptions() {
+        let base = Instant::now();
+        let mut anchor = None;
+        assert_eq!(
+            relative_capture_queue_age(&mut anchor, 1_000_000, base),
+            Some(Duration::ZERO)
+        );
+        // The capture clock advanced 10 ms while processing observed 14 ms.
+        assert_eq!(
+            relative_capture_queue_age(&mut anchor, 1_100_000, base + Duration::from_millis(14),),
+            Some(Duration::from_millis(4))
+        );
+        // A capture-clock reset establishes a new anchor instead of underflowing.
+        assert_eq!(
+            relative_capture_queue_age(&mut anchor, 10, base + Duration::from_millis(20)),
+            Some(Duration::ZERO)
+        );
     }
 
     #[tokio::test]
@@ -6138,6 +8118,31 @@ mod tests {
         assert!(stalled.is_err());
     }
 
+    #[tokio::test]
+    async fn mjpeg_body_backpressure_is_bounded_and_counted() {
+        let metrics = ScreenShareMediaMetrics::new();
+        let (sender, _receiver) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(1);
+        assert!(send_mjpeg_body_chunk_with_timeout(
+            Duration::from_millis(10),
+            &sender,
+            Bytes::from_static(b"first"),
+            &metrics,
+        )
+        .await
+        .is_ok());
+        assert!(send_mjpeg_body_chunk_with_timeout(
+            Duration::from_millis(1),
+            &sender,
+            Bytes::from_static(b"blocked"),
+            &metrics,
+        )
+        .await
+        .is_err());
+        let snapshot = metrics.snapshot(None);
+        assert_eq!(snapshot.stream_send_timeout_count, 1);
+        assert_eq!(snapshot.stream_send_wait.total_sample_count, 2);
+    }
+
     fn test_http_state() -> Arc<HttpServerState> {
         let (broadcast_tx, _) = broadcast::channel(8);
         Arc::new(HttpServerState {
@@ -6145,6 +8150,9 @@ mod tests {
             broadcast_tx,
             interaction: InteractionState::new(77),
             viewer_count: Arc::new(AtomicU32::new(0)),
+            viewer_ip_reference_count: Arc::new(AtomicU32::new(0)),
+            active_media_task_count: Arc::new(AtomicU32::new(0)),
+            mjpeg_viewer_count: Arc::new(AtomicU32::new(0)),
             cancel: Arc::new(AtomicBool::new(false)),
             auth_hash: None,
             auth_username: None,
@@ -6158,6 +8166,8 @@ mod tests {
             preview_token: Arc::new(Mutex::new(None)),
             transport: Arc::new(Mutex::new(ScreenShareMediaTransport::Mjpeg)),
             input_worker: None,
+            #[cfg(feature = "screen-share-webrtc-prototype")]
+            webrtc: None,
         })
     }
 
@@ -6208,7 +8218,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn screen_share_router_snapshot_status_stream_and_websocket_paths_are_isolated() {
+    async fn screen_share_router_removed_snapshot_and_single_paths_stay_removed() {
         let state = test_http_state();
         let app = screen_share_router(state.clone());
 
@@ -6221,45 +8231,14 @@ mod tests {
 
         state
             .interaction
-            .register_client("freezer")
-            .expect("register freezer");
-        state
-            .interaction
             .record_frame(Arc::new(Bytes::from_static(b"jpeg-frame")));
-        state
-            .interaction
-            .process(
-                "freezer",
-                ClientEnvelope {
-                    v: screenshare_interaction::PROTOCOL_VERSION,
-                    message_type: "view.freeze".to_string(),
-                    session_id: 77,
-                    source_epoch: 1,
-                    client_seq: Some(1),
-                    revision: None,
-                    payload: None,
-                },
-            )
-            .expect("freeze request");
-
-        let snapshot = app
-            .clone()
-            .oneshot(http_request("/snapshot/1"))
-            .await
-            .unwrap();
-        assert_eq!(snapshot.status(), StatusCode::OK);
-        assert_eq!(
-            to_bytes(snapshot.into_body(), usize::MAX).await.unwrap(),
-            Bytes::from_static(b"jpeg-frame")
-        );
 
         let single_frame = app
             .clone()
             .oneshot(http_request("/stream?single=1"))
             .await
             .unwrap();
-        assert_eq!(single_frame.status(), StatusCode::OK);
-        assert_eq!(single_frame.headers()["content-type"], "image/jpeg");
+        assert_eq!(single_frame.status(), StatusCode::BAD_REQUEST);
 
         let status = app.clone().oneshot(http_request("/status")).await.unwrap();
         assert_eq!(status.status(), StatusCode::OK);
@@ -6272,10 +8251,20 @@ mod tests {
         assert_eq!(status_json["session_id"], 77);
         assert_eq!(status_json["source_epoch"], 1);
         assert_eq!(status_json["latest_frame_id"], 1);
-        assert_eq!(status_json["frozen_frame_id"], 1);
-        assert_eq!(status_json["view_mode"], "frozen");
+        assert_eq!(status_json["frozen_frame_id"], serde_json::Value::Null);
+        assert_eq!(status_json["view_mode"], "live");
         assert_eq!(status_json["transport"], "mjpeg");
         assert_eq!(status_json["h264_media"]["ready"], false);
+
+        let time = app.clone().oneshot(http_request("/time")).await.unwrap();
+        assert_eq!(time.status(), StatusCode::OK);
+        let time_json: serde_json::Value = serde_json::from_slice(
+            &to_bytes(time.into_body(), usize::MAX)
+                .await
+                .expect("time body"),
+        )
+        .expect("time JSON");
+        assert!(time_json["server_unix_ms"].as_u64().is_some());
 
         let media_without_encoder = app
             .clone()
@@ -6296,6 +8285,154 @@ mod tests {
 
         let unknown = app.oneshot(http_request("/not-a-route")).await.unwrap();
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn capture_trace_rejects_input_applied_after_capture() {
+        let applied = AppliedInputSnapshot {
+            client_sequence: 17,
+            applied_at_server_unix_ms: 1_001,
+        };
+
+        assert_eq!(
+            applied_input_visible_at_capture(Some(applied.clone()), 1_001),
+            Some(applied.clone())
+        );
+        assert_eq!(applied_input_visible_at_capture(Some(applied), 1_000), None);
+        assert_eq!(applied_input_visible_at_capture(None, 1_001), None);
+    }
+
+    #[test]
+    fn h264_media_trace_sidecar_preserves_capture_and_media_identity() {
+        let segment = H264MediaSegment {
+            generation: 3,
+            sequence: 44,
+            keyframe: true,
+            timestamp_us: 500_000,
+            duration_us: 33_333,
+            capture_sequence: 91,
+            captured_at_unix_ms: 1_700_000_000_123,
+            visible_input_sequence: Some(17),
+            input_applied_at_server_unix_ms: Some(1_700_000_000_100),
+            access_unit_avcc: Arc::new(Bytes::from_static(b"access-unit")),
+            bytes: Arc::new(Bytes::from_static(b"fragment")),
+        };
+
+        let message: serde_json::Value =
+            serde_json::from_str(&h264_media_trace_message(&segment)).unwrap();
+        assert_eq!(message["type"], "media.trace");
+        assert_eq!(message["generation"], 3);
+        assert_eq!(message["sequence"], 44);
+        assert_eq!(message["keyframe"], true);
+        assert_eq!(message["timestamp_us"], 500_000);
+        assert_eq!(message["duration_us"], 33_333);
+        assert_eq!(message["capture_sequence"], 91);
+        assert_eq!(message["captured_at_unix_ms"], 1_700_000_000_123_u64);
+        assert_eq!(message["visible_input_sequence"], 17);
+        assert_eq!(
+            message["input_applied_at_server_unix_ms"],
+            1_700_000_000_100_u64
+        );
+    }
+
+    #[test]
+    fn webcodecs_lag_recovery_refreshes_only_changed_generation() {
+        let descriptor = Arc::new(H264StreamDescriptor {
+            generation: 4,
+            codec: "avc1.42C028".to_owned(),
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_bps: 3_000_000,
+            init_segment: Arc::new(Bytes::new()),
+            decoder_configuration: Arc::new(Bytes::from_static(&[1, 0x42, 0xc0, 0x28])),
+        });
+
+        assert!(webcodecs_newer_descriptor(4, Some(descriptor.clone())).is_none());
+        assert_eq!(
+            webcodecs_newer_descriptor(3, Some(descriptor))
+                .expect("changed generation")
+                .generation,
+            4
+        );
+        assert!(webcodecs_newer_descriptor(3, None).is_none());
+    }
+
+    #[test]
+    fn webcodecs_wire_preserves_complete_access_unit_and_exact_header() {
+        let segment = H264MediaSegment {
+            generation: 7,
+            sequence: 99,
+            keyframe: true,
+            timestamp_us: 1_234_567,
+            duration_us: 16_667,
+            capture_sequence: 5,
+            captured_at_unix_ms: 10,
+            visible_input_sequence: None,
+            input_applied_at_server_unix_ms: None,
+            access_unit_avcc: Arc::new(Bytes::from_static(&[
+                0, 0, 0, 2, 0x67, 0x64, 0, 0, 0, 3, 0x65, 1, 2,
+            ])),
+            bytes: Arc::new(Bytes::new()),
+        };
+        let wire = webcodecs_access_unit_message(&segment, true).unwrap();
+        assert_eq!(&wire[0..4], b"FSTW");
+        assert_eq!(wire[4], 1);
+        assert_eq!(wire[5], 0b0101);
+        assert_eq!(u16::from_be_bytes(wire[6..8].try_into().unwrap()), 40);
+        assert_eq!(u64::from_be_bytes(wire[8..16].try_into().unwrap()), 7);
+        assert_eq!(u64::from_be_bytes(wire[16..24].try_into().unwrap()), 99);
+        assert_eq!(
+            u64::from_be_bytes(wire[24..32].try_into().unwrap()),
+            1_234_567
+        );
+        assert_eq!(u32::from_be_bytes(wire[32..36].try_into().unwrap()), 16_667);
+        assert_eq!(
+            u32::from_be_bytes(wire[36..40].try_into().unwrap()) as usize,
+            segment.access_unit_avcc.len()
+        );
+        assert_eq!(&wire[40..], segment.access_unit_avcc.as_ref());
+
+        let mut invalid = segment.clone();
+        invalid.generation = 0;
+        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
+        invalid = segment.clone();
+        invalid.sequence = 0;
+        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
+        invalid = segment.clone();
+        invalid.duration_us = 0;
+        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
+        invalid = segment.clone();
+        invalid.access_unit_avcc = Arc::new(Bytes::new());
+        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
+        invalid.access_unit_avcc =
+            Arc::new(Bytes::from(vec![0; WEBCODECS_MAX_ACCESS_UNIT_BYTES + 1]));
+        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
+    }
+
+    #[test]
+    fn webcodecs_descriptor_contains_avcc_configuration() {
+        let descriptor = H264StreamDescriptor {
+            generation: 4,
+            codec: "avc1.42C028".to_owned(),
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_bps: 5_000_000,
+            init_segment: Arc::new(Bytes::new()),
+            decoder_configuration: Arc::new(Bytes::from_static(&[1, 0x42, 0xc0, 0x28])),
+        };
+        let message: serde_json::Value =
+            serde_json::from_str(&webcodecs_descriptor_message(&descriptor).unwrap()).unwrap();
+        assert_eq!(message["transport"], "webcodecs_h264");
+        assert_eq!(message["generation"], 4);
+        assert_eq!(message["codec"], "avc1.42C028");
+        assert_eq!(message["description_base64"], "AULAKA==");
+        assert!(message["color_space"].is_null());
+
+        let mut invalid = descriptor;
+        invalid.decoder_configuration = Arc::new(Bytes::new());
+        assert!(webcodecs_descriptor_message(&invalid).is_err());
     }
 
     #[tokio::test]
@@ -6339,16 +8476,11 @@ mod tests {
     }
 
     #[test]
-    fn screen_share_embedded_pages_include_svg_favicon() {
-        let viewer = viewer_html();
+    fn screen_share_login_page_includes_svg_favicon() {
         let login = login_html(false, false);
 
-        for html in [&viewer, &login] {
-            assert!(html.contains(r#"<link rel="icon" type="image/svg+xml""#));
-            assert!(html.contains("data:image/svg+xml"));
-        }
-        assert!(viewer.contains("privacy_mode_or_display_off"));
-        assert!(viewer.contains("检测到所有屏幕持续黑屏"));
+        assert!(login.contains(r#"<link rel="icon" type="image/svg+xml""#));
+        assert!(login.contains("data:image/svg+xml"));
     }
 
     #[test]
@@ -6371,7 +8503,6 @@ mod tests {
         .expect("legacy screen-share config");
 
         assert!(config.annotations_enabled);
-        assert!(config.shared_freeze_enabled);
         assert!(!config.control_requests_enabled);
         assert!(!config.keyboard_control_enabled);
         assert_eq!(config.transport, ScreenShareMediaTransport::Auto);
@@ -6381,9 +8512,18 @@ mod tests {
     fn h264_selector_preserves_explicit_mjpeg_and_webrtc_fallback() {
         assert!(ScreenShareMediaTransport::Auto.wants_h264());
         assert!(ScreenShareMediaTransport::MseH264.wants_h264());
+        assert!(ScreenShareMediaTransport::WebCodecs.wants_h264());
+        assert!(ScreenShareMediaTransport::WebRtc.wants_h264());
         assert!(!ScreenShareMediaTransport::Mjpeg.wants_h264());
-        assert!(!ScreenShareMediaTransport::WebRtc.wants_h264());
         assert_eq!(ScreenShareMediaTransport::Mjpeg.resolved_label(), "mjpeg");
+        assert_eq!(
+            ScreenShareMediaTransport::WebCodecs.resolved_label(),
+            "web_codecs"
+        );
+        assert_eq!(
+            ScreenShareMediaTransport::WebRtc.resolved_label(),
+            "web_rtc"
+        );
     }
 
     #[test]
@@ -6463,7 +8603,7 @@ mod tests {
         *handle.media_metrics.lock().unwrap() = Some(Arc::new(ScreenShareMediaMetrics::new()));
         *handle.preview_token.lock().unwrap() = Some("stale-preview".into());
         handle.desktop_overlay_active.store(true, Ordering::SeqCst);
-        record_viewer_ip(&handle.viewer_ips, "10.0.0.1");
+        record_viewer_connection(&handle.viewer_ips, "10.0.0.1");
 
         prepare_runtime_state_for_start(&handle);
 
@@ -6500,7 +8640,7 @@ mod tests {
         *handle.media_metrics.lock().unwrap() = Some(Arc::new(ScreenShareMediaMetrics::new()));
         *handle.preview_token.lock().unwrap() = Some("active-preview".into());
         handle.desktop_overlay_active.store(true, Ordering::SeqCst);
-        record_viewer_ip(&handle.viewer_ips, "10.0.0.2");
+        record_viewer_connection(&handle.viewer_ips, "10.0.0.2");
 
         reset_runtime_state(&handle);
 
@@ -6716,21 +8856,62 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_viewer_ips_prunes_stale_heartbeats() {
-        let now = Instant::now();
+    fn snapshot_viewer_ips_contains_only_sorted_active_media_leases() {
         let ips = Arc::new(Mutex::new(std::collections::HashMap::new()));
-
-        record_viewer_ip_at(&ips, "10.0.0.1", now - VIEWER_IP_TTL / 2);
-        record_viewer_ip_at(&ips, "10.0.0.2", now - VIEWER_IP_TTL * 2);
-
+        record_viewer_connection(&ips, "10.0.0.2");
+        record_viewer_connection(&ips, "10.0.0.1");
         assert_eq!(
-            snapshot_viewer_ips_at(&ips, now),
-            vec!["10.0.0.1".to_string()]
+            snapshot_viewer_ips(&ips),
+            vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()]
         );
-        assert_eq!(
-            snapshot_viewer_ips_at(&ips, now + VIEWER_IP_TTL * 2),
-            Vec::<String>::new()
-        );
+    }
+
+    #[test]
+    fn active_viewer_ip_survives_partial_disconnect_and_is_removed_after_last_connection() {
+        let ips = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        record_viewer_connection(&ips, "10.0.0.1");
+        record_viewer_connection(&ips, "10.0.0.1");
+
+        release_viewer_connection(&ips, "10.0.0.1");
+        assert_eq!(snapshot_viewer_ips(&ips), vec!["10.0.0.1".to_string()]);
+
+        release_viewer_connection(&ips, "10.0.0.1");
+        assert!(snapshot_viewer_ips(&ips).is_empty());
+    }
+
+    #[test]
+    fn viewer_guard_releases_all_runtime_accounting() {
+        let viewers = Arc::new(AtomicU32::new(1));
+        let ip_references = Arc::new(AtomicU32::new(1));
+        let tasks = Arc::new(AtomicU32::new(1));
+        let transport = Arc::new(AtomicU32::new(1));
+        let ips = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        record_viewer_connection(&ips, "10.0.0.1");
+        drop(ViewerGuard {
+            events: Arc::new(TestScreenShareEvents),
+            count: viewers.clone(),
+            ip_reference_count: ip_references.clone(),
+            active_task_count: tasks.clone(),
+            transport_count: Some(transport.clone()),
+            ips: ips.clone(),
+            ip: "10.0.0.1".to_string(),
+        });
+        assert_eq!(viewers.load(Ordering::Relaxed), 0);
+        assert_eq!(ip_references.load(Ordering::Relaxed), 0);
+        assert_eq!(tasks.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.load(Ordering::Relaxed), 0);
+        assert!(snapshot_viewer_ips(&ips).is_empty());
+    }
+
+    #[test]
+    fn media_viewer_limit_is_atomic_and_releases_capacity() {
+        let viewers = AtomicU32::new(0);
+        for expected in 1..=MAX_MEDIA_VIEWERS {
+            assert_eq!(try_reserve_media_viewer(&viewers), Some(expected));
+        }
+        assert_eq!(try_reserve_media_viewer(&viewers), None);
+        assert_eq!(decrement_nonzero(&viewers), MAX_MEDIA_VIEWERS - 1);
+        assert_eq!(try_reserve_media_viewer(&viewers), Some(MAX_MEDIA_VIEWERS));
     }
 
     #[test]

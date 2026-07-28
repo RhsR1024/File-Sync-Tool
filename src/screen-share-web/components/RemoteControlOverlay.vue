@@ -11,8 +11,8 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  move: [point: NormalizedPoint];
-  button: [payload: { button: 'left' | 'right'; pressed: boolean }];
+  move: [point: NormalizedPoint, eventOccurredAtMs: number];
+  button: [payload: { button: 'left' | 'right'; pressed: boolean }, eventOccurredAtMs?: number];
   wheel: [deltaY: number];
 }>();
 
@@ -20,7 +20,7 @@ const layer = ref<HTMLElement | null>(null);
 const activePointerId = ref<number | null>(null);
 const heldButtons = new Set<'left' | 'right'>();
 let moveFrame: number | null = null;
-let queuedMove: NormalizedPoint | null = null;
+let queuedMove: { point: NormalizedPoint; eventOccurredAtMs: number } | null = null;
 
 const layerStyle = computed<Record<string, string>>(() => ({
   left: `${props.geometry.left}px`,
@@ -44,13 +44,13 @@ function mapEvent(event: Pick<MouseEvent, 'clientX' | 'clientY'>): NormalizedPoi
 function flushMove() {
   moveFrame = null;
   if (queuedMove) {
-    emit('move', queuedMove);
+    emit('move', queuedMove.point, queuedMove.eventOccurredAtMs);
     queuedMove = null;
   }
 }
 
-function sendMove(point: NormalizedPoint) {
-  queuedMove = point;
+function sendMove(point: NormalizedPoint, eventOccurredAtMs: number) {
+  queuedMove = { point, eventOccurredAtMs };
   if (moveFrame === null) moveFrame = window.requestAnimationFrame(flushMove);
 }
 
@@ -62,9 +62,9 @@ function cancelQueuedMove() {
   queuedMove = null;
 }
 
-function sendMoveNow(point: NormalizedPoint) {
+function sendMoveNow(point: NormalizedPoint, eventOccurredAtMs: number) {
   cancelQueuedMove();
-  emit('move', point);
+  emit('move', point, eventOccurredAtMs);
 }
 
 function begin(event: PointerEvent) {
@@ -75,11 +75,11 @@ function begin(event: PointerEvent) {
   if (!button) return;
   event.preventDefault();
   event.stopPropagation();
-  sendMoveNow(point);
+  sendMoveNow(point, event.timeStamp);
   heldButtons.add(button);
   activePointerId.value = event.pointerId;
   layer.value?.setPointerCapture(event.pointerId);
-  emit('button', { button, pressed: true });
+  emit('button', { button, pressed: true }, event.timeStamp);
 }
 
 function move(event: PointerEvent) {
@@ -87,7 +87,7 @@ function move(event: PointerEvent) {
   const point = mapEvent(event);
   if (!point) return;
   event.preventDefault();
-  sendMove(point);
+  sendMove(point, event.timeStamp);
 }
 
 function finish(event: PointerEvent) {
@@ -96,9 +96,9 @@ function finish(event: PointerEvent) {
   event.preventDefault();
   event.stopPropagation();
   const point = mapEvent(event);
-  if (point) sendMoveNow(point);
+  if (point) sendMoveNow(point, event.timeStamp);
   heldButtons.delete(button);
-  emit('button', { button, pressed: false });
+  emit('button', { button, pressed: false }, event.timeStamp);
   if (activePointerId.value === event.pointerId) {
     activePointerId.value = null;
     try { layer.value?.releasePointerCapture(event.pointerId); } catch { /* already released */ }
@@ -119,7 +119,7 @@ function onWheel(event: WheelEvent) {
   if (!point || delta === null) return;
   event.preventDefault();
   event.stopPropagation();
-  sendMoveNow(point);
+  sendMoveNow(point, event.timeStamp);
   emit('wheel', delta);
 }
 

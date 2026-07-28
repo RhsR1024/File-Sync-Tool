@@ -113,6 +113,12 @@ pub struct StreamRuntimeConfig {
     pub transport: StreamTransport,
     pub enabled_streams: Vec<DeviceSimulatorStreamKind>,
     pub audio_enabled: bool,
+    #[serde(default = "time_watermark_enabled_by_default")]
+    pub time_watermark_enabled: bool,
+}
+
+fn time_watermark_enabled_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -932,6 +938,7 @@ mod tests {
                     DeviceSimulatorStreamKind::Third,
                 ],
                 audio_enabled: false,
+                time_watermark_enabled: true,
             },
         }
     }
@@ -960,6 +967,18 @@ mod tests {
             .unwrap()
             .get("allow_local_player_access")
             .is_none());
+    }
+
+    #[test]
+    fn legacy_stream_request_defaults_time_watermark_on() {
+        let mut value = serde_json::to_value(start_request()).unwrap();
+        value["stream"]
+            .as_object_mut()
+            .unwrap()
+            .remove("time_watermark_enabled");
+
+        let request: SimulatorStartRequest = serde_json::from_value(value).unwrap();
+        assert!(request.stream.time_watermark_enabled);
     }
 
     #[test]

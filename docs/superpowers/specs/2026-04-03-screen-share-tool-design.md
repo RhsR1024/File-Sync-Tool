@@ -210,7 +210,7 @@ async fn handler_index(
 | `password` | `Option<String>` | 访问密码，None 表示无密码 |
 | `monitor_index` | `usize` | 屏幕索引 |
 | `quality` | `u8` | JPEG 质量 10-100，默认 70 |
-| `fps` | `u8` | 目标帧率 1-30，默认 15 |
+| `fps` | `u8` | 目标帧率 1-60，默认 15；30 以上属于 `screen-share-latency-optimization.md` §6.2 的实验档 |
 | `show_cursor` | `bool` | 是否显示鼠标光标（暂未实现，预留） |
 
 #### ScreenShareStatus

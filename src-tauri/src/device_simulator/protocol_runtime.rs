@@ -10,7 +10,7 @@ use crate::device_simulator::discovery::{
 use crate::device_simulator::http::{
     DeviceHttpListener, HttpBindPlan, HttpMethod, HttpRequest, HttpResponse,
 };
-use crate::device_simulator::media::ParameterSetKind;
+use crate::device_simulator::media::{Codec, ParameterSetKind};
 use crate::device_simulator::profiles::schema::DeviceProfileV1;
 use crate::device_simulator::profiles::scope::{FirstReleaseProfileId, TargetPlatform};
 use crate::device_simulator::rtsp::routes::{
@@ -21,6 +21,7 @@ use crate::device_simulator::rtsp::service::{
 };
 use crate::device_simulator::runtime_assets::{RuntimeAssetLayout, RuntimeMediaKind};
 use crate::device_simulator::telemetry::ProtocolFailureMetrics;
+use crate::device_simulator::watermark_runtime::WatermarkMediaHub;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use chrono::{SecondsFormat, Utc};
@@ -149,6 +150,7 @@ pub struct ProtocolRuntime {
     discovery: Vec<ServiceTask>,
     http: Vec<ServiceTask>,
     rtsp: Vec<RtspEndpoint>,
+    watermark_media: Option<WatermarkMediaHub>,
     device_metrics: BTreeMap<String, Arc<DeviceProtocolMetrics>>,
 }
 
@@ -170,8 +172,23 @@ impl ProtocolRuntime {
             discovery: Vec::new(),
             http: Vec::new(),
             rtsp: Vec::new(),
+            watermark_media: None,
             device_metrics: BTreeMap::new(),
         };
+
+        if config.request.stream.time_watermark_enabled {
+            runtime.watermark_media = Some(
+                WatermarkMediaHub::start(Arc::clone(&config.assets))
+                    .await
+                    .map_err(|message| {
+                        runtime_error("device_simulator.watermark.start_failed", message)
+                    })?,
+            );
+        } else {
+            log::info!(
+                "device simulator time watermark is disabled; using the original indexed media path"
+            );
+        }
 
         for device in &config.preview.devices {
             let device_metrics = Arc::new(DeviceProtocolMetrics::default());
@@ -229,6 +246,10 @@ impl ProtocolRuntime {
                     RtspStreamKind::Third => RuntimeMediaKind::Third,
                 };
                 let media = config.assets.media(media_kind);
+                let watermark_source = runtime
+                    .watermark_media
+                    .as_ref()
+                    .map(|hub| hub.stream(media_kind).clone());
                 let mut routes = BTreeMap::new();
                 for route in plan
                     .routes
@@ -236,14 +257,34 @@ impl ProtocolRuntime {
                     .filter(|route| route.evidence.runtime_activation_allowed())
                 {
                     let metadata_only = route.role == RtspRouteRole::MetadataControl;
-                    let sdp = build_reviewed_static_sdp(device.ip, &route.path, media.as_ref())?;
-                    let source = RtspStreamSource::from_media(
-                        format!("{}:{:?}", device.device_id, plan.stream),
-                        Arc::<[u8]>::from(sdp),
-                        Arc::clone(&media),
-                        128,
-                        1_200,
-                    )
+                    let source = if let Some(watermark) = watermark_source.as_ref() {
+                        let sdp = build_reviewed_sdp(
+                            device.ip,
+                            &route.path,
+                            watermark.payload_type,
+                            watermark.clock_rate,
+                            &watermark.sps,
+                            &watermark.pps,
+                        )?;
+                        RtspStreamSource::from_scheduler(
+                            format!("{}:{:?}", device.device_id, plan.stream),
+                            Arc::<[u8]>::from(sdp),
+                            watermark.scheduler.clone(),
+                            Codec::H264,
+                            watermark.payload_type,
+                            1_200,
+                        )
+                    } else {
+                        let sdp =
+                            build_reviewed_static_sdp(device.ip, &route.path, media.as_ref())?;
+                        RtspStreamSource::from_media(
+                            format!("{}:{:?}", device.device_id, plan.stream),
+                            Arc::<[u8]>::from(sdp),
+                            Arc::clone(&media),
+                            128,
+                            1_200,
+                        )
+                    }
                     .map_err(|source| runtime_error(source.code, source.message))?;
                     routes.insert(
                         route.path.clone(),
@@ -273,7 +314,9 @@ impl ProtocolRuntime {
                     .push(handle.local_addr().to_string());
                 runtime.rtsp.push(RtspEndpoint {
                     device_id: device.device_id.clone(),
-                    bitrate_bps: media.actual_bitrate_bps(),
+                    bitrate_bps: watermark_source
+                        .as_ref()
+                        .map_or_else(|| media.actual_bitrate_bps(), |source| source.bitrate_bps),
                     handle,
                 });
             }
@@ -363,6 +406,9 @@ impl ProtocolRuntime {
             if let Err(source) = endpoint.handle.stop(SERVICE_STOP_TIMEOUT).await {
                 first_error.get_or_insert_with(|| runtime_error(source.code, source.message));
             }
+        }
+        if let Some(hub) = self.watermark_media.take() {
+            hub.stop(SERVICE_STOP_TIMEOUT).await;
         }
         while let Some(task) = self.http.pop() {
             if let Err(source) = task.stop().await {
@@ -1452,6 +1498,53 @@ fn build_reviewed_static_sdp(
     let pps = media.parameter_set(ParameterSetKind::Pps).ok_or_else(|| {
         runtime_error("device_simulator.rtsp.pps_missing", "media pack has no PPS")
     })?;
+    build_reviewed_sdp_body(
+        device_ip,
+        route,
+        payload_type,
+        clock_rate,
+        "64001f",
+        sps,
+        pps,
+    )
+}
+
+fn build_reviewed_sdp(
+    device_ip: Ipv4Addr,
+    route: &str,
+    payload_type: u8,
+    clock_rate: u32,
+    sps: &[u8],
+    pps: &[u8],
+) -> Result<Vec<u8>, ProtocolRuntimeError> {
+    if sps.len() < 4 || sps[0] & 0x1f != 7 || pps.is_empty() || pps[0] & 0x1f != 8 {
+        return Err(runtime_error(
+            "device_simulator.rtsp.parameter_sets_invalid",
+            "H.264 SDP requires valid SPS and PPS NAL units",
+        ));
+    }
+    let profile_level_id = format!("{:02x}{:02x}{:02x}", sps[1], sps[2], sps[3]);
+    build_reviewed_sdp_body(
+        device_ip,
+        route,
+        payload_type,
+        clock_rate,
+        &profile_level_id,
+        sps,
+        pps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_reviewed_sdp_body(
+    device_ip: Ipv4Addr,
+    route: &str,
+    payload_type: u8,
+    clock_rate: u32,
+    profile_level_id: &str,
+    sps: &[u8],
+    pps: &[u8],
+) -> Result<Vec<u8>, ProtocolRuntimeError> {
     // Keep the SDP shape emitted by the legacy IPCRtsp server, including its
     // advertised metadata track. The legacy capture also contains no PT 107
     // metadata RTP; the service accepts that track's SETUP but sends video.
@@ -1463,7 +1556,7 @@ fn build_reviewed_static_sdp(
     let control_url = format!("rtsp://{device_ip}{control_route}");
     let metadata_url = format!("rtsp://{device_ip}/media/video1/metadata");
     let body = format!(
-        "v=0\r\no=- 1001 1 IN IP4 {device_ip}\r\ns=VCP IPC Realtime stream\r\nm=video 0 RTP/AVP {payload_type}\r\nc=IN IP4 {device_ip}\r\na=control:{control_url}\r\na=rtpmap:{payload_type} H264/{clock_rate}\r\na=fmtp:{payload_type} profile-level-id=64001f; packetization-mode=1; sprop-parameter-sets={},{}\r\na=recvonly\r\nm=application 0 RTP/AVP 107\r\nc=IN IP4 {device_ip}\r\na=control:{metadata_url}\r\na=rtpmap:107 vnd.onvif.metadata/90000\r\na=fmtp:107 DecoderTag=h3c-v3 RTCP=0\r\na=recvonly\r\n",
+        "v=0\r\no=- 1001 1 IN IP4 {device_ip}\r\ns=VCP IPC Realtime stream\r\nm=video 0 RTP/AVP {payload_type}\r\nc=IN IP4 {device_ip}\r\na=control:{control_url}\r\na=rtpmap:{payload_type} H264/{clock_rate}\r\na=fmtp:{payload_type} profile-level-id={profile_level_id}; packetization-mode=1; sprop-parameter-sets={},{}\r\na=recvonly\r\nm=application 0 RTP/AVP 107\r\nc=IN IP4 {device_ip}\r\na=control:{metadata_url}\r\na=rtpmap:107 vnd.onvif.metadata/90000\r\na=fmtp:107 DecoderTag=h3c-v3 RTCP=0\r\na=recvonly\r\n",
         BASE64_STANDARD.encode(sps),
         BASE64_STANDARD.encode(pps),
     );
@@ -1524,6 +1617,40 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read_test_rtsp_response(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            assert!(
+                response.len() < 64 * 1024,
+                "RTSP response headers are bounded"
+            );
+            response.push(
+                tokio::time::timeout(Duration::from_secs(5), stream.read_u8())
+                    .await
+                    .expect("RTSP response header timed out")
+                    .unwrap(),
+            );
+        }
+        let headers = String::from_utf8_lossy(&response);
+        let body_length = headers
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Content-Length:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        let header_length = response.len();
+        response.resize(header_length + body_length, 0);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.read_exact(&mut response[header_length..]),
+        )
+        .await
+        .expect("RTSP response body timed out")
+        .unwrap();
+        response
+    }
 
     fn profile(id: FirstReleaseProfileId) -> DeviceProfileV1 {
         DeviceProfileV1 {
@@ -1800,7 +1927,8 @@ mod tests {
 
     #[test]
     fn nvr_subscription_response_echoes_platform_port_and_reassigns_id() {
-        let learned: SharedLearnedAlarmEndpoint = std::sync::Arc::new(parking_lot::RwLock::new(None));
+        let learned: SharedLearnedAlarmEndpoint =
+            std::sync::Arc::new(parking_lot::RwLock::new(None));
         // POST subscription carrying the platform's alarm receiver port.
         let post = request(
             HttpMethod::Post,
@@ -1835,7 +1963,8 @@ mod tests {
 
     #[test]
     fn subscription_learning_accepts_any_advertised_port_and_captures_the_endpoint() {
-        let learned: SharedLearnedAlarmEndpoint = std::sync::Arc::new(parking_lot::RwLock::new(None));
+        let learned: SharedLearnedAlarmEndpoint =
+            std::sync::Arc::new(parking_lot::RwLock::new(None));
         // PUT renew echoes the subscription ID from the URL, not a random one.
         let put = request(
             HttpMethod::Put,
@@ -1891,7 +2020,10 @@ mod tests {
             None,
             b"{\"IPAddress\":\"0.0.0.0\",\"Port\":30000}",
         );
-        assert_eq!(learn_subscription_endpoint(&unspecified, &learned), Some(30000));
+        assert_eq!(
+            learn_subscription_endpoint(&unspecified, &learned),
+            Some(30000)
+        );
         let endpoint = learned.read().clone().unwrap();
         assert_eq!(endpoint.host, None);
         assert_eq!(endpoint.duration_secs, None);
@@ -2008,6 +2140,7 @@ mod tests {
                     DeviceSimulatorStreamKind::Third,
                 ],
                 audio_enabled: false,
+                time_watermark_enabled: true,
             },
         };
         let preview = crate::device_simulator::api::preview_devices(&request).unwrap();
@@ -2052,13 +2185,56 @@ mod tests {
         rtsp.write_all(b"OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n")
             .await
             .unwrap();
-        let mut rtsp_response = [0_u8; 512];
-        let read = rtsp.read(&mut rtsp_response).await.unwrap();
-        assert!(String::from_utf8_lossy(&rtsp_response[..read]).contains("RTSP/1.0 200 OK"));
+        let rtsp_response = read_test_rtsp_response(&mut rtsp).await;
+        assert!(String::from_utf8_lossy(&rtsp_response).contains("RTSP/1.0 200 OK"));
         let stats = runtime.stats();
         assert_eq!(stats.active_rtsp_clients, 1);
-        assert!(stats.bytes_sent >= read as u64);
+        assert!(stats.bytes_sent >= rtsp_response.len() as u64);
         assert!(stats.outbound_bitrate_kbps > 0);
+
+        rtsp.write_all(b"DESCRIBE rtsp://127.0.0.1/media/video1 RTSP/1.0\r\nCSeq: 2\r\n\r\n")
+            .await
+            .unwrap();
+        let describe = read_test_rtsp_response(&mut rtsp).await;
+        let describe = String::from_utf8_lossy(&describe);
+        assert!(describe.contains("sprop-parameter-sets="));
+        assert!(describe.contains("profile-level-id="));
+
+        rtsp.write_all(b"SETUP rtsp://127.0.0.1/media/video1/video RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n")
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&read_test_rtsp_response(&mut rtsp).await)
+                .contains("RTSP/1.0 200 OK")
+        );
+        rtsp.write_all(b"PLAY rtsp://127.0.0.1/media/video1 RTSP/1.0\r\nCSeq: 4\r\n\r\n")
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&read_test_rtsp_response(&mut rtsp).await)
+                .contains("RTSP/1.0 200 OK")
+        );
+        let mut saw_sps = false;
+        for _ in 0..8 {
+            let mut interleaved = [0u8; 4];
+            tokio::time::timeout(Duration::from_secs(5), rtsp.read_exact(&mut interleaved))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!((interleaved[0], interleaved[1]), (b'$', 0));
+            let packet_length = u16::from_be_bytes([interleaved[2], interleaved[3]]) as usize;
+            let mut packet = vec![0u8; packet_length];
+            tokio::time::timeout(Duration::from_secs(5), rtsp.read_exact(&mut packet))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(packet.len() > 12);
+            saw_sps |= packet[12] & 0x1f == 7;
+            if saw_sps {
+                break;
+            }
+        }
+        assert!(saw_sps, "first encoded keyframe carries its active SPS");
 
         drop(rtsp);
         runtime.stop().await.unwrap();
@@ -2090,6 +2266,36 @@ mod tests {
         assert!(rendered.contains("IPC3615SB-ADF28KM-I0"));
         assert!(rendered.contains("rtsp://192.0.2.10:554/media/video1"));
         assert!(!rendered.contains("206.2.18.165"));
+    }
+
+    #[test]
+    fn reviewed_sdp_derives_profile_level_id_from_the_active_encoder_sps() {
+        let sdp = build_reviewed_sdp(
+            "192.0.2.10".parse().unwrap(),
+            "/media/video1",
+            96,
+            90_000,
+            &[0x67, 0x42, 0xc0, 0x1f],
+            &[0x68, 0xce, 0x06],
+        )
+        .unwrap();
+        let sdp = String::from_utf8(sdp).unwrap();
+        assert!(sdp.contains("profile-level-id=42c01f"));
+        assert!(sdp.contains("sprop-parameter-sets=Z0LAHw==,aM4G"));
+    }
+
+    #[test]
+    fn reviewed_sdp_rejects_invalid_encoder_parameter_sets() {
+        let error = build_reviewed_sdp(
+            "192.0.2.10".parse().unwrap(),
+            "/media/video1",
+            96,
+            90_000,
+            &[0x68, 0x42, 0xc0, 0x1f],
+            &[0x68],
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "device_simulator.rtsp.parameter_sets_invalid");
     }
 
     #[test]

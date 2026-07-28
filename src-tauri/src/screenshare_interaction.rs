@@ -151,7 +151,6 @@ pub struct SessionHelloPayload {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct InteractionFeatures {
     pub annotations_enabled: bool,
-    pub shared_freeze_enabled: bool,
     pub control_requests_enabled: bool,
     pub keyboard_control_enabled: bool,
 }
@@ -169,7 +168,6 @@ pub enum ControlState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InteractionConfig {
     pub annotations_enabled: bool,
-    pub shared_freeze_enabled: bool,
     pub control_requests_enabled: bool,
     pub keyboard_control_enabled: bool,
 }
@@ -178,7 +176,6 @@ impl Default for InteractionConfig {
     fn default() -> Self {
         Self {
             annotations_enabled: true,
-            shared_freeze_enabled: true,
             control_requests_enabled: false,
             keyboard_control_enabled: false,
         }
@@ -241,14 +238,6 @@ pub struct ControlStatePayload {
 pub struct AnnotationAppliedPayload {
     pub operation: String,
     pub document: AnnotationDocument,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ViewStatePayload {
-    pub document: AnnotationDocument,
-    pub control: ControlStateSnapshot,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub snapshot_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -319,8 +308,8 @@ struct InteractionInner {
     clients: HashMap<String, InteractionClientMetadata>,
     client_connections: HashMap<String, usize>,
     last_client_seq: HashMap<String, u64>,
+    latest_frame_info: Option<FrameInfo>,
     latest_frame: Option<StoredFrame>,
-    frozen_frame: Option<StoredFrame>,
     next_frame_id: u64,
     control: ControlRuntime,
 }
@@ -366,8 +355,8 @@ impl InteractionState {
                 clients: HashMap::new(),
                 client_connections: HashMap::new(),
                 last_client_seq: HashMap::new(),
+                latest_frame_info: None,
                 latest_frame: None,
-                frozen_frame: None,
                 next_frame_id: 0,
                 control: ControlRuntime {
                     state: control_state,
@@ -519,7 +508,6 @@ impl InteractionState {
                     client_id: client_id.to_string(),
                     features: InteractionFeatures {
                         annotations_enabled: inner.config.annotations_enabled,
-                        shared_freeze_enabled: inner.config.shared_freeze_enabled,
                         control_requests_enabled: inner.config.control_requests_enabled,
                         keyboard_control_enabled: inner.config.keyboard_control_enabled,
                     },
@@ -601,12 +589,6 @@ impl InteractionState {
             return Err(ProtocolError::new(
                 "annotations_disabled",
                 "annotations are disabled by the host",
-            ));
-        }
-        if message_type.starts_with("view.") && !inner.config.shared_freeze_enabled {
-            return Err(ProtocolError::new(
-                "shared_freeze_disabled",
-                "shared freeze is disabled by the host",
             ));
         }
         let result = match message_type {
@@ -755,43 +737,6 @@ impl InteractionState {
                 bump_revision(&mut inner);
                 Some(annotation_message(&inner, "update"))
             }
-            "view.freeze" => {
-                let frame = inner.latest_frame.clone().ok_or_else(|| {
-                    ProtocolError::new("frame_unavailable", "no captured frame is available yet")
-                })?;
-                if inner.control.pending.is_some() || inner.control.controller.is_some() {
-                    inner.control.pending = None;
-                    inner.control.controller = None;
-                    inner.control.state = if inner.config.control_requests_enabled {
-                        ControlState::Revoked
-                    } else {
-                        ControlState::Disabled
-                    };
-                    bump_revision(&mut inner);
-                }
-                if inner.document.mode != ViewMode::Frozen {
-                    inner.frozen_frame = Some(frame.clone());
-                    inner.document.mode = ViewMode::Frozen;
-                    inner.document.frozen_frame_id = Some(frame.frame_id);
-                    bump_revision(&mut inner);
-                }
-                Some(view_message(&inner))
-            }
-            "view.resume" => {
-                if inner.document.mode != ViewMode::Live {
-                    inner.frozen_frame = None;
-                    inner.document.mode = ViewMode::Live;
-                    inner.document.frozen_frame_id = None;
-                    // A resumed live stream invalidates persistent marks; laser
-                    // points are ephemeral and may remain until their TTL.
-                    inner
-                        .document
-                        .shapes
-                        .retain(|shape| shape.kind == AnnotationKind::Laser);
-                    bump_revision(&mut inner);
-                }
-                Some(view_message(&inner))
-            }
             _ => {
                 return Err(ProtocolError::new(
                     "unknown_message_type",
@@ -885,19 +830,23 @@ impl InteractionState {
                 "this client is not the active controller",
             ));
         }
-        if let Some(seq) = envelope.client_seq {
-            if inner
-                .last_client_seq
-                .get(client_id)
-                .is_some_and(|last| seq <= *last)
-            {
-                return Err(ProtocolError::new(
-                    "stale_client_seq",
-                    "client_seq must increase for each message",
-                ));
-            }
-            inner.last_client_seq.insert(client_id.to_string(), seq);
+        let seq = envelope.client_seq.ok_or_else(|| {
+            ProtocolError::new(
+                "missing_client_seq",
+                "remote input requires client_seq for acknowledgement correlation",
+            )
+        })?;
+        if inner
+            .last_client_seq
+            .get(client_id)
+            .is_some_and(|last| seq <= *last)
+        {
+            return Err(ProtocolError::new(
+                "stale_client_seq",
+                "client_seq must increase for each message",
+            ));
         }
+        inner.last_client_seq.insert(client_id.to_string(), seq);
         Ok(())
     }
 
@@ -1046,9 +995,9 @@ impl InteractionState {
         inner.document.frozen_frame_id = None;
         inner.document.shapes.clear();
         // The previous JPEG belongs to the old coordinate space. Keep no
-        // stale frame eligible for a new shared freeze while capture recovers.
+        // stale frame eligible for compatibility MJPEG while capture recovers.
+        inner.latest_frame_info = None;
         inner.latest_frame = None;
-        inner.frozen_frame = None;
         let had_control = inner.control.pending.is_some() || inner.control.controller.is_some();
         inner.control.pending = None;
         inner.control.controller = None;
@@ -1085,27 +1034,49 @@ impl InteractionState {
     }
 
     pub fn record_frame_with_metadata(&self, bytes: Arc<Bytes>, width: u32, height: u32) -> u64 {
+        let frame_id = self.record_frame_metadata(width, height);
+        let _ = self.record_frame_bytes(frame_id, bytes);
+        frame_id
+    }
+
+    /// Record capture identity and dimensions independently from compatibility
+    /// JPEG production. H.264-only sessions still need current source metadata
+    /// for pointer mapping, status, and annotation coordinates.
+    pub fn record_frame_metadata(&self, width: u32, height: u32) -> u64 {
         let mut inner = self.inner.lock().expect("interaction state lock poisoned");
         inner.next_frame_id = inner.next_frame_id.saturating_add(1).max(1);
         let frame_id = inner.next_frame_id;
-        inner.latest_frame = Some(StoredFrame {
+        inner.latest_frame_info = Some(FrameInfo {
             frame_id,
             source_epoch: inner.document.source_epoch,
             captured_at_ms: now_ms(),
             width,
             height,
-            bytes,
         });
         frame_id
     }
 
-    pub fn frozen_frame(&self, frame_id: u64) -> Option<Arc<Bytes>> {
-        let inner = self.inner.lock().ok()?;
-        inner
-            .frozen_frame
+    /// Attach a compatibility JPEG to the capture metadata it was encoded
+    /// from. A stale encode is ignored after a source/frame transition.
+    pub fn record_frame_bytes(&self, frame_id: u64, bytes: Arc<Bytes>) -> bool {
+        let mut inner = self.inner.lock().expect("interaction state lock poisoned");
+        let Some(info) = inner
+            .latest_frame_info
             .as_ref()
-            .filter(|frame| frame.frame_id == frame_id)
-            .map(|frame| frame.bytes.clone())
+            .filter(|info| info.frame_id == frame_id)
+            .cloned()
+        else {
+            return false;
+        };
+        inner.latest_frame = Some(StoredFrame {
+            frame_id: info.frame_id,
+            source_epoch: info.source_epoch,
+            captured_at_ms: info.captured_at_ms,
+            width: info.width,
+            height: info.height,
+            bytes,
+        });
+        true
     }
 
     /// Return the newest encoded frame for a one-shot viewer request. The
@@ -1119,15 +1090,10 @@ impl InteractionState {
     }
 
     pub fn latest_frame_info(&self) -> Option<FrameInfo> {
-        self.inner.lock().ok().and_then(|inner| {
-            inner.latest_frame.as_ref().map(|frame| FrameInfo {
-                frame_id: frame.frame_id,
-                source_epoch: frame.source_epoch,
-                captured_at_ms: frame.captured_at_ms,
-                width: frame.width,
-                height: frame.height,
-            })
-        })
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.latest_frame_info.clone())
     }
 }
 
@@ -1368,28 +1334,6 @@ fn annotation_message(inner: &InteractionInner, operation: &str) -> ServerEnvelo
                 document,
             })
             .expect("annotation payload is serializable"),
-        ),
-    )
-}
-
-fn view_message(inner: &InteractionInner) -> ServerEnvelope {
-    let document = inner.document.clone();
-    let control = control_snapshot_locked(inner);
-    let snapshot_url = document
-        .frozen_frame_id
-        .map(|frame_id| format!("/snapshot/{frame_id}"));
-    ServerEnvelope::new(
-        "view.state",
-        document.session_id,
-        document.source_epoch,
-        Some(document.revision),
-        Some(
-            serde_json::to_value(ViewStatePayload {
-                document,
-                control,
-                snapshot_url,
-            })
-            .expect("view payload is serializable"),
         ),
     )
 }
@@ -1693,33 +1637,38 @@ mod tests {
     }
 
     #[test]
-    fn freeze_requires_a_frame_and_snapshot_route_identity_is_stable() {
+    fn removed_shared_freeze_messages_are_rejected() {
         let state = state();
         register(&state, "a");
+        state.record_frame(Arc::new(Bytes::from_static(b"jpeg")));
         let error = state
             .process("a", envelope("view.freeze", 42, 1, None))
             .unwrap_err();
-        assert_eq!(error.code, "frame_unavailable");
-        let frame_id = state.record_frame(Arc::new(Bytes::from_static(b"jpeg")));
-        assert_eq!(frame_id, 1);
+        assert_eq!(error.code, "unknown_message_type");
+        assert_eq!(state.snapshot().mode, ViewMode::Live);
+        assert_eq!(state.snapshot().frozen_frame_id, None);
+    }
+
+    #[test]
+    fn capture_metadata_advances_without_jpeg_and_rejects_stale_attachment() {
+        let state = state();
+        let first = state.record_frame_metadata(1920, 1080);
+        let info = state.latest_frame_info().unwrap();
+        assert_eq!(
+            (info.frame_id, info.width, info.height),
+            (first, 1920, 1080)
+        );
+        assert!(state.latest_frame_bytes().is_none());
+
+        let second = state.record_frame_metadata(1280, 720);
+        assert!(second > first);
+        assert!(!state.record_frame_bytes(first, Arc::new(Bytes::from_static(b"stale"))));
+        assert!(state.latest_frame_bytes().is_none());
+        assert!(state.record_frame_bytes(second, Arc::new(Bytes::from_static(b"current"))));
         assert_eq!(
             state.latest_frame_bytes().unwrap().as_ref().as_ref(),
-            b"jpeg"
+            b"current"
         );
-        let event = state
-            .process("a", envelope("view.freeze", 42, 1, None))
-            .unwrap()
-            .unwrap();
-        assert_eq!(state.snapshot().mode, ViewMode::Frozen);
-        assert_eq!(state.snapshot().frozen_frame_id, Some(1));
-        assert_eq!(state.frozen_frame(1).unwrap().as_ref().as_ref(), b"jpeg");
-        assert!(state.frozen_frame(2).is_none());
-        assert_eq!(event.message_type, "view.state");
-        state
-            .process("a", envelope("view.resume", 42, 1, None))
-            .unwrap();
-        assert_eq!(state.snapshot().mode, ViewMode::Live);
-        assert!(state.frozen_frame(1).is_none());
     }
 
     #[test]
@@ -1788,7 +1737,7 @@ mod tests {
     }
 
     #[test]
-    fn source_epoch_change_clears_document_and_freeze() {
+    fn source_epoch_change_clears_document_and_frame_cache() {
         let state = state();
         register(&state, "a");
         state.record_frame(Arc::new(Bytes::from_static(b"jpeg")));
@@ -1803,16 +1752,13 @@ mod tests {
                 ),
             )
             .unwrap();
-        state
-            .process("a", envelope("view.freeze", 42, 1, None))
-            .unwrap();
         let event = state.bump_source_epoch();
         assert_eq!(event.message_type, "source.changed");
         let document = state.snapshot();
         assert_eq!(document.source_epoch, 2);
         assert_eq!(document.mode, ViewMode::Live);
         assert!(document.shapes.is_empty());
-        assert!(state.frozen_frame(1).is_none());
+        assert!(state.latest_frame_bytes().is_none());
     }
 
     #[test]
@@ -1924,37 +1870,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_freeze_revokes_controller_before_publishing_frozen_state() {
-        let state = InteractionState::new_with_config(
-            42,
-            InteractionConfig {
-                control_requests_enabled: true,
-                ..InteractionConfig::default()
-            },
-        );
-        register(&state, "a");
-        state.record_frame(Arc::new(Bytes::from_static(b"jpeg")));
-        state
-            .process("a", envelope("control.request", 42, 1, None))
-            .unwrap();
-        let request_id = state
-            .pending_control_request()
-            .expect("pending request")
-            .request_id;
-        state.respond_control_request(&request_id, true).unwrap();
-
-        let event = state
-            .process("a", envelope("view.freeze", 42, 1, None))
-            .unwrap()
-            .expect("view state event");
-
-        assert_eq!(state.control_snapshot().state, ControlState::Revoked);
-        assert!(!state.is_controller("a", 42, 1));
-        let payload = event.payload.expect("view state payload");
-        assert_eq!(payload["control"]["state"], "revoked");
-    }
-
-    #[test]
     fn input_authorization_rejects_ungranted_stale_and_replayed_messages() {
         let state = InteractionState::new_with_config(
             42,
@@ -1995,6 +1910,14 @@ mod tests {
             state.authorize_input("a", &stale_source).unwrap_err().code,
             "source_epoch_mismatch"
         );
+        let missing_sequence = envelope("input.pointer_move", 42, 1, None);
+        assert_eq!(
+            state
+                .authorize_input("a", &missing_sequence)
+                .unwrap_err()
+                .code,
+            "missing_client_seq"
+        );
         state.authorize_input("a", &input).unwrap();
         assert_eq!(
             state.authorize_input("a", &input).unwrap_err().code,
@@ -2018,12 +1941,13 @@ mod tests {
             .unwrap();
         let request_id = disabled.pending_control_request().unwrap().request_id;
         disabled.respond_control_request(&request_id, true).unwrap();
-        let key = envelope(
+        let mut key = envelope(
             "input.key",
             42,
             1,
             Some(serde_json::json!({ "code": "KeyA", "pressed": true })),
         );
+        key.client_seq = Some(1);
         assert_eq!(
             disabled.authorize_input("a", &key).unwrap_err().code,
             "keyboard_control_disabled"
@@ -2046,8 +1970,10 @@ mod tests {
         enabled
             .authorize_input("a", &key)
             .expect("keyboard should be authorized when enabled");
+        let mut release_all = envelope("input.release_all", 42, 1, None);
+        release_all.client_seq = Some(2);
         enabled
-            .authorize_input("a", &envelope("input.release_all", 42, 1, None))
+            .authorize_input("a", &release_all)
             .expect("release-all should be authorized");
     }
 }

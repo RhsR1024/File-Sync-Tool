@@ -35,6 +35,7 @@ pub struct DeviceSimulatorSettings {
     pub last_http_port: u16,
     pub last_rtsp_ports: RtspPorts,
     pub last_media_theme_id: String,
+    pub last_time_watermark_enabled: bool,
     pub auto_check_asset_updates: bool,
     pub manage_firewall: bool,
 }
@@ -56,6 +57,7 @@ impl Default for DeviceSimulatorSettings {
             last_http_port: 81,
             last_rtsp_ports: RtspPorts::default(),
             last_media_theme_id: DEFAULT_MEDIA_THEME_ID.into(),
+            last_time_watermark_enabled: true,
             auto_check_asset_updates: true,
             manage_firewall: true,
         }
@@ -1312,7 +1314,20 @@ mod tests {
     #[test]
     fn device_simulator_defaults_alarm_receiver_port_to_the_observed_ums_port() {
         let value = serde_json::to_value(DeviceSimulatorSettings::default()).unwrap();
-        assert_eq!(value["last_alarm_receiver_port"], DEFAULT_ALARM_RECEIVER_PORT);
+        assert_eq!(
+            value["last_alarm_receiver_port"],
+            DEFAULT_ALARM_RECEIVER_PORT
+        );
+    }
+
+    #[test]
+    fn device_simulator_legacy_settings_default_time_watermark_on() {
+        let settings: DeviceSimulatorSettings = serde_json::from_value(serde_json::json!({
+            "last_media_theme_id": DEFAULT_MEDIA_THEME_ID
+        }))
+        .unwrap();
+
+        assert!(settings.last_time_watermark_enabled);
     }
 
     #[test]

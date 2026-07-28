@@ -2606,6 +2606,7 @@ mod tests {
                     crate::device_simulator::api::DeviceSimulatorStreamKind::Third,
                 ],
                 audio_enabled: false,
+                time_watermark_enabled: true,
             },
         };
         let preview = preview_devices(&request).unwrap();

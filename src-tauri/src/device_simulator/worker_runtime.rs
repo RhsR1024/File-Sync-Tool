@@ -281,7 +281,9 @@ impl WorkerServiceRuntime for SystemWorkerServices {
             port: learned.as_ref().map(|endpoint| endpoint.port),
             duration_secs: learned.as_ref().and_then(|endpoint| endpoint.duration_secs),
             learned_at_ms: learned.as_ref().map(|endpoint| endpoint.learned_at_ms),
-            expires_at_ms: learned.as_ref().and_then(LearnedAlarmEndpoint::expires_at_ms),
+            expires_at_ms: learned
+                .as_ref()
+                .and_then(LearnedAlarmEndpoint::expires_at_ms),
             overridden: !alarms.follows_platform_subscription(),
         })
     }
@@ -1440,6 +1442,7 @@ mod tests {
                     DeviceSimulatorStreamKind::Third,
                 ],
                 audio_enabled: false,
+                time_watermark_enabled: true,
             },
         }
     }

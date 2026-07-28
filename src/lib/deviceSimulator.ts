@@ -84,6 +84,7 @@ export interface DeviceSimulatorSettings {
   last_http_port: number;
   last_rtsp_ports: RtspPorts;
   last_media_theme_id: string;
+  last_time_watermark_enabled: boolean;
   auto_check_asset_updates: boolean;
   manage_firewall: boolean;
 }
@@ -109,6 +110,7 @@ export interface StreamRuntimeConfig {
   transport: 'tcp_interleaved';
   enabled_streams: DeviceSimulatorStreamKind[];
   audio_enabled: false;
+  time_watermark_enabled: boolean;
 }
 
 export interface SimulatorStartRequest {

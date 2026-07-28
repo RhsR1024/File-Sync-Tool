@@ -27,7 +27,9 @@ const BLOCKING_PROBE_LIMIT: usize = 128;
 const RESCAN_ATTEMPTS: usize = 2;
 const TCP_PROBE_PORTS: &[u16] = &[80, 443, 22, 53, 135, 139, 445, 3389];
 
-async fn first_successful_probe<T>(probes: Vec<Pin<Box<dyn Future<Output = Option<T>> + Send>>>) -> Option<T>
+async fn first_successful_probe<T>(
+    probes: Vec<Pin<Box<dyn Future<Output = Option<T>> + Send>>>,
+) -> Option<T>
 where
     T: Send + 'static,
 {
@@ -133,14 +135,13 @@ fn tcp_probe(ip: Ipv4Addr, port: u16, timeout: Duration) -> ProbeFuture {
         let addr = SocketAddr::from((ip, port));
         let started = Instant::now();
 
-        let reachable = match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr))
-            .await
-        {
-            Ok(Ok(_stream)) => true,
-            // A refusal still proves a TCP stack is answering at that address.
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => true,
-            _ => false,
-        };
+        let reachable =
+            match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+                Ok(Ok(_stream)) => true,
+                // A refusal still proves a TCP stack is answering at that address.
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => true,
+                _ => false,
+            };
 
         reachable.then(|| ProbeHit {
             method: ProbeMethod::Tcp,
@@ -176,7 +177,9 @@ async fn probe_host(
         // The host is up, so borrow a real round-trip figure from ICMP.
         let latency = icmp_probe(ip, timeout_ms, ctx.blocking.clone()).await;
         return Some(ProbeHit {
-            latency_ms: latency.and_then(|probe| probe.latency_ms).or(hit.latency_ms),
+            latency_ms: latency
+                .and_then(|probe| probe.latency_ms)
+                .or(hit.latency_ms),
             ..hit
         });
     }
@@ -925,7 +928,7 @@ pub async fn send_wol(request: WolRequest) -> Result<WolResult, String> {
 mod tests {
     use super::{
         first_successful_probe, normalize_requested_ports, parse_prefix, top_port_counts,
-        validated_ping_target, PortCount, PingResult, ProbeHit, ProbeMethod,
+        validated_ping_target, PingResult, PortCount, ProbeHit, ProbeMethod,
     };
     use std::pin::Pin;
     use std::time::{Duration, Instant};

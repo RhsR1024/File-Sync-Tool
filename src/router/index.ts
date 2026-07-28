@@ -72,8 +72,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../pages/ToolsHubPage.vue'),
   },
   {
+    path: '/tools/ums-initial-password',
+    component: () => import('../pages/UmsInitialPasswordPage.vue'),
+  },
+  {
     path: '/tools/framework-password',
-    component: () => import('../pages/FrameworkPasswordPage.vue'),
+    redirect: '/tools/ums-initial-password',
   },
   {
     path: '/tools/appliance-ssh',

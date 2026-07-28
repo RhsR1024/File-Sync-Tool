@@ -68,6 +68,8 @@ defineOptions({ name: 'ScreenSharePage' });
 
 const { t } = useI18n();
 const AUTO_REFRESH_SECONDS = Math.round(LAN_SHARE_STATUS_REFRESH_INTERVAL_MS / 1000);
+/** 实验档帧率，必须与 Rust 的 `MAX_CAPTURE_FPS` 一致，否则启动会被拒绝。 */
+const EXPERIMENTAL_HIGH_FPS = 60;
 
 const monitors = ref<MonitorInfo[]>([]);
 const interfaces = ref<NetworkInterfaceInfo[]>([]);
@@ -80,12 +82,17 @@ const passwordEnabled = ref(false);
 const password = ref('');
 const quality = ref(70);
 const fps = ref(15);
+// 60 FPS 是与 30 FPS 分档对比的实验项，默认关闭：默认档位要等目标机型的
+// capture-to-display、资源和扇出数据出来后再决定。
+const highFpsExperiment = ref(false);
 const showCursor = ref(true);
 const backendMode = ref<ScreenShareBackendMode>('auto');
 const mediaTransport = ref<ScreenShareMediaTransport>('auto');
 const autoStart = ref(false);
 const controlRequestsEnabled = ref(false);
 const keyboardControlEnabled = ref(false);
+
+const effectiveFps = computed(() => (highFpsExperiment.value ? EXPERIMENTAL_HIGH_FPS : fps.value));
 
 const isActive = ref(false);
 const isStarting = ref(false);
@@ -107,23 +114,90 @@ const isRespondingControl = ref(false);
 const isRevokingControl = ref(false);
 
 function emptyMediaMetrics(): ScreenShareMediaMetrics {
+  const emptyDuration = () => ({
+    sample_count: 0,
+    total_sample_count: 0,
+    retained_sample_count: 0,
+    sample_window_capacity: 0,
+    measurement_scope: 'rolling_last_n_samples',
+    p50_us: 0,
+    p95_us: 0,
+    p99_us: 0,
+    max_us: 0,
+  });
+  const emptyByteWindow = () => ({
+    sample_count: 0,
+    total_sample_count: 0,
+    retained_sample_count: 0,
+    sample_window_capacity: 0,
+    measurement_scope: 'rolling_last_n_samples',
+    total_bytes: 0,
+    retained_total_bytes: 0,
+    p50_bytes: 0,
+    p95_bytes: 0,
+    p99_bytes: 0,
+    max_bytes: 0,
+  });
   return {
+    capture_frame_count: 0,
+    mjpeg_encoded_frame_count: 0,
+    mjpeg_encoded_bytes: 0,
+    outbound_bytes_total: 0,
+    capture_fps_actual: 0,
+    mjpeg_fps_actual: 0,
+    mjpeg_consumer_count: 0,
+    jpeg_active: false,
+    jpeg_enable_count: 0,
+    jpeg_disable_count: 0,
+    jpeg_fallback_reason: null,
+    latest_capture: null,
+    frame_wait: emptyDuration(),
+    capture_queue_age: emptyDuration(),
+    gpu_readback: emptyDuration(),
+    black_frame_classification: emptyDuration(),
+    jpeg_color_conversion: emptyDuration(),
+    jpeg_encode: emptyDuration(),
+    stream_send_wait: emptyDuration(),
+    outbound_100ms: emptyByteWindow(),
+    outbound_1s: emptyByteWindow(),
+    stream_send_timeout_count: 0,
+    stream_disconnect_count: 0,
     encoded_frame_count: 0,
     jpeg_sample_count: 0,
+    jpeg_total_sample_count: 0,
+    jpeg_retained_sample_count: 0,
+    jpeg_sample_window_capacity: 0,
+    jpeg_measurement_scope: 'rolling_last_n_samples',
     jpeg_size_avg_bytes: 0,
     jpeg_size_p50_bytes: 0,
     jpeg_size_p95_bytes: 0,
+    jpeg_size_p99_bytes: 0,
+    jpeg_size_max_bytes: 0,
     first_frame_delay_ms: null,
     frame_age_ms: null,
     slow_client_dropped_frames: 0,
     stream_connection_count: 0,
     stream_first_frame_sample_count: 0,
+    stream_first_frame_total_sample_count: 0,
+    stream_first_frame_retained_sample_count: 0,
+    stream_first_frame_sample_window_capacity: 0,
+    stream_first_frame_measurement_scope: 'rolling_last_n_samples',
     stream_first_frame_avg_ms: null,
+    stream_first_frame_p50_ms: null,
     stream_first_frame_p95_ms: null,
+    stream_first_frame_p99_ms: null,
+    stream_first_frame_max_ms: null,
     stream_reconnect_count: 0,
     stream_reconnect_sample_count: 0,
+    stream_reconnect_total_sample_count: 0,
+    stream_reconnect_retained_sample_count: 0,
+    stream_reconnect_sample_window_capacity: 0,
+    stream_reconnect_measurement_scope: 'rolling_last_n_samples',
     stream_reconnect_avg_ms: null,
+    stream_reconnect_p50_ms: null,
     stream_reconnect_p95_ms: null,
+    stream_reconnect_p99_ms: null,
+    stream_reconnect_max_ms: null,
     fps_actual: 0,
     bitrate_kbps: 0,
   };
@@ -132,6 +206,8 @@ function emptyMediaMetrics(): ScreenShareMediaMetrics {
 const status = ref<ScreenShareStatus>({
   is_active: false,
   viewer_count: 0,
+  viewer_ip_reference_count: 0,
+  active_media_task_count: 0,
   connection_count: 0,
   fps_actual: 0,
   bitrate_kbps: 0,
@@ -154,6 +230,7 @@ const status = ref<ScreenShareStatus>({
   pending_control_request: null,
   desktop_overlay_active: false,
   media_metrics: emptyMediaMetrics(),
+  input_metrics: null,
 });
 
 const annotationDocument = ref<ScreenShareAnnotationDocument>({
@@ -243,6 +320,7 @@ interface SavedSettings {
   password: string;
   quality: number;
   fps: number;
+  highFpsExperiment?: boolean;
   showCursor: boolean;
   backendMode: ScreenShareBackendMode;
   mediaTransport?: ScreenShareMediaTransport;
@@ -265,6 +343,7 @@ async function saveSettings() {
         password: password.value,
         quality: quality.value,
         fps: fps.value,
+        highFpsExperiment: highFpsExperiment.value,
         showCursor: showCursor.value,
         backendMode: backendMode.value,
         mediaTransport: mediaTransport.value,
@@ -293,6 +372,7 @@ async function loadSettings() {
     password.value = saved.password ?? '';
     quality.value = saved.quality ?? 70;
     fps.value = saved.fps ?? 15;
+    highFpsExperiment.value = saved.highFpsExperiment ?? false;
     showCursor.value = saved.showCursor ?? true;
     backendMode.value = saved.backendMode ?? 'auto';
     mediaTransport.value = saved.mediaTransport ?? 'auto';
@@ -315,14 +395,13 @@ function buildScreenShareConfig(): ScreenShareConfig {
     password: passwordEnabled.value && password.value ? password.value : null,
     monitor_index: selectedMonitor.value,
     quality: quality.value,
-    fps: fps.value,
+    fps: effectiveFps.value,
     show_cursor: showCursor.value,
     capture_backend_mode: backendMode.value,
     bind_address: selectedBindAddress.value || '0.0.0.0',
     control_requests_enabled: controlRequestsEnabled.value,
     keyboard_control_enabled: controlRequestsEnabled.value && keyboardControlEnabled.value,
     annotations_enabled: true,
-    shared_freeze_enabled: true,
     transport: mediaTransport.value,
   };
 }
@@ -357,6 +436,16 @@ const mediaTransportOptions = computed(() => [
     description: t('tools.screenShare.mediaTransportH264Desc'),
   },
   {
+    value: 'web_codecs' as const,
+    label: t('tools.screenShare.mediaTransportWebCodecs'),
+    description: t('tools.screenShare.mediaTransportWebCodecsDesc'),
+  },
+  {
+    value: 'web_rtc' as const,
+    label: t('tools.screenShare.mediaTransportWebRtc'),
+    description: t('tools.screenShare.mediaTransportWebRtcDesc'),
+  },
+  {
     value: 'mjpeg' as const,
     label: t('tools.screenShare.mediaTransportMjpeg'),
     description: t('tools.screenShare.mediaTransportMjpegDesc'),
@@ -366,7 +455,11 @@ const mediaTransportOptions = computed(() => [
 const activeTransportLabel = computed(() => (
   status.value.transport === 'mse_h264'
     ? t('tools.screenShare.mediaTransportH264')
-    : t('tools.screenShare.mediaTransportMjpeg')
+    : status.value.transport === 'web_codecs'
+      ? t('tools.screenShare.mediaTransportWebCodecs')
+      : status.value.transport === 'web_rtc'
+        ? t('tools.screenShare.mediaTransportWebRtc')
+        : t('tools.screenShare.mediaTransportMjpeg')
 ));
 
 watch(controlRequestsEnabled, (enabled) => {
@@ -408,6 +501,8 @@ async function stopShare() {
   status.value = {
     is_active: false,
     viewer_count: 0,
+    viewer_ip_reference_count: 0,
+    active_media_task_count: 0,
     connection_count: 0,
     fps_actual: 0,
     bitrate_kbps: 0,
@@ -430,6 +525,7 @@ async function stopShare() {
     pending_control_request: null,
     desktop_overlay_active: false,
     media_metrics: emptyMediaMetrics(),
+    input_metrics: null,
   };
 }
 
@@ -915,7 +1011,7 @@ onUnmounted(() => {
                 <div class="mb-2 flex items-center justify-between">
                   <label class="ss-label">{{ t('tools.screenShare.fps') }}</label>
                   <span class="font-mono text-sm font-semibold text-violet-600">
-                    {{ fps }} <span class="text-xs font-normal text-slate-400">{{ t('tools.screenShare.fpsUnit') }}</span>
+                    {{ effectiveFps }} <span class="text-xs font-normal text-slate-400">{{ t('tools.screenShare.fpsUnit') }}</span>
                   </span>
                 </div>
                 <input
@@ -924,9 +1020,25 @@ onUnmounted(() => {
                   min="5"
                   max="30"
                   step="5"
-                  :disabled="isActive"
+                  :disabled="isActive || highFpsExperiment"
                   class="ss-range w-full"
+                  :class="highFpsExperiment ? 'opacity-50' : ''"
                 >
+                <label
+                  class="mt-2 flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 transition"
+                  :class="isActive ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:border-violet-200 hover:bg-violet-50/40'"
+                >
+                  <input
+                    v-model="highFpsExperiment"
+                    type="checkbox"
+                    :disabled="isActive"
+                    class="mt-0.5 h-4 w-4 accent-violet-600"
+                  >
+                  <span class="min-w-0">
+                    <span class="block text-sm font-medium text-slate-800">{{ t('tools.screenShare.highFpsExperiment') }}</span>
+                    <span class="mt-1 block text-xs leading-5 text-slate-500">{{ t('tools.screenShare.highFpsExperimentDesc') }}</span>
+                  </span>
+                </label>
               </div>
               <div>
                 <div class="mb-2 flex items-center justify-between gap-3">
