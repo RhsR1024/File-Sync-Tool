@@ -14,9 +14,11 @@ mod error_code;
 mod fileshare;
 mod local_exec;
 mod network;
+mod network_probe;
 mod notepad_extensions;
 mod paper_todo;
 mod persist;
+mod portal_login;
 mod remote_package_patch;
 mod scanner;
 mod screenshare;
@@ -361,14 +363,27 @@ fn try_reserve_executor(
     })
 }
 
+/// Whether the copy queue holds work that can start as soon as the executor frees up.
+///
+/// A paused run stays in the queue but is waiting on the user, not on the executor, so
+/// it must not count: treating it as pending would block every scheduled scan until the
+/// user resumes it.
+fn copy_queue_has_ready_items(state: &AppState) -> bool {
+    state.manual_copy_queue.lock().unwrap().iter().any(|item| {
+        item.task_handle.as_ref().map_or(true, |handle| {
+            !state
+                .task_manager
+                .is_run_paused(&handle.task_group_id, &handle.run_id)
+        })
+    })
+}
+
 fn reserve_scan_executor(
     state: &AppState,
     already_running_message: &'static str,
 ) -> Result<ExecutorReservation, String> {
     let _admission = state.executor_admission.lock().unwrap();
-    if state.manual_copy_worker_running.load(Ordering::SeqCst)
-        || !state.manual_copy_queue.lock().unwrap().is_empty()
-    {
+    if state.manual_copy_worker_running.load(Ordering::SeqCst) || copy_queue_has_ready_items(state) {
         return Err("Manual copy queue already in progress".to_string());
     }
     try_reserve_executor(state.executor_active.clone(), state.is_scanning.clone()).ok_or_else(
@@ -1121,9 +1136,46 @@ pub(crate) fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn config_requires_launch_on_startup(config: &AppConfig) -> bool {
+    config.launch_and_auto_scan
+        || config.launch_and_auto_start_file_share
+        || config.portal_login.enabled
+}
+
 #[tauri::command]
 fn get_config(state: State<AppState>) -> AppConfig {
-    state.config.lock().unwrap().clone()
+    config::redact_secrets_for_frontend(state.config.lock().unwrap().clone())
+}
+
+/// How long a graceful exit may take before the process is torn down by force.
+///
+/// All persistence and feature-specific cleanup has completed before this watchdog is
+/// armed. Keeping the remaining window short prevents an immediate manual relaunch from
+/// colliding with a process that has already hidden its window but still owns the
+/// single-instance mutex.
+const EXIT_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Guarantee the process actually dies once exit has been requested.
+///
+/// A worker wedged inside the Windows shell copy engine
+/// (`IFileOperation::PerformOperations` can fail to return after its progress dialog is
+/// force-closed) may keep graceful runtime teardown alive after all windows disappear.
+/// The process then keeps the EXE and single-instance mutex open, so the next launch is
+/// rejected as a duplicate. `TerminateProcess` is only the bounded fallback after the
+/// normal Tauri exit request has had time to complete.
+fn spawn_exit_watchdog() {
+    let _ = std::thread::Builder::new()
+        .name("exit-watchdog".to_string())
+        .spawn(|| {
+            std::thread::sleep(EXIT_WATCHDOG_TIMEOUT);
+            #[cfg(target_os = "windows")]
+            unsafe {
+                use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+                let _ = TerminateProcess(GetCurrentProcess(), 0);
+            }
+            #[cfg(not(target_os = "windows"))]
+            std::process::exit(0);
+        });
 }
 
 #[tauri::command]
@@ -1139,7 +1191,13 @@ async fn confirm_quit(
     .await;
     match cleanup {
         Ok(Ok(())) => {
+            // Copy workers own the only writes still in flight. Signalling them here lets
+            // an in-progress run reach a cancelled terminal state on its own before the
+            // process goes away; a run that cannot react is still recovered on next start,
+            // where task state left mid-flight is loaded back as interrupted.
+            state.should_cancel.store(true, Ordering::SeqCst);
             state.clipboard.shutdown();
+            spawn_exit_watchdog();
             app_handle.exit(0);
             Ok(())
         }
@@ -1310,16 +1368,17 @@ fn cancel_quit(state: State<'_, AppState>) {
 async fn save_config_cmd(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
-    config: AppConfig,
+    mut config: AppConfig,
 ) -> Result<(), String> {
-    config::validate_config(&config)?;
     let previous = state.config.lock().unwrap().clone();
+    config::merge_redacted_portal_password(&mut config.portal_login, &previous.portal_login);
+    config::validate_config(&config)?;
     let mut config = config::normalize_config(config);
     let server_url_changed = previous.update_server_url != config.update_server_url;
     if server_url_changed {
         config.last_update_check_at = None;
     }
-    sync_launch_on_startup(config.launch_and_auto_scan || config.launch_and_auto_start_file_share)?;
+    sync_launch_on_startup(config_requires_launch_on_startup(&config))?;
     *state.config.lock().unwrap() = config.clone();
     config::save_config(&app_handle, &config)?;
     updater::commands::handle_config_changed(&app_handle, state.inner(), server_url_changed);
@@ -1355,7 +1414,7 @@ async fn update_app_config(
     if server_url_changed {
         next.last_update_check_at = None;
     }
-    sync_launch_on_startup(next.launch_and_auto_scan || next.launch_and_auto_start_file_share)?;
+    sync_launch_on_startup(config_requires_launch_on_startup(&next))?;
     *state.config.lock().unwrap() = next.clone();
     config::save_config(&app_handle, &next)?;
     updater::commands::handle_config_changed(&app_handle, state.inner(), server_url_changed);
@@ -1386,10 +1445,27 @@ async fn scan_now(
         state.should_skip_current.clone(),
         state.is_paused.clone(),
         state.scan_queue_removals.clone(),
+        copy_queue_pending_probe(state.inner()),
     )
     .await;
 
     Ok(result)
+}
+
+/// Probe the scan cycle uses to tell whether copies queued by the user are still waiting.
+///
+/// Mirrors [`copy_queue_has_ready_items`] over cloned handles, because the cycle outlives
+/// the borrow of `AppState` that `scan_now` holds.
+fn copy_queue_pending_probe(state: &AppState) -> scanner::CopyQueuePendingProbe {
+    let manual_copy_queue = state.manual_copy_queue.clone();
+    let task_manager = state.task_manager.clone();
+    Arc::new(move || {
+        manual_copy_queue.lock().unwrap().iter().any(|item| {
+            item.task_handle.as_ref().map_or(true, |handle| {
+                !task_manager.is_run_paused(&handle.task_group_id, &handle.run_id)
+            })
+        })
+    })
 }
 
 #[tauri::command]
@@ -2421,6 +2497,15 @@ mod tests {
     };
     #[cfg(target_os = "windows")]
     use std::cell::Cell;
+
+    #[test]
+    fn portal_auto_login_keeps_windows_startup_enabled() {
+        let mut config = crate::config::AppConfig::default();
+        assert!(!super::config_requires_launch_on_startup(&config));
+
+        config.portal_login.enabled = true;
+        assert!(super::config_requires_launch_on_startup(&config));
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -4192,6 +4277,7 @@ fn main() {
             // exits leaving a dead "ghost" tray icon that ignores clicks.
             let setup_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let config = config::load_config(app.handle());
+            let portal_login_settings_at_start = config.portal_login.clone();
             let task_manager = task_manager::TaskManager::new(app.handle().clone());
 
             // 单实例插件的隐藏窗口此时已创建：放行“低完整性 → 本实例”的
@@ -4227,9 +4313,7 @@ fn main() {
                     }
                 }
             }
-            let _ = sync_launch_on_startup(
-                config.launch_and_auto_scan || config.launch_and_auto_start_file_share,
-            );
+            let _ = sync_launch_on_startup(config_requires_launch_on_startup(&config));
 
             let app_data_dir = app
                 .path()
@@ -4280,8 +4364,10 @@ fn main() {
 
             app.manage(network::NetworkState::default());
             app.manage(device_simulator_commands::DeviceSimulatorCommandState::default());
-            app.manage(tftp_server::TftpServerState::default());
+            app.manage(tftp_server::TftpServerState::new(app.handle()));
             app.manage(paper_todo::PaperTodoRuntime::default());
+            let portal_login_runtime = portal_login::PortalLoginRuntime::default();
+            app.manage(portal_login_runtime.clone());
             app.manage(AppState {
                 config: Arc::new(Mutex::new(config)),
                 updater: Arc::new(updater::UpdaterState::new()),
@@ -4308,6 +4394,12 @@ fn main() {
                 clipboard: clipboard_state,
                 error_code: std::sync::Mutex::new(error_code::ErrorCodeStore::default()),
             });
+
+            portal_login::start_if_enabled(
+                app.handle().clone(),
+                portal_login_settings_at_start,
+                portal_login_runtime,
+            );
 
             paper_todo::initialize(app.handle());
 
@@ -4410,7 +4502,7 @@ fn main() {
                 .text(TRAY_SHOW_ID, "显示主窗口")
                 .text(TRAY_CLIPBOARD_PANEL_ID, "Clipboard Panel")
                 .separator()
-                .text(TRAY_PAPER_TODO_ID, "桌面便签")
+                .text(TRAY_PAPER_TODO_ID, "PaperTodo便签")
                 .text(TRAY_NEW_TODO_ID, "新建待办纸")
                 .text(TRAY_NEW_NOTE_ID, "新建笔记纸")
                 .separator()
@@ -4428,7 +4520,7 @@ fn main() {
                         let _ = clipboard::commands::cb_toggle_panel_internal(app.clone());
                     }
                     TRAY_PAPER_TODO_ID => {
-                        show_main_window(app, "托盘菜单「桌面便签」");
+                        show_main_window(app, "托盘菜单「PaperTodo便签」");
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.eval("window.location.hash = '#/tools/paper-todo'");
                         }
@@ -4525,6 +4617,7 @@ fn main() {
             device_simulator_commands::device_simulator_list_interfaces,
             device_simulator_commands::device_simulator_list_profiles,
             device_simulator_commands::device_simulator_list_alarm_types,
+            device_simulator_commands::device_simulator_list_media_themes,
             device_simulator_commands::device_simulator_get_asset_status,
             device_simulator_commands::device_simulator_prepare_assets,
             device_simulator_commands::device_simulator_cancel_asset_download,
@@ -4571,6 +4664,9 @@ fn main() {
             save_text_file,
             change_framework_password,
             enable_appliance_ssh,
+            portal_login::portal_login_get_runtime_status,
+            portal_login::portal_login_check_status,
+            portal_login::portal_login_run,
             updater::commands::check_update,
             updater::commands::start_update_download,
             updater::commands::cancel_update_download,
@@ -4603,6 +4699,7 @@ fn main() {
             persist::load_kv,
             network::ping_scan,
             network::cancel_ping_scan,
+            network::open_ping_console,
             network::get_tcp_connections,
             network::test_ports,
             network::cancel_port_test,
@@ -4613,19 +4710,22 @@ fn main() {
             notepad_extensions::notepad_extensions_fetch_catalog,
             notepad_extensions::notepad_extensions_install_plugin,
             notepad_extensions::notepad_extensions_read_enhance_config,
+            notepad_extensions::notepad_extensions_compile_matcher,
             notepad_extensions::notepad_extensions_save_enhance_config,
             paper_todo::paper_todo_load,
             paper_todo::paper_todo_save_paper,
             paper_todo::paper_todo_delete_paper,
+            paper_todo::paper_todo_close_window,
             paper_todo::paper_todo_save_settings,
             paper_todo::paper_todo_save_order,
             paper_todo::paper_todo_open_window,
             paper_todo::paper_todo_create_paper,
             paper_todo::paper_todo_set_launcher_expanded,
-            paper_todo::paper_todo_save_launcher_position,
+            paper_todo::paper_todo_drag_launcher,
             paper_todo::paper_todo_open_settings,
             paper_todo::paper_todo_set_window_mode,
             paper_todo::paper_todo_dock_window,
+            paper_todo::paper_todo_set_edge_peek,
             paper_todo::paper_todo_set_all_windows,
             paper_todo::paper_todo_import_image,
             paper_todo::paper_todo_resolve_assets,

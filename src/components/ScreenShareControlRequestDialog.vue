@@ -67,6 +67,10 @@ watch(
       previouslyFocused = null;
     }
   },
+  // The parent mounts this dialog only once a request exists, so the arriving
+  // request is the initial value rather than a transition. Without `immediate`
+  // the deny button would never take focus.
+  { immediate: true },
 );
 
 onBeforeUnmount(() => previouslyFocused?.focus());

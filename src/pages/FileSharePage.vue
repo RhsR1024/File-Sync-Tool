@@ -570,7 +570,7 @@ onUnmounted(() => {
     <div class="mx-auto flex w-full max-w-7xl flex-col gap-5 p-6 pb-10">
       <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div class="flex items-start gap-3">
-          <div class="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-teal-500 to-cyan-600 shadow-sm">
+          <div class="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-teal-500 to-cyan-600 shadow-sm">
             <Share2 class="h-5 w-5 text-white" />
             <span v-if="isActive" class="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-white bg-emerald-500">
               <span class="h-1.5 w-1.5 rounded-full bg-white"></span>

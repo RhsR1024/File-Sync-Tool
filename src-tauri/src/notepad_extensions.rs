@@ -146,6 +146,38 @@ impl Default for EnhanceAnyLexerGlobal {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EnhanceMatcherKind {
+    Words,
+    Line,
+    Between,
+    Preset,
+    #[default]
+    Regex,
+}
+
+/// 预设匹配器。编译产物写入 `EnhanceAnyLexerRule::pattern`，正则始终是唯一真相来源。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnhanceMatcher {
+    #[serde(default)]
+    pub kind: EnhanceMatcherKind,
+    #[serde(default)]
+    pub terms: Vec<String>,
+    #[serde(default)]
+    pub open: String,
+    #[serde(default)]
+    pub close: String,
+    #[serde(default)]
+    pub preset: String,
+    #[serde(default)]
+    pub whole_word: bool,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub line_start: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnhanceAnyLexerRule {
     pub id: String,
@@ -155,6 +187,8 @@ pub struct EnhanceAnyLexerRule {
     pub pattern: String,
     #[serde(default)]
     pub whitelist_styles: Vec<i32>,
+    #[serde(default)]
+    pub matcher: EnhanceMatcher,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -854,6 +888,126 @@ pub async fn notepad_extensions_install_plugin(
     Ok(result)
 }
 
+/// 内置语义预设。EnhanceAnyLexer 使用 Boost.Regex（Perl 语法），可放心使用 `\d`、`{n,m}` 和非捕获组。
+const ENHANCE_PRESETS: &[(&str, &str)] = &[
+    ("ipv4", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+    ("number", r"\b\d+(?:\.\d+)?\b"),
+    ("hex", r"\b0[xX][0-9a-fA-F]+\b"),
+    ("version", r"\bv?\d+(?:\.\d+){1,3}\b"),
+    ("url", r#"\bhttps?://[^\s"'<>]+"#),
+    ("win_path", r#"\b[A-Za-z]:\\[^\s"'<>|]*"#),
+    (
+        "timestamp",
+        r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\b",
+    ),
+    (
+        "guid",
+        r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b",
+    ),
+    ("mac", r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b"),
+];
+
+fn escape_regex_literal(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(
+            character,
+            '\\' | '^' | '$' | '.' | '|' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}'
+        ) {
+            output.push('\\');
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn matcher_core(matcher: &EnhanceMatcher) -> Result<String, String> {
+    let terms: Vec<String> = matcher
+        .terms
+        .iter()
+        .map(|term| term.trim())
+        .filter(|term| !term.is_empty())
+        .map(escape_regex_literal)
+        .collect();
+    if terms.is_empty() {
+        return Err("enhance_matcher_terms_empty".into());
+    }
+    let core = if terms.len() == 1 {
+        terms[0].clone()
+    } else {
+        format!("(?:{})", terms.join("|"))
+    };
+    Ok(if matcher.whole_word {
+        format!(r"\b{core}\b")
+    } else {
+        core
+    })
+}
+
+fn preset_pattern(id: &str) -> Result<&'static str, String> {
+    ENHANCE_PRESETS
+        .iter()
+        .find(|(key, _)| *key == id)
+        .map(|(_, pattern)| *pattern)
+        .ok_or_else(|| format!("enhance_preset_unknown:{id}"))
+}
+
+/// 把预设匹配器编译成正则。`Regex` 模式返回 `None`，此时 `pattern` 自身就是权威值。
+pub fn compile_matcher(matcher: &EnhanceMatcher) -> Result<Option<String>, String> {
+    let body = match matcher.kind {
+        EnhanceMatcherKind::Regex => return Ok(None),
+        EnhanceMatcherKind::Words => {
+            let core = matcher_core(matcher)?;
+            if matcher.line_start {
+                format!("^{core}")
+            } else {
+                core
+            }
+        }
+        EnhanceMatcherKind::Line => format!("^.*{}.*$", matcher_core(matcher)?),
+        EnhanceMatcherKind::Between => {
+            let open = matcher.open.trim();
+            let close = matcher.close.trim();
+            if open.is_empty() || close.is_empty() {
+                return Err("enhance_matcher_delimiter_empty".into());
+            }
+            let open_pattern = escape_regex_literal(open);
+            let close_pattern = escape_regex_literal(close);
+            // 结束符是单字符时用否定字符类，保证相邻两段各自独立着色而不会连成一片。
+            if close.chars().count() == 1 {
+                format!("{open_pattern}[^{close_pattern}]*{close_pattern}")
+            } else {
+                format!("{open_pattern}.*?{close_pattern}")
+            }
+        }
+        EnhanceMatcherKind::Preset => {
+            let pattern = preset_pattern(matcher.preset.trim())?;
+            if matcher.line_start {
+                format!("^{pattern}")
+            } else {
+                pattern.to_string()
+            }
+        }
+    };
+    // 引擎默认忽略大小写，区分大小写要靠反向内联标志，且必须位于最外层最前面。
+    Ok(Some(if matcher.case_sensitive {
+        format!("(?-i){body}")
+    } else {
+        body
+    }))
+}
+
+/// 注释里的匹配器必须能重新编译出文件中的同一条正则，否则说明用户手工改过，降级为原始正则模式。
+fn resolve_matcher(candidate: Option<EnhanceMatcher>, pattern: &str) -> EnhanceMatcher {
+    let Some(matcher) = candidate else {
+        return EnhanceMatcher::default();
+    };
+    match compile_matcher(&matcher) {
+        Ok(Some(compiled)) if compiled == pattern => matcher,
+        _ => EnhanceMatcher::default(),
+    }
+}
+
 fn rgb_from_plugin_color(value: &str, rgb_format: bool) -> String {
     let normalized = value
         .trim()
@@ -883,6 +1037,7 @@ fn parse_rule_line(
     rgb_format: bool,
     enabled: bool,
     pending_name: Option<String>,
+    pending_matcher: Option<EnhanceMatcher>,
     index: usize,
 ) -> Option<EnhanceAnyLexerRule> {
     let split = line.find('=')?;
@@ -904,6 +1059,7 @@ fn parse_rule_line(
         color: rgb_from_plugin_color(color, rgb_format),
         pattern: pattern.into(),
         whitelist_styles: whitelist,
+        matcher: resolve_matcher(pending_matcher, pattern),
     })
 }
 
@@ -920,10 +1076,15 @@ fn parse_enhance_config(text: &str) -> EnhanceAnyLexerConfig {
     };
     let mut current: Option<EnhanceAnyLexerSection> = None;
     let mut pending_name: Option<String> = None;
+    let mut pending_matcher: Option<EnhanceMatcher> = None;
     for source_line in text.lines() {
         let line = source_line.trim();
         if line.starts_with("; FST-NAME ") {
             pending_name = Some(line.trim_start_matches("; FST-NAME ").trim().into());
+            continue;
+        }
+        if let Some(payload) = line.strip_prefix("; FST-MATCH ") {
+            pending_matcher = serde_json::from_str::<EnhanceMatcher>(payload.trim()).ok();
             continue;
         }
         if let Some(disabled) = line.strip_prefix("; FST-DISABLED ") {
@@ -933,6 +1094,7 @@ fn parse_enhance_config(text: &str) -> EnhanceAnyLexerConfig {
                     rgb_format,
                     false,
                     pending_name.take(),
+                    pending_matcher.take(),
                     section.rules.len(),
                 ) {
                     section.rules.push(rule);
@@ -983,6 +1145,7 @@ fn parse_enhance_config(text: &str) -> EnhanceAnyLexerConfig {
             rgb_format,
             true,
             pending_name.take(),
+            pending_matcher.take(),
             section.rules.len(),
         ) {
             section.rules.push(rule);
@@ -1065,6 +1228,13 @@ fn render_enhance_config(config: &EnhanceAnyLexerConfig) -> String {
         }
         for rule in &section.rules {
             output.push_str(&format!("; FST-NAME {}\n", rule.name.trim()));
+            if rule.matcher.kind != EnhanceMatcherKind::Regex {
+                if let Ok(payload) = serde_json::to_string(&rule.matcher) {
+                    if !payload.contains(['\r', '\n']) {
+                        output.push_str(&format!("; FST-MATCH {payload}\n"));
+                    }
+                }
+            }
             let whitelist = if rule.whitelist_styles.is_empty() {
                 String::new()
             } else {
@@ -1090,6 +1260,41 @@ fn render_enhance_config(config: &EnhanceAnyLexerConfig) -> String {
     output
 }
 
+/// 首次进入时的示例规则，直接用关键字列表匹配器，让用户看到的就是预设形态而不是裸正则。
+fn seeded_words_rule(name: &str, color: &str, terms: &[&str]) -> EnhanceAnyLexerRule {
+    let matcher = EnhanceMatcher {
+        kind: EnhanceMatcherKind::Words,
+        terms: terms.iter().map(|term| (*term).to_string()).collect(),
+        whole_word: true,
+        ..EnhanceMatcher::default()
+    };
+    let pattern = compile_matcher(&matcher)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| terms.join("|"));
+    EnhanceAnyLexerRule {
+        id: Uuid::new_v4().to_string(),
+        name: name.into(),
+        enabled: true,
+        color: color.into(),
+        pattern,
+        whitelist_styles: Vec::new(),
+        matcher,
+    }
+}
+
+/// 保存前把预设匹配器编译进 `pattern`，保证落盘的正则与匹配器永远自洽。
+fn normalize_enhance_config(config: &mut EnhanceAnyLexerConfig) -> Result<(), String> {
+    for section in &mut config.sections {
+        for rule in &mut section.rules {
+            if let Some(pattern) = compile_matcher(&rule.matcher)? {
+                rule.pattern = pattern;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn enhance_config_path(exe_path: &str) -> Result<(NotepadInstance, PathBuf), String> {
     let instance = validate_instance_path(Path::new(exe_path), "manual")?;
     let path = PathBuf::from(&instance.enhance_any_lexer.config_path);
@@ -1109,30 +1314,9 @@ pub async fn notepad_extensions_read_enhance_config(
                     lexer: "normal text".into(),
                     excluded_styles: Vec::new(),
                     rules: vec![
-                        EnhanceAnyLexerRule {
-                            id: Uuid::new_v4().to_string(),
-                            name: "ERROR".into(),
-                            enabled: true,
-                            color: "#EF4444".into(),
-                            pattern: r"\bERROR\b".into(),
-                            whitelist_styles: Vec::new(),
-                        },
-                        EnhanceAnyLexerRule {
-                            id: Uuid::new_v4().to_string(),
-                            name: "WARN".into(),
-                            enabled: true,
-                            color: "#F59E0B".into(),
-                            pattern: r"\bWARN(?:ING)?\b".into(),
-                            whitelist_styles: Vec::new(),
-                        },
-                        EnhanceAnyLexerRule {
-                            id: Uuid::new_v4().to_string(),
-                            name: "INFO".into(),
-                            enabled: true,
-                            color: "#22C55E".into(),
-                            pattern: r"\bINFO\b".into(),
-                            whitelist_styles: Vec::new(),
-                        },
+                        seeded_words_rule("ERROR", "#EF4444", &["ERROR"]),
+                        seeded_words_rule("WARN", "#F59E0B", &["WARN", "WARNING"]),
+                        seeded_words_rule("INFO", "#22C55E", &["INFO"]),
                     ],
                 }],
             });
@@ -1145,12 +1329,22 @@ pub async fn notepad_extensions_read_enhance_config(
     .map_err(|error| error.to_string())?
 }
 
+/// 供规则卡片实时显示「生成的正则」。编译逻辑只在 Rust 侧存在一份，避免前后端实现漂移。
+#[tauri::command]
+pub async fn notepad_extensions_compile_matcher(
+    matcher: EnhanceMatcher,
+) -> Result<String, String> {
+    Ok(compile_matcher(&matcher)?.unwrap_or_default())
+}
+
 #[tauri::command]
 pub async fn notepad_extensions_save_enhance_config(
     exe_path: String,
     config: EnhanceAnyLexerConfig,
 ) -> Result<EnhanceSaveResult, String> {
     tokio::task::spawn_blocking(move || {
+        let mut config = config;
+        normalize_enhance_config(&mut config)?;
         validate_enhance_config(&config)?;
         let (instance, path) = enhance_config_path(&exe_path)?;
         let parent = path
@@ -1244,6 +1438,7 @@ mod tests {
                     color: "#A855F7".into(),
                     pattern: r"\bself\b".into(),
                     whitelist_styles: vec![2],
+                    matcher: EnhanceMatcher::default(),
                 }],
             }],
         };
@@ -1273,5 +1468,119 @@ mod tests {
             ],
         };
         assert!(validate_enhance_config(&config).is_err());
+    }
+
+    fn words_matcher(terms: &[&str]) -> EnhanceMatcher {
+        EnhanceMatcher {
+            kind: EnhanceMatcherKind::Words,
+            terms: terms.iter().map(|term| (*term).to_string()).collect(),
+            whole_word: true,
+            ..EnhanceMatcher::default()
+        }
+    }
+
+    #[test]
+    fn compiles_matchers_for_boost_regex() {
+        assert_eq!(
+            compile_matcher(&words_matcher(&["ERROR", "FATAL"])).unwrap(),
+            Some(r"\b(?:ERROR|FATAL)\b".into())
+        );
+        // 引擎默认忽略大小写，区分大小写必须显式加反向内联标志。
+        let mut sensitive = words_matcher(&["Error"]);
+        sensitive.case_sensitive = true;
+        assert_eq!(
+            compile_matcher(&sensitive).unwrap(),
+            Some(r"(?-i)\bError\b".into())
+        );
+        let line = EnhanceMatcher {
+            kind: EnhanceMatcherKind::Line,
+            ..words_matcher(&["ERROR"])
+        };
+        assert_eq!(
+            compile_matcher(&line).unwrap(),
+            Some(r"^.*\bERROR\b.*$".into())
+        );
+        let between = EnhanceMatcher {
+            kind: EnhanceMatcherKind::Between,
+            open: "\"".into(),
+            close: "\"".into(),
+            ..EnhanceMatcher::default()
+        };
+        assert_eq!(compile_matcher(&between).unwrap(), Some("\"[^\"]*\"".into()));
+        // 原始正则模式不编译，pattern 自身就是权威值。
+        assert_eq!(compile_matcher(&EnhanceMatcher::default()).unwrap(), None);
+    }
+
+    #[test]
+    fn escapes_metacharacters_in_terms() {
+        let matcher = EnhanceMatcher {
+            whole_word: false,
+            ..words_matcher(&["a.b(c)"])
+        };
+        assert_eq!(
+            compile_matcher(&matcher).unwrap(),
+            Some(r"a\.b\(c\)".into())
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_matchers() {
+        assert!(compile_matcher(&words_matcher(&[])).is_err());
+        let between = EnhanceMatcher {
+            kind: EnhanceMatcherKind::Between,
+            open: "\"".into(),
+            ..EnhanceMatcher::default()
+        };
+        assert!(compile_matcher(&between).is_err());
+        let preset = EnhanceMatcher {
+            kind: EnhanceMatcherKind::Preset,
+            preset: "nope".into(),
+            ..EnhanceMatcher::default()
+        };
+        assert!(compile_matcher(&preset).is_err());
+    }
+
+    #[test]
+    fn matcher_survives_round_trip() {
+        let mut config = EnhanceAnyLexerConfig {
+            global: EnhanceAnyLexerGlobal::default(),
+            sections: vec![EnhanceAnyLexerSection {
+                lexer: "normal text".into(),
+                excluded_styles: vec![],
+                rules: vec![EnhanceAnyLexerRule {
+                    id: "rule-1".into(),
+                    name: "Levels".into(),
+                    enabled: true,
+                    pattern: String::new(),
+                    color: "#EF4444".into(),
+                    whitelist_styles: vec![],
+                    matcher: words_matcher(&["ERROR", "FATAL"]),
+                }],
+            }],
+        };
+        normalize_enhance_config(&mut config).unwrap();
+        assert_eq!(config.sections[0].rules[0].pattern, r"\b(?:ERROR|FATAL)\b");
+
+        let parsed = parse_enhance_config(&render_enhance_config(&config));
+        let rule = &parsed.sections[0].rules[0];
+        assert_eq!(rule.matcher.kind, EnhanceMatcherKind::Words);
+        assert_eq!(rule.matcher.terms, vec!["ERROR", "FATAL"]);
+    }
+
+    #[test]
+    fn hand_edited_pattern_downgrades_to_regex() {
+        // 用户在 Notepad++ 里直接改了正则，注释已经对不上，必须以文件中的正则为准。
+        let text = concat!(
+            "[normal text]\n",
+            "; FST-NAME Levels\n",
+            r#"; FST-MATCH {"kind":"words","terms":["ERROR"],"whole_word":true}"#,
+            "\n",
+            r"#EF4444 = \bERROR|FATAL\b",
+            "\n"
+        );
+        let parsed = parse_enhance_config(text);
+        let rule = &parsed.sections[0].rules[0];
+        assert_eq!(rule.matcher.kind, EnhanceMatcherKind::Regex);
+        assert_eq!(rule.pattern, r"\bERROR|FATAL\b");
     }
 }

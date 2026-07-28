@@ -778,7 +778,7 @@ onUnmounted(() => {
     <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-6 pb-10">
       <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div class="flex items-start gap-3">
-          <div class="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 shadow-sm">
+          <div class="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 shadow-sm">
             <MonitorUp class="h-5 w-5 text-white" />
             <span
               v-if="isActive"

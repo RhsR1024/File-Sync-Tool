@@ -3,6 +3,7 @@
 //! Protocol-specific behavior must remain traceable to the evidence matrix in
 //! `docs/superpowers/specs/2026-07-18-video-device-simulator-evidence-matrix.md`.
 
+pub mod access_control;
 pub mod alarm_runtime;
 pub mod alarms;
 pub mod api;

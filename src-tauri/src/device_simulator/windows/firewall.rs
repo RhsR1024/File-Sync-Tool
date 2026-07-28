@@ -796,18 +796,62 @@ fn parse_ports(value: &str) -> Result<Vec<u16>, FirewallBackendError> {
     Ok(ports)
 }
 
+fn invalid_ipv4_address(item: &str) -> FirewallBackendError {
+    FirewallBackendError::Native(format!(
+        "managed firewall rule contains invalid IPv4 address '{item}'"
+    ))
+}
+
+fn invalid_subnet(item: &str) -> FirewallBackendError {
+    FirewallBackendError::Native(format!(
+        "managed firewall rule contains invalid subnet '{item}'"
+    ))
+}
+
+/// Windows Firewall's COM API echoes addresses back in canonical forms the bare
+/// `Ipv4Addr` parser rejects: a single host comes back as `IP/255.255.255.255`
+/// (or `IP/32`) and a degenerate range as `IP-IP`, never as a plain `IP`.
+/// Normalize one such token to its host address so a rule we wrote round-trips
+/// on read-back instead of failing the whole managed-rule enumeration, which
+/// would abort firewall cleanup and leave the session un-recoverable.
+fn parse_host_address(token: &str) -> Result<Ipv4Addr, FirewallBackendError> {
+    let token = token.trim();
+    let host = if let Some((addr, suffix)) = token.split_once('/') {
+        // Only a host-scoped mask is a single address; a broader mask here means
+        // a subnet was stored in a field that must hold host addresses.
+        if !matches!(suffix.trim(), "32" | "255.255.255.255") {
+            return Err(invalid_ipv4_address(token));
+        }
+        addr.trim()
+    } else if let Some((start, end)) = token.split_once('-') {
+        if start.trim() != end.trim() {
+            return Err(invalid_ipv4_address(token));
+        }
+        start.trim()
+    } else {
+        token
+    };
+    host.parse::<Ipv4Addr>()
+        .map_err(|_| invalid_ipv4_address(token))
+}
+
+/// Convert a dotted-decimal subnet mask (e.g. `255.255.255.0`) to a prefix
+/// length, or `None` if it is not a valid contiguous netmask.
+fn dotted_mask_to_prefix(mask: &str) -> Option<u8> {
+    let bits = u32::from(mask.trim().parse::<Ipv4Addr>().ok()?);
+    // A valid netmask is contiguous 1s followed by contiguous 0s.
+    if bits.leading_ones() + bits.trailing_zeros() != 32 {
+        return None;
+    }
+    Some(bits.leading_ones() as u8)
+}
+
 fn parse_addresses(value: &str) -> Result<Vec<Ipv4Addr>, FirewallBackendError> {
     let mut addresses = value
         .split(',')
         .map(str::trim)
         .filter(|item| !item.is_empty())
-        .map(|item| {
-            item.parse::<Ipv4Addr>().map_err(|_| {
-                FirewallBackendError::Native(format!(
-                    "managed firewall rule contains invalid IPv4 address '{item}'"
-                ))
-            })
-        })
+        .map(parse_host_address)
         .collect::<Result<Vec<_>, _>>()?;
     addresses.sort_unstable();
     addresses.dedup();
@@ -821,16 +865,32 @@ fn parse_addresses(value: &str) -> Result<Vec<Ipv4Addr>, FirewallBackendError> {
 
 fn parse_remote_scope(value: &str) -> Result<FirewallRemoteScope, FirewallBackendError> {
     let trimmed = value.trim();
-    if trimmed.contains('/') && !trimmed.contains(',') {
-        let network = trimmed.parse::<ipnet::Ipv4Net>().map_err(|_| {
-            FirewallBackendError::Native(format!(
-                "managed firewall rule contains invalid subnet '{trimmed}'"
-            ))
-        })?;
-        return Ipv4Subnet::from_address(network.network(), network.prefix_len())
+    // A comma-separated list is always an explicit host set.
+    if trimmed.contains(',') {
+        return parse_addresses(trimmed).map(FirewallRemoteScope::Addresses);
+    }
+    if let Some((addr, suffix)) = trimmed.split_once('/') {
+        let suffix = suffix.trim();
+        // A host-scoped mask denotes a single explicit address, not a subnet.
+        if matches!(suffix, "32" | "255.255.255.255") {
+            return parse_addresses(trimmed).map(FirewallRemoteScope::Addresses);
+        }
+        // Otherwise a subnet, expressed as either a prefix length or a dotted
+        // mask (Windows echoes SelectedSubnet scopes back as `network/mask`).
+        let prefix_len = suffix
+            .parse::<u8>()
+            .ok()
+            .or_else(|| dotted_mask_to_prefix(suffix))
+            .ok_or_else(|| invalid_subnet(trimmed))?;
+        let network = addr
+            .trim()
+            .parse::<Ipv4Addr>()
+            .map_err(|_| invalid_subnet(trimmed))?;
+        return Ipv4Subnet::from_address(network, prefix_len)
             .map(FirewallRemoteScope::SelectedSubnet)
             .map_err(|error| FirewallBackendError::Native(error.to_string()));
     }
+    // No mask: a plain host or a degenerate `IP-IP` range.
     parse_addresses(trimmed).map(FirewallRemoteScope::Addresses)
 }
 
@@ -1006,6 +1066,41 @@ mod tests {
             )
         );
         assert!(parse_remote_scope("*").is_err());
+    }
+
+    #[test]
+    fn parse_accepts_windows_canonical_address_forms() {
+        // Windows Firewall echoes a single host back as `IP/255.255.255.255`
+        // (or `IP/32`) and a degenerate range as `IP-IP`; reading back a rule
+        // we wrote must round-trip, not abort managed-rule enumeration.
+        assert_eq!(
+            parse_addresses("192.115.1.220/255.255.255.255").unwrap(),
+            vec![ip("192.115.1.220")]
+        );
+        assert_eq!(
+            parse_addresses("192.168.50.10/32,192.168.50.11/255.255.255.255").unwrap(),
+            vec![ip("192.168.50.10"), ip("192.168.50.11")]
+        );
+        assert_eq!(
+            parse_addresses("192.115.1.220-192.115.1.220").unwrap(),
+            vec![ip("192.115.1.220")]
+        );
+        assert_eq!(
+            parse_remote_scope("192.115.1.11/255.255.255.255").unwrap(),
+            FirewallRemoteScope::Addresses(vec![ip("192.115.1.11")])
+        );
+        // A subnet remote scope may come back as a dotted mask instead of a prefix.
+        assert_eq!(
+            parse_remote_scope("192.168.50.0/255.255.255.0").unwrap(),
+            FirewallRemoteScope::SelectedSubnet(
+                Ipv4Subnet::from_address(ip("192.168.50.10"), 24).unwrap()
+            )
+        );
+        // A genuinely broken address must still be rejected.
+        assert!(parse_addresses("192.115.1.220/255.255.0.255").is_err());
+        assert!(parse_addresses("192.115.1.220/24").is_err());
+        assert!(parse_addresses("192.115.1.220-192.115.1.221").is_err());
+        assert!(parse_addresses("not-an-ip").is_err());
     }
 
     #[cfg(target_os = "windows")]

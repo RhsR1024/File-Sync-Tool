@@ -302,17 +302,19 @@ onMounted(async () => {
         class="rounded-[24px] border border-white/70 bg-white/85 px-6 py-5 shadow-[0_18px_60px_rgba(15,23,42,0.08)] backdrop-blur"
       >
         <div class="flex items-start justify-between gap-4">
-          <div class="space-y-2">
-            <div class="flex items-center gap-2 text-slate-500">
-              <FileSearch class="h-4 w-4" />
-              <span class="text-[11px] font-bold uppercase tracking-[0.18em]">
-                {{ t('toolsHub.cards.errorCodeLookup.chip') }}
-              </span>
+          <div class="flex min-w-0 items-start gap-3">
+            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 shadow-sm">
+              <FileSearch class="h-5 w-5 text-white" />
             </div>
-            <h1 class="text-2xl font-bold text-slate-950">
-              {{ t('errorCodeLookup.title') }}
-            </h1>
-            <p class="text-sm text-slate-500">{{ t('errorCodeLookup.description') }}</p>
+            <div class="min-w-0">
+              <p class="text-xs font-bold uppercase tracking-[0.16em] text-indigo-700">
+                {{ t('toolsHub.cards.errorCodeLookup.chip') }}
+              </p>
+              <h1 class="mt-1 text-2xl font-bold text-slate-900">
+                {{ t('errorCodeLookup.title') }}
+              </h1>
+              <p class="mt-1 text-sm text-slate-500">{{ t('errorCodeLookup.description') }}</p>
+            </div>
           </div>
 
           <div class="flex shrink-0 items-center gap-3">

@@ -1,5 +1,6 @@
 use crate::device_simulator::telemetry::ProtocolFailureMetrics;
 use crate::device_simulator::template::CompiledTemplate;
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
@@ -165,20 +166,26 @@ impl DiscoveryListener {
     ) -> Result<Self, DiscoveryError> {
         plan.validate()?;
         let address = SocketAddrV4::new(plan.device_ip, plan.listen_port);
-        let socket = std::net::UdpSocket::bind(address).map_err(|source| {
-            error(
-                "device_simulator.discovery.bind_failed",
-                format!("failed to bind discovery listener to {address}: {source}"),
-            )
-        })?;
+        let socket = new_legacy_udp_socket()?;
         socket
-            .join_multicast_v4(&plan.multicast_address, &plan.device_ip)
+            .bind(&SockAddr::from(SocketAddr::V4(address)))
+            .map_err(|source| {
+                error(
+                    "device_simulator.discovery.bind_failed",
+                    format!("failed to bind discovery listener to {address}: {source}"),
+                )
+            })?;
+        socket
+            // Legacy Vsocket_ip.py packs IP_ADD_MEMBERSHIP with INADDR_ANY.
+            // Let Windows choose the multicast interface instead of forcing a
+            // simulator alias, which is marked SkipAsSource.
+            .join_multicast_v4(&plan.multicast_address, &Ipv4Addr::UNSPECIFIED)
             .map_err(|source| {
                 error(
                     "device_simulator.discovery.multicast_join_failed",
                     format!(
-                        "failed to join discovery group {} through {}: {source}",
-                        plan.multicast_address, plan.device_ip
+                        "failed to join discovery group {} through the default interface: {source}",
+                        plan.multicast_address
                     ),
                 )
             })?;
@@ -188,7 +195,7 @@ impl DiscoveryListener {
                 format!("failed to configure discovery socket: {source}"),
             )
         })?;
-        let socket = UdpSocket::from_std(socket).map_err(|source| {
+        let socket = UdpSocket::from_std(socket.into()).map_err(|source| {
             error(
                 "device_simulator.discovery.runtime_socket_failed",
                 format!("failed to attach discovery socket to Tokio: {source}"),
@@ -233,8 +240,12 @@ impl DiscoveryListener {
         }
     }
 
-    pub async fn send_response(
+    /// Mirrors the legacy response path: create a fresh reusable UDP socket,
+    /// bind it to the responding virtual device on an ephemeral port, send to
+    /// all three UMS response ports, and close it when this call returns.
+    pub async fn send_response_from(
         &self,
+        device_ip: Ipv4Addr,
         probe: &DiscoveryProbe,
         response: &[u8],
         now_ms: u64,
@@ -246,9 +257,42 @@ impl DiscoveryListener {
                 "discovery response is empty or larger than the UDP safety limit",
             ));
         }
+        if device_ip.is_unspecified()
+            || device_ip.is_multicast()
+            || device_ip == Ipv4Addr::BROADCAST
+        {
+            return Err(error(
+                "device_simulator.discovery.response_ip_invalid",
+                "discovery response must use an explicit unicast device IPv4 address",
+            ));
+        }
+        let source_address = SocketAddrV4::new(device_ip, 0);
+        let socket = new_legacy_udp_socket()?;
+        socket
+            .bind(&SockAddr::from(SocketAddr::V4(source_address)))
+            .map_err(|source| {
+                error(
+                    "device_simulator.discovery.response_bind_failed",
+                    format!(
+                        "failed to bind discovery response socket to {source_address}: {source}"
+                    ),
+                )
+            })?;
+        socket.set_nonblocking(true).map_err(|source| {
+            error(
+                "device_simulator.discovery.response_nonblocking_failed",
+                format!("failed to configure discovery response socket: {source}"),
+            )
+        })?;
+        let socket = UdpSocket::from_std(socket.into()).map_err(|source| {
+            error(
+                "device_simulator.discovery.response_runtime_socket_failed",
+                format!("failed to attach discovery response socket to Tokio: {source}"),
+            )
+        })?;
         for port in DISCOVERY_RESPONSE_PORTS {
             let destination = SocketAddrV4::new(*probe.source.ip(), port);
-            if let Err(source) = self.socket.send_to(response, destination).await {
+            if let Err(source) = socket.send_to(response, destination).await {
                 let should_log = self.metrics.record_send_failure(now_ms, log_interval_ms);
                 return Err(error(
                     "device_simulator.discovery.send_failed",
@@ -260,6 +304,25 @@ impl DiscoveryListener {
         }
         Ok(())
     }
+}
+
+/// Python's `SO_REUSEADDR` call in legacy `Vsocket_ip.py` happens before every
+/// discovery bind. Creating the socket explicitly preserves that ordering;
+/// `std::net::UdpSocket::bind` would bind before the option can be enabled.
+fn new_legacy_udp_socket() -> Result<Socket, DiscoveryError> {
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).map_err(|source| {
+        error(
+            "device_simulator.discovery.socket_create_failed",
+            format!("failed to create discovery UDP socket: {source}"),
+        )
+    })?;
+    socket.set_reuse_address(true).map_err(|source| {
+        error(
+            "device_simulator.discovery.reuse_address_failed",
+            format!("failed to enable discovery address reuse: {source}"),
+        )
+    })?;
+    Ok(socket)
 }
 
 fn contains_xml_element(xml: &str, local_name: &str) -> bool {
@@ -438,5 +501,24 @@ mod tests {
         assert_eq!(DISCOVERY_MULTICAST_ADDRESS.to_string(), "239.255.255.252");
         assert_eq!(DISCOVERY_LISTEN_PORT, 3702);
         assert_eq!(DISCOVERY_RESPONSE_PORTS, [3705, 3706, 3707]);
+    }
+
+    #[test]
+    fn legacy_socket_enables_address_reuse_before_binding() {
+        let socket = new_legacy_udp_socket().unwrap();
+        assert!(socket.reuse_address().unwrap());
+    }
+
+    #[test]
+    fn reusable_legacy_sockets_can_share_one_udp_address() {
+        let first = new_legacy_udp_socket().unwrap();
+        first.bind(&SockAddr::from(source_with_port(0))).unwrap();
+        let address = first.local_addr().unwrap();
+        let second = new_legacy_udp_socket().unwrap();
+        second.bind(&address).unwrap();
+    }
+
+    fn source_with_port(port: u16) -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
     }
 }

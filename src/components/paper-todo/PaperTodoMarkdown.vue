@@ -48,11 +48,29 @@ markdown.renderer.rules.image = (tokens, index, _options, env) => {
   return `<img src="${markdown.utils.escapeHtml(url)}" alt="${alt}" style="${widthStyle}" loading="lazy" decoding="async">`;
 };
 
+// Image paths never change once imported, so resolve each asset once per window
+// instead of invoking Rust on every keystroke of a note that embeds pictures.
+const assetUrlCache = new Map<string, string>();
+let lastRenderedContent: string | null = null;
+
 async function renderContent(content: string): Promise<void> {
+  if (content === lastRenderedContent) return;
   const token = ++renderToken;
-  const ids = [...content.matchAll(/\bi:([a-fA-F0-9]{16,64})\b/g)].map((match) => match[1]);
-  const assetUrls = await resolvePaperAssets([...new Set(ids)]);
-  if (token !== renderToken) return;
+  const ids = new Set(
+    [...content.matchAll(/\bi:([a-fA-F0-9]{16,64})\b/g)].map((match) => match[1]),
+  );
+  const missing = [...ids].filter((id) => !assetUrlCache.has(id));
+  if (missing.length) {
+    const resolved = await resolvePaperAssets(missing);
+    if (token !== renderToken) return;
+    for (const [id, url] of Object.entries(resolved)) assetUrlCache.set(id, url);
+  }
+  const assetUrls: Record<string, string> = {};
+  for (const id of ids) {
+    const url = assetUrlCache.get(id);
+    if (url) assetUrls[id] = url;
+  }
+  lastRenderedContent = content;
   rendered.value = markdown.render(content, { assetUrls });
 }
 

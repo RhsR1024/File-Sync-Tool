@@ -404,7 +404,7 @@ const enableStateClass = (value?: number) => {
           </div>
           <div>
             <h1 class="text-2xl font-bold text-slate-900">{{ t('tools.applianceSsh.title') }}</h1>
-            <p class="text-slate-500 text-sm mt-0.5">{{ t('tools.applianceSsh.description') }}</p>
+            <p class="mt-1 text-sm text-slate-500">{{ t('tools.applianceSsh.description') }}</p>
           </div>
         </div>
       </div>

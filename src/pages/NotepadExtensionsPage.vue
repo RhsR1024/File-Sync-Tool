@@ -2,6 +2,8 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
   Check,
   ChevronRight,
   Download,
@@ -11,6 +13,7 @@ import {
   Package,
   Palette,
   Plus,
+  Regex,
   RefreshCw,
   Save,
   Search,
@@ -18,16 +21,19 @@ import {
   ShieldCheck,
   Trash2,
 } from 'lucide-vue-next';
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import {
+  ENHANCE_MATCHER_PRESETS,
   getConfig,
   notepadExtensionsApi,
   openPathParent,
   type EnhanceAnyLexerConfig,
   type EnhanceAnyLexerRule,
   type EnhanceAnyLexerSection,
+  type EnhanceMatcher,
+  type EnhanceMatcherKind,
   type NotepadInstance,
   type NotepadPluginCatalog,
   type NotepadPluginCatalogEntry,
@@ -122,6 +128,9 @@ function friendlyError(error: unknown) {
     'plugin_architecture_mismatch',
     'plugin_sha256_mismatch',
     'plugin_entry_dll_missing',
+    'enhance_matcher_terms_empty',
+    'enhance_matcher_delimiter_empty',
+    'enhance_preset_unknown',
   ].find((key) => raw.includes(key));
   return known ? t(`notepadExtensions.errors.${known}`) : raw;
 }
@@ -234,14 +243,28 @@ function removeSection(index: number) {
   activeSectionIndex.value = Math.max(0, Math.min(activeSectionIndex.value, enhanceConfig.value.sections.length - 1));
 }
 
+function defaultMatcher(): EnhanceMatcher {
+  return {
+    kind: 'words',
+    terms: [],
+    open: '"',
+    close: '"',
+    preset: 'ipv4',
+    whole_word: true,
+    case_sensitive: false,
+    line_start: false,
+  };
+}
+
 function newRule(): EnhanceAnyLexerRule {
   return {
     id: crypto.randomUUID(),
     name: t('notepadExtensions.enhance.newRule'),
     enabled: true,
     color: '#8B5CF6',
-    pattern: '\\bKEYWORD\\b',
+    pattern: '',
     whitelist_styles: [],
+    matcher: defaultMatcher(),
   };
 }
 
@@ -252,6 +275,97 @@ function addRule() {
 function removeRule(index: number) {
   activeSection.value?.rules.splice(index, 1);
 }
+
+// 列表顺序即优先级：插件逐字符写入 indicator，越靠下的规则越后写，颜色会覆盖上方规则。
+function moveRule(index: number, delta: number) {
+  const rules = activeSection.value?.rules;
+  if (!rules) return;
+  const target = index + delta;
+  if (target < 0 || target >= rules.length) return;
+  const [moved] = rules.splice(index, 1);
+  rules.splice(target, 0, moved);
+}
+
+const MATCHER_KINDS: EnhanceMatcherKind[] = ['words', 'line', 'between', 'preset', 'regex'];
+const CJK_PATTERN = /[㐀-鿿豈-﫿]/;
+
+const compiledPatterns = ref<Record<string, string>>({});
+const compileErrors = ref<Record<string, string>>({});
+
+function termsText(matcher: EnhanceMatcher) {
+  return matcher.terms.join(', ');
+}
+
+function updateTerms(matcher: EnhanceMatcher, value: string) {
+  matcher.terms = value
+    .split(',')
+    .map((term) => term.trim())
+    .filter((term) => term.length > 0);
+}
+
+function showsWholeWord(matcher: EnhanceMatcher) {
+  return matcher.kind === 'words' || matcher.kind === 'line';
+}
+
+function showsLineStart(matcher: EnhanceMatcher) {
+  return matcher.kind === 'words' || matcher.kind === 'preset';
+}
+
+// CJK 没有词间空格，`\b关键词\b` 只会命中孤立词，命不中句子里的同一个词。
+function warnsCjkWholeWord(matcher: EnhanceMatcher) {
+  return (
+    showsWholeWord(matcher)
+    && matcher.whole_word
+    && matcher.terms.some((term) => CJK_PATTERN.test(term))
+  );
+}
+
+function effectivePattern(rule: EnhanceAnyLexerRule) {
+  return rule.matcher.kind === 'regex' ? rule.pattern : compiledPatterns.value[rule.id] ?? '';
+}
+
+// 切到原始正则时把编译结果落进 pattern，否则用户在预设里填的内容会凭空消失。单向，不做正则反解。
+function changeKind(rule: EnhanceAnyLexerRule, kind: EnhanceMatcherKind) {
+  if (kind === 'regex' && rule.matcher.kind !== 'regex') {
+    rule.pattern = effectivePattern(rule) || rule.pattern;
+  }
+  rule.matcher = { ...rule.matcher, kind };
+}
+
+function convertToRegex(rule: EnhanceAnyLexerRule) {
+  changeKind(rule, 'regex');
+}
+
+let compileTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function compileRules() {
+  const rules = activeSection.value?.rules ?? [];
+  const patterns: Record<string, string> = {};
+  const errors: Record<string, string> = {};
+  for (const rule of rules) {
+    if (rule.matcher.kind === 'regex') continue;
+    try {
+      patterns[rule.id] = await notepadExtensionsApi.compileMatcher(rule.matcher);
+    } catch (error) {
+      errors[rule.id] = friendlyError(error);
+    }
+  }
+  compiledPatterns.value = patterns;
+  compileErrors.value = errors;
+}
+
+function scheduleCompile() {
+  if (compileTimer) clearTimeout(compileTimer);
+  compileTimer = setTimeout(() => {
+    void compileRules();
+  }, 200);
+}
+
+watch(
+  () => JSON.stringify(activeSection.value?.rules.map((rule) => [rule.id, rule.matcher]) ?? []),
+  scheduleCompile,
+  { immediate: true },
+);
 
 function styleListText(values: number[]) {
   return values.join(',');
@@ -265,39 +379,42 @@ function updateStyleList(target: number[], value: string) {
   target.splice(0, target.length, ...next);
 }
 
-function ruleMatches(rule: EnhanceAnyLexerRule, line: string) {
-  if (!rule.enabled || !rule.pattern) return false;
+// 插件默认忽略大小写。JS 不支持内联标志，先剥离 (?i)/(?-i) 再换算成 RegExp 标志位。
+function previewExpression(rule: EnhanceAnyLexerRule) {
+  const pattern = effectivePattern(rule);
+  if (!pattern) return null;
+  const inline = pattern.match(/^\((\?-?i)\)/);
+  const body = inline ? pattern.slice(inline[0].length) : pattern;
+  const ignoreCase = inline ? inline[1] === '?i' : true;
   try {
-    return new RegExp(rule.pattern, 'i').test(line);
+    return new RegExp(body, ignoreCase ? 'gi' : 'g');
   } catch {
-    return false;
+    return null;
   }
 }
 
+// 实测语义：插件逐字符写入单个 indicator，后定义的规则覆盖先定义的，所以按顺序涂色、后者胜出。
 function previewSegments(line: string) {
-  const section = activeSection.value;
-  if (!section) return [{ text: line, color: '' }];
-  for (const rule of section.rules) {
-    if (!ruleMatches(rule, line)) continue;
-    try {
-      const expression = new RegExp(rule.pattern, 'gi');
-      const segments: Array<{ text: string; color: string }> = [];
-      let cursor = 0;
-      for (const match of line.matchAll(expression)) {
-        const start = match.index ?? 0;
-        if (start > cursor) segments.push({ text: line.slice(cursor, start), color: '' });
-        const matched = match[0];
-        if (!matched) break;
-        segments.push({ text: matched, color: rule.color });
-        cursor = start + matched.length;
+  const colors = new Array<string>(line.length).fill('');
+  for (const rule of activeSection.value?.rules ?? []) {
+    if (!rule.enabled) continue;
+    const expression = previewExpression(rule);
+    if (!expression) continue;
+    for (const match of line.matchAll(expression)) {
+      const start = match.index ?? 0;
+      if (!match[0]) break;
+      for (let cursor = start; cursor < start + match[0].length; cursor += 1) {
+        colors[cursor] = rule.color;
       }
-      if (cursor < line.length) segments.push({ text: line.slice(cursor), color: '' });
-      return segments.length ? segments : [{ text: line, color: '' }];
-    } catch {
-      return [{ text: line, color: '' }];
     }
   }
-  return [{ text: line, color: '' }];
+  const segments: Array<{ text: string; color: string }> = [];
+  for (let index = 0; index < line.length; index += 1) {
+    const last = segments[segments.length - 1];
+    if (last && last.color === colors[index]) last.text += line[index];
+    else segments.push({ text: line[index], color: colors[index] });
+  }
+  return segments.length ? segments : [{ text: line, color: '' }];
 }
 
 async function saveEnhance() {
@@ -348,20 +465,25 @@ onMounted(async () => {
   await Promise.all([refreshInstances(), refreshCatalog()]);
 });
 
-onBeforeUnmount(() => unlistenInstall?.());
+onBeforeUnmount(() => {
+  unlistenInstall?.();
+  if (compileTimer) clearTimeout(compileTimer);
+});
 </script>
 
 <template>
   <div class="flex-1 overflow-y-auto bg-gradient-to-b from-violet-50/70 via-slate-50 to-white">
     <div class="mx-auto flex w-full max-w-7xl flex-col gap-5 px-6 py-6 pb-12">
       <header class="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div class="mb-2 inline-flex items-center gap-2 rounded-full border border-violet-200 bg-white px-3 py-1 text-xs font-semibold text-violet-700 shadow-sm">
-            <Package class="h-3.5 w-3.5" aria-hidden="true" />
-            {{ t('notepadExtensions.eyebrow') }}
+        <div class="flex min-w-0 items-start gap-3">
+          <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 shadow-sm">
+            <Package class="h-5 w-5 text-white" aria-hidden="true" />
           </div>
-          <h1 class="text-2xl font-bold tracking-tight text-slate-950">{{ t('notepadExtensions.title') }}</h1>
-          <p class="mt-1 max-w-3xl text-sm leading-6 text-slate-600">{{ t('notepadExtensions.description') }}</p>
+          <div class="min-w-0">
+            <p class="text-xs font-bold uppercase tracking-[0.16em] text-violet-700">{{ t('notepadExtensions.eyebrow') }}</p>
+            <h1 class="mt-1 text-2xl font-bold text-slate-900">{{ t('notepadExtensions.title') }}</h1>
+            <p class="mt-1 max-w-3xl text-sm text-slate-500">{{ t('notepadExtensions.description') }}</p>
+          </div>
         </div>
         <button
           type="button"
@@ -369,7 +491,7 @@ onBeforeUnmount(() => unlistenInstall?.());
           :disabled="loadingInstances"
           @click="refreshInstances()"
         >
-          <RefreshCw class="h-4 w-4" :class="loadingInstances ? 'animate-spin' : ''" />
+          <RefreshCw class="h-4 w-4" :class="loadingInstances ? 'animate-spin motion-reduce:animate-none' : ''" />
           {{ t('notepadExtensions.instance.rescan') }}
         </button>
       </header>
@@ -472,13 +594,13 @@ onBeforeUnmount(() => unlistenInstall?.());
             :disabled="loadingCatalog"
             @click="refreshCatalog"
           >
-            <RefreshCw class="h-4 w-4" :class="loadingCatalog ? 'animate-spin' : ''" />
+            <RefreshCw class="h-4 w-4" :class="loadingCatalog ? 'animate-spin motion-reduce:animate-none' : ''" />
             {{ t('notepadExtensions.catalog.refresh') }}
           </button>
         </div>
 
         <div v-if="loadingCatalog" class="flex min-h-48 items-center justify-center rounded-2xl border border-slate-200 bg-white">
-          <LoaderCircle class="h-6 w-6 animate-spin text-violet-600" />
+          <LoaderCircle class="h-6 w-6 animate-spin text-violet-600 motion-reduce:animate-none" />
         </div>
         <div v-else-if="catalogPlugins.length" class="grid gap-4 lg:grid-cols-2">
           <article
@@ -521,7 +643,7 @@ onBeforeUnmount(() => unlistenInstall?.());
                   :disabled="!selectedInstance || !packageFor(plugin) || installingPluginId !== ''"
                   @click="installPlugin(plugin)"
                 >
-                  <LoaderCircle v-if="installingPluginId === plugin.id" class="h-4 w-4 animate-spin" />
+                  <LoaderCircle v-if="installingPluginId === plugin.id" class="h-4 w-4 animate-spin motion-reduce:animate-none" />
                   <Download v-else class="h-4 w-4" />
                   {{ installingPluginId === plugin.id ? installPhaseLabel(installPhase) : isInstalled(plugin) ? t('notepadExtensions.catalog.reinstall') : t('notepadExtensions.catalog.install') }}
                 </button>
@@ -546,7 +668,7 @@ onBeforeUnmount(() => unlistenInstall?.());
           </button>
         </div>
         <div v-else-if="loadingEnhance" class="flex min-h-56 items-center justify-center rounded-2xl border border-slate-200 bg-white">
-          <LoaderCircle class="h-7 w-7 animate-spin text-violet-600" />
+          <LoaderCircle class="h-7 w-7 animate-spin text-violet-600 motion-reduce:animate-none" />
         </div>
         <template v-else-if="enhanceConfig">
           <div class="grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)]">
@@ -609,7 +731,7 @@ onBeforeUnmount(() => unlistenInstall?.());
 
                 <div class="mt-4 space-y-3">
                   <article v-for="(rule, index) in activeSection.rules" :key="rule.id" class="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
-                    <div class="grid gap-3 lg:grid-cols-[auto_minmax(140px,0.7fr)_120px_minmax(240px,1.5fr)_auto] lg:items-end">
+                    <div class="grid gap-3 lg:grid-cols-[auto_minmax(140px,0.7fr)_120px_minmax(150px,0.8fr)_auto] lg:items-end">
                       <label class="flex min-h-11 cursor-pointer items-center gap-2 rounded-lg px-1 text-sm font-medium text-slate-700">
                         <input v-model="rule.enabled" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500" />
                         {{ t('notepadExtensions.enhance.enabled') }}
@@ -626,13 +748,87 @@ onBeforeUnmount(() => unlistenInstall?.());
                         </div>
                       </label>
                       <label class="space-y-1">
+                        <span class="text-xs font-semibold text-slate-600">{{ t('notepadExtensions.enhance.matchMode') }}</span>
+                        <select :value="rule.matcher.kind" class="min-h-10 w-full cursor-pointer rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none focus:border-violet-500" @change="changeKind(rule, ($event.target as HTMLSelectElement).value as EnhanceMatcherKind)">
+                          <option v-for="kind in MATCHER_KINDS" :key="kind" :value="kind">{{ t(`notepadExtensions.enhance.kinds.${kind}`) }}</option>
+                        </select>
+                      </label>
+                      <div class="flex items-center gap-1">
+                        <button type="button" class="flex h-10 w-9 cursor-pointer items-center justify-center rounded-lg text-slate-400 hover:bg-violet-50 hover:text-violet-700 disabled:cursor-not-allowed disabled:opacity-30" :disabled="index === 0" :aria-label="t('notepadExtensions.enhance.moveUp')" @click="moveRule(index, -1)">
+                          <ArrowUp class="h-4 w-4" />
+                        </button>
+                        <button type="button" class="flex h-10 w-9 cursor-pointer items-center justify-center rounded-lg text-slate-400 hover:bg-violet-50 hover:text-violet-700 disabled:cursor-not-allowed disabled:opacity-30" :disabled="index === activeSection.rules.length - 1" :aria-label="t('notepadExtensions.enhance.moveDown')" @click="moveRule(index, 1)">
+                          <ArrowDown class="h-4 w-4" />
+                        </button>
+                        <button type="button" class="flex h-10 w-9 cursor-pointer items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600" :aria-label="t('notepadExtensions.enhance.deleteRule')" @click="removeRule(index)">
+                          <Trash2 class="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div class="mt-3 flex flex-wrap items-end gap-3">
+                      <label v-if="rule.matcher.kind === 'words' || rule.matcher.kind === 'line'" class="min-w-[260px] flex-1 space-y-1">
+                        <span class="text-xs font-semibold text-slate-600">{{ t('notepadExtensions.enhance.terms') }}</span>
+                        <input :value="termsText(rule.matcher)" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-violet-500" :placeholder="t('notepadExtensions.enhance.termsPlaceholder')" @change="updateTerms(rule.matcher, ($event.target as HTMLInputElement).value)" />
+                      </label>
+                      <template v-else-if="rule.matcher.kind === 'between'">
+                        <label class="w-32 space-y-1">
+                          <span class="text-xs font-semibold text-slate-600">{{ t('notepadExtensions.enhance.openDelimiter') }}</span>
+                          <input v-model="rule.matcher.open" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 font-mono text-sm outline-none focus:border-violet-500" />
+                        </label>
+                        <label class="w-32 space-y-1">
+                          <span class="text-xs font-semibold text-slate-600">{{ t('notepadExtensions.enhance.closeDelimiter') }}</span>
+                          <input v-model="rule.matcher.close" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 font-mono text-sm outline-none focus:border-violet-500" />
+                        </label>
+                      </template>
+                      <label v-else-if="rule.matcher.kind === 'preset'" class="min-w-[240px] flex-1 space-y-1">
+                        <span class="text-xs font-semibold text-slate-600">{{ t('notepadExtensions.enhance.preset') }}</span>
+                        <select v-model="rule.matcher.preset" class="min-h-10 w-full cursor-pointer rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none focus:border-violet-500">
+                          <option v-for="preset in ENHANCE_MATCHER_PRESETS" :key="preset" :value="preset">{{ t(`notepadExtensions.enhance.presets.${preset}`) }}</option>
+                        </select>
+                      </label>
+                      <label v-else class="min-w-[260px] flex-1 space-y-1">
                         <span class="text-xs font-semibold text-slate-600">{{ t('notepadExtensions.enhance.pattern') }}</span>
                         <input v-model="rule.pattern" class="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 font-mono text-sm outline-none focus:border-violet-500" />
                       </label>
-                      <button type="button" class="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600" :aria-label="t('notepadExtensions.enhance.deleteRule')" @click="removeRule(index)">
-                        <Trash2 class="h-4 w-4" />
+
+                      <div v-if="rule.matcher.kind !== 'regex'" class="flex flex-wrap items-center gap-4 pb-2">
+                        <label class="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+                          <input v-model="rule.matcher.case_sensitive" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500" />
+                          {{ t('notepadExtensions.enhance.caseSensitive') }}
+                        </label>
+                        <label v-if="showsWholeWord(rule.matcher)" class="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+                          <input v-model="rule.matcher.whole_word" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500" />
+                          {{ t('notepadExtensions.enhance.wholeWord') }}
+                        </label>
+                        <label v-if="showsLineStart(rule.matcher)" class="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+                          <input v-model="rule.matcher.line_start" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-violet-600 focus:ring-violet-500" />
+                          {{ t('notepadExtensions.enhance.lineStart') }}
+                        </label>
+                      </div>
+                    </div>
+
+                    <div v-if="rule.matcher.kind !== 'regex'" class="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                      <span class="text-xs font-semibold text-slate-500">{{ t('notepadExtensions.enhance.compiled') }}</span>
+                      <code class="min-w-0 flex-1 truncate font-mono text-xs text-slate-700">{{ compiledPatterns[rule.id] || '—' }}</code>
+                      <button type="button" class="inline-flex min-h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 px-2 text-xs font-semibold text-slate-600 hover:border-violet-300 hover:text-violet-700" @click="convertToRegex(rule)">
+                        <Regex class="h-3.5 w-3.5" />
+                        {{ t('notepadExtensions.enhance.convertToRegex') }}
                       </button>
                     </div>
+
+                    <p v-if="compileErrors[rule.id]" class="mt-2 flex items-center gap-1.5 text-xs text-rose-600">
+                      <AlertCircle class="h-3.5 w-3.5 shrink-0" />
+                      {{ compileErrors[rule.id] }}
+                    </p>
+                    <p v-if="rule.matcher.kind === 'line' && index > 0" class="mt-2 flex items-center gap-1.5 text-xs text-amber-700">
+                      <AlertCircle class="h-3.5 w-3.5 shrink-0" />
+                      {{ t('notepadExtensions.enhance.lineOverrideHint') }}
+                    </p>
+                    <p v-if="warnsCjkWholeWord(rule.matcher)" class="mt-2 flex items-center gap-1.5 text-xs text-amber-700">
+                      <AlertCircle class="h-3.5 w-3.5 shrink-0" />
+                      {{ t('notepadExtensions.enhance.cjkWholeWordHint') }}
+                    </p>
                   </article>
                   <div v-if="activeSection.rules.length === 0" class="rounded-xl border border-dashed border-slate-300 px-5 py-8 text-center text-sm text-slate-500">
                     {{ t('notepadExtensions.enhance.emptyRules') }}
@@ -660,7 +856,7 @@ onBeforeUnmount(() => unlistenInstall?.());
                   {{ t('notepadExtensions.enhance.openConfigFolder') }}
                 </button>
                 <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-violet-600 px-5 text-sm font-bold text-white transition-colors hover:bg-violet-700 disabled:cursor-not-allowed disabled:bg-slate-300" :disabled="savingEnhance" @click="saveEnhance">
-                  <LoaderCircle v-if="savingEnhance" class="h-4 w-4 animate-spin" />
+                  <LoaderCircle v-if="savingEnhance" class="h-4 w-4 animate-spin motion-reduce:animate-none" />
                   <Save v-else class="h-4 w-4" />
                   {{ savingEnhance ? t('notepadExtensions.enhance.saving') : t('notepadExtensions.enhance.save') }}
                 </button>

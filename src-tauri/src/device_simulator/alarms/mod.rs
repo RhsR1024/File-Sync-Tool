@@ -1176,6 +1176,7 @@ fn apply_legacy_runtime_values(
             set_value(&mut document, "/TimeStamp", timestamp);
             set_number(&mut document, "/Seq", event_id);
             set_capture_times(&mut document, "/StructureInfo/ImageInfoList", &capture_time);
+            normalize_structured_image_formats(&mut document)?;
             apply_structured_camera_values(
                 &mut document,
                 definition.alarm_type_id.as_str(),
@@ -1395,6 +1396,40 @@ fn set_smart_v1_image_times(document: &mut serde_json::Value, timestamp: serde_j
 
 fn set_capture_times(document: &mut serde_json::Value, list: &str, capture_time: &str) {
     set_capture_times_count(document, list, capture_time, 8);
+}
+
+fn normalize_structured_image_formats(document: &mut serde_json::Value) -> AlarmResult<()> {
+    let images = document
+        .pointer_mut("/StructureInfo/ImageInfoList")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| {
+            AlarmError::new(
+                "device_simulator.alarm.structured_image_list_invalid",
+                "structured alarm template must contain an ImageInfoList array",
+            )
+        })?;
+
+    for (index, image) in images.iter_mut().enumerate() {
+        let format = image.get_mut("Format").ok_or_else(|| {
+            AlarmError::new(
+                "device_simulator.alarm.structured_image_format_invalid",
+                format!("structured alarm image {index} is missing Format"),
+            )
+        })?;
+        let normalized = match format {
+            serde_json::Value::Number(value) => value.as_u64(),
+            serde_json::Value::String(value) => value.parse::<u64>().ok(),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            AlarmError::new(
+                "device_simulator.alarm.structured_image_format_invalid",
+                format!("structured alarm image {index} Format must be an unsigned integer"),
+            )
+        })?;
+        *format = serde_json::Value::from(normalized);
+    }
+    Ok(())
 }
 
 fn set_capture_times_count(
@@ -2271,6 +2306,43 @@ mod tests {
         assert_eq!(
             template.render(&BTreeMap::new()).unwrap(),
             br#"{"outer":{"value":1}}"#
+        );
+    }
+
+    #[test]
+    fn structured_image_formats_are_normalized_to_unsigned_json_numbers() {
+        let mut document = serde_json::json!({
+            "StructureInfo": {
+                "ImageInfoList": [
+                    { "Format": "01" },
+                    { "Format": "1" },
+                    { "Format": 2 }
+                ]
+            }
+        });
+
+        normalize_structured_image_formats(&mut document).unwrap();
+
+        let formats = document["StructureInfo"]["ImageInfoList"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|image| image["Format"].as_u64())
+            .collect::<Vec<_>>();
+        assert_eq!(formats, vec![Some(1), Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn structured_image_formats_reject_non_numeric_values_locally() {
+        let mut document = serde_json::json!({
+            "StructureInfo": { "ImageInfoList": [{ "Format": "jpeg" }] }
+        });
+
+        let error = normalize_structured_image_formats(&mut document).unwrap_err();
+
+        assert_eq!(
+            error.code,
+            "device_simulator.alarm.structured_image_format_invalid"
         );
     }
 

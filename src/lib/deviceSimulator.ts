@@ -42,6 +42,14 @@ export type SimulatorAlarmJobState =
   | 'completed'
   | 'failed';
 
+/**
+ * Which callers a running session answers. Virtual devices carry no protocol
+ * credentials, so `open` lets any platform that can reach them add them;
+ * `configured_servers_only` restricts discovery and HTTP to the addresses the
+ * configured platform servers resolve to. RTSP is not gated by this setting.
+ */
+export type PlatformAccessMode = 'open' | 'configured_servers_only';
+
 export type SimulatorCheckSeverity = 'info' | 'warning' | 'error';
 export type SimulatorCheckStatus = 'passed' | 'warning' | 'failed' | 'skipped';
 export type SimulatorLogLevel = 'trace' | 'debug' | 'info' | 'warning' | 'error';
@@ -69,10 +77,13 @@ export interface DeviceSimulatorSettings {
   last_device_ips: string[];
   last_subnet_prefix: number;
   last_platform_servers: TargetPlatformServer[];
+  last_platform_access_mode: PlatformAccessMode;
   last_alarm_receiver_url: string | null;
+  last_alarm_receiver_port: number | null;
   last_device_groups: DeviceGroupDraft[];
   last_http_port: number;
   last_rtsp_ports: RtspPorts;
+  last_media_theme_id: string;
   auto_check_asset_updates: boolean;
   manage_firewall: boolean;
 }
@@ -86,7 +97,9 @@ export interface TargetPlatformServer {
 export interface TargetPlatformConfig {
   kind: DeviceSimulatorPlatform;
   servers: TargetPlatformServer[];
+  access_mode: PlatformAccessMode;
   alarm_receiver_url: string | null;
+  alarm_receiver_port: number | null;
 }
 
 export interface DeviceGroupConfig extends DeviceGroupDraft {}
@@ -106,6 +119,7 @@ export interface SimulatorStartRequest {
   subnet_prefix: number;
   device_http_port: number;
   rtsp_ports: RtspPorts;
+  media_theme_id: string;
   groups: DeviceGroupConfig[];
   stream: StreamRuntimeConfig;
 }
@@ -145,6 +159,12 @@ export interface AlarmTypeSummary {
 export interface ProfileAlarmTypes {
   profile_id: string;
   alarm_types: AlarmTypeSummary[];
+}
+
+export interface MediaThemeSummary {
+  id: string;
+  display_name_key: string;
+  is_default: boolean;
 }
 
 export interface AssetPackStatus {
@@ -249,6 +269,14 @@ export interface SimulatorStatus {
   last_error: SimulatorErrorInfo | null;
 }
 
+export function shouldReleaseActiveAlarmJob(
+  status: SimulatorStatus,
+  alarmStartPending: boolean,
+): boolean {
+  return status.state !== 'running'
+    || (status.metrics.active_alarm_jobs === 0 && !alarmStartPending);
+}
+
 export interface ImportedAlarmImage {
   image_id: string;
   file_name: string;
@@ -286,8 +314,24 @@ export interface AlarmJobStats {
   failed: number;
   unverified: number;
   in_flight: number;
+  last_http_status: number | null;
   average_duration_ms: number;
   last_error: SimulatorErrorInfo | null;
+}
+
+/**
+ * Where alarms are currently delivered, and whether that came from a platform
+ * subscription or from the configured fallback port.
+ */
+export interface AlarmSubscription {
+  destinations: string[];
+  learned: boolean;
+  host: string | null;
+  port: number | null;
+  duration_secs: number | null;
+  learned_at_ms: number | null;
+  expires_at_ms: number | null;
+  overridden: boolean;
 }
 
 export interface RecoveryResult {
@@ -359,6 +403,7 @@ export const DEVICE_SIMULATOR_COMMANDS = {
   listInterfaces: 'device_simulator_list_interfaces',
   listProfiles: 'device_simulator_list_profiles',
   listAlarmTypes: 'device_simulator_list_alarm_types',
+  listMediaThemes: 'device_simulator_list_media_themes',
   getAssetStatus: 'device_simulator_get_asset_status',
   prepareAssets: 'device_simulator_prepare_assets',
   cancelAssetDownload: 'device_simulator_cancel_asset_download',
@@ -381,6 +426,7 @@ export const DEVICE_SIMULATOR_EVENTS = {
   deviceStatus: 'device-simulator-device-status',
   rtspStats: 'device-simulator-rtsp-stats',
   alarmStats: 'device-simulator-alarm-stats',
+  alarmSubscription: 'device-simulator-alarm-subscription',
   cleanupProgress: 'device-simulator-cleanup-progress',
 } as const;
 
@@ -391,6 +437,7 @@ export interface DeviceSimulatorEventPayloads {
   [DEVICE_SIMULATOR_EVENTS.deviceStatus]: DeviceStatusBatch;
   [DEVICE_SIMULATOR_EVENTS.rtspStats]: RtspStats;
   [DEVICE_SIMULATOR_EVENTS.alarmStats]: AlarmJobStats;
+  [DEVICE_SIMULATOR_EVENTS.alarmSubscription]: AlarmSubscription;
   [DEVICE_SIMULATOR_EVENTS.cleanupProgress]: CleanupProgress;
 }
 
@@ -405,6 +452,7 @@ export interface DeviceSimulatorApi {
   listInterfaces(): Promise<SimulatorNetworkInterfaceInfo[]>;
   listProfiles(): Promise<DeviceProfileSummary[]>;
   listAlarmTypes(): Promise<ProfileAlarmTypes[]>;
+  listMediaThemes(): Promise<MediaThemeSummary[]>;
   getAssetStatus(profileIds: string[]): Promise<AssetStatus>;
   prepareAssets(profileIds: string[]): Promise<string>;
   cancelAssetDownload(jobId: string): Promise<void>;
@@ -427,6 +475,7 @@ export function createDeviceSimulatorApi(invokeCommand: DeviceSimulatorInvoke): 
     listInterfaces: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listInterfaces),
     listProfiles: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listProfiles),
     listAlarmTypes: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listAlarmTypes),
+    listMediaThemes: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listMediaThemes),
     getAssetStatus: (profileIds) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getAssetStatus, { profileIds }),
     prepareAssets: (profileIds) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.prepareAssets, { profileIds }),
     cancelAssetDownload: (jobId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.cancelAssetDownload, { jobId }),
@@ -480,4 +529,47 @@ export function hasBlockingPreflightFailure(report: PreflightReport): boolean {
   return !report.ok || report.checks.some((check) => (
     check.severity === 'error' && check.status === 'failed'
   ));
+}
+
+/**
+ * Backend alarm error codes that have a specific explanation, keyed by the
+ * suffix under `deviceSimulator.alarmErrors`. Codes absent here still surface
+ * verbatim in the UI next to the generic message — the raw code must never be
+ * swallowed, because it is the only thing that identifies the fault.
+ */
+const ALARM_ERROR_MESSAGE_KEYS: Record<string, string> = {
+  'device_simulator.alarm.transport_connect_failed': 'transportConnectFailed',
+  'device_simulator.alarm.transport_timeout': 'transportTimeout',
+  'device_simulator.alarm.transport_failed': 'transportFailed',
+  'device_simulator.alarm.request_timeout': 'requestTimeout',
+  'device_simulator.alarm.destination_unknown': 'destinationUnknown',
+  'device_simulator.alarm.destination_url_invalid': 'destinationUrlInvalid',
+  'device_simulator.alarm.destination_missing': 'destinationUnknown',
+  'device_simulator.alarm.header_invalid': 'headerInvalid',
+  'device_simulator.alarm.http_client_failed': 'httpClientFailed',
+  'device_simulator.alarm.client_cache_poisoned': 'httpClientFailed',
+  'device_simulator.alarm.cancelled': 'cancelled',
+};
+
+/** i18n key explaining a specific alarm failure, or null when only the generic message applies. */
+export function alarmErrorMessageKey(code: string): string | null {
+  if (code.startsWith('device_simulator.alarm.http_status.')) {
+    return 'deviceSimulator.alarmErrors.httpStatus';
+  }
+  const suffix = ALARM_ERROR_MESSAGE_KEYS[code];
+  return suffix ? `deviceSimulator.alarmErrors.${suffix}` : null;
+}
+
+/** HTTP status carried inside a `device_simulator.alarm.http_status.<n>` code. */
+export function alarmErrorHttpStatus(code: string): string | null {
+  const prefix = 'device_simulator.alarm.http_status.';
+  return code.startsWith(prefix) ? code.slice(prefix.length) : null;
+}
+
+/** True once a learned subscription has passed the lifetime the platform declared. */
+export function isAlarmSubscriptionExpired(
+  subscription: AlarmSubscription,
+  now = Date.now(),
+): boolean {
+  return subscription.expires_at_ms !== null && subscription.expires_at_ms <= now;
 }

@@ -6,6 +6,10 @@ import { useI18n } from 'vue-i18n';
 
 import { clipboardApi, type ImageCopyCrop } from '@/lib/tauri';
 
+withDefaults(defineProps<{ embedded?: boolean }>(), {
+  embedded: false,
+});
+
 const { t } = useI18n();
 
 const imagePath = ref('');
@@ -137,8 +141,14 @@ async function copyImage() {
 </script>
 
 <template>
-  <section class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-    <header class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-5 py-4">
+  <section
+    class="overflow-hidden"
+    :class="embedded ? '' : 'rounded-2xl border border-slate-200 bg-white shadow-sm'"
+  >
+    <header
+      class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100"
+      :class="embedded ? 'px-1 pb-4' : 'px-5 py-4'"
+    >
       <div class="flex items-start gap-3">
         <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-50 text-sky-700">
           <ClipboardCopy class="h-5 w-5" aria-hidden="true" />
@@ -153,7 +163,10 @@ async function copyImage() {
       </span>
     </header>
 
-    <div class="grid gap-5 p-5 lg:grid-cols-[minmax(0,1.45fr)_minmax(280px,0.55fr)]">
+    <div
+      class="grid gap-5 lg:grid-cols-[minmax(0,1.45fr)_minmax(280px,0.55fr)]"
+      :class="embedded ? 'px-1 pt-5 pb-1' : 'p-5'"
+    >
       <div
         class="flex min-h-[310px] items-center justify-center overflow-hidden rounded-2xl border border-dashed bg-slate-50 p-4"
         :class="cropMode ? 'border-sky-300' : 'border-slate-300'"

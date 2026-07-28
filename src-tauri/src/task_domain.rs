@@ -510,7 +510,7 @@ fn default_local_exec_state() -> LocalExecState {
     LocalExecState::NotStarted
 }
 
-fn normalize_path_for_merge(value: &str) -> String {
+pub fn normalize_path_for_merge(value: &str) -> String {
     let mut normalized = value.trim().replace('/', "\\");
     while normalized.len() > 3 && normalized.ends_with('\\') {
         normalized.pop();

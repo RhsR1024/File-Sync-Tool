@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildMediaWebSocketUrl,
-  lowLatencySeekTarget,
+  lowLatencyAction,
   parseMediaHello,
   supportsMseH264,
 } from './mse-player';
@@ -46,10 +46,21 @@ describe('screen share MSE player helpers', () => {
     expect(check).toHaveBeenCalledWith('video/mp4; codecs="avc1.42C028"');
   });
 
-  it('keeps playback close to the live edge for remote-control feedback', () => {
-    expect(lowLatencySeekTarget(4, 5, 6)).toBeCloseTo(5.95);
-    expect(lowLatencySeekTarget(5.5, 5, 6)).toBeCloseTo(5.95);
-    expect(lowLatencySeekTarget(5.82, 5, 6)).toBeNull();
-    expect(lowLatencySeekTarget(Number.NaN, 5, 6)).toBeNull();
+  it('seeks on initial sync, outside the buffer, and severe live-edge drift', () => {
+    expect(lowLatencyAction(5.8, 5, 6, false)).toEqual({ seekTo: 5.88, playbackRate: 1 });
+    expect(lowLatencyAction(4, 5, 6, true)).toEqual({ seekTo: 5.88, playbackRate: 1 });
+    expect(lowLatencyAction(5, 5, 6, true)).toEqual({ seekTo: 5.88, playbackRate: 1 });
+  });
+
+  it('catches up smoothly during steady-state drift and restores normal speed at target', () => {
+    const moderate = lowLatencyAction(5.7, 5, 6, true);
+    expect(moderate.seekTo).toBeNull();
+    expect(moderate.playbackRate).toBeGreaterThan(1);
+    expect(moderate.playbackRate).toBeLessThan(1.1);
+
+    expect(lowLatencyAction(5.5, 5, 6, true)).toEqual({ seekTo: null, playbackRate: 1.1 });
+    expect(lowLatencyAction(5.2, 5, 6, true)).toEqual({ seekTo: null, playbackRate: 1.1 });
+    expect(lowLatencyAction(5.88, 5, 6, true)).toEqual({ seekTo: null, playbackRate: 1 });
+    expect(lowLatencyAction(Number.NaN, 5, 6, true)).toEqual({ seekTo: null, playbackRate: 1 });
   });
 });

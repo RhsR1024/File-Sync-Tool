@@ -15,12 +15,12 @@ test('update dialog keeps long changelogs inside a viewport-bound scroll area', 
   );
   assert.match(
     dialogSource,
-    /flex[^"]*min-h-0[^"]*flex-1[^"]*flex-col[^"]*gap-6[^"]*px-6[^"]*py-7/,
+    /flex[^"]*min-h-0[^"]*flex-1[^"]*flex-col[^"]*gap-\d+[^"]*px-6[^"]*py-7/,
     'dialog body should allow its middle content to shrink before scrolling',
   );
   assert.match(
     dialogSource,
-    /rounded-2xl[^"]*min-h-0[^"]*flex-1[^"]*overflow-y-auto/,
+    /scrollbar-light[^"]*min-h-0[^"]*flex-1[^"]*overflow-y-auto[^"]*overscroll-contain/,
     'release notes card should scroll instead of pushing action buttons off-screen',
   );
   assert.match(

@@ -83,6 +83,48 @@ export interface ScanTask {
   post_copy_execution_order: PostCopyExecutionOrder;
 }
 
+export interface PortalLoginSettings {
+  enabled: boolean;
+  host: string;
+  login_url: string;
+  portal_url: string;
+  username: string;
+  password: string;
+  /** True when a saved password exists but is intentionally not returned to the UI. */
+  password_saved: boolean;
+  remember_pwd: boolean;
+  retry_count: number;
+  retry_interval_secs: number;
+  network_wait_secs: number;
+  request_timeout_secs: number;
+}
+
+export interface PortalLoginStep {
+  code: string;
+  level: 'info' | 'success' | 'warn' | 'error';
+  detail: string | null;
+}
+
+export interface PortalLoginResult {
+  outcome: 'success' | 'already_logged_in' | 'failed';
+  attempts: number;
+  account: string | null;
+  detail: string | null;
+  checked_at: string;
+  steps: PortalLoginStep[];
+}
+
+export interface PortalLoginCheckResult {
+  logged_in: boolean;
+  account: string | null;
+  checked_at: string;
+}
+
+export interface PortalLoginRuntimeStatus {
+  running: boolean;
+  last_result: PortalLoginResult | null;
+}
+
 export interface AppConfig {
   tasks: ScanTask[];
 
@@ -160,6 +202,9 @@ export interface AppConfig {
 
   /** Video device simulator application-domain preferences. */
   device_simulator: DeviceSimulatorSettings;
+
+  /** Captive portal auto-login settings. */
+  portal_login: PortalLoginSettings;
 }
 
 export interface SyncConfigPatch extends Pick<
@@ -196,6 +241,7 @@ export interface AppDomainConfigPatch extends Pick<
   | 'notify_on_new_version'
   | 'clipboard'
   | 'device_simulator'
+  | 'portal_login'
 > {}
 
 export interface ManifestVersion {
@@ -414,6 +460,8 @@ export interface ScanResult {
   found_folders: string[];
   copied_folders: string[];
   errors: string[];
+  /** The cycle stopped early so copies queued earlier keep their place in line. */
+  deferred_for_copy_queue: boolean;
 }
 
 export async function getConfig(): Promise<AppConfig> {
@@ -435,6 +483,18 @@ export async function updateSyncConfig(patch: SyncConfigPatch): Promise<void> {
 
 export async function updateAppConfig(patch: AppDomainConfigPatch): Promise<void> {
   await invoke('update_app_config', { patch });
+}
+
+export async function portalLoginGetRuntimeStatus(): Promise<PortalLoginRuntimeStatus> {
+  return await invoke<PortalLoginRuntimeStatus>('portal_login_get_runtime_status');
+}
+
+export async function portalLoginCheckStatus(): Promise<PortalLoginCheckResult> {
+  return await invoke<PortalLoginCheckResult>('portal_login_check_status');
+}
+
+export async function portalLoginRun(): Promise<PortalLoginResult> {
+  return await invoke<PortalLoginResult>('portal_login_run');
 }
 
 export async function scanNow(): Promise<ScanResult> {
@@ -1050,10 +1110,21 @@ export async function diskCleanupDeleteCacheKeys(
 
 // ─── Network Tools ─────────────────────────────────────
 
+/** How an address was found to be occupied. */
+export type PingProbeMethod = 'arp' | 'icmp' | 'tcp' | 'arp-cache';
+
 export interface PingResult {
   ip: string;
   alive: boolean;
   latencyMs: number | null;
+  mac: string | null;
+  method: PingProbeMethod | null;
+}
+
+/** Pass the scan is currently running, emitted on `ping-scan-phase`. */
+export interface PingScanPhase {
+  phase: 'scanning' | 'rescanning' | 'arpSweep';
+  remaining: number;
 }
 
 export interface PingScanRequest {
@@ -1119,6 +1190,11 @@ export async function pingScan(request: PingScanRequest): Promise<void> {
 
 export async function cancelPingScan(): Promise<void> {
   await invoke('cancel_ping_scan');
+}
+
+/** Opens a console window running `ping` against one address, for manual review. */
+export async function openPingConsole(ip: string): Promise<void> {
+  await invoke('open_ping_console', { ip });
 }
 
 export async function getTcpConnections(): Promise<TcpConnectionStats> {
@@ -1742,6 +1818,31 @@ export interface EnhanceAnyLexerGlobal {
   regex_error_color: string;
 }
 
+export type EnhanceMatcherKind = 'words' | 'line' | 'between' | 'preset' | 'regex';
+
+export const ENHANCE_MATCHER_PRESETS = [
+  'ipv4',
+  'number',
+  'hex',
+  'version',
+  'url',
+  'win_path',
+  'timestamp',
+  'guid',
+  'mac',
+] as const;
+
+export interface EnhanceMatcher {
+  kind: EnhanceMatcherKind;
+  terms: string[];
+  open: string;
+  close: string;
+  preset: string;
+  whole_word: boolean;
+  case_sensitive: boolean;
+  line_start: boolean;
+}
+
 export interface EnhanceAnyLexerRule {
   id: string;
   name: string;
@@ -1749,6 +1850,7 @@ export interface EnhanceAnyLexerRule {
   color: string;
   pattern: string;
   whitelist_styles: number[];
+  matcher: EnhanceMatcher;
 }
 
 export interface EnhanceAnyLexerSection {
@@ -1790,6 +1892,8 @@ export const notepadExtensionsApi = {
     }),
   readEnhanceConfig: (exePath: string) =>
     invoke<EnhanceAnyLexerConfig>('notepad_extensions_read_enhance_config', { exePath }),
+  compileMatcher: (matcher: EnhanceMatcher) =>
+    invoke<string>('notepad_extensions_compile_matcher', { matcher }),
   saveEnhanceConfig: (exePath: string, config: EnhanceAnyLexerConfig) =>
     invoke<EnhanceAnyLexerSaveResult>('notepad_extensions_save_enhance_config', {
       exePath,

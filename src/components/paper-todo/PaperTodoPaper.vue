@@ -28,7 +28,7 @@ import {
   Undo2,
   X,
 } from 'lucide-vue-next';
-import { computed, nextTick, ref, type CSSProperties } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type CSSProperties } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { VueDraggable } from 'vue-draggable-plus';
 
@@ -38,11 +38,13 @@ import {
   createTodoItem,
   createDesktopPaper,
   importPaperImage,
+  isPaperEmpty,
   isPowerPaper,
   MAX_NOTE_LENGTH,
   openPaperNoteExternally,
   openPaperWindow,
   runPaperScript,
+  setPaperEdgePeek,
   splitTodoPaste,
   type PaperDocument,
 } from '@/lib/paperTodo';
@@ -63,6 +65,11 @@ const previewMode = ref<'edit' | 'split' | 'preview'>('edit');
 const pendingImage = ref(false);
 const deleteConfirmationOpen = ref(false);
 const deleteDialog = ref<HTMLElement | null>(null);
+const scriptConfirmationOpen = ref(false);
+const scriptDialog = ref<HTMLElement | null>(null);
+const capsuleHovered = ref(false);
+const peekedAway = ref(false);
+let peekTimer: ReturnType<typeof setTimeout> | null = null;
 
 const paper = computed(() => store.state.value.papers.find((item) => item.id === props.paperId) ?? null);
 const settings = computed(() => store.state.value.settings);
@@ -72,10 +79,10 @@ const isScript = computed(() => Boolean(paper.value && isPowerPaper(paper.value)
 const systemDark = typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches;
 const useDarkTheme = computed(() => settings.value.theme === 'dark' || (settings.value.theme === 'system' && systemDark));
 const paletteClass = computed(() => ({
-  warm: useDarkTheme.value ? 'border-amber-800/70 bg-[#29251b] text-amber-50 shadow-black/30' : 'border-amber-200/90 bg-[#fffdf3] text-slate-800 shadow-amber-950/10',
-  ink: useDarkTheme.value ? 'border-zinc-700 bg-zinc-900 text-zinc-100 shadow-black/30' : 'border-zinc-300 bg-zinc-100 text-zinc-900 shadow-zinc-950/10',
-  forest: useDarkTheme.value ? 'border-emerald-900 bg-[#13241a] text-emerald-50 shadow-black/30' : 'border-emerald-200/90 bg-[#f3fbf5] text-emerald-950 shadow-emerald-950/10',
-  frost: useDarkTheme.value ? 'border-sky-900 bg-[#14232d] text-sky-50 shadow-black/30' : 'border-sky-200/90 bg-[#f4faff] text-slate-800 shadow-sky-950/10',
+  warm: useDarkTheme.value ? 'bg-[#29251b] text-amber-50' : 'bg-[#fffdf3] text-slate-800',
+  ink: useDarkTheme.value ? 'bg-zinc-900 text-zinc-100' : 'bg-zinc-100 text-zinc-900',
+  forest: useDarkTheme.value ? 'bg-[#13241a] text-emerald-50' : 'bg-[#f3fbf5] text-emerald-950',
+  frost: useDarkTheme.value ? 'bg-[#14232d] text-sky-50' : 'bg-[#f4faff] text-slate-800',
 }[settings.value.palette]));
 const todoTextClass = computed(() => ({
   small: 'text-xs', medium: 'text-sm', large: 'text-base', xlarge: 'text-lg',
@@ -89,6 +96,46 @@ const titleTextClass = computed(() => ({
 const capsuleTextClass = computed(() => ({
   small: 'text-xs', medium: 'text-sm', large: 'text-base', xlarge: 'text-lg',
 }[settings.value.capsuleFontSize]));
+// The capsule is the paper folded away, not a shrunken window: it draws its own
+// compact surface instead of squeezing the expanded header into 216 px.
+const isCapsule = computed(() => Boolean(props.standalone && paper.value?.collapsed));
+const capsuleAccent = computed(() => ({
+  warm: useDarkTheme.value ? '#d9a441' : '#b8791a',
+  ink: useDarkTheme.value ? '#a1a1aa' : '#52525b',
+  forest: useDarkTheme.value ? '#4ade80' : '#15803d',
+  frost: useDarkTheme.value ? '#7dd3fc' : '#0369a1',
+}[settings.value.palette]));
+const capsuleDockSide = computed(() => paper.value?.geometry.dockEdge ?? 'right');
+/// Share of the spine that is inked in: completed items for a todo paper, and
+/// how full the note is for a note paper. Readable from the docked sliver alone.
+const capsuleFill = computed(() => {
+  const current = paper.value;
+  if (!current) return 0;
+  if (current.kind === 'todo') {
+    return current.items.length ? completedCount.value / current.items.length : 0;
+  }
+  return current.content.length ? Math.min(1, current.content.length / 4_000) : 0;
+});
+const capsuleMeta = computed(() => {
+  const current = paper.value;
+  if (!current) return '';
+  if (current.kind === 'todo') {
+    return current.items.length ? `${completedCount.value}/${current.items.length}` : '';
+  }
+  const lines = current.content.trim() ? current.content.trim().split('\n').length : 0;
+  return lines ? t('paperTodo.capsuleLines', { count: lines }) : '';
+});
+const canAutoHideCapsule = computed(() => Boolean(
+  props.standalone
+  && settings.value.autoDockCapsules
+  && settings.value.autoHideDockedCapsules,
+));
+
+/** Tooltips are opt-in; screen-reader labels stay on the controls regardless. */
+function tip(key: string): string | undefined {
+  return settings.value.hoverTips ? t(key) : undefined;
+}
+
 const renderingStyle = computed<CSSProperties>(() => ({
   WebkitFontSmoothing: settings.value.textRendering === 'soft' ? 'antialiased' : 'auto',
   textRendering: settings.value.textRendering === 'sharp' ? 'geometricPrecision' : 'auto',
@@ -99,6 +146,10 @@ const paperStyle = computed<CSSProperties>(() => ({
   fontSize: `${settings.value.interfaceScale}%`,
   colorScheme: useDarkTheme.value ? 'dark' : 'light',
 }));
+const capsuleStyle = computed<CSSProperties>(() => ({
+  ...paperStyle.value,
+  '--paper-capsule-accent': capsuleAccent.value,
+} as CSSProperties));
 
 function update(mutator: (value: PaperDocument) => void, history = false, immediate = false): void {
   store.updatePaper(props.paperId, mutator, { history, immediate });
@@ -140,6 +191,22 @@ function deleteTodo(id: string): void {
 function clearCompleted(): void {
   if (!completedCount.value) return;
   update((value) => { value.items = value.items.filter((item) => !item.completed); }, true, true);
+}
+
+function onTodoListKeydown(event: KeyboardEvent): void {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+  const key = event.key.toLowerCase();
+  const target = event.target as HTMLElement | null;
+  // Leave native caret undo/redo to text fields; list-level history is driven
+  // from the footer buttons and these shortcuts only when focus is elsewhere.
+  if (target && target.closest('input,textarea,select')) return;
+  if (key === 'z' && store.canUndo(props.paperId)) {
+    event.preventDefault();
+    store.undoPaper(props.paperId);
+  } else if ((key === 'y' || (key === 'z' && event.shiftKey)) && store.canRedo(props.paperId)) {
+    event.preventDefault();
+    store.redoPaper(props.paperId);
+  }
 }
 
 function onSortStart(): void {
@@ -245,8 +312,16 @@ function onNotePaste(event: ClipboardEvent): void {
   }
 }
 
+async function openScriptConfirmation(): Promise<void> {
+  if (!paper.value) return;
+  scriptConfirmationOpen.value = true;
+  await nextTick();
+  scriptDialog.value?.focus();
+}
+
 async function launchScript(): Promise<void> {
-  if (!paper.value || !window.confirm(t('paperTodo.confirmRunScript'))) return;
+  scriptConfirmationOpen.value = false;
+  if (!paper.value) return;
   try {
     await runPaperScript(paper.value, settings.value);
   } catch (reason) {
@@ -297,15 +372,87 @@ async function openLinkedNote(id: string | null): Promise<void> {
 }
 
 async function closeDesktop(): Promise<void> {
+  const current = paper.value;
+  if (!current) return;
+  if (isPaperEmpty(current)) {
+    const id = current.id;
+    await store.removePaper(id);
+    emit('deleted', id);
+    return;
+  }
   update((value) => { value.desktopOpen = false; }, false, true);
   await store.flush();
   await getCurrentWindow().close();
 }
 
+async function saveCurrentPaper(): Promise<void> {
+  if (!paper.value) return;
+  update(() => {}, false, true);
+  await store.flush();
+}
+
+function cancelPeekTimer(): void {
+  if (peekTimer) clearTimeout(peekTimer);
+  peekTimer = null;
+}
+
+async function setEdgePeek(peek: boolean): Promise<void> {
+  const current = paper.value;
+  if (!current || !current.collapsed || !canAutoHideCapsule.value) return;
+  if (peekedAway.value === peek) return;
+  peekedAway.value = peek;
+  // The slide takes ~110 ms in Rust; hold move tracking a little longer so the
+  // trailing frames cannot be mistaken for a user reposition.
+  store.suspendGeometryTracking(400);
+  try {
+    await setPaperEdgePeek(
+      current.id,
+      current.geometry.dockEdge ?? 'nearest',
+      peek,
+      settings.value.animations,
+    );
+  } catch (reason) {
+    peekedAway.value = !peek;
+    store.error.value = String(reason);
+  }
+}
+
+/** Rest the capsule against the edge once the pointer has clearly left it. */
+function schedulePeekAway(delay = 900): void {
+  cancelPeekTimer();
+  if (!canAutoHideCapsule.value || capsuleHovered.value) return;
+  peekTimer = setTimeout(() => {
+    peekTimer = null;
+    void setEdgePeek(true);
+  }, delay);
+}
+
+function onCapsuleEnter(): void {
+  capsuleHovered.value = true;
+  cancelPeekTimer();
+  void setEdgePeek(false);
+}
+
+function onCapsuleLeave(): void {
+  capsuleHovered.value = false;
+  schedulePeekAway(650);
+}
+
+async function dockCapsule(edge: 'left' | 'right' | 'nearest'): Promise<void> {
+  const current = paper.value;
+  if (!current || !props.standalone) return;
+  store.suspendGeometryTracking(400);
+  const resolved = await invoke<string>('paper_todo_dock_window', { id: current.id, edge });
+  update((value) => { value.geometry.dockEdge = resolved === 'left' ? 'left' : 'right'; }, false, true);
+}
+
 async function applyWindowMode(collapsed: boolean): Promise<void> {
   if (!paper.value) return;
+  cancelPeekTimer();
+  peekedAway.value = false;
   update((value) => { value.collapsed = collapsed; }, false, true);
   if (props.standalone) {
+    store.suspendGeometryTracking(400);
     await invoke('paper_todo_set_window_mode', {
       id: paper.value.id,
       collapsed,
@@ -314,10 +461,8 @@ async function applyWindowMode(collapsed: boolean): Promise<void> {
       height: paper.value.geometry.height,
     });
     if (collapsed && settings.value.autoDockCapsules) {
-      await invoke('paper_todo_dock_window', {
-        id: paper.value.id,
-        edge: paper.value.geometry.dockEdge ?? 'nearest',
-      });
+      await dockCapsule(paper.value.geometry.dockEdge ?? 'nearest');
+      schedulePeekAway();
     }
   }
 }
@@ -329,9 +474,7 @@ async function togglePinned(): Promise<void> {
 }
 
 async function dock(edge: 'left' | 'right'): Promise<void> {
-  if (!paper.value || !props.standalone) return;
-  await invoke('paper_todo_dock_window', { id: paper.value.id, edge });
-  update((value) => { value.geometry.dockEdge = edge; }, false, true);
+  await dockCapsule(edge);
 }
 
 async function confirmDeletePaper(): Promise<void> {
@@ -349,31 +492,157 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
   try {
     await getCurrentWindow().startDragging();
     if (paper.value?.collapsed && settings.value.autoDockCapsules) {
-      await invoke('paper_todo_dock_window', { id: paper.value.id, edge: 'nearest' });
+      await dockCapsule('nearest');
     }
   } catch (reason) {
     store.error.value = String(reason);
   }
 }
+
+/**
+ * The capsule has one press gesture: drag it to move, or press and release
+ * without moving to open the paper. Buttons inside it keep their own clicks.
+ */
+async function startCapsuleDrag(event: MouseEvent): Promise<void> {
+  const current = paper.value;
+  if (!current || !props.standalone || event.button !== 0) return;
+  if ((event.target as HTMLElement).closest('button')) return;
+  cancelPeekTimer();
+  const capsuleWindow = getCurrentWindow();
+  try {
+    const origin = await capsuleWindow.outerPosition();
+    // `startDragging` resolves when the OS drag loop ends, so the position
+    // afterwards tells us whether this press was a move or a plain click.
+    await capsuleWindow.startDragging();
+    const landed = await capsuleWindow.outerPosition();
+    if (Math.abs(landed.x - origin.x) < 3 && Math.abs(landed.y - origin.y) < 3) {
+      await applyWindowMode(false);
+      return;
+    }
+    peekedAway.value = false;
+    if (settings.value.autoDockCapsules) await dockCapsule('nearest');
+    schedulePeekAway();
+  } catch (reason) {
+    store.error.value = String(reason);
+  }
+}
+
+// Turning auto-hide off must not strand a capsule that is already resting off
+// screen: it has no visible surface left to grab, so bring it back immediately.
+watch(canAutoHideCapsule, (enabled) => {
+  const current = paper.value;
+  if (enabled || !peekedAway.value || !current) return;
+  cancelPeekTimer();
+  peekedAway.value = false;
+  store.suspendGeometryTracking(400);
+  setPaperEdgePeek(
+    current.id,
+    current.geometry.dockEdge ?? 'nearest',
+    false,
+    settings.value.animations,
+  ).catch((reason) => { store.error.value = String(reason); });
+});
+
+/** Save explicitly with Ctrl+S; Escape folds an expanded desktop paper away. */
+function onWindowKeydown(event: KeyboardEvent): void {
+  if (!props.standalone) return;
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's') {
+    event.preventDefault();
+    void saveCurrentPaper();
+    return;
+  }
+  if (event.key !== 'Escape') return;
+  if (!paper.value || paper.value.collapsed || !settings.value.capsuleMode) return;
+  void applyWindowMode(true);
+}
+
+onMounted(() => {
+  // A paper restored as a capsule should settle against its edge on its own.
+  if (isCapsule.value) schedulePeekAway(1_400);
+  if (props.standalone) window.addEventListener('keydown', onWindowKeydown);
+});
+
+onBeforeUnmount(() => {
+  cancelPeekTimer();
+  window.removeEventListener('keydown', onWindowKeydown);
+});
 </script>
 
 <template>
-  <section
-    v-if="paper"
-    class="relative flex min-h-0 flex-col overflow-hidden border shadow-[0_18px_45px_var(--tw-shadow-color)]"
+  <div
+    v-if="paper && isCapsule"
+    class="paper-capsule"
     :class="[
       paletteClass,
-      standalone ? 'h-screen rounded-[7px]' : 'h-[520px] rounded-lg',
-      !settings.animations && 'motion-reduce:transition-none',
+      capsuleDockSide === 'left' ? 'is-docked-left' : 'is-docked-right',
+      !settings.animations && 'paper-no-motion',
+    ]"
+    :style="capsuleStyle"
+    :title="tip('paperTodo.capsuleHint')"
+    @mouseenter="onCapsuleEnter"
+    @mouseleave="onCapsuleLeave"
+    @mousedown="startCapsuleDrag"
+    @dblclick.prevent="applyWindowMode(false)"
+    @contextmenu.prevent
+  >
+    <span class="paper-capsule-spine" aria-hidden="true">
+      <span class="paper-capsule-spine-fill" :style="{ height: `${Math.round(capsuleFill * 100)}%` }"></span>
+    </span>
+    <component
+      :is="paper.kind === 'todo' ? StickyNote : FileText"
+      class="paper-capsule-icon"
+      aria-hidden="true"
+    />
+    <span class="paper-capsule-title" :class="[capsuleTextClass, settings.capsuleBold && 'font-bold']">
+      {{ paper.title }}
+    </span>
+    <span v-if="capsuleMeta" class="paper-capsule-meta">{{ capsuleMeta }}</span>
+    <span class="paper-capsule-actions">
+      <button
+        type="button"
+        class="paper-capsule-action"
+        :title="tip('paperTodo.expand')"
+        :aria-label="t('paperTodo.openCapsule', { title: paper.title })"
+        @click.stop="applyWindowMode(false)"
+      >
+        <ChevronDown class="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        class="paper-capsule-action"
+        :title="tip('paperTodo.close')"
+        :aria-label="t('paperTodo.close')"
+        @click.stop="closeDesktop"
+      >
+        <X class="h-3.5 w-3.5" />
+      </button>
+    </span>
+  </div>
+
+  <section
+    v-else-if="paper"
+    class="paper-surface relative flex min-h-0 flex-col overflow-hidden"
+    :class="[
+      paletteClass,
+      standalone ? 'h-screen rounded-xl' : 'h-[520px] rounded-xl ring-1 ring-current/10 shadow-lg',
+      !settings.animations && 'paper-no-motion',
     ]"
     :style="paperStyle"
+    @contextmenu.prevent
   >
     <header
       class="flex min-h-12 shrink-0 items-center gap-1.5 border-b border-current/10 px-2.5"
       :class="standalone ? 'cursor-move select-none' : ''"
       @mousedown="startWindowDrag"
     >
-      <button class="paper-icon-button" type="button" :title="paper.pinned ? t('paperTodo.unpin') : t('paperTodo.pin')" @click="togglePinned">
+      <button
+        class="paper-icon-button"
+        type="button"
+        :title="tip(paper.pinned ? 'paperTodo.unpin' : 'paperTodo.pin')"
+        :aria-label="t(paper.pinned ? 'paperTodo.unpin' : 'paperTodo.pin')"
+        :aria-pressed="paper.pinned"
+        @click="togglePinned"
+      >
         <Pin v-if="paper.pinned" class="h-4 w-4" />
         <PinOff v-else class="h-4 w-4" />
       </button>
@@ -381,7 +650,7 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
         v-if="standalone"
         class="paper-window-drag-handle"
         type="button"
-        :title="t('paperTodo.moveWindow')"
+        :title="tip('paperTodo.moveWindow')"
         :aria-label="t('paperTodo.moveWindow')"
         @mousedown.stop.prevent="startWindowDrag($event, true)"
       >
@@ -391,40 +660,36 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
       <input
         :value="paper.title"
         class="min-w-0 flex-1 bg-transparent px-1 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40"
-        :class="[paper.collapsed && standalone ? capsuleTextClass : titleTextClass, (paper.collapsed && standalone ? settings.capsuleBold : settings.titleBold) && 'font-bold']"
+        :class="[titleTextClass, settings.titleBold && 'font-bold']"
         :maxlength="settings.titleMaxLength"
         :aria-label="t('paperTodo.paperTitle')"
         @input="changeTitle"
       >
-      <span v-if="store.savingIds.value.has(paper.id)" class="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500 motion-reduce:animate-none" :title="t('paperTodo.saving')"></span>
-      <button v-if="paper.kind === 'note' && settings.showExternalOpenButton" class="paper-icon-button" type="button" :title="t('paperTodo.openExternal')" @click="openExternal">
+      <span v-if="store.savingIds.value.has(paper.id)" class="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500 motion-reduce:animate-none" :title="tip('paperTodo.saving')"></span>
+      <button v-if="paper.kind === 'note' && settings.showExternalOpenButton" class="paper-icon-button" type="button" :title="tip('paperTodo.openExternal')" :aria-label="t('paperTodo.openExternal')" @click="openExternal">
         <ExternalLink class="h-4 w-4" />
       </button>
-      <button v-if="standalone && settings.showNewTodoButton" class="paper-icon-button" type="button" :title="t('paperTodo.newTodoPaper')" @click="createSiblingPaper('todo')">
+      <button v-if="standalone && settings.showNewTodoButton" class="paper-icon-button" type="button" :title="tip('paperTodo.newTodoPaper')" :aria-label="t('paperTodo.newTodoPaper')" @click="createSiblingPaper('todo')">
         <Plus class="h-4 w-4" />
       </button>
-      <button v-if="standalone && settings.showNewNoteButton" class="paper-icon-button" type="button" :title="t('paperTodo.newNotePaper')" @click="createSiblingPaper('note')">
+      <button v-if="standalone && settings.showNewNoteButton" class="paper-icon-button" type="button" :title="tip('paperTodo.newNotePaper')" :aria-label="t('paperTodo.newNotePaper')" @click="createSiblingPaper('note')">
         <FilePlus2 class="h-4 w-4" />
       </button>
-      <button v-if="isScript" class="paper-icon-button text-amber-600" type="button" :title="t('paperTodo.runScript')" @click="launchScript">
+      <button v-if="isScript" class="paper-icon-button text-amber-600" type="button" :title="tip('paperTodo.runScript')" :aria-label="t('paperTodo.runScript')" @click="openScriptConfirmation">
         <Play class="h-4 w-4" />
       </button>
-      <button v-if="!standalone" class="paper-icon-button" type="button" :title="t('paperTodo.openDesktop')" @click="openDesktop">
+      <button v-if="!standalone" class="paper-icon-button" type="button" :title="tip('paperTodo.openDesktop')" :aria-label="t('paperTodo.openDesktop')" @click="openDesktop">
         <Maximize2 class="h-4 w-4" />
       </button>
-      <button v-if="standalone && paper.collapsed" class="paper-icon-button" type="button" :title="t('paperTodo.expand')" @click="applyWindowMode(false)">
-        <ChevronDown class="h-4 w-4" />
-      </button>
-      <button v-else-if="settings.capsuleMode" class="paper-icon-button" type="button" :title="t('paperTodo.collapse')" @click="applyWindowMode(true)">
+      <button v-if="settings.capsuleMode" class="paper-icon-button" type="button" :title="tip('paperTodo.collapse')" :aria-label="t('paperTodo.collapse')" @click="applyWindowMode(true)">
         <ChevronUp class="h-4 w-4" />
       </button>
-      <button v-if="standalone" class="paper-icon-button" type="button" :title="t('paperTodo.close')" @click="closeDesktop">
+      <button v-if="standalone" class="paper-icon-button" type="button" :title="tip('paperTodo.close')" :aria-label="t('paperTodo.close')" @click="closeDesktop">
         <X class="h-4 w-4" />
       </button>
     </header>
 
-    <template v-if="!paper.collapsed || !standalone">
-      <div v-if="paper.kind === 'todo'" class="flex min-h-0 flex-1 flex-col">
+    <div v-if="paper.kind === 'todo'" class="flex min-h-0 flex-1 flex-col" @keydown="onTodoListKeydown">
         <div class="flex shrink-0 gap-2 border-b border-current/10 p-3">
           <input
             v-model="newTodoText"
@@ -433,7 +698,7 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
             @keydown.enter.prevent="submitTodo"
             @paste="onTodoPaste"
           >
-          <button class="paper-command-button" type="button" :disabled="!newTodoText.trim()" :title="t('paperTodo.addTodo')" @click="submitTodo">
+          <button class="paper-command-button" type="button" :disabled="!newTodoText.trim()" :title="tip('paperTodo.addTodo')" :aria-label="t('paperTodo.addTodo')" @click="submitTodo">
             <CirclePlus class="h-4 w-4" />
           </button>
         </div>
@@ -464,22 +729,23 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
               class="mt-1 min-w-0 flex-1 bg-transparent leading-6 outline-none focus-visible:ring-2 focus-visible:ring-sky-500/30"
               :class="[todoTextClass, settings.todoBold && 'font-semibold', item.completed && 'line-through opacity-45']"
               maxlength="2000"
+              @input="update(() => {}, false)"
               @change="update(() => {}, false, true)"
             >
             <select
               v-if="notes.length"
               v-model="item.linkedNoteId"
               class="mt-1 h-7 max-w-24 rounded border border-current/10 bg-transparent px-1 text-[11px] opacity-0 outline-none transition-opacity group-hover:opacity-70 focus:opacity-100"
-              :title="t('paperTodo.linkNote')"
+              :title="tip('paperTodo.linkNote')" :aria-label="t('paperTodo.linkNote')"
               @change="update(() => {}, true, true)"
             >
               <option :value="null">{{ t('paperTodo.noLinkedNote') }}</option>
               <option v-for="note in notes" :key="note.id" :value="note.id">{{ settings.showLinkedNoteTitle ? note.title : t('paperTodo.note') }}</option>
             </select>
-            <button v-if="item.linkedNoteId" class="paper-icon-button mt-0.5" type="button" :title="t('paperTodo.openLinkedNote')" @click="openLinkedNote(item.linkedNoteId)">
+            <button v-if="item.linkedNoteId" class="paper-icon-button mt-0.5" type="button" :title="tip('paperTodo.openLinkedNote')" :aria-label="t('paperTodo.openLinkedNote')" @click="openLinkedNote(item.linkedNoteId)">
               <ExternalLink class="h-3.5 w-3.5" />
             </button>
-            <button class="paper-icon-button mt-0.5 opacity-0 group-hover:opacity-60 focus:opacity-100" type="button" :title="t('paperTodo.deleteTodo')" @click="deleteTodo(item.id)">
+            <button class="paper-icon-button mt-0.5 opacity-35 group-hover:opacity-70 focus:opacity-100" type="button" :title="tip('paperTodo.deleteTodo')" :aria-label="t('paperTodo.deleteTodo')" @click="deleteTodo(item.id)">
               <Trash2 class="h-3.5 w-3.5" />
             </button>
           </div>
@@ -488,24 +754,24 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
 
         <footer class="flex min-h-11 shrink-0 items-center gap-1 border-t border-current/10 px-2">
           <span class="mr-auto text-xs opacity-50">{{ t('paperTodo.todoProgress', { done: completedCount, total: paper.items.length }) }}</span>
-          <button class="paper-icon-button" type="button" :disabled="!store.canUndo(paper.id)" :title="t('paperTodo.undo')" @click="store.undoPaper(paper.id)"><Undo2 class="h-4 w-4" /></button>
-          <button class="paper-icon-button" type="button" :disabled="!store.canRedo(paper.id)" :title="t('paperTodo.redo')" @click="store.redoPaper(paper.id)"><Redo2 class="h-4 w-4" /></button>
-          <button class="paper-icon-button" type="button" :disabled="!completedCount" :title="t('paperTodo.clearCompleted')" @click="clearCompleted"><RotateCcw class="h-4 w-4" /></button>
-          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="openDeleteConfirmation"><Trash2 class="h-4 w-4" /></button>
+          <button class="paper-icon-button" type="button" :disabled="!store.canUndo(paper.id)" :title="tip('paperTodo.undo')" :aria-label="t('paperTodo.undo')" @click="store.undoPaper(paper.id)"><Undo2 class="h-4 w-4" /></button>
+          <button class="paper-icon-button" type="button" :disabled="!store.canRedo(paper.id)" :title="tip('paperTodo.redo')" :aria-label="t('paperTodo.redo')" @click="store.redoPaper(paper.id)"><Redo2 class="h-4 w-4" /></button>
+          <button class="paper-icon-button" type="button" :disabled="!completedCount" :title="tip('paperTodo.clearCompleted')" :aria-label="t('paperTodo.clearCompleted')" @click="clearCompleted"><RotateCcw class="h-4 w-4" /></button>
+          <button class="paper-icon-button text-rose-600" type="button" :title="tip('paperTodo.deletePaper')" :aria-label="t('paperTodo.deletePaper')" @click="openDeleteConfirmation"><Trash2 class="h-4 w-4" /></button>
         </footer>
-      </div>
+    </div>
 
-      <div v-else class="flex min-h-0 flex-1 flex-col">
+    <div v-else class="flex min-h-0 flex-1 flex-col">
         <div class="flex min-h-10 shrink-0 items-center gap-1 border-b border-current/10 px-2">
-          <button class="paper-icon-button font-bold" type="button" :title="t('paperTodo.bold')" @click="formatSelection('**')"><Bold class="h-4 w-4" /></button>
-          <button class="paper-icon-button italic" type="button" :title="t('paperTodo.italic')" @click="formatSelection('*')"><Italic class="h-4 w-4" /></button>
-          <button class="paper-icon-button" type="button" :title="t('paperTodo.link')" @click="formatSelection('[', '](https://)')"><Link class="h-4 w-4" /></button>
-          <button class="paper-icon-button" type="button" :disabled="pendingImage" :title="t('paperTodo.insertImage')" @click="insertImage('file')"><Image class="h-4 w-4" /></button>
+          <button class="paper-icon-button font-bold" type="button" :title="tip('paperTodo.bold')" :aria-label="t('paperTodo.bold')" @click="formatSelection('**')"><Bold class="h-4 w-4" /></button>
+          <button class="paper-icon-button italic" type="button" :title="tip('paperTodo.italic')" :aria-label="t('paperTodo.italic')" @click="formatSelection('*')"><Italic class="h-4 w-4" /></button>
+          <button class="paper-icon-button" type="button" :title="tip('paperTodo.link')" :aria-label="t('paperTodo.link')" @click="formatSelection('[', '](https://)')"><Link class="h-4 w-4" /></button>
+          <button class="paper-icon-button" type="button" :disabled="pendingImage" :title="tip('paperTodo.insertImage')" :aria-label="t('paperTodo.insertImage')" @click="insertImage('file')"><Image class="h-4 w-4" /></button>
           <span class="mx-1 h-4 w-px bg-current/15"></span>
           <button class="paper-text-button" type="button" :class="previewMode === 'edit' && 'bg-current/10'" @click="previewMode = 'edit'">{{ t('paperTodo.edit') }}</button>
           <button class="paper-text-button" type="button" :class="previewMode === 'split' && 'bg-current/10'" @click="previewMode = 'split'">{{ t('paperTodo.split') }}</button>
           <button class="paper-text-button" type="button" :class="previewMode === 'preview' && 'bg-current/10'" @click="previewMode = 'preview'">{{ t('paperTodo.preview') }}</button>
-          <button class="paper-text-button ml-auto" type="button" :title="t('paperTodo.resetZoom')" @click="update(value => { value.zoom = 100; }, false, true)">{{ paper.zoom }}%</button>
+          <button class="paper-text-button ml-auto" type="button" :title="tip('paperTodo.resetZoom')" :aria-label="t('paperTodo.resetZoom')" @click="update(value => { value.zoom = 100; }, false, true)">{{ paper.zoom }}%</button>
         </div>
         <div class="grid min-h-0 flex-1" :class="previewMode === 'split' ? 'grid-cols-2' : 'grid-cols-1'">
           <textarea
@@ -528,12 +794,11 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
         </div>
         <footer class="flex min-h-11 shrink-0 items-center border-t border-current/10 px-2">
           <span class="mr-auto text-xs opacity-45">{{ paper.content.length.toLocaleString() }} / {{ MAX_NOTE_LENGTH.toLocaleString() }}</span>
-          <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="t('paperTodo.dockLeft')" @click="dock('left')"><PanelLeftClose class="h-4 w-4" /></button>
-          <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="t('paperTodo.dockRight')" @click="dock('right')"><PanelRightClose class="h-4 w-4" /></button>
-          <button class="paper-icon-button text-rose-600" type="button" :title="t('paperTodo.deletePaper')" @click="openDeleteConfirmation"><Trash2 class="h-4 w-4" /></button>
+          <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="tip('paperTodo.dockLeft')" :aria-label="t('paperTodo.dockLeft')" @click="dock('left')"><PanelLeftClose class="h-4 w-4" /></button>
+          <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="tip('paperTodo.dockRight')" :aria-label="t('paperTodo.dockRight')" @click="dock('right')"><PanelRightClose class="h-4 w-4" /></button>
+          <button class="paper-icon-button text-rose-600" type="button" :title="tip('paperTodo.deletePaper')" :aria-label="t('paperTodo.deletePaper')" @click="openDeleteConfirmation"><Trash2 class="h-4 w-4" /></button>
         </footer>
-      </div>
-    </template>
+    </div>
 
     <div
       v-if="deleteConfirmationOpen"
@@ -553,10 +818,149 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
         </div>
       </div>
     </div>
+
+    <div
+      v-if="scriptConfirmationOpen"
+      ref="scriptDialog"
+      class="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/25 p-5 backdrop-blur-[1px]"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      :aria-label="t('paperTodo.runScript')"
+      @keydown.esc.stop="scriptConfirmationOpen = false"
+    >
+      <div class="w-full max-w-72 rounded-md border border-current/15 bg-white p-4 text-slate-800 shadow-xl dark:bg-zinc-900 dark:text-zinc-100">
+        <p class="text-sm leading-6">{{ t('paperTodo.confirmRunScript') }}</p>
+        <div class="mt-4 flex justify-end gap-2">
+          <button type="button" class="paper-confirm-button" autofocus @click="scriptConfirmationOpen = false">{{ t('common.cancel') }}</button>
+          <button type="button" class="paper-confirm-button border-amber-300 text-amber-700 hover:bg-amber-50 dark:text-amber-300" @click="launchScript">{{ t('paperTodo.runScript') }}</button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
 <style scoped>
+.paper-surface {
+  /* Clip the WebView-composited surface itself so antialiasing cannot leave a
+     square dark fringe around the transparent native window. */
+  border: 0;
+  clip-path: inset(0 round 0.75rem);
+}
+
+/*
+ * The capsule reads as a sheet of paper resting on its edge rather than a
+ * shrunken window. Its one deliberate flourish is the spine: the palette-inked
+ * bar along the docked side. The spine is the binding of the paper, the
+ * progress meter (filled by completed items), and — because auto-hide slides
+ * the pill off the display until only this bar shows — the handle you grab to
+ * bring it back. One element, three jobs, so nothing else needs decorating.
+ */
+.paper-capsule {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 999px;
+  box-shadow: 0 2px 6px rgb(15 23 42 / 0.2);
+  cursor: grab;
+  user-select: none;
+}
+.paper-capsule:active { cursor: grabbing; }
+.paper-capsule.is-docked-left { padding: 0 13px 0 16px; }
+.paper-capsule.is-docked-right { padding: 0 16px 0 13px; }
+.paper-capsule-spine {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  display: flex;
+  width: 3px;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--paper-capsule-accent) 24%, transparent);
+}
+/* Stays within the sliver the window leaves on screen while parked. */
+.is-docked-left .paper-capsule-spine { left: 5px; }
+.is-docked-right .paper-capsule-spine { right: 5px; }
+.paper-capsule-spine-fill {
+  width: 100%;
+  border-radius: 999px;
+  background: var(--paper-capsule-accent);
+  transition: height 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.paper-capsule-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  opacity: 0.5;
+}
+.paper-capsule-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+.paper-capsule-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.48;
+  transition: opacity 150ms ease;
+}
+/* Actions overlay the count instead of displacing it, so the resting capsule
+   never reflows when the pointer arrives. */
+.paper-capsule-actions {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+}
+.is-docked-left .paper-capsule-actions { right: 9px; }
+.is-docked-right .paper-capsule-actions { right: 12px; }
+.paper-capsule:hover .paper-capsule-meta,
+.paper-capsule:focus-within .paper-capsule-meta { opacity: 0; }
+.paper-capsule:hover .paper-capsule-actions,
+.paper-capsule:focus-within .paper-capsule-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.paper-capsule-action {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: 0.62;
+  transition: background-color 140ms ease, opacity 140ms ease;
+}
+.paper-capsule-action:hover { background: rgb(100 116 139 / 0.2); opacity: 1; }
+.paper-capsule-action:focus-visible {
+  outline: 2px solid rgb(14 165 233 / 0.6);
+  outline-offset: 1px;
+  opacity: 1;
+}
+/* "Animations off" is a setting, not just an OS preference. */
+.paper-no-motion,
+.paper-no-motion :deep(*) {
+  transition-duration: 0ms !important;
+  animation-duration: 0ms !important;
+}
 .paper-icon-button {
   display: inline-flex;
   width: 2rem;
@@ -616,6 +1020,10 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
 .paper-confirm-button:hover { background: rgb(248 250 252 / 0.85); }
 .paper-confirm-button:focus-visible { outline: 2px solid rgb(14 165 233 / 0.55); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
-  .paper-icon-button { transition: none; }
+  .paper-icon-button,
+  .paper-capsule-action,
+  .paper-capsule-meta,
+  .paper-capsule-actions,
+  .paper-capsule-spine-fill { transition: none; }
 }
 </style>

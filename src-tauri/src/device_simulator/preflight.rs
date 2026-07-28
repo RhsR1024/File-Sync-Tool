@@ -402,8 +402,8 @@ fn join_addresses(addresses: &[Ipv4Addr]) -> String {
 mod tests {
     use super::*;
     use crate::device_simulator::api::{
-        DeviceGroupDraft, DeviceSimulatorStreamKind, RtspPorts, StreamRuntimeConfig,
-        StreamTransport, TargetPlatformConfig, TargetPlatformServer,
+        DeviceGroupDraft, DeviceSimulatorStreamKind, PlatformAccessMode, RtspPorts,
+        StreamRuntimeConfig, StreamTransport, TargetPlatformConfig, TargetPlatformServer,
     };
     use crate::device_simulator::profiles::scope::TargetPlatform;
     use crate::device_simulator::windows::interfaces::StableInterfaceId;
@@ -420,7 +420,9 @@ mod tests {
                     host: "192.0.2.10".into(),
                     port: 80,
                 }],
+                access_mode: PlatformAccessMode::Open,
                 alarm_receiver_url: None,
+                alarm_receiver_port: Some(55_025),
             },
             interface_id: "guid:a0b1c2d3-1234-5678-90ab-010203040506".into(),
             start_ip: "192.168.50.10".parse().unwrap(),
@@ -428,6 +430,8 @@ mod tests {
             subnet_prefix: 24,
             device_http_port: 81,
             rtsp_ports: RtspPorts::default(),
+            _legacy_allow_local_player_access: true,
+            media_theme_id: crate::device_simulator::api::DEFAULT_MEDIA_THEME_ID.into(),
             groups: vec![DeviceGroupDraft {
                 id: "ipc".into(),
                 profile_id: "ipc-custom".into(),

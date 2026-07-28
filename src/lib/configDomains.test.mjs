@@ -44,6 +44,20 @@ const config = {
     auto_check_asset_updates: true,
     manage_firewall: true,
   },
+  portal_login: {
+    enabled: true,
+    host: 'http://1.1.1.3',
+    login_url: '/ac_portal/login.php',
+    portal_url: '/ac_portal/default/pc.html',
+    username: 'portal-user',
+    password: 'portal-password',
+    password_saved: false,
+    remember_pwd: true,
+    retry_count: 3,
+    retry_interval_secs: 5,
+    network_wait_secs: 30,
+    request_timeout_secs: 15,
+  },
 };
 
 const backendOnlyFields = ['last_update_check_at', 'pending_update'];
@@ -72,6 +86,7 @@ test('config domain patches preserve the exact values owned by each domain', () 
   assert.equal(syncPatch.copy_mode, 'windows_shell');
   assert.equal(appPatch.clipboard, config.clipboard);
   assert.equal(appPatch.device_simulator, config.device_simulator);
+  assert.equal(appPatch.portal_login, config.portal_login);
   assert.equal(appPatch.update_server_url, 'http://updates.example.test');
   assert.equal(appPatch.sync_task_notifications_enabled, true);
 });

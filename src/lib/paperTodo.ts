@@ -62,6 +62,7 @@ export interface PaperTodoSettings {
   hideLinkedNoteCapsules: boolean;
   capsuleMode: boolean;
   autoDockCapsules: boolean;
+  autoHideDockedCapsules: boolean;
   rememberExpandedPosition: boolean;
   hideFromTaskbar: boolean;
   avoidFullscreen: boolean;
@@ -127,6 +128,7 @@ export function createDefaultSettings(): PaperTodoSettings {
     hideLinkedNoteCapsules: false,
     capsuleMode: true,
     autoDockCapsules: true,
+    autoHideDockedCapsules: true,
     rememberExpandedPosition: true,
     hideFromTaskbar: true,
     avoidFullscreen: true,
@@ -185,11 +187,28 @@ export function createPaper(kind: PaperKind, title?: string): PaperDocument {
   };
 }
 
+/**
+ * A fresh paper with only its generated title is disposable. A custom title,
+ * a real todo item, or note text makes it user content that must be retained.
+ */
+export function isPaperEmpty(paper: PaperDocument): boolean {
+  const title = paper.title.trim();
+  const defaultTitle = paper.kind === 'todo' ? '待办纸' : '笔记纸';
+  if (title && title !== defaultTitle) return false;
+  if (paper.kind === 'todo') {
+    return !paper.items.some((item) => item.text.trim() || item.linkedNoteId);
+  }
+  return !paper.content.trim();
+}
+
 export function createDefaultState(): PaperTodoState {
   return {
     version: 1,
     revision: 0,
-    papers: [createPaper('todo')],
+    // Seed only a genuinely fresh profile. `normalizePaperTodoState` preserves
+    // an explicit empty `papers` array, so users can still delete both papers
+    // and keep the launcher at zero items.
+    papers: [createPaper('todo'), createPaper('note')],
     settings: createDefaultSettings(),
   };
 }
@@ -323,6 +342,11 @@ export async function deletePaperDocument(id: string): Promise<number> {
   return invoke<number>('paper_todo_delete_paper', { id, source: PAPER_TODO_SESSION_ID });
 }
 
+export async function closePaperWindow(id: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke('paper_todo_close_window', { id });
+}
+
 export async function savePaperTodoSettings(settings: PaperTodoSettings): Promise<number> {
   if (!isTauriRuntime()) {
     saveFallback((state) => { state.settings = settings; });
@@ -342,9 +366,38 @@ export async function savePaperOrder(ids: string[]): Promise<number> {
   return invoke<number>('paper_todo_save_order', { ids, source: PAPER_TODO_SESSION_ID });
 }
 
+export function movePaperId(
+  ids: string[],
+  sourceId: string,
+  targetId: string,
+  side: 'before' | 'after',
+): string[] {
+  if (sourceId === targetId || !ids.includes(sourceId) || !ids.includes(targetId)) return [...ids];
+  const orderedIds = ids.filter((id) => id !== sourceId);
+  let insertAt = orderedIds.indexOf(targetId);
+  if (side === 'after') insertAt += 1;
+  orderedIds.splice(insertAt, 0, sourceId);
+  return orderedIds;
+}
+
 export async function openPaperWindow(paper: PaperDocument, settings: PaperTodoSettings): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke('paper_todo_open_window', { paper, settings });
+}
+
+/**
+ * Slide a docked capsule out to its display edge (`peek`) or back into view.
+ * Only the spine stays on screen while it rests, so the desktop underneath
+ * remains clickable.
+ */
+export async function setPaperEdgePeek(
+  id: string,
+  edge: 'left' | 'right' | 'nearest',
+  peek: boolean,
+  animate: boolean,
+): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke('paper_todo_set_edge_peek', { id, edge, peek, animate });
 }
 
 export async function createDesktopPaper(kind: PaperKind): Promise<void> {
@@ -352,14 +405,28 @@ export async function createDesktopPaper(kind: PaperKind): Promise<void> {
   await invoke('paper_todo_create_paper', { kind });
 }
 
-export async function setPaperLauncherExpanded(expanded: boolean): Promise<void> {
+/**
+ * `capsuleWidth` is the logical width the collapsed master capsule needs for
+ * its own label. Pass `null` while expanding: the capsule reads a different
+ * label then, and the backend keeps the last collapsed measurement.
+ */
+export async function setPaperLauncherExpanded(
+  expanded: boolean,
+  itemCount = 0,
+  capsuleWidth: number | null = null,
+): Promise<void> {
   if (!isTauriRuntime()) return;
-  await invoke('paper_todo_set_launcher_expanded', { expanded });
+  await invoke('paper_todo_set_launcher_expanded', { expanded, itemCount, capsuleWidth });
 }
 
-export async function savePaperLauncherPosition(): Promise<number> {
-  if (!isTauriRuntime()) return 35;
-  return invoke<number>('paper_todo_save_launcher_position');
+/**
+ * Run the native drag loop that slides the launcher along its display edge.
+ * Resolves to `true` once the press actually travelled, and `false` when it was
+ * a plain click the caller should turn into an expand/collapse.
+ */
+export async function dragPaperLauncher(): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  return invoke<boolean>('paper_todo_drag_launcher');
 }
 
 export async function openPaperTodoSettings(): Promise<void> {

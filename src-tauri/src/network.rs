@@ -1,19 +1,36 @@
+use crate::network_probe::{
+    arp_cache_neighbors, arp_resolve, format_mac, icmp_echo, is_on_link, local_prefixes,
+    IcmpOutcome, LocalPrefix,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, State};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-type ProbeFuture = Pin<Box<dyn Future<Output = Option<f64>> + Send>>;
+type ProbeFuture = Pin<Box<dyn Future<Output = Option<ProbeHit>> + Send>>;
 
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Addresses probed at once. Far above the old limit because probes no longer
+/// spawn a process each.
+const HOST_CONCURRENCY: usize = 128;
+/// Ceiling on IP Helper calls in flight. Each one occupies a blocking thread
+/// for its full duration, and `SendARP` ignores our timeout entirely.
+const BLOCKING_PROBE_LIMIT: usize = 128;
+/// Attempts per address during the rescan pass. A single echo is lost often
+/// enough on a busy link to be the main source of missed hosts.
+const RESCAN_ATTEMPTS: usize = 2;
+const TCP_PROBE_PORTS: &[u16] = &[80, 443, 22, 53, 135, 139, 445, 3389];
 
-async fn first_successful_probe(probes: Vec<ProbeFuture>) -> Option<f64> {
+async fn first_successful_probe<T>(probes: Vec<Pin<Box<dyn Future<Output = Option<T>> + Send>>>) -> Option<T>
+where
+    T: Send + 'static,
+{
     if probes.is_empty() {
         return None;
     }
@@ -24,48 +41,165 @@ async fn first_successful_probe(probes: Vec<ProbeFuture>) -> Option<f64> {
     }
 
     while let Some(joined) = tasks.join_next().await {
-        if let Ok(Some(latency_ms)) = joined {
+        if let Ok(Some(hit)) = joined {
             tasks.abort_all();
-            return Some(latency_ms);
+            return Some(hit);
         }
     }
 
     None
 }
 
-async fn probe_tcp_port(ip: String, port: u16, timeout: std::time::Duration) -> Option<f64> {
-    let addr = format!("{}:{}", ip, port);
-    let start = std::time::Instant::now();
+fn round_ms(elapsed: Duration) -> f64 {
+    (elapsed.as_secs_f64() * 10_000.0).round() / 10.0
+}
 
-    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await {
-        Ok(Ok(_stream)) => Some(start.elapsed().as_secs_f64() * 1000.0),
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-            Some(start.elapsed().as_secs_f64() * 1000.0)
+/// How an address was found to be occupied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProbeMethod {
+    Arp,
+    Icmp,
+    Tcp,
+    ArpCache,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProbeHit {
+    method: ProbeMethod,
+    latency_ms: Option<f64>,
+    mac: Option<[u8; 6]>,
+}
+
+struct ProbeContext {
+    prefixes: Vec<LocalPrefix>,
+    blocking: Arc<Semaphore>,
+}
+
+/// Runs a blocking IP Helper call under a permit. Taking the permit before the
+/// thread starts means a probe that loses its race while still queued costs
+/// nothing; once running it cannot be cancelled, so the permit is what actually
+/// bounds thread usage.
+async fn run_blocking_probe<T, F>(limiter: Arc<Semaphore>, probe: F) -> Option<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = limiter.acquire_owned().await.ok()?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        probe()
+    })
+    .await
+    .ok()
+}
+
+fn arp_probe(ip: Ipv4Addr, limiter: Arc<Semaphore>) -> ProbeFuture {
+    Box::pin(async move {
+        let (mac, elapsed) = run_blocking_probe(limiter, move || arp_resolve(ip)).await?;
+        Some(ProbeHit {
+            method: ProbeMethod::Arp,
+            latency_ms: Some(round_ms(elapsed)),
+            mac: Some(mac?),
+        })
+    })
+}
+
+fn icmp_probe(ip: Ipv4Addr, timeout_ms: u64, limiter: Arc<Semaphore>) -> ProbeFuture {
+    Box::pin(async move {
+        let timeout_ms = timeout_ms.clamp(1, u32::MAX as u64) as u32;
+        let (outcome, elapsed) =
+            run_blocking_probe(limiter, move || icmp_echo(ip, timeout_ms)).await?;
+
+        match outcome {
+            IcmpOutcome::Reply { round_trip_ms } => Some(ProbeHit {
+                method: ProbeMethod::Icmp,
+                // The API reports whole milliseconds and reads 0 on a fast LAN,
+                // so fall back to the measured call duration.
+                latency_ms: Some(if round_trip_ms > 0 {
+                    round_trip_ms as f64
+                } else {
+                    round_ms(elapsed)
+                }),
+                mac: None,
+            }),
+            IcmpOutcome::Unreachable | IcmpOutcome::NoReply => None,
         }
-        _ => None,
-    }
+    })
 }
 
-#[cfg(target_os = "windows")]
-async fn probe_icmp(ip: String, timeout_ms: u64) -> Option<f64> {
-    let started = std::time::Instant::now();
-    let timeout_arg = timeout_ms.max(1).to_string();
-    let command = tokio::process::Command::new("ping")
-        .args(["-n", "1", "-w", timeout_arg.as_str(), ip.as_str()])
-        .kill_on_drop(true)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let process_timeout = std::time::Duration::from_millis(timeout_ms.saturating_add(750));
+fn tcp_probe(ip: Ipv4Addr, port: u16, timeout: Duration) -> ProbeFuture {
+    Box::pin(async move {
+        let addr = SocketAddr::from((ip, port));
+        let started = Instant::now();
 
-    match tokio::time::timeout(process_timeout, command).await {
-        Ok(Ok(output)) if output.status.success() => Some(started.elapsed().as_secs_f64() * 1000.0),
-        _ => None,
-    }
+        let reachable = match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr))
+            .await
+        {
+            Ok(Ok(_stream)) => true,
+            // A refusal still proves a TCP stack is answering at that address.
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => true,
+            _ => false,
+        };
+
+        reachable.then(|| ProbeHit {
+            method: ProbeMethod::Tcp,
+            latency_ms: Some(round_ms(started.elapsed())),
+            mac: None,
+        })
+    })
 }
 
-#[cfg(not(target_os = "windows"))]
-async fn probe_icmp(_ip: String, _timeout_ms: u64) -> Option<f64> {
-    None
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbePass {
+    /// Sweeps every address once.
+    Initial,
+    /// Revisits addresses that looked dead, with a longer timeout and retries.
+    Rescan,
+}
+
+/// Probes one address.
+async fn probe_host(
+    ip: Ipv4Addr,
+    timeout_ms: u64,
+    ctx: &ProbeContext,
+    pass: ProbePass,
+) -> Option<ProbeHit> {
+    let on_link = is_on_link(ip, &ctx.prefixes);
+
+    if pass == ProbePass::Initial && on_link {
+        // ARP is definitive on the local link: the stack cannot deliver ICMP or
+        // TCP to a neighbour it cannot resolve, so a failed ARP means nothing
+        // else would have answered either. Probing ARP alone keeps the first
+        // pass cheap on a subnet that is mostly empty.
+        let hit = arp_probe(ip, ctx.blocking.clone()).await?;
+        // The host is up, so borrow a real round-trip figure from ICMP.
+        let latency = icmp_probe(ip, timeout_ms, ctx.blocking.clone()).await;
+        return Some(ProbeHit {
+            latency_ms: latency.and_then(|probe| probe.latency_ms).or(hit.latency_ms),
+            ..hit
+        });
+    }
+
+    let timeout = Duration::from_millis(timeout_ms);
+    let mut probes: Vec<ProbeFuture> = Vec::with_capacity(TCP_PROBE_PORTS.len() + 2);
+    if on_link {
+        // Worth asking again even though the first pass already did. `SendARP`
+        // normally retries internally for seconds, but when the neighbour cache
+        // holds a negative entry for the address it fails immediately instead —
+        // and the cache sweep discards that same entry as unreachable. Without
+        // a second attempt, a host that merely lost one ARP exchange is
+        // reported free while it answers a manual ping fine.
+        probes.push(arp_probe(ip, ctx.blocking.clone()));
+    }
+    probes.push(icmp_probe(ip, timeout_ms, ctx.blocking.clone()));
+    probes.extend(
+        TCP_PROBE_PORTS
+            .iter()
+            .map(|port| tcp_probe(ip, *port, timeout)),
+    );
+
+    first_successful_probe(probes).await
 }
 
 // ─── Ping Scan ───────────────────────────────────────────────────────────────
@@ -76,6 +210,38 @@ pub struct PingResult {
     pub ip: String,
     pub alive: bool,
     pub latency_ms: Option<f64>,
+    pub mac: Option<String>,
+    pub method: Option<ProbeMethod>,
+}
+
+impl PingResult {
+    fn new(ip: Ipv4Addr, hit: Option<&ProbeHit>) -> Self {
+        match hit {
+            Some(hit) => Self {
+                ip: ip.to_string(),
+                alive: true,
+                latency_ms: hit.latency_ms,
+                mac: hit.mac.as_ref().map(format_mac),
+                method: Some(hit.method),
+            },
+            None => Self {
+                ip: ip.to_string(),
+                alive: false,
+                latency_ms: None,
+                mac: None,
+                method: None,
+            },
+        }
+    }
+}
+
+/// Which pass the scan is currently in, so the UI can explain the work that
+/// happens after every address has a first answer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PingScanPhase {
+    pub phase: &'static str,
+    pub remaining: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,25 +267,7 @@ impl Default for NetworkState {
     }
 }
 
-/// Try a TCP connect to common service ports. If we get a connection OR a
-/// "connection refused" the host is alive (there is a TCP stack answering).
-async fn tcp_ping(ip: &str, timeout_ms: u64) -> (bool, Option<f64>) {
-    let timeout = std::time::Duration::from_millis(timeout_ms);
-    let ports: &[u16] = &[80, 443, 22, 53, 135, 139, 445, 3389];
-    let mut probes = Vec::with_capacity(ports.len() + 1);
-    probes.push(Box::pin(probe_icmp(ip.to_string(), timeout_ms)) as ProbeFuture);
-    probes.extend(ports.iter().copied().map(|port| {
-        let ip = ip.to_string();
-        Box::pin(async move { probe_tcp_port(ip, port, timeout).await }) as ProbeFuture
-    }));
-
-    match first_successful_probe(probes).await {
-        Some(latency_ms) => (true, Some(latency_ms)),
-        None => (false, None),
-    }
-}
-
-fn validate_prefix(prefix: &str) -> Result<(), String> {
+fn parse_prefix(prefix: &str) -> Result<[u8; 3], String> {
     let octets: Vec<&str> = prefix.split('.').collect();
     if octets.len() != 3 {
         return Err(format!(
@@ -127,9 +275,11 @@ fn validate_prefix(prefix: &str) -> Result<(), String> {
             prefix
         ));
     }
+
+    let mut parsed = [0u8; 3];
     for (i, octet) in octets.iter().enumerate() {
         match octet.parse::<u16>() {
-            Ok(v) if v <= 255 => {}
+            Ok(v) if v <= 255 => parsed[i] = v as u8,
             _ => {
                 return Err(format!(
                     "Invalid prefix '{}': octet {} ('{}') is not 0-255",
@@ -140,7 +290,69 @@ fn validate_prefix(prefix: &str) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    Ok(parsed)
+}
+
+fn emit_phase(app_handle: &tauri::AppHandle, phase: &'static str, remaining: usize) {
+    let _ = app_handle.emit("ping-scan-phase", PingScanPhase { phase, remaining });
+}
+
+/// Probes every target once. `deep` also enables retries, for the pass that
+/// only revisits addresses which looked dead.
+async fn run_probe_round(
+    app_handle: &tauri::AppHandle,
+    cancel: &Arc<AtomicBool>,
+    ctx: &Arc<ProbeContext>,
+    targets: &[Ipv4Addr],
+    timeout_ms: u64,
+    pass: ProbePass,
+    emit_misses: bool,
+) -> Vec<(Ipv4Addr, Option<ProbeHit>)> {
+    let host_limit = Arc::new(Semaphore::new(HOST_CONCURRENCY));
+    let mut tasks = JoinSet::new();
+
+    for ip in targets.iter().copied() {
+        let host_limit = host_limit.clone();
+        let cancel = cancel.clone();
+        let ctx = ctx.clone();
+
+        tasks.spawn(async move {
+            let _permit = host_limit.acquire_owned().await;
+            if cancel.load(Ordering::SeqCst) {
+                return (ip, None);
+            }
+
+            if pass == ProbePass::Initial {
+                return (ip, probe_host(ip, timeout_ms, &ctx, pass).await);
+            }
+
+            let mut hit = None;
+            for _ in 0..RESCAN_ATTEMPTS {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                hit = probe_host(ip, timeout_ms, &ctx, pass).await;
+                if hit.is_some() {
+                    break;
+                }
+            }
+            (ip, hit)
+        });
+    }
+
+    let mut outcomes = Vec::with_capacity(targets.len());
+    while let Some(joined) = tasks.join_next().await {
+        let Ok((ip, hit)) = joined else { continue };
+
+        // A cancelled task reports no hit because it never ran, not because the
+        // address is free — never publish that as an offline result.
+        if !cancel.load(Ordering::SeqCst) && (emit_misses || hit.is_some()) {
+            let _ = app_handle.emit("ping-result", &PingResult::new(ip, hit.as_ref()));
+        }
+        outcomes.push((ip, hit));
+    }
+
+    outcomes
 }
 
 #[tauri::command]
@@ -149,7 +361,7 @@ pub async fn ping_scan(
     state: State<'_, NetworkState>,
     request: PingScanRequest,
 ) -> Result<(), String> {
-    validate_prefix(&request.prefix)?;
+    let prefix = parse_prefix(&request.prefix)?;
 
     if request.start > request.end {
         return Err(format!(
@@ -159,55 +371,103 @@ pub async fn ping_scan(
     }
 
     let timeout_ms = if request.timeout_ms == 0 {
-        1500
+        1000
     } else {
-        request.timeout_ms
+        request.timeout_ms.clamp(100, 30_000)
     };
 
     // Reset cancel flag
     state.ping_cancel.store(false, Ordering::SeqCst);
     let cancel = state.ping_cancel.clone();
 
-    let semaphore = Arc::new(Semaphore::new(50));
-    let mut handles = Vec::new();
+    let targets: Vec<Ipv4Addr> = (request.start..=request.end)
+        .map(|host| Ipv4Addr::new(prefix[0], prefix[1], prefix[2], host))
+        .collect();
 
-    for i in request.start..=request.end {
-        if cancel.load(Ordering::SeqCst) {
-            break;
+    let ctx = Arc::new(ProbeContext {
+        prefixes: tokio::task::spawn_blocking(local_prefixes)
+            .await
+            .unwrap_or_default(),
+        blocking: Arc::new(Semaphore::new(BLOCKING_PROBE_LIMIT)),
+    });
+
+    let mut hits: HashMap<Ipv4Addr, ProbeHit> = HashMap::new();
+    let mut missed: Vec<Ipv4Addr> = Vec::new();
+
+    emit_phase(&app_handle, "scanning", targets.len());
+    for (ip, hit) in run_probe_round(
+        &app_handle,
+        &cancel,
+        &ctx,
+        &targets,
+        timeout_ms,
+        ProbePass::Initial,
+        true,
+    )
+    .await
+    {
+        match hit {
+            Some(hit) => {
+                hits.insert(ip, hit);
+            }
+            None => missed.push(ip),
         }
-
-        let ip = format!("{}.{}", request.prefix, i);
-        let app = app_handle.clone();
-        let cancel = cancel.clone();
-        let sem = semaphore.clone();
-
-        let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await;
-
-            if cancel.load(Ordering::SeqCst) {
-                return;
-            }
-
-            let (alive, latency_ms) = tcp_ping(&ip, timeout_ms).await;
-
-            if cancel.load(Ordering::SeqCst) {
-                return;
-            }
-
-            let result = PingResult {
-                ip,
-                alive,
-                latency_ms,
-            };
-            let _ = app.emit("ping-result", &result);
-        });
-
-        handles.push(handle);
     }
 
-    // Wait for all tasks to complete
-    for handle in handles {
-        let _ = handle.await;
+    // Second pass over everything that looked dead, with a longer timeout and
+    // retries. A single lost echo is the usual reason a live host is missed,
+    // and running the full probe set here also covers hosts that filter ARP.
+    if !missed.is_empty() && !cancel.load(Ordering::SeqCst) {
+        emit_phase(&app_handle, "rescanning", missed.len());
+        let rescan_timeout = timeout_ms.saturating_mul(2).clamp(1_000, 5_000);
+        for (ip, hit) in run_probe_round(
+            &app_handle,
+            &cancel,
+            &ctx,
+            &missed,
+            rescan_timeout,
+            ProbePass::Rescan,
+            false,
+        )
+        .await
+        {
+            if let Some(hit) = hit {
+                hits.insert(ip, hit);
+            }
+        }
+    }
+
+    // Finally consult the neighbour table. Anything that answered ARP at any
+    // point during the scan is in there, including hosts whose reply arrived
+    // after their own probe had already given up.
+    if !cancel.load(Ordering::SeqCst) {
+        emit_phase(&app_handle, "arpSweep", 0);
+        let in_range: HashSet<Ipv4Addr> = targets.iter().copied().collect();
+        let neighbors = tokio::task::spawn_blocking(arp_cache_neighbors)
+            .await
+            .unwrap_or_default();
+
+        for (ip, mac) in neighbors {
+            if !in_range.contains(&ip) {
+                continue;
+            }
+            match hits.get_mut(&ip) {
+                // Already known to be up; just fill in the hardware address.
+                Some(hit) if hit.mac.is_none() => hit.mac = Some(mac),
+                Some(_) => continue,
+                None => {
+                    hits.insert(
+                        ip,
+                        ProbeHit {
+                            method: ProbeMethod::ArpCache,
+                            latency_ms: None,
+                            mac: Some(mac),
+                        },
+                    );
+                }
+            }
+            let _ = app_handle.emit("ping-result", &PingResult::new(ip, hits.get(&ip)));
+        }
     }
 
     let _ = app_handle.emit("ping-scan-complete", ());
@@ -217,6 +477,53 @@ pub async fn ping_scan(
 #[tauri::command]
 pub fn cancel_ping_scan(state: State<'_, NetworkState>) {
     state.ping_cancel.store(true, Ordering::SeqCst);
+}
+
+// ─── Manual ping console ─────────────────────────────────────────────────────
+
+/// Echo count for the console shown on demand. Enough packets to expose a host
+/// that answers intermittently, which is the case a one-shot scan gets wrong.
+const PING_CONSOLE_COUNT: &str = "10";
+
+/// Rejects anything that is not a bare IPv4 address. Re-rendering the parsed
+/// address guarantees the string handed to the shell holds digits and dots
+/// only, so it cannot carry command syntax.
+fn validated_ping_target(ip: &str) -> Result<String, String> {
+    ip.trim()
+        .parse::<Ipv4Addr>()
+        .map(|parsed| parsed.to_string())
+        .map_err(|_| format!("Invalid IPv4 address: '{}'", ip))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub fn open_ping_console(ip: String) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    /// Gives the child its own visible console instead of borrowing ours.
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+
+    let target = validated_ping_target(&ip)?;
+
+    // `/k` keeps the window open once ping finishes so the output stays
+    // readable and the address can be re-tested by hand.
+    std::process::Command::new("cmd")
+        .args(["/k", "ping", "-n", PING_CONSOLE_COUNT, target.as_str()])
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .map_err(|e| format!("Failed to open ping console for {}: {}", target, e))?;
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+pub fn open_ping_console(ip: String) -> Result<(), String> {
+    let target = validated_ping_target(&ip)?;
+    Err(format!(
+        "Opening a ping console for {} is only supported on Windows",
+        target
+    ))
 }
 
 // ─── TCP Connections (netstat) ───────────────────────────────────────────────
@@ -616,7 +923,10 @@ pub async fn send_wol(request: WolRequest) -> Result<WolResult, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_successful_probe, normalize_requested_ports, top_port_counts, PortCount};
+    use super::{
+        first_successful_probe, normalize_requested_ports, parse_prefix, top_port_counts,
+        validated_ping_target, PortCount, PingResult, ProbeHit, ProbeMethod,
+    };
     use std::pin::Pin;
     use std::time::{Duration, Instant};
 
@@ -641,6 +951,71 @@ mod tests {
 
         assert_eq!(latency, Some(7.5));
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn parse_prefix_rejects_malformed_input_and_keeps_octets() {
+        assert_eq!(parse_prefix("192.168.1"), Ok([192, 168, 1]));
+        // Leading zeros are accepted here but would fail a string-based
+        // Ipv4Addr parse, which is why the scan builds addresses from octets.
+        assert_eq!(parse_prefix("192.168.001"), Ok([192, 168, 1]));
+        assert!(parse_prefix("192.168.1.5").is_err());
+        assert!(parse_prefix("192.168").is_err());
+        assert!(parse_prefix("192.168.256").is_err());
+    }
+
+    #[test]
+    fn ping_console_target_accepts_only_bare_ipv4() {
+        assert_eq!(
+            validated_ping_target(" 192.168.0.108 "),
+            Ok("192.168.0.108".to_string())
+        );
+
+        // Nothing that could reach the shell as syntax may survive validation.
+        for hostile in [
+            "192.168.0.1 && calc",
+            "192.168.0.1 | calc",
+            "192.168.0.1&calc",
+            "192.168.0.1\"&calc",
+            "192.168.0.1; calc",
+            "$(calc)",
+            "%COMSPEC%",
+            "localhost",
+            "::1",
+            "",
+        ] {
+            assert!(
+                validated_ping_target(hostile).is_err(),
+                "should have rejected {:?}",
+                hostile
+            );
+        }
+    }
+
+    #[test]
+    fn ping_result_reports_method_and_mac_for_a_hit() {
+        let hit = ProbeHit {
+            method: ProbeMethod::Arp,
+            latency_ms: Some(1.5),
+            mac: Some([0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E]),
+        };
+
+        let result = PingResult::new("192.168.1.7".parse().unwrap(), Some(&hit));
+
+        assert!(result.alive);
+        assert_eq!(result.latency_ms, Some(1.5));
+        assert_eq!(result.mac.as_deref(), Some("00:1A:2B:3C:4D:5E"));
+        assert_eq!(result.method, Some(ProbeMethod::Arp));
+    }
+
+    #[test]
+    fn ping_result_reports_a_miss_as_offline() {
+        let result = PingResult::new("192.168.1.7".parse().unwrap(), None);
+
+        assert!(!result.alive);
+        assert_eq!(result.latency_ms, None);
+        assert_eq!(result.mac, None);
+        assert_eq!(result.method, None);
     }
 
     #[test]

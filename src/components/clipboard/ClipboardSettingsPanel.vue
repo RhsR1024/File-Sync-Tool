@@ -9,6 +9,7 @@ import DisplayTab from '@/components/clipboard-settings/DisplayTab.vue';
 import GeneralTab from '@/components/clipboard-settings/GeneralTab.vue';
 import PreviewTab from '@/components/clipboard-settings/PreviewTab.vue';
 import ShortcutsTab from '@/components/clipboard-settings/ShortcutsTab.vue';
+import ImageToClipboardCard from '@/components/clipboard/ImageToClipboardCard.vue';
 import {
   CLIPBOARD_SETTINGS_TABS,
   type ClipboardSettingsTabId,
@@ -42,6 +43,7 @@ const tabComponents = {
   data: DataTab,
   preview: PreviewTab,
   appFilter: AppFilterTab,
+  imageCopy: ImageToClipboardCard,
 } as const;
 
 const currentTabComponent = computed(
@@ -292,7 +294,12 @@ void load();
         role="tabpanel"
         :aria-labelledby="`clipboard-settings-tab-${activeTab}`"
       >
+        <ImageToClipboardCard
+          v-if="activeTab === 'imageCopy'"
+          embedded
+        />
         <component
+          v-else
           :is="currentTabComponent"
           :settings="model"
           :is-elevated="isElevated"

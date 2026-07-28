@@ -28,7 +28,7 @@ pub fn paste_item(
     plain_text: bool,
 ) -> Result<(), String> {
     write_to_clipboard(clipboard, item, plain_text)?;
-    finish_paste(app)
+    finish_paste(app, clipboard)
 }
 
 /// Explicit actual-files paste path for file items.
@@ -61,7 +61,7 @@ pub fn paste_file_paths_as_text(
 /// Paste plain text directly.
 pub fn paste_text(app: &AppHandle, clipboard: &ClipboardState, text: &str) -> Result<(), String> {
     write_text_to_clipboard_with_marker(clipboard, text)?;
-    finish_paste(app)
+    finish_paste(app, clipboard)
 }
 
 /// Convert a file item into the path text used by "paste as path".
@@ -301,14 +301,35 @@ fn clear_pending_write(clipboard: &ClipboardState) {
     clipboard.pending_self_write.lock().take();
 }
 
-fn finish_paste(app: &AppHandle) -> Result<(), String> {
+fn finish_paste(app: &AppHandle, clipboard: &ClipboardState) -> Result<(), String> {
     crate::clipboard::preview::hide_preview_windows(app);
     if let Some(panel) = app.get_webview_window("clipboard-panel") {
         let _ = panel.hide();
     }
 
     thread::sleep(Duration::from_millis(30));
+    restore_paste_target(clipboard);
+    thread::sleep(Duration::from_millis(20));
     simulate_paste()
+}
+
+#[cfg(target_os = "windows")]
+fn restore_paste_target(clipboard: &ClipboardState) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
+
+    let Some(raw_target) = clipboard.paste_target_window.lock().take() else {
+        return;
+    };
+    let target = HWND(raw_target as *mut _);
+    if unsafe { IsWindow(target) }.as_bool() {
+        let _ = unsafe { SetForegroundWindow(target) };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restore_paste_target(clipboard: &ClipboardState) {
+    clipboard.paste_target_window.lock().take();
 }
 
 fn preferred_text(item: &ClipboardItem) -> &str {

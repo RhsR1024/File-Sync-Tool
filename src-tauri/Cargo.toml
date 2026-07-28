@@ -24,6 +24,7 @@ log = "0.4"
 tauri = { version = "2.10.0", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-log = "2"
 tokio = { version = "1.49.0", features = ["full"] }
+socket2 = "0.6"
 chrono = "0.4.43"
 regex = "1.12.3"
 env_logger = "0.11.8"
@@ -87,7 +88,9 @@ wiremock = "0.6"
 winreg = "0.52"
 clipboard-win = "5.4"
 tauri-winrt-notification = "0.7.2"
+windows-core = "0.58"
 windows = { version = "0.58", features = [
+    "implement",
     "Foundation",
     "Win32_Devices_Display",
     "Graphics",
@@ -119,6 +122,7 @@ windows = { version = "0.58", features = [
     "Win32_System_ProcessStatus",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",

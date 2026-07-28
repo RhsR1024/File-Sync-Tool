@@ -4,6 +4,7 @@ import { ScreenShareSessionClient } from './session-client';
 
 class FakeSocket extends EventTarget {
   readyState: number = WebSocket.CONNECTING;
+  bufferedAmount = 0;
   readonly sent: string[] = [];
 
   open() {
@@ -116,5 +117,29 @@ describe('screen share session client', () => {
       source_epoch: 8,
       payload: { x: 0.25, y: 0.75 },
     });
+  });
+
+  it('drops only pointer moves when the interaction socket is congested', () => {
+    const socket = new FakeSocket();
+    const client = new ScreenShareSessionClient({
+      maxPointerMoveBufferedBytes: 64,
+      webSocketFactory: () => socket as unknown as WebSocket,
+    });
+    client.connect(55, 8);
+    socket.open();
+    socket.bufferedAmount = 65;
+
+    expect(client.send('input.pointer_move', { x: 0.25, y: 0.75 })).toBe(false);
+    expect(client.send('input.pointer_button', { button: 'left', pressed: false })).toBe(true);
+    expect(client.send('input.key', { code: 'Escape', pressed: false })).toBe(true);
+    expect(client.send('input.release_all')).toBe(true);
+
+    const messages = socket.sent.slice(-3).map((value) => JSON.parse(value));
+    expect(messages.map((message) => message.type)).toEqual([
+      'input.pointer_button',
+      'input.key',
+      'input.release_all',
+    ]);
+    expect(messages.map((message) => message.client_seq)).toEqual([2, 3, 4]);
   });
 });

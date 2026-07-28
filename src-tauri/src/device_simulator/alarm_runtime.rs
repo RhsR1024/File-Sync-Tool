@@ -1,8 +1,9 @@
 use crate::device_simulator::alarms::scheduler::{
-    AlarmClock, AlarmDeviceTarget, AlarmDispatchMode as ScheduledDispatchMode, AlarmFuture,
-    AlarmInvocation, AlarmJobSnapshot, AlarmScheduler, AlarmSchedulerLimits, AlarmSendError,
-    AlarmSender, AlarmSenderResponse, OneShotAlarmJob, OutboundAlarmRequest, PeriodicAlarmJob,
-    RunningAlarmJob, ScheduledAlarmJobState, SystemAlarmClock,
+    AlarmApplicationStatus, AlarmClock, AlarmDeviceTarget,
+    AlarmDispatchMode as ScheduledDispatchMode, AlarmFuture, AlarmInvocation, AlarmJobSnapshot,
+    AlarmScheduler, AlarmSchedulerLimits, AlarmSendError, AlarmSender, AlarmSenderResponse,
+    OneShotAlarmJob, OutboundAlarmRequest, PeriodicAlarmJob, RunningAlarmJob,
+    ScheduledAlarmJobState, SystemAlarmClock,
 };
 use crate::device_simulator::alarms::{
     embedded_image_count, AlarmBuildContext, AlarmHandlerDefinition, AlarmHandlerId,
@@ -21,9 +22,10 @@ use crate::device_simulator::errors::SimulatorErrorBody;
 use crate::device_simulator::models::AlarmJobState;
 use crate::device_simulator::profiles::scope::{FirstReleaseProfileId, TargetPlatform};
 use crate::device_simulator::runtime_assets::RuntimeAssetLayout;
+use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -32,9 +34,45 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+/// Alarm receiver endpoint the target platform advertised in its most recent
+/// subscription request. `None` means "not learned"; the configured destination
+/// is then used unchanged. Shared with the HTTP protocol runtime, which writes
+/// it, and read by the alarm sender so dispatch follows the platform like the
+/// legacy tool's global `picconfig/sendport` did.
+pub type SharedLearnedAlarmEndpoint = Arc<RwLock<Option<LearnedAlarmEndpoint>>>;
+
+/// A subscription endpoint parsed out of a LAPI `Event/Subscription` body.
+///
+/// Real UMS deployments allocate this port dynamically (observed: `22815`), so
+/// no port range may be assumed — only a non-zero port is required.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearnedAlarmEndpoint {
+    /// `IPAddress` from the subscription body; `None` keeps the configured host.
+    pub host: Option<Ipv4Addr>,
+    /// `Port` from the subscription body. Never `0`.
+    pub port: u16,
+    /// `Duration` in seconds, when the platform declared one.
+    pub duration_secs: Option<u32>,
+    /// Wall-clock milliseconds when this subscription was last accepted.
+    pub learned_at_ms: u64,
+}
+
+impl LearnedAlarmEndpoint {
+    /// Wall-clock milliseconds when the platform's subscription lapses. `None`
+    /// when the platform declared no `Duration`.
+    pub fn expires_at_ms(&self) -> Option<u64> {
+        self.duration_secs.map(|seconds| {
+            self.learned_at_ms
+                .saturating_add(u64::from(seconds).saturating_mul(1_000))
+        })
+    }
+}
+
 const ALARM_TYPES_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_CHANNEL_ID: &str = "1";
 const DEFAULT_ALARM_REQUEST_TIMEOUT_MS: u64 = 10_000;
+const MAX_ALARM_RESPONSE_INSPECTION_BYTES: usize = 64 * 1024;
+const RECENTLY_STOPPED_ALARM_JOB_CAPACITY: usize = 256;
 const NUMERIC_TIMESTAMP_SENTINEL: &str = "__FST_NUMERIC_TIMESTAMP__";
 const NUMERIC_EVENT_ID_SENTINEL: &str = "__FST_NUMERIC_EVENT_ID__";
 const NUMERIC_RELATED_ID_SENTINEL: &str = "__FST_NUMERIC_RELATED_ID__";
@@ -117,6 +155,66 @@ struct ActiveAlarmJob {
     tracker: crate::device_simulator::alarms::scheduler::AlarmJobTracker,
 }
 
+struct AlarmJobRegistry<T> {
+    active: BTreeMap<String, T>,
+    recently_stopped: VecDeque<String>,
+    recently_stopped_capacity: usize,
+}
+
+impl<T> AlarmJobRegistry<T> {
+    fn new(recently_stopped_capacity: usize) -> Self {
+        Self {
+            active: BTreeMap::new(),
+            recently_stopped: VecDeque::with_capacity(recently_stopped_capacity),
+            recently_stopped_capacity: recently_stopped_capacity.max(1),
+        }
+    }
+
+    fn insert(&mut self, job_id: String, job: T) {
+        self.recently_stopped
+            .retain(|stopped_id| stopped_id != &job_id);
+        self.active.insert(job_id, job);
+    }
+
+    fn take_for_stop(&mut self, job_id: &str) -> Result<Option<T>, AlarmRuntimeError> {
+        if self.recently_stopped.iter().any(|known| known == job_id) {
+            return Ok(None);
+        }
+        let Some(job) = self.active.remove(job_id) else {
+            // Stopping is a desired-state operation. The Worker may have been
+            // restarted or the final telemetry event may have raced the UI, so
+            // an already-absent job is successfully stopped as well.
+            return Ok(None);
+        };
+        self.remember_stopped(job_id.to_owned());
+        Ok(Some(job))
+    }
+
+    fn mark_finished(&mut self, job_id: &str) -> Option<T> {
+        let job = self.active.remove(job_id)?;
+        self.remember_stopped(job_id.to_owned());
+        Some(job)
+    }
+
+    fn take_all_for_stop(&mut self) -> Vec<T> {
+        let active = std::mem::take(&mut self.active);
+        for job_id in active.keys() {
+            self.remember_stopped(job_id.clone());
+        }
+        active.into_values().collect()
+    }
+
+    fn remember_stopped(&mut self, job_id: String) {
+        if self.recently_stopped.iter().any(|known| known == &job_id) {
+            return;
+        }
+        if self.recently_stopped.len() == self.recently_stopped_capacity {
+            self.recently_stopped.pop_front();
+        }
+        self.recently_stopped.push_back(job_id);
+    }
+}
+
 pub struct AlarmRuntime {
     scheduler: AlarmScheduler,
     registry: AlarmHandlerRegistry,
@@ -130,7 +228,9 @@ pub struct AlarmRuntime {
     destination_ids: Vec<String>,
     device_http_port: u16,
     platform: TargetPlatform,
-    jobs: Mutex<BTreeMap<String, ActiveAlarmJob>>,
+    learned_endpoint: SharedLearnedAlarmEndpoint,
+    allow_learned_endpoint: bool,
+    jobs: Mutex<AlarmJobRegistry<ActiveAlarmJob>>,
 }
 
 impl AlarmRuntime {
@@ -141,8 +241,14 @@ impl AlarmRuntime {
                 "alarm runtime requires at least one simulated device",
             ));
         }
-        let (destinations, destination_ids) = build_destinations(&config.target)?;
-        let sender = Arc::new(HttpAlarmSender::new(destinations.clone()));
+        let (destinations, destination_ids, allow_learned_endpoint) =
+            build_destinations(&config.target)?;
+        let learned_endpoint: SharedLearnedAlarmEndpoint = Arc::new(RwLock::new(None));
+        let sender = Arc::new(HttpAlarmSender::new(
+            destinations.clone(),
+            Arc::clone(&learned_endpoint),
+            allow_learned_endpoint,
+        ));
         let scheduler = AlarmScheduler::new(
             sender,
             Arc::new(SystemAlarmClock::default()) as Arc<dyn AlarmClock>,
@@ -224,12 +330,46 @@ impl AlarmRuntime {
             destination_ids,
             device_http_port: config.device_http_port,
             platform: config.platform,
-            jobs: Mutex::new(BTreeMap::new()),
+            learned_endpoint,
+            allow_learned_endpoint,
+            jobs: Mutex::new(AlarmJobRegistry::new(RECENTLY_STOPPED_ALARM_JOB_CAPACITY)),
         })
     }
 
     pub fn image_cache(&self) -> SharedImageCache {
         Arc::clone(&self.image_cache)
+    }
+
+    /// Shared handle the HTTP runtime updates when the platform advertises its
+    /// alarm receiver endpoint during subscription, so dispatch and the rendered
+    /// `Reference` follow it. See [`SharedLearnedAlarmEndpoint`].
+    pub fn learned_endpoint(&self) -> SharedLearnedAlarmEndpoint {
+        Arc::clone(&self.learned_endpoint)
+    }
+
+    /// Where alarms are currently dispatched, resolved exactly like a real
+    /// send. Surfaced to the UI so the effective destination is visible without
+    /// having to trigger an alarm and read the failure back.
+    pub fn effective_destinations(&self) -> Vec<String> {
+        self.destination_ids
+            .iter()
+            .filter_map(|id| self.destinations.get(id))
+            .map(|base| {
+                apply_learned_endpoint(base, &self.learned_endpoint, self.allow_learned_endpoint)
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The platform subscription the device is currently honouring, if any.
+    pub fn learned_subscription(&self) -> Option<LearnedAlarmEndpoint> {
+        self.learned_endpoint.read().clone()
+    }
+
+    /// `false` when an explicit receiver URL pins the destination, which
+    /// deliberately suppresses subscription learning.
+    pub fn follows_platform_subscription(&self) -> bool {
+        self.allow_learned_endpoint
     }
 
     pub async fn trigger_once(
@@ -282,12 +422,9 @@ impl AlarmRuntime {
     }
 
     pub async fn stop_job(&self, job_id: &str) -> Result<(), AlarmRuntimeError> {
-        let active = self.jobs.lock().await.remove(job_id).ok_or_else(|| {
-            runtime_error(
-                "device_simulator.alarm.job_not_found",
-                format!("alarm job '{job_id}' is not active"),
-            )
-        })?;
+        let Some(active) = self.jobs.lock().await.take_for_stop(job_id)? else {
+            return Ok(());
+        };
         active
             .running
             .stop_and_wait()
@@ -299,9 +436,7 @@ impl AlarmRuntime {
     pub async fn stop_all(&self) -> Result<(), AlarmRuntimeError> {
         let jobs = {
             let mut active = self.jobs.lock().await;
-            std::mem::take(&mut *active)
-                .into_values()
-                .collect::<Vec<_>>()
+            active.take_all_for_stop()
         };
         let mut first_error = None;
         for job in jobs {
@@ -317,18 +452,41 @@ impl AlarmRuntime {
             .jobs
             .lock()
             .await
-            .values()
-            .map(|job| job.tracker.clone())
+            .active
+            .iter()
+            .map(|(job_id, job)| (job_id.clone(), job.tracker.clone()))
             .collect::<Vec<_>>();
         let mut snapshots = Vec::with_capacity(trackers.len());
-        for tracker in trackers {
-            snapshots.push(job_stats_snapshot(tracker.snapshot().await));
+        let mut finished = Vec::new();
+        for (job_id, tracker) in trackers {
+            let snapshot = tracker.snapshot().await;
+            if matches!(
+                snapshot.state,
+                ScheduledAlarmJobState::Completed
+                    | ScheduledAlarmJobState::Cancelled
+                    | ScheduledAlarmJobState::Failed
+            ) {
+                finished.push(job_id);
+            }
+            snapshots.push(job_stats_snapshot(snapshot));
+        }
+        if !finished.is_empty() {
+            let mut jobs = self.jobs.lock().await;
+            for job_id in finished {
+                jobs.mark_finished(&job_id);
+            }
         }
         snapshots
     }
 
     pub async fn active_job_count(&self) -> u32 {
-        self.jobs.lock().await.len().try_into().unwrap_or(u32::MAX)
+        self.jobs
+            .lock()
+            .await
+            .active
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX)
     }
 
     async fn build_targets(
@@ -412,12 +570,19 @@ impl AlarmRuntime {
             }
             let subscription_id = stable_numeric_id(job_id, &device_id);
             let destination_id = self.destination_ids[index % self.destination_ids.len()].clone();
-            let destination = self.destinations.get(&destination_id).ok_or_else(|| {
+            let base_destination = self.destinations.get(&destination_id).ok_or_else(|| {
                 runtime_error(
                     "device_simulator.alarm.destination_missing",
                     format!("alarm destination '{destination_id}' is not configured"),
                 )
             })?;
+            // Resolve the effective endpoint once so the rendered Reference
+            // matches where the request is actually dispatched.
+            let destination = apply_learned_endpoint(
+                base_destination,
+                &self.learned_endpoint,
+                self.allow_learned_endpoint,
+            );
             let mut invocations = Vec::with_capacity(definitions.len());
             for mut definition in definitions {
                 if let Some(user_image) = &user_image {
@@ -431,7 +596,7 @@ impl AlarmRuntime {
                     device,
                     &definition,
                     &subscription_id,
-                    destination,
+                    &destination,
                     self.device_http_port,
                 )?;
                 invocations.push(AlarmInvocation {
@@ -490,13 +655,21 @@ impl AlarmRuntime {
 #[derive(Debug)]
 struct HttpAlarmSender {
     destinations: BTreeMap<String, reqwest::Url>,
+    learned_endpoint: SharedLearnedAlarmEndpoint,
+    allow_learned_endpoint: bool,
     clients: StdMutex<HashMap<Ipv4Addr, reqwest::Client>>,
 }
 
 impl HttpAlarmSender {
-    fn new(destinations: BTreeMap<String, reqwest::Url>) -> Self {
+    fn new(
+        destinations: BTreeMap<String, reqwest::Url>,
+        learned_endpoint: SharedLearnedAlarmEndpoint,
+        allow_learned_endpoint: bool,
+    ) -> Self {
         Self {
             destinations,
+            learned_endpoint,
+            allow_learned_endpoint,
             clients: StdMutex::new(HashMap::new()),
         }
     }
@@ -517,8 +690,19 @@ impl HttpAlarmSender {
             .local_address(IpAddr::V4(source_ip))
             .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(10))
+            // Legacy HTTPConnection reports the receiver's first response and
+            // never follows redirects. Following a 302 can turn the alarm POST
+            // into a GET to a login/general page and misreport that final 200 as
+            // an alarm acknowledgement.
+            .redirect(reqwest::redirect::Policy::none())
+            // The legacy sender creates a fresh TCP connection for every alarm.
+            // Keep the per-source client cache, but do not reuse idle sockets.
+            .pool_max_idle_per_host(0)
             .build()
-            .map_err(|_| AlarmSendError::new("device_simulator.alarm.http_client_failed", false))?;
+            .map_err(|source| {
+                AlarmSendError::new("device_simulator.alarm.http_client_failed", false)
+                    .with_details(format!("source {source_ip}: {source}"))
+            })?;
         self.clients
             .lock()
             .map_err(|_| {
@@ -538,29 +722,41 @@ impl AlarmSender for HttpAlarmSender {
             let base = self
                 .destinations
                 .get(&outbound.destination_id)
-                .cloned()
                 .ok_or_else(|| {
                     AlarmSendError::new("device_simulator.alarm.destination_unknown", false)
+                        .with_details(format!(
+                            "no destination configured for '{}'",
+                            outbound.destination_id
+                        ))
                 })?;
+            // Follow the platform's advertised alarm endpoint, matching the
+            // authority baked into the rendered Reference at build time.
+            let base =
+                apply_learned_endpoint(base, &self.learned_endpoint, self.allow_learned_endpoint);
             let url = base
                 .join(outbound.request.path.trim_start_matches('/'))
-                .map_err(|_| {
+                .map_err(|source| {
                     AlarmSendError::new("device_simulator.alarm.destination_url_invalid", false)
+                        .with_details(format!("{base} + {}: {source}", outbound.request.path))
                 })?;
-            let client = self.client(outbound.request.source_ip)?;
+            let endpoint = url.to_string();
+            let source_ip = outbound.request.source_ip;
+            let client = self.client(source_ip)?;
             let mut builder = match outbound.request.method {
                 HttpMethod::Post => client.post(url),
             };
             for (name, value) in &outbound.request.headers {
                 let name = reqwest::header::HeaderName::from_str(name).map_err(|_| {
                     AlarmSendError::new("device_simulator.alarm.header_invalid", false)
+                        .with_details(format!("invalid header name '{name}'"))
                 })?;
                 let value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
                     AlarmSendError::new("device_simulator.alarm.header_invalid", false)
+                        .with_details(format!("invalid value for header '{name}'"))
                 })?;
                 builder = builder.header(name, value);
             }
-            let response = builder
+            let mut response = builder
                 .body(outbound.request.body.to_vec())
                 .send()
                 .await
@@ -575,12 +771,115 @@ impl AlarmSender for HttpAlarmSender {
                         },
                         source.is_timeout() || source.is_connect(),
                     )
+                    // The endpoint and the OS-level reason are the two facts that
+                    // actually identify the fault; without them the UI can only
+                    // say "sending failed".
+                    .with_details(format!(
+                        "{source_ip} -> {endpoint}: {}",
+                        transport_reason(&source)
+                    ))
                 })?;
-            Ok(AlarmSenderResponse {
-                status: response.status().as_u16(),
-            })
+            let status = response.status().as_u16();
+            let application_status = inspect_ums_alarm_response(&mut response).await;
+            let mut result = AlarmSenderResponse::new(status).with_endpoint(endpoint);
+            if let Some(application_status) = application_status {
+                result = result.with_application_status(application_status);
+            }
+            Ok(result)
         })
     }
+}
+
+/// Decode the bounded UMS JSON response envelope. A successful application
+/// code is stronger evidence than HTTP 2xx; a non-zero code is a real platform
+/// rejection even when the HTTP status itself is 200. Empty and unknown bodies
+/// deliberately remain unverified.
+async fn inspect_ums_alarm_response(
+    response: &mut reqwest::Response,
+) -> Option<AlarmApplicationStatus> {
+    let mut body = Vec::new();
+    loop {
+        let Some(chunk) = response.chunk().await.ok()? else {
+            break;
+        };
+        if body.len().saturating_add(chunk.len()) > MAX_ALARM_RESPONSE_INSPECTION_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    decode_ums_alarm_response(&body)
+}
+
+fn decode_ums_alarm_response(body: &[u8]) -> Option<AlarmApplicationStatus> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return None;
+    }
+    let document: Value = serde_json::from_slice(body).ok()?;
+    let envelope = document.get("Response").unwrap_or(&document);
+    let response_code = json_i64(envelope.get("ResponseCode"));
+    let status_code = json_i64(envelope.get("StatusCode"));
+    if response_code.is_none() && status_code.is_none() {
+        return None;
+    }
+    let sub_response_code = json_i64(envelope.get("SubResponseCode"));
+    let accepted = response_code.is_none_or(|code| code == 0)
+        && status_code.is_none_or(|code| code == 0)
+        && sub_response_code.is_none_or(|code| code == 0);
+    if accepted {
+        return Some(AlarmApplicationStatus::Accepted);
+    }
+    let mut parts = Vec::new();
+    if let Some(code) = response_code {
+        parts.push(format!("ResponseCode={code}"));
+    }
+    if let Some(code) = sub_response_code {
+        parts.push(format!("SubResponseCode={code}"));
+    }
+    if let Some(code) = status_code {
+        parts.push(format!("StatusCode={code}"));
+    }
+    for key in ["ResponseString", "StatusString"] {
+        if let Some(value) = envelope.get(key).and_then(Value::as_str) {
+            let value = value.trim();
+            if !value.is_empty() {
+                parts.push(format!("{key}={}", truncate_public_detail(value, 256)));
+            }
+        }
+    }
+    Some(AlarmApplicationStatus::Rejected {
+        details: parts.join(", "),
+    })
+}
+
+fn json_i64(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| number.try_into().ok()))
+        .or_else(|| value.as_str()?.trim().parse().ok())
+}
+
+fn truncate_public_detail(value: &str, maximum_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut truncated = chars.by_ref().take(maximum_chars).collect::<String>();
+    if chars.next().is_some() {
+        truncated.push('…');
+    }
+    truncated
+}
+
+/// Innermost cause of a transport failure. `reqwest`'s own `Display` stops at
+/// "error sending request", which hides the very thing an operator needs (for
+/// example "No connection could be made because the target machine actively
+/// refused it").
+fn transport_reason(error: &reqwest::Error) -> String {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    let mut deepest = error.to_string();
+    while let Some(current) = source {
+        deepest = current.to_string();
+        source = current.source();
+    }
+    deepest
 }
 
 fn register_profile_definitions(
@@ -1557,8 +1856,12 @@ fn image_manifest_index(
 
 fn build_destinations(
     target: &TargetPlatformConfig,
-) -> Result<(BTreeMap<String, reqwest::Url>, Vec<String>), AlarmRuntimeError> {
+) -> Result<(BTreeMap<String, reqwest::Url>, Vec<String>, bool), AlarmRuntimeError> {
     let mut destinations = BTreeMap::new();
+    // An explicit receiver URL is a deliberate override and is never rewritten
+    // by a learned subscription. Server-derived destinations start with the
+    // dedicated receiver port and may then follow the platform subscription.
+    let mut allow_learned_endpoint = false;
     if let Some(url) = target
         .alarm_receiver_url
         .as_deref()
@@ -1567,6 +1870,7 @@ fn build_destinations(
     {
         destinations.insert("configured".into(), normalize_destination_url(url)?);
     } else {
+        allow_learned_endpoint = true;
         for server in &target.servers {
             let host = server.host.trim();
             if host.is_empty() {
@@ -1580,14 +1884,45 @@ fn build_destinations(
             } else {
                 host.to_owned()
             };
+            let receiver_port = target.alarm_receiver_port.unwrap_or(server.port);
             destinations.insert(
                 server.id.clone(),
-                normalize_destination_url(&format!("http://{rendered_host}:{}/", server.port))?,
+                normalize_destination_url(&format!("http://{rendered_host}:{receiver_port}/"))?,
             );
         }
     }
     let ids = destinations.keys().cloned().collect();
-    Ok((destinations, ids))
+    Ok((destinations, ids, allow_learned_endpoint))
+}
+
+/// Apply a learned alarm receiver endpoint to a base destination URL when
+/// override is permitted and a subscription has actually been seen. Used for
+/// both the rendered `Reference` and the outbound request so they stay aligned.
+///
+/// The subscription carries `IPAddress` as well as `Port`; a platform whose
+/// alarm receiver is not co-located with its web service advertises a different
+/// host there, so both are honoured.
+fn apply_learned_endpoint(
+    base: &reqwest::Url,
+    learned: &SharedLearnedAlarmEndpoint,
+    allow: bool,
+) -> reqwest::Url {
+    let mut url = base.clone();
+    if !allow {
+        return url;
+    }
+    let Some(endpoint) = learned.read().clone() else {
+        return url;
+    };
+    if let Some(host) = endpoint.host {
+        if url.host_str() != Some(host.to_string().as_str()) {
+            let _ = url.set_host(Some(&host.to_string()));
+        }
+    }
+    if url.port_or_known_default() != Some(endpoint.port) {
+        let _ = url.set_port(Some(endpoint.port));
+    }
+    url
 }
 
 fn normalize_destination_url(value: &str) -> Result<reqwest::Url, AlarmRuntimeError> {
@@ -1614,26 +1949,28 @@ fn build_context(
     definition: &AlarmHandlerDefinition,
     subscription_id: &str,
     destination: &reqwest::Url,
-    _device_http_port: u16,
+    device_http_port: u16,
 ) -> Result<AlarmBuildContext, AlarmRuntimeError> {
     let channel = device
         .preview
         .channel_count
         .map(|_| DEFAULT_CHANNEL_ID)
         .unwrap_or(DEFAULT_CHANNEL_ID);
-    // The legacy alarm scripts hard-code :81 only for the custom alarm
-    // camera and :80 for every other device-side Reference. This is separate
-    // from the configurable listener port used by the virtual device service.
-    let reference_port = if definition.profile_id == FirstReleaseProfileId::IpcCustom {
+    // Preserve the legacy fixed ports for profiles whose Reference is not used
+    // to retrieve structured alarm pictures. Structured alarms must advertise
+    // the port where this runtime actually serves /System/Picture; otherwise a
+    // non-80 listener produces accepted alarms whose pictures cannot be fetched.
+    let legacy_reference_port = if definition.profile_id == FirstReleaseProfileId::IpcCustom {
         81
     } else {
         80
     };
-    let device_authority = format!("{}:{reference_port}", device.preview.ip);
+    let legacy_device_authority = format!("{}:{legacy_reference_port}", device.preview.ip);
+    let runtime_device_authority = format!("{}:{device_http_port}", device.preview.ip);
     let destination_authority = destination_reference_authority(destination)?;
     let reference = match definition.profile_id {
         FirstReleaseProfileId::IpcCustom => {
-            format!("{device_authority}/Subscription/Subscribers/{subscription_id}")
+            format!("{legacy_device_authority}/Subscription/Subscribers/{subscription_id}")
         }
         FirstReleaseProfileId::IpcSmart
             if matches!(
@@ -1641,18 +1978,18 @@ fn build_context(
                 BodyEncoding::Multipart { .. }
             ) =>
         {
-            format!("{device_authority}/Subscription/Subscribers/{subscription_id}")
+            format!("{legacy_device_authority}/Subscription/Subscribers/{subscription_id}")
         }
         FirstReleaseProfileId::IpcSmart => {
             format!("{destination_authority}/Subscription/Subscribers/{subscription_id}")
         }
         FirstReleaseProfileId::IpcStructured => {
-            format!("{device_authority}/Subscription/Subscribers/1")
+            format!("{runtime_device_authority}/Subscription/Subscribers/1")
         }
         FirstReleaseProfileId::IpcFaceAccess
             if definition.transport.path.ends_with("/PersonVerification") =>
         {
-            format!("{device_authority}/Subscription/Subscribers/1000")
+            format!("{legacy_device_authority}/Subscription/Subscribers/1000")
         }
         FirstReleaseProfileId::IpcFaceAccess => {
             format!("{destination_authority}/Subscription/Subscribers/{subscription_id}")
@@ -1663,7 +2000,7 @@ fn build_context(
         ),
         FirstReleaseProfileId::NvrVehicle if definition.alarm_type_id.as_str() == "snap" => {
             format!(
-                "{device_authority}/{}/Subscription/Subscribers/{subscription_id}",
+                "{legacy_device_authority}/{}/Subscription/Subscribers/{subscription_id}",
                 device.preview.hardware_id
             )
         }
@@ -1744,13 +2081,24 @@ fn scheduled_mode(
     })
 }
 
+/// Build the operator-facing error body for a failed alarm attempt.
+///
+/// The scheduler's raw `code` is the only thing that identifies the fault, so it
+/// is always carried through alongside the sanitized `details` the sender
+/// collected. Dropping either leaves the UI with nothing but a generic message.
+fn alarm_error_body(code: String, details: Option<String>) -> SimulatorErrorBody {
+    let body = SimulatorErrorBody::new(code, "deviceSimulator.errors.alarmDispatchFailed")
+        .retryable(false);
+    match details {
+        Some(details) => body.with_public_details(details),
+        None => body,
+    }
+}
+
 fn trigger_result(snapshot: AlarmJobSnapshot, duration_ms: u64) -> AlarmTriggerResult {
     let mut errors = Vec::new();
     if let Some(code) = snapshot.last_error_code {
-        errors.push(
-            SimulatorErrorBody::new(code, "deviceSimulator.errors.alarmDispatchFailed")
-                .retryable(false),
-        );
+        errors.push(alarm_error_body(code, snapshot.last_error_details));
     }
     AlarmTriggerResult {
         attempted: snapshot.attempted,
@@ -1780,10 +2128,10 @@ fn job_stats_snapshot(snapshot: AlarmJobSnapshot) -> AlarmJobStatsSnapshot {
         unverified: snapshot.unverified,
         in_flight: snapshot.in_flight,
         average_duration_ms: snapshot.average_duration_ms as f64,
-        last_error: snapshot.last_error_code.map(|code| {
-            SimulatorErrorBody::new(code, "deviceSimulator.errors.alarmDispatchFailed")
-                .retryable(false)
-        }),
+        last_http_status: snapshot.last_http_status,
+        last_error: snapshot
+            .last_error_code
+            .map(|code| alarm_error_body(code, snapshot.last_error_details)),
     }
 }
 
@@ -1852,11 +2200,174 @@ fn runtime_error(code: &'static str, message: impl Into<String>) -> AlarmRuntime
 mod tests {
     use super::*;
     use crate::device_simulator::api::{
-        preview_devices, DeviceGroupDraft, RtspPorts, SimulatorStartRequest, StreamRuntimeConfig,
-        StreamTransport, TargetPlatformServer,
+        preview_devices, DeviceGroupDraft, PlatformAccessMode, RtspPorts, SimulatorStartRequest,
+        StreamRuntimeConfig, StreamTransport, TargetPlatformServer,
     };
     use crate::device_simulator::runtime_assets::PinnedPackDirectory;
     use tempfile::TempDir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn alarm_http_client_reports_the_first_redirect_instead_of_following_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/alarm"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/login", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let sender = HttpAlarmSender::new(BTreeMap::new(), Arc::new(RwLock::new(None)), false);
+        let response = sender
+            .client(Ipv4Addr::LOCALHOST)
+            .unwrap()
+            .post(format!("{}/alarm", server.uri()))
+            .body("alarm")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/alarm");
+    }
+
+    #[test]
+    fn ums_response_envelope_confirms_or_rejects_the_alarm_application_result() {
+        assert_eq!(decode_ums_alarm_response(b""), None);
+        assert_eq!(
+            decode_ums_alarm_response(
+                br#"{"Response":{"ResponseCode":0,"SubResponseCode":0,"StatusCode":0,"ResponseString":"Succeed"}}"#,
+            ),
+            Some(AlarmApplicationStatus::Accepted)
+        );
+        assert_eq!(
+            decode_ums_alarm_response(
+                br#"{"Response":{"ResponseCode":17,"SubResponseCode":2,"StatusCode":0,"ResponseString":"Invalid image"}}"#,
+            ),
+            Some(AlarmApplicationStatus::Rejected {
+                details: "ResponseCode=17, SubResponseCode=2, StatusCode=0, ResponseString=Invalid image".into(),
+            })
+        );
+        assert_eq!(
+            decode_ums_alarm_response(br#"{"unrelated":"login page payload"}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn alarm_job_registry_makes_stopping_an_inactive_job_idempotent() {
+        let mut jobs = AlarmJobRegistry::new(4);
+        jobs.insert("alarm-explicit".into(), 7_u8);
+
+        assert_eq!(jobs.take_for_stop("alarm-explicit").unwrap(), Some(7));
+        assert_eq!(jobs.take_for_stop("alarm-explicit").unwrap(), None);
+        assert_eq!(jobs.take_for_stop("alarm-never-started").unwrap(), None);
+    }
+
+    #[test]
+    fn alarm_job_registry_remembers_a_naturally_finished_job() {
+        let mut jobs = AlarmJobRegistry::new(4);
+        jobs.insert("alarm-finite".into(), 11_u8);
+
+        assert_eq!(jobs.mark_finished("alarm-finite"), Some(11));
+        assert_eq!(jobs.take_for_stop("alarm-finite").unwrap(), None);
+    }
+
+    #[test]
+    fn alarm_job_registry_bounds_recently_stopped_ids() {
+        let mut jobs = AlarmJobRegistry::new(2);
+        for (job_id, value) in [("alarm-1", 1_u8), ("alarm-2", 2), ("alarm-3", 3)] {
+            jobs.insert(job_id.into(), value);
+            assert_eq!(jobs.take_for_stop(job_id).unwrap(), Some(value));
+        }
+
+        assert_eq!(jobs.take_for_stop("alarm-1").unwrap(), None);
+        assert_eq!(jobs.take_for_stop("alarm-2").unwrap(), None);
+        assert_eq!(jobs.take_for_stop("alarm-3").unwrap(), None);
+    }
+
+    #[test]
+    fn learned_alarm_endpoint_follows_servers_but_never_an_explicit_receiver() {
+        use crate::device_simulator::api::TargetPlatformConfig;
+
+        // Server-derived destinations allow the learned endpoint to override.
+        let servers = TargetPlatformConfig {
+            kind: TargetPlatform::Ums,
+            servers: vec![TargetPlatformServer {
+                id: "primary".into(),
+                host: "198.51.100.9".into(),
+                port: 6000,
+            }],
+            access_mode: PlatformAccessMode::Open,
+            alarm_receiver_url: None,
+            alarm_receiver_port: Some(55_025),
+        };
+        let (destinations, _ids, allow_learned) = build_destinations(&servers).unwrap();
+        assert!(allow_learned);
+        let base = &destinations["primary"];
+        assert_eq!(base.port(), Some(55_025));
+
+        // A port far outside the legacy 55000..55999 range must be honoured.
+        let learned: SharedLearnedAlarmEndpoint =
+            Arc::new(RwLock::new(Some(LearnedAlarmEndpoint {
+                host: None,
+                port: 22_815,
+                duration_secs: Some(600),
+                learned_at_ms: 1_000,
+            })));
+        assert_eq!(
+            apply_learned_endpoint(base, &learned, true).port(),
+            Some(22_815)
+        );
+        // Override disabled or nothing learned yet leaves the configured port.
+        assert_eq!(
+            apply_learned_endpoint(base, &learned, false).port(),
+            Some(55_025)
+        );
+        assert_eq!(
+            apply_learned_endpoint(base, &Arc::new(RwLock::new(None)), true).port(),
+            Some(55_025)
+        );
+
+        // The advertised receiver host wins over the configured server host.
+        let relocated: SharedLearnedAlarmEndpoint =
+            Arc::new(RwLock::new(Some(LearnedAlarmEndpoint {
+                host: Some(Ipv4Addr::new(192, 115, 1, 55)),
+                port: 22_815,
+                duration_secs: None,
+                learned_at_ms: 1_000,
+            })));
+        let resolved = apply_learned_endpoint(base, &relocated, true);
+        assert_eq!(resolved.host_str(), Some("192.115.1.55"));
+        assert_eq!(resolved.port(), Some(22_815));
+
+        let mut fallback = servers.clone();
+        fallback.alarm_receiver_port = None;
+        let (fallback_destinations, _, _) = build_destinations(&fallback).unwrap();
+        assert_eq!(fallback_destinations["primary"].port(), Some(6000));
+
+        // An explicit receiver URL is a deliberate choice and is never rewritten.
+        let explicit = TargetPlatformConfig {
+            kind: TargetPlatform::Ums,
+            servers: Vec::new(),
+            access_mode: PlatformAccessMode::Open,
+            alarm_receiver_url: Some("http://198.51.100.9:7000/alarm".into()),
+            alarm_receiver_port: Some(55_025),
+        };
+        let (explicit_destinations, _i, allow_explicit) = build_destinations(&explicit).unwrap();
+        assert!(!allow_explicit);
+        assert_eq!(explicit_destinations["configured"].port(), Some(7000));
+    }
 
     #[test]
     fn compiles_legacy_json_into_bounded_runtime_fields_without_executable_content() {
@@ -1942,6 +2453,29 @@ mod tests {
     }
 
     #[test]
+    fn job_stats_api_preserves_the_last_http_status() {
+        let stats = job_stats_snapshot(AlarmJobSnapshot {
+            job_id: "alarm-status".into(),
+            state: ScheduledAlarmJobState::Running,
+            attempted: 1,
+            succeeded: 0,
+            failed: 0,
+            unverified: 1,
+            timed_out: 0,
+            cancelled: 0,
+            rejected: 0,
+            in_flight: 0,
+            average_duration_ms: 4,
+            last_http_status: Some(202),
+            last_error_code: None,
+            last_error_details: None,
+            devices: BTreeMap::new(),
+        });
+
+        assert_eq!(stats.last_http_status, Some(202));
+    }
+
+    #[test]
     fn configured_mode_requires_one_explicit_alarm_type() {
         assert!(scheduled_mode(AlarmDispatchMode::Configured, 0).is_err());
         assert_eq!(
@@ -2010,7 +2544,9 @@ mod tests {
                     host: "127.0.0.1".into(),
                     port: 18080,
                 }],
+                access_mode: PlatformAccessMode::Open,
                 alarm_receiver_url: None,
+                alarm_receiver_port: Some(55_025),
             },
             interface_id: "fixture-interface".into(),
             start_ip: "127.30.0.10".parse().unwrap(),
@@ -2022,6 +2558,8 @@ mod tests {
                 sub: 18555,
                 third: 18556,
             },
+            _legacy_allow_local_player_access: true,
+            media_theme_id: crate::device_simulator::api::DEFAULT_MEDIA_THEME_ID.into(),
             groups: vec![
                 DeviceGroupDraft {
                     id: "custom".into(),
@@ -2176,7 +2714,7 @@ mod tests {
         );
         let smart_alarm_body = String::from_utf8_lossy(&smart_requests[1].body);
         let smart_structure_body = String::from_utf8_lossy(&smart_requests[0].body);
-        assert!(smart_structure_body.contains("127.0.0.1:18080/Subscription/Subscribers/"));
+        assert!(smart_structure_body.contains("127.0.0.1:55025/Subscription/Subscribers/"));
         assert!(!smart_structure_body.contains("206.2.18.166"));
         assert!(smart_alarm_body.contains("SmartMotionDetectOn"));
         assert!(!smart_alarm_body.contains("\"AlarmType\":\"motion\""));
@@ -2276,7 +2814,7 @@ mod tests {
         assert_eq!(vehicle_requests.len(), 2);
         let vehicle_structure_body = String::from_utf8_lossy(&vehicle_requests[0].body);
         assert!(vehicle_structure_body.contains(&format!(
-            "127.0.0.1:18080/{}/Subscription/Subscribers/",
+            "127.0.0.1:55025/{}/Subscription/Subscribers/",
             vehicle_device.preview.hardware_id
         )));
         assert_eq!(
@@ -2408,7 +2946,7 @@ mod tests {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             let expected_reference = format!(
                 "{}:{}/Subscription/Subscribers/1",
-                structured_device.preview.ip, 80
+                structured_device.preview.ip, runtime.device_http_port
             );
             assert_eq!(
                 body["Reference"].as_str(),
@@ -2423,6 +2961,7 @@ mod tests {
                 expected_types
             );
             for image in images {
+                assert_eq!(image["Format"].as_u64(), Some(1));
                 assert!(image["Size"].as_u64().unwrap() > 0);
                 assert!(!image["Data"].as_str().unwrap().is_empty());
                 let url = image["URL"].as_str().unwrap();

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, MonitorCog, MonitorUp, PackageSearch, Puzzle, RadioTower, Share2, Shield, StickyNote, Video, type LucideIcon } from 'lucide-vue-next';
+import { ArrowRight, BarChart3, Clipboard, FileSearch, Globe, HardDrive, KeyRound, LogIn, MonitorCog, MonitorUp, PackageSearch, Puzzle, RadioTower, Share2, Shield, StickyNote, Video, type LucideIcon } from 'lucide-vue-next';
 import { useRouter } from 'vue-router';
 import { appStore } from '@/lib/store';
 
@@ -69,6 +69,15 @@ const toolCards = computed<ToolCard[]>(() => [
     icon: markRaw(Shield as LucideIcon),
     iconClasses: 'from-sky-500 to-indigo-600 shadow-sky-500/20',
     chipKey: 'toolsHub.cards.applianceSsh.chip',
+  },
+  {
+    key: 'portal-auto-login',
+    titleKey: 'sidebar.portalAutoLogin',
+    descriptionKey: 'portalAutoLogin.description',
+    path: '/tools/portal-auto-login',
+    icon: markRaw(LogIn as LucideIcon),
+    iconClasses: 'from-emerald-500 to-cyan-600 shadow-emerald-500/20',
+    chipKey: 'toolsHub.cards.portalAutoLogin.chip',
   },
   {
     key: 'remote-package-patch',

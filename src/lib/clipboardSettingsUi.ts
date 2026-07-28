@@ -2,6 +2,7 @@ import {
   Database,
   Eye,
   Filter,
+  Images,
   Keyboard,
   LayoutPanelTop,
   Settings2,
@@ -14,6 +15,7 @@ export const CLIPBOARD_SETTINGS_TABS = [
   { id: 'data', labelKey: 'clipboard.settings.tabs.data', icon: Database },
   { id: 'preview', labelKey: 'clipboard.settings.tabs.preview', icon: Eye },
   { id: 'appFilter', labelKey: 'clipboard.settings.tabs.appFilter', icon: Filter },
+  { id: 'imageCopy', labelKey: 'clipboard.imageCopy.title', icon: Images },
 ] as const;
 
 export type ClipboardSettingsTabId =

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import {
+  AlertCircle,
   ArrowLeft,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Globe,
@@ -287,13 +289,21 @@ function onExpandLeave(el: Element) {
 
             <div
               v-else
-              class="flex items-center rounded-2xl border border-slate-200 bg-slate-50/80 px-5 py-4 text-sm text-slate-500"
+              class="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50/80 px-5 py-4 text-sm text-slate-500"
             >
-              {{
-                !state?.server_url
-                  ? t('about.serverNotConfigured')
-                  : t('about.noUpdateAvailable')
-              }}
+              <CheckCircle2
+                v-if="state?.server_url"
+                class="h-5 w-5 shrink-0 text-emerald-500"
+                aria-hidden="true"
+              />
+              <AlertCircle v-else class="h-5 w-5 shrink-0 text-amber-500" aria-hidden="true" />
+              <span>
+                {{
+                  !state?.server_url
+                    ? t('about.serverNotConfigured')
+                    : t('about.noUpdateAvailable')
+                }}
+              </span>
             </div>
           </div>
         </div>
@@ -317,7 +327,13 @@ function onExpandLeave(el: Element) {
           </p>
         </div>
 
-        <div id="changelog-latest" class="relative mt-5">
+        <!-- Expanded notes are capped and scroll in place, so a long release
+             cannot push the upgrade action off the first screen. -->
+        <div
+          id="changelog-latest"
+          class="mt-5"
+          :class="showLatestChangelog ? 'scrollbar-light max-h-[46vh] overflow-y-auto overscroll-contain pr-2' : ''"
+        >
           <ul
             v-if="visibleLatestChangelog.length > 0"
             class="list-disc space-y-2.5 pl-6 text-[15px] leading-7 text-slate-700 marker:text-sky-500"
@@ -327,12 +343,6 @@ function onExpandLeave(el: Element) {
           <div v-else class="text-sm leading-6 text-slate-400">
             {{ t('about.changelogEmpty') }}
           </div>
-
-          <div
-            v-if="!showLatestChangelog && latestHiddenChangelogCount > 0"
-            class="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-white via-white/85 to-transparent"
-            aria-hidden="true"
-          />
         </div>
 
         <div v-if="latestHiddenChangelogCount > 0" class="mt-4 flex justify-center">
@@ -357,15 +367,13 @@ function onExpandLeave(el: Element) {
       </section>
 
       <section class="rounded-[30px] border border-slate-200 bg-white px-6 py-6 shadow-[0_18px_60px_rgba(15,23,42,0.08)]">
-        <div class="flex items-center justify-between gap-3">
-          <div>
-            <p class="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
-              {{ t('about.history') }}
-            </p>
-            <h2 class="mt-2 text-2xl font-semibold tracking-tight text-slate-950">
-              {{ t('about.history') }}
-            </h2>
-          </div>
+        <div class="flex flex-wrap items-end justify-between gap-3">
+          <h2 class="text-2xl font-semibold tracking-tight text-slate-950">
+            {{ t('about.history') }}
+          </h2>
+          <p v-if="sortedVersions.length > 0" class="text-sm text-slate-500 tabular-nums">
+            {{ t('about.historyCount', { count: sortedVersions.length }) }}
+          </p>
         </div>
 
         <div v-if="sortedVersions.length > 0" class="mt-6 space-y-3">
@@ -413,7 +421,7 @@ function onExpandLeave(el: Element) {
                 :id="`changelog-${entry.version}`"
                 class="changelog-panel border-t border-slate-200 bg-white"
               >
-                <ul class="list-disc space-y-2 px-5 py-4 pl-10 text-sm leading-6 text-slate-700">
+                <ul class="scrollbar-light max-h-72 list-disc space-y-2 overflow-y-auto overscroll-contain px-5 py-4 pl-10 text-sm leading-6 text-slate-700">
                   <li v-for="(line, index) in entry.changelog" :key="index">{{ line }}</li>
                   <li v-if="entry.changelog.length === 0" class="list-none pl-0 text-slate-400">
                     {{ t('about.changelogEmpty') }}

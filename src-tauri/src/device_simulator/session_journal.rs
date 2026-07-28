@@ -193,6 +193,36 @@ impl SessionJournalV1 {
     pub fn remaining_resources(&self) -> Vec<String> {
         self.resources.remaining_labels()
     }
+
+    /// Clamps `cleanup.stage` back to the earliest stage that still owns a
+    /// resource. A journal cannot legitimately be past the stage that releases
+    /// a resource it still owns, so a later stage (in particular a stale
+    /// `Complete`) is an inconsistency that recovery must repair rather than
+    /// trust. This lets recovery revisit every owned resource idempotently when
+    /// a journal arrives inconsistent — from an interrupted write, an older
+    /// build, or a residual copied from another machine.
+    pub fn reconcile_cleanup_stage(&mut self) {
+        let owns = |state: ResourceOwnershipState| state == ResourceOwnershipState::Owned;
+        let earliest = if self
+            .resources
+            .firewall_rules
+            .iter()
+            .any(|rule| owns(rule.state))
+        {
+            Some(JournalCleanupStage::RemovingFirewall)
+        } else if self.resources.ip_addresses.iter().any(|ip| owns(ip.state)) {
+            Some(JournalCleanupStage::RemovingIps)
+        } else if self.resources.packs.iter().any(|pack| owns(pack.state)) {
+            Some(JournalCleanupStage::ReleasingPacks)
+        } else {
+            None
+        };
+        if let Some(earliest) = earliest {
+            if self.cleanup.stage > earliest {
+                self.cleanup.stage = earliest;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,10 +402,14 @@ impl SessionJournalStore {
         cleaner: &mut C,
         now_ms: u64,
     ) -> SimulatorResult<RecoveryOutcome> {
-        validate_journal(&journal, Some(&journal.session_id))?;
+        validate_journal_structure(&journal, Some(&journal.session_id))?;
         if journal.is_terminal() {
             return Ok(success_outcome(journal));
         }
+        // Owned resources mean cleanup is not actually finished, even if a prior
+        // run recorded a later stage. Rewind so each owned resource is revisited
+        // and released idempotently instead of trusting a stale stage.
+        journal.reconcile_cleanup_stage();
 
         journal.state = SessionState::Recovering;
         journal.cleanup.attempts = journal.cleanup.attempts.saturating_add(1);
@@ -589,7 +623,12 @@ fn validate_session_id(session_id: &str) -> SimulatorResult<()> {
     Ok(())
 }
 
-fn validate_journal(
+/// Structural validation shared by every read, recovery, and write path. It
+/// rejects journals that are genuinely unusable (bad schema, identity, or
+/// interface bindings) but tolerates the `Complete` + still-owned
+/// contradiction, which recovery is designed to repair rather than reject.
+/// See [`validate_journal`] for the stricter write-time invariant.
+fn validate_journal_structure(
     journal: &SessionJournalV1,
     expected_session_id: Option<&str>,
 ) -> SimulatorResult<()> {
@@ -615,6 +654,20 @@ fn validate_journal(
             "owned IP interface/prefix does not match the journal identity",
         ));
     }
+    Ok(())
+}
+
+/// Write-time validation. Beyond the structural checks it enforces the
+/// invariant that a `Complete` journal owns no resources, so the desktop never
+/// *persists* the contradiction on its own. Recovery still repairs journals
+/// that arrive in that state from an interrupted write, an older build, or a
+/// residual copied from another machine (see
+/// [`SessionJournalV1::reconcile_cleanup_stage`]).
+fn validate_journal(
+    journal: &SessionJournalV1,
+    expected_session_id: Option<&str>,
+) -> SimulatorResult<()> {
+    validate_journal_structure(journal, expected_session_id)?;
     if journal.cleanup.stage == JournalCleanupStage::Complete
         && journal.resources.has_owned_resources()
     {
@@ -628,7 +681,10 @@ fn validate_journal(
 fn decode_journal(bytes: &[u8], expected_session_id: &str) -> SimulatorResult<SessionJournalV1> {
     let journal: SessionJournalV1 = serde_json::from_slice(bytes)
         .map_err(|error| journal_serialize_error("decode session journal", error))?;
-    validate_journal(&journal, Some(expected_session_id))?;
+    // Read tolerates the `Complete` + still-owned contradiction so a residual
+    // journal (older build, interrupted write, another machine) stays loadable
+    // and recovery can repair it. The stricter invariant lives in `save`.
+    validate_journal_structure(&journal, Some(expected_session_id))?;
     Ok(journal)
 }
 
@@ -956,6 +1012,45 @@ mod tests {
         assert_eq!(retried.journal.state, SessionState::Stopped);
         assert_eq!(cleaner.removed_ips, vec![first_ip, second_ip]);
         assert_eq!(retried.journal.cleanup.attempts, 2);
+    }
+
+    #[test]
+    fn complete_journal_with_owned_resources_is_loadable_and_recovers() {
+        let temp = TempDir::new().unwrap();
+        let store = SessionJournalStore::new(temp.path());
+        let owned_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let mut value = journal("residual-complete");
+        value.state = SessionState::Failed;
+        value.cleanup.stage = JournalCleanupStage::Complete;
+        value.resources.ip_addresses.push(OwnedIpAddress {
+            interface_id: "if-guid".to_owned(),
+            address: owned_ip,
+            prefix_len: 24,
+            state: ResourceOwnershipState::Owned,
+        });
+        // The desktop never *writes* this contradiction, so seed the file
+        // directly the way a residual from another machine or an older build
+        // arrives on disk. `save` would reject it by design.
+        assert_eq!(store.save(&value).unwrap_err().body().code, JOURNAL_INVALID);
+        fs::create_dir_all(temp.path()).unwrap();
+        let paths = JournalPaths::new(temp.path(), "residual-complete");
+        fs::write(&paths.primary, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        // A stale `Complete` stage must not make the journal unreadable...
+        let loaded = store.load("residual-complete").unwrap();
+        assert!(!loaded.is_terminal());
+
+        // ...and recovery must release the still-owned resource and finish clean.
+        let mut cleaner = Cleaner {
+            existing_ips: HashSet::from([owned_ip]),
+            ..Cleaner::default()
+        };
+        let outcome = store.recover_session(loaded, &mut cleaner, 100).unwrap();
+        assert!(outcome.recovered);
+        assert!(outcome.remaining_resources.is_empty());
+        assert_eq!(outcome.journal.cleanup.stage, JournalCleanupStage::Complete);
+        assert_eq!(outcome.journal.state, SessionState::Stopped);
+        assert_eq!(cleaner.removed_ips, vec![owned_ip]);
     }
 
     #[test]

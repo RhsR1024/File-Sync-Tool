@@ -16,7 +16,9 @@ export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
   last_device_ips: [],
   last_subnet_prefix: 24,
   last_platform_servers: [{ id: 'server-1', host: '192.168.50.2', port: 80 }],
+  last_platform_access_mode: 'configured_servers_only',
   last_alarm_receiver_url: 'http://192.168.50.2/alarm',
+  last_alarm_receiver_port: 55025,
   last_device_groups: [{
     id: 'group-1',
     profile_id: 'ipc-custom',
@@ -25,6 +27,7 @@ export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
   }],
   last_http_port: 81,
   last_rtsp_ports: { main: 554, sub: 555, third: 556 },
+  last_media_theme_id: 'classic',
   auto_check_asset_updates: true,
   manage_firewall: true,
 };
@@ -33,7 +36,9 @@ export const simulatorStartRequestContract: SimulatorStartRequest = {
   platform: {
     kind: 'ums',
     servers: [{ id: 'server-1', host: '192.168.50.2', port: 80 }],
+    access_mode: 'configured_servers_only',
     alarm_receiver_url: 'http://192.168.50.2/alarm',
+    alarm_receiver_port: 55025,
   },
   interface_id: 'adapter-1',
   start_ip: '192.168.50.10',
@@ -41,6 +46,7 @@ export const simulatorStartRequestContract: SimulatorStartRequest = {
   subnet_prefix: 24,
   device_http_port: 81,
   rtsp_ports: { main: 554, sub: 555, third: 556 },
+  media_theme_id: 'classic',
   groups: [{
     id: 'group-1',
     profile_id: 'ipc-custom',
@@ -94,3 +100,16 @@ export const simulatorStatusContract: SimulatorStatus = {
 export const statusEventContract: DeviceSimulatorEventPayloads[
   typeof DEVICE_SIMULATOR_EVENTS.status
 ] = simulatorStatusContract;
+
+export const alarmSubscriptionEventContract: DeviceSimulatorEventPayloads[
+  typeof DEVICE_SIMULATOR_EVENTS.alarmSubscription
+] = {
+  destinations: ['http://192.115.1.55:22815/'],
+  learned: true,
+  host: '192.115.1.55',
+  port: 22815,
+  duration_secs: 600,
+  learned_at_ms: 1_784_773_245_000,
+  expires_at_ms: 1_784_773_845_000,
+  overridden: false,
+};

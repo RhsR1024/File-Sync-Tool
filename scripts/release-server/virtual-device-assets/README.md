@@ -23,6 +23,14 @@ virtual-device-assets/
 - 签名私钥永远不得放入本目录。这里只发布 Catalog、分离签名、不可变 ZIP；公钥由应用的受信密钥配置分发。
 - 仓库中的 `scripts/release-server/serve.py` 仅适合开发验证，不作为大规模生产素材分发服务。
 
+本机构建机签名密钥位置：
+
+- 私钥：`D:\FileSyncTool-Secrets\device-assets-static-review-2026.key`
+- 公钥：`D:\FileSyncTool-Secrets\device-assets-static-review-2026.pub.pem`
+- Key ID：`device-assets-static-review-2026`
+
+这里只记录本机外部路径，私钥文件本身不得复制到仓库、发布目录、日志或构建产物中。执行签名前必须确认私钥派生公钥与应用内置受信公钥匹配。
+
 完整生成、签名、校验、发布和密钥轮换步骤见 [`scripts/device-simulator-assets/README.md`](../../device-simulator-assets/README.md)。
 
 如果需要把当前版本真正部署到升级服务器，请参阅 [`DEPLOYMENT_GUIDE.md`](./DEPLOYMENT_GUIDE.md)，其中列出了当前 Catalog 对应的 ZIP 文件、Profile 依赖、客户端访问 URL 和验收步骤。

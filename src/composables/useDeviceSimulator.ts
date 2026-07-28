@@ -6,8 +6,10 @@ import {
   deviceSimulatorApi,
   hasBlockingPreflightFailure,
   isDeviceSimulatorTopologyLocked,
+  shouldReleaseActiveAlarmJob,
   type AlarmJobRequest,
   type AlarmJobStats,
+  type AlarmSubscription,
   type ProfileAlarmTypes,
   type AlarmTriggerResult,
   type AssetProgress,
@@ -19,6 +21,7 @@ import {
   type DeviceSimulatorSettings,
   type DeviceStatusBatch,
   type ImportedAlarmImage,
+  type MediaThemeSummary,
   type PreflightReport,
   type RtspStats,
   type SimulatorLogEvent,
@@ -61,7 +64,9 @@ const defaultSettings = (): DeviceSimulatorSettings => ({
   last_device_ips: [],
   last_subnet_prefix: 24,
   last_platform_servers: [],
+  last_platform_access_mode: 'open',
   last_alarm_receiver_url: null,
+  last_alarm_receiver_port: 22_815,
   last_device_groups: [{
     id: newId('group'),
     profile_id: 'ipc-custom',
@@ -70,6 +75,7 @@ const defaultSettings = (): DeviceSimulatorSettings => ({
   }],
   last_http_port: 81,
   last_rtsp_ports: { main: 554, sub: 555, third: 556 },
+  last_media_theme_id: 'classic',
   auto_check_asset_updates: true,
   manage_firewall: true,
 });
@@ -81,7 +87,9 @@ function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartR
       servers: settings.last_platform_servers.length > 0
         ? settings.last_platform_servers.map((server) => ({ ...server }))
         : [{ id: newId('server'), host: '', port: 80 }],
+      access_mode: settings.last_platform_access_mode ?? 'open',
       alarm_receiver_url: settings.last_alarm_receiver_url,
+      alarm_receiver_port: settings.last_alarm_receiver_port,
     },
     interface_id: settings.selected_interface_id ?? '',
     start_ip: settings.last_start_ip ?? '192.168.1.100',
@@ -89,6 +97,7 @@ function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartR
     subnet_prefix: settings.last_subnet_prefix,
     device_http_port: settings.last_http_port,
     rtsp_ports: { ...settings.last_rtsp_ports },
+    media_theme_id: settings.last_media_theme_id || 'classic',
     groups: settings.last_device_groups.length > 0
       ? settings.last_device_groups.map((group) => ({ ...group }))
       : defaultSettings().last_device_groups,
@@ -107,6 +116,11 @@ function createDeviceSimulator() {
   const interfaces = ref<SimulatorNetworkInterfaceInfo[]>([]);
   const profiles = ref<DeviceProfileSummary[]>([]);
   const alarmTypes = ref<ProfileAlarmTypes[]>([]);
+  const mediaThemes = ref<MediaThemeSummary[]>([{
+    id: 'classic',
+    display_name_key: 'deviceSimulator.mediaThemes.classic',
+    is_default: true,
+  }]);
   const assets = ref<AssetStatus | null>(null);
   const assetProgress = ref<AssetProgress | null>(null);
   const preview = ref<DevicePreview | null>(null);
@@ -114,6 +128,10 @@ function createDeviceSimulator() {
   const deviceStatus = ref<DeviceStatusBatch | null>(null);
   const rtspStats = ref<RtspStats | null>(null);
   const alarmStats = ref<AlarmJobStats | null>(null);
+  const alarmSubscription = ref<AlarmSubscription | null>(null);
+  const activeAlarmJobId = ref<string | null>(null);
+  const alarmStartPending = ref(false);
+  const alarmStopPending = ref(false);
   const cleanupProgress = ref<CleanupProgress | null>(null);
   const lastAlarmResult = ref<AlarmTriggerResult | null>(null);
   const importedAlarmImage = ref<ImportedAlarmImage | null>(null);
@@ -139,6 +157,13 @@ function createDeviceSimulator() {
   ));
   const selectedInterface = computed(() => interfaces.value
     .find((item) => item.id === request.interface_id) ?? null);
+
+  function applyStatus(next: SimulatorStatus) {
+    status.value = next;
+    if (shouldReleaseActiveAlarmJob(next, alarmStartPending.value)) {
+      activeAlarmJobId.value = null;
+    }
+  }
 
   function selectAvailableInterface() {
     if (topologyLocked.value) return;
@@ -190,6 +215,7 @@ function createDeviceSimulator() {
     request.subnet_prefix = next.subnet_prefix;
     request.device_http_port = next.device_http_port;
     request.rtsp_ports = next.rtsp_ports;
+    request.media_theme_id = next.media_theme_id;
     request.groups = next.groups;
     request.stream = next.stream;
   }
@@ -203,10 +229,13 @@ function createDeviceSimulator() {
       last_device_ips: [...request.device_ips],
       last_subnet_prefix: request.subnet_prefix,
       last_platform_servers: request.platform.servers.map((server) => ({ ...server })),
+      last_platform_access_mode: request.platform.access_mode,
       last_alarm_receiver_url: request.platform.alarm_receiver_url,
+      last_alarm_receiver_port: request.platform.alarm_receiver_port,
       last_device_groups: request.groups.map((group) => ({ ...group })),
       last_http_port: request.device_http_port,
       last_rtsp_ports: { ...request.rtsp_ports },
+      last_media_theme_id: request.media_theme_id,
     };
   }
 
@@ -235,27 +264,55 @@ function createDeviceSimulator() {
     return code || message_key || details ? { code, message_key, details } : null;
   }
 
-  function appendErrorLog(action: string, error: unknown) {
-    const info = errorInfo(error);
-    const message = info?.details || info?.message_key || (error instanceof Error ? error.message : String(error));
-    const errorCode = info?.code || null;
-    const previous = logs.value[logs.value.length - 1];
-    if (previous?.level === 'error' && previous.error_code === errorCode && previous.message === message) return;
+  function pushLog(entry: Partial<SimulatorLogEvent> & Pick<SimulatorLogEvent, 'level' | 'component' | 'message'>) {
     logs.value.push({
       timestamp: new Date().toISOString(),
-      level: 'error',
       session_id: status.value.session_id,
-      component: `ui:${action}`,
       profile_id: null,
       device_id: null,
       device_ip: null,
       channel_id: null,
       alarm_job_id: null,
       rtsp_session_id: null,
-      error_code: errorCode,
-      message,
+      error_code: null,
+      ...entry,
     });
     if (logs.value.length > 2_000) logs.value.splice(0, logs.value.length - 2_000);
+  }
+
+  function appendErrorLog(action: string, error: unknown) {
+    const info = errorInfo(error);
+    const message = info?.details || info?.message_key || (error instanceof Error ? error.message : String(error));
+    const errorCode = info?.code || null;
+    const previous = logs.value[logs.value.length - 1];
+    if (previous?.level === 'error' && previous.error_code === errorCode && previous.message === message) return;
+    pushLog({ level: 'error', component: `ui:${action}`, error_code: errorCode, message });
+  }
+
+  /**
+   * Alarm dispatch failures only ever reached the UI as a single translated
+   * sentence, which made every distinct cause look identical. Mirror each new
+   * failure into the run log with its raw code so the log tab is usable for
+   * diagnosis instead of staying empty.
+   */
+  let lastLoggedAlarmError = '';
+
+  function logAlarmFailure(stats: AlarmJobStats) {
+    const error = stats.last_error;
+    if (!error) {
+      lastLoggedAlarmError = '';
+      return;
+    }
+    const signature = `${stats.job_id}|${error.code}|${error.details ?? ''}`;
+    if (signature === lastLoggedAlarmError) return;
+    lastLoggedAlarmError = signature;
+    pushLog({
+      level: 'error',
+      component: 'alarm:dispatch',
+      alarm_job_id: stats.job_id,
+      error_code: error.code,
+      message: error.details ? `${error.code}: ${error.details}` : error.code,
+    });
   }
 
   async function run<T>(action: string, operation: () => Promise<T>): Promise<T | null> {
@@ -276,7 +333,7 @@ function createDeviceSimulator() {
     if (unlisteners.length > 0) return;
     const listeners = await Promise.all([
       listen<SimulatorStatus>(DEVICE_SIMULATOR_EVENTS.status, ({ payload }) => {
-        status.value = payload;
+        applyStatus(payload);
         if (payload.last_error) appendErrorLog('backend', payload.last_error);
       }),
       listen<AssetProgress>(DEVICE_SIMULATOR_EVENTS.assetProgress, ({ payload }) => {
@@ -286,7 +343,7 @@ function createDeviceSimulator() {
             .then(async (status) => {
               assets.value = status;
               if (payload.state === 'ready') {
-                await refreshAlarmTypes();
+                await Promise.all([refreshAlarmTypes(), refreshMediaThemes()]);
               } else {
                 alarmTypes.value = [];
               }
@@ -296,7 +353,17 @@ function createDeviceSimulator() {
       }),
       listen<DeviceStatusBatch>(DEVICE_SIMULATOR_EVENTS.deviceStatus, ({ payload }) => { deviceStatus.value = payload; }),
       listen<RtspStats>(DEVICE_SIMULATOR_EVENTS.rtspStats, ({ payload }) => { rtspStats.value = payload; }),
-      listen<AlarmJobStats>(DEVICE_SIMULATOR_EVENTS.alarmStats, ({ payload }) => { alarmStats.value = payload; }),
+      listen<AlarmJobStats>(DEVICE_SIMULATOR_EVENTS.alarmStats, ({ payload }) => {
+        alarmStats.value = payload;
+        logAlarmFailure(payload);
+        if (activeAlarmJobId.value === payload.job_id
+          && (payload.state === 'completed' || payload.state === 'failed')) {
+          activeAlarmJobId.value = null;
+        }
+      }),
+      listen<AlarmSubscription>(DEVICE_SIMULATOR_EVENTS.alarmSubscription, ({ payload }) => {
+        alarmSubscription.value = payload;
+      }),
       listen<CleanupProgress>(DEVICE_SIMULATOR_EVENTS.cleanupProgress, ({ payload }) => { cleanupProgress.value = payload; }),
       listen<SimulatorLogEvent>(DEVICE_SIMULATOR_EVENTS.log, ({ payload }) => {
         logs.value.push(payload);
@@ -307,7 +374,11 @@ function createDeviceSimulator() {
   }
 
   async function initialize() {
-    if (initialized.value) return;
+    if (initialized.value) {
+      // Re-entering the page re-checks the required files without resetting the draft.
+      if (busyAction.value === null && selectedProfileIds.value.length > 0) await refreshAssets();
+      return;
+    }
     await subscribeEvents();
     busyAction.value = 'initialize';
     errorMessage.value = '';
@@ -326,7 +397,7 @@ function createDeviceSimulator() {
       selectAvailableInterface();
     }
     if (profileResult.status === 'fulfilled') profiles.value = profileResult.value;
-    if (statusResult.status === 'fulfilled') status.value = statusResult.value;
+    if (statusResult.status === 'fulfilled') applyStatus(statusResult.value);
     const failure = [settingsResult, interfaceResult, profileResult, statusResult]
       .find((result) => result.status === 'rejected');
     if (failure?.status === 'rejected') errorMessage.value = errorText(failure.reason);
@@ -348,7 +419,7 @@ function createDeviceSimulator() {
       selectAvailableInterface();
     }
     if (profileResult.status === 'fulfilled') profiles.value = profileResult.value;
-    if (statusResult.status === 'fulfilled') status.value = statusResult.value;
+    if (statusResult.status === 'fulfilled') applyStatus(statusResult.value);
     const failure = [interfaceResult, profileResult, statusResult]
       .find((result) => result.status === 'rejected');
     if (failure?.status === 'rejected') errorMessage.value = errorText(failure.reason);
@@ -374,7 +445,11 @@ function createDeviceSimulator() {
       assets.value = result;
       if (result.state === 'ready' || result.state === 'update_available') {
         try {
-          alarmTypes.value = await deviceSimulatorApi.listAlarmTypes();
+          const [nextAlarmTypes] = await Promise.all([
+            deviceSimulatorApi.listAlarmTypes(),
+            refreshMediaThemes(),
+          ]);
+          alarmTypes.value = nextAlarmTypes;
         } catch {
           // Alarm names are an optional convenience; sending all types still works.
           alarmTypes.value = [];
@@ -387,7 +462,10 @@ function createDeviceSimulator() {
 
   async function prepareAssets() {
     const jobId = await run('prepare-assets', () => deviceSimulatorApi.prepareAssets(selectedProfileIds.value));
-    if (jobId) {
+    // A cached/no-op preparation can emit progress (including `ready`) before
+    // the command response reaches the WebView. Preserve every event already
+    // received for this job instead of overwriting it with a stale initial state.
+    if (jobId && assetProgress.value?.job_id !== jobId) {
       assetProgress.value = {
         job_id: jobId,
         state: 'checking',
@@ -405,6 +483,19 @@ function createDeviceSimulator() {
       alarmTypes.value = await deviceSimulatorApi.listAlarmTypes();
     } catch {
       alarmTypes.value = [];
+    }
+  }
+
+  async function refreshMediaThemes() {
+    try {
+      const next = await deviceSimulatorApi.listMediaThemes();
+      if (next.length === 0) return;
+      mediaThemes.value = next;
+      if (!next.some((theme) => theme.id === request.media_theme_id)) {
+        request.media_theme_id = next.find((theme) => theme.is_default)?.id ?? next[0].id;
+      }
+    } catch {
+      // Theme discovery is available only after the active media pack is prepared.
     }
   }
 
@@ -436,14 +527,17 @@ function createDeviceSimulator() {
       settings.value = saved;
       return deviceSimulatorApi.start(request);
     });
-    if (result) status.value = result;
+    if (result) applyStatus(result);
   }
 
   async function stop() {
     const stopped = await run('stop', () => deviceSimulatorApi.stop());
     if (stopped === null) return;
+    activeAlarmJobId.value = null;
+    alarmSubscription.value = null;
+    lastLoggedAlarmError = '';
     const next = await run('status', () => deviceSimulatorApi.getStatus());
-    if (next) status.value = next;
+    if (next) applyStatus(next);
   }
 
   async function recover() {
@@ -457,12 +551,23 @@ function createDeviceSimulator() {
     });
     if (!recovered) return;
     const next = await run('status', () => deviceSimulatorApi.getStatus());
-    if (next) status.value = next;
+    if (next) applyStatus(next);
   }
 
   async function triggerAlarm(alarm: AlarmJobRequest) {
     const result = await run('trigger-alarm', () => deviceSimulatorApi.triggerAlarmOnce(alarm));
-    if (result) lastAlarmResult.value = result;
+    if (!result) return;
+    lastAlarmResult.value = result;
+    // A one-shot send reports its failures only in the result, so record them
+    // here; the periodic path goes through the alarm stats event instead.
+    for (const error of result.errors) {
+      pushLog({
+        level: 'error',
+        component: 'alarm:dispatch',
+        error_code: error.code,
+        message: error.details ? `${error.code}: ${error.details}` : error.code,
+      });
+    }
   }
 
   async function importAlarmImage() {
@@ -476,12 +581,35 @@ function createDeviceSimulator() {
   }
 
   async function startAlarm(alarm: AlarmJobRequest) {
-    await run('start-alarm', () => deviceSimulatorApi.startAlarm(alarm));
+    if (activeAlarmJobId.value || alarmStartPending.value || alarmStopPending.value) return;
+    alarmStartPending.value = true;
+    try {
+      const jobId = await run('start-alarm', () => deviceSimulatorApi.startAlarm(alarm));
+      if (jobId) {
+        activeAlarmJobId.value = jobId;
+        if (alarmStats.value?.job_id === jobId
+          && (alarmStats.value.state === 'completed' || alarmStats.value.state === 'failed')) {
+          activeAlarmJobId.value = null;
+        }
+      }
+    } finally {
+      alarmStartPending.value = false;
+    }
   }
 
   async function stopAlarm() {
-    if (!alarmStats.value?.job_id) return;
-    await run('stop-alarm', () => deviceSimulatorApi.stopAlarm(alarmStats.value!.job_id));
+    const jobId = activeAlarmJobId.value;
+    if (!jobId || alarmStopPending.value) return;
+    alarmStopPending.value = true;
+    try {
+      const stopped = await run('stop-alarm', async () => {
+        await deviceSimulatorApi.stopAlarm(jobId);
+        return true;
+      });
+      if (stopped && activeAlarmJobId.value === jobId) activeAlarmJobId.value = null;
+    } finally {
+      alarmStopPending.value = false;
+    }
   }
 
   function addGroup(profileId = 'ipc-custom') {
@@ -511,6 +639,7 @@ function createDeviceSimulator() {
     interfaces,
     profiles,
     alarmTypes,
+    mediaThemes,
     assets,
     assetProgress,
     preview,
@@ -518,6 +647,9 @@ function createDeviceSimulator() {
     deviceStatus,
     rtspStats,
     alarmStats,
+    alarmSubscription,
+    activeAlarmJobId,
+    alarmStopPending,
     cleanupProgress,
     lastAlarmResult,
     importedAlarmImage,
@@ -537,6 +669,7 @@ function createDeviceSimulator() {
     saveSettings,
     refreshAssets,
     refreshAlarmTypes,
+    refreshMediaThemes,
     prepareAssets,
     cancelAssetDownload,
     previewDevices,

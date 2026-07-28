@@ -8,6 +8,7 @@ import {
   Globe,
   HardDrive,
   KeyRound,
+  LogIn,
   MonitorUp,
   PackageSearch,
   Puzzle,
@@ -43,6 +44,7 @@ const iconMap: Record<SidebarIconKey, Component> = {
   toolsOverview: Server,
   frameworkPassword: KeyRound,
   applianceSsh: Shield,
+  portalAutoLogin: LogIn,
   remotePackagePatch: PackageSearch,
   codeStatistics: BarChart3,
   networkTools: Globe,
@@ -87,6 +89,8 @@ const versionChipLabel = computed(() => {
     : fallbackDate;
   return releaseDate ? `${current} · ${releaseDate}` : current;
 });
+
+const latestVersion = computed(() => updaterState.value?.manifest?.latest ?? null);
 </script>
 
 <template>
@@ -179,7 +183,7 @@ const versionChipLabel = computed(() => {
       >
         <ShieldCheck class="h-4 w-4" aria-hidden="true" />
         <span class="min-w-0 flex-1 truncate">{{ versionChipLabel }}</span>
-        <UpdateRedDot v-if="updaterState?.has_update" />
+        <UpdateRedDot v-if="updaterState?.has_update" variant="halo" :version="latestVersion" />
       </button>
     </div>
   </div>

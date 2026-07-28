@@ -1,1 +1,0 @@
-scripts/release-server/virtual-device-assets.rar filter=lfs diff=lfs merge=lfs -text

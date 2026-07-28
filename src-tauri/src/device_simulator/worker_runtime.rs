@@ -1,8 +1,12 @@
-use crate::device_simulator::alarm_runtime::{AlarmRuntime, AlarmRuntimeConfig, AlarmRuntimeError};
+use crate::device_simulator::access_control::PlatformAccessPolicy;
+use crate::device_simulator::alarm_runtime::{
+    AlarmRuntime, AlarmRuntimeConfig, AlarmRuntimeError, LearnedAlarmEndpoint,
+};
 use crate::device_simulator::api::{
-    preview_devices, AlarmJobRequest, AlarmJobStatsSnapshot, AlarmTriggerResult, DevicePreview,
-    DeviceRuntimeStatusSnapshot, RtspStatsSnapshot, RuntimeEventBatcher, RuntimeTelemetrySnapshot,
-    SimulatorMetricsSnapshot, SimulatorStatusSnapshot, TargetPlatformServer,
+    preview_devices, AlarmJobRequest, AlarmJobStatsSnapshot, AlarmSubscriptionSnapshot,
+    AlarmTriggerResult, DevicePreview, DeviceRuntimeStatusSnapshot, PlatformAccessMode,
+    RtspStatsSnapshot, RuntimeEventBatcher, RuntimeTelemetrySnapshot, SimulatorMetricsSnapshot,
+    SimulatorStatusSnapshot, TargetPlatformServer,
 };
 use crate::device_simulator::errors::SimulatorErrorBody;
 use crate::device_simulator::models::{AlarmJobState, SessionState};
@@ -35,6 +39,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const ALIAS_READY_ATTEMPTS: usize = 20;
 const ALIAS_READY_INTERVAL: Duration = Duration::from_millis(100);
+// Legacy Vsocket_ip.py waits five seconds after adding virtual addresses before
+// it starts discovery, HTTP, and RTSP. Preserve that Windows network-settle
+// window; unit tests use a zero duration so the behavior remains fast to test.
+const LEGACY_ALIAS_SETTLE_DELAY: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_secs(5)
+};
 
 pub type WorkerServiceFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, WorkerRuntimeError>> + Send + 'a>>;
@@ -75,6 +87,9 @@ pub struct WorkerServiceStartConfig {
     pub preview: DevicePreview,
     pub assets: Option<Arc<RuntimeAssetLayout>>,
     pub app_data_dir: PathBuf,
+    /// Resolved during session initialization so the admission list cannot
+    /// change while the session runs.
+    pub access_policy: PlatformAccessPolicy,
 }
 
 pub trait WorkerServiceRuntime: Send {
@@ -97,6 +112,9 @@ pub trait WorkerServiceRuntime: Send {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Vec<AlarmJobStatsSnapshot>> + Send + 'a>>;
     fn protocol_stats(&self) -> ProtocolRuntimeStats;
+    /// Effective alarm destination plus the platform subscription behind it.
+    /// `None` before the alarm runtime exists.
+    fn alarm_subscription(&self) -> Option<AlarmSubscriptionSnapshot>;
 }
 
 #[derive(Default)]
@@ -141,11 +159,14 @@ impl WorkerServiceRuntime for SystemWorkerServices {
                 })?
                 .map_err(alarm_runtime_error)?;
             let picture_cache = alarms.image_cache();
+            let learned_endpoint = alarms.learned_endpoint();
             let protocol = ProtocolRuntime::start(ProtocolRuntimeConfig {
                 request: config.request,
                 preview: config.preview,
                 assets,
                 picture_cache,
+                learned_endpoint,
+                access_policy: config.access_policy,
                 enable_discovery: true,
             })
             .await
@@ -247,12 +268,30 @@ impl WorkerServiceRuntime for SystemWorkerServices {
             .map(ProtocolRuntime::stats)
             .unwrap_or_default()
     }
+
+    fn alarm_subscription(&self) -> Option<AlarmSubscriptionSnapshot> {
+        let alarms = self.alarms.as_ref()?;
+        let learned = alarms.learned_subscription();
+        Some(AlarmSubscriptionSnapshot {
+            destinations: alarms.effective_destinations(),
+            learned: learned.is_some(),
+            host: learned
+                .as_ref()
+                .and_then(|endpoint| endpoint.host.map(|host| host.to_string())),
+            port: learned.as_ref().map(|endpoint| endpoint.port),
+            duration_secs: learned.as_ref().and_then(|endpoint| endpoint.duration_secs),
+            learned_at_ms: learned.as_ref().map(|endpoint| endpoint.learned_at_ms),
+            expires_at_ms: learned.as_ref().and_then(LearnedAlarmEndpoint::expires_at_ms),
+            overridden: !alarms.follows_platform_subscription(),
+        })
+    }
 }
 
 struct InitializedSession {
     payload: InitializeSessionPayload,
     assets: Option<Arc<RuntimeAssetLayout>>,
     firewall_rules: Vec<FirewallRuleSpec>,
+    access_policy: PlatformAccessPolicy,
 }
 
 pub struct WorkerRuntime {
@@ -351,8 +390,9 @@ impl WorkerRuntime {
             .collect::<Vec<_>>();
         let pins = payload.pinned_packs.clone();
         let selected_for_load = selected_profiles.clone();
+        let media_theme_id = payload.request.media_theme_id.clone();
         let assets = tokio::task::spawn_blocking(move || {
-            RuntimeAssetLayout::load(&pins, &selected_for_load)
+            RuntimeAssetLayout::load_for_theme(&pins, &selected_for_load, &media_theme_id)
         })
         .await
         .map_err(|source| {
@@ -362,9 +402,15 @@ impl WorkerRuntime {
             )
         })?
         .map_err(|source| runtime_error(source.code, source.message))?;
-        let remote_scope = if payload.manage_firewall {
+        // Firewall scoping and application-layer admission both key off the same
+        // resolved platform addresses, so resolve them once and only when at
+        // least one of the two actually needs them.
+        let access_mode = payload.request.platform.access_mode;
+        let platform_addresses = if payload.manage_firewall
+            || access_mode == PlatformAccessMode::ConfiguredServersOnly
+        {
             let servers = payload.request.platform.servers.clone();
-            let remote_addresses =
+            Some(
                 tokio::task::spawn_blocking(move || resolve_platform_ipv4_addresses(&servers))
                     .await
                     .map_err(|source| {
@@ -372,15 +418,28 @@ impl WorkerRuntime {
                             "device_simulator.worker.firewall_scope_task_failed",
                             format!("platform address resolution task failed: {source}"),
                         )
-                    })??;
-            FirewallRemoteScope::Addresses(remote_addresses)
+                    })??,
+            )
         } else {
-            let subnet =
-                Ipv4Subnet::from_address(payload.request.start_ip, payload.request.subnet_prefix)
-                    .map_err(|source| {
+            None
+        };
+        let access_policy = PlatformAccessPolicy::resolve(
+            access_mode,
+            platform_addresses.clone().unwrap_or_default(),
+        )
+        .map_err(|source| runtime_error(source.code, source.message))?;
+        let remote_scope = match platform_addresses {
+            Some(addresses) if payload.manage_firewall => FirewallRemoteScope::Addresses(addresses),
+            _ => {
+                let subnet = Ipv4Subnet::from_address(
+                    payload.request.start_ip,
+                    payload.request.subnet_prefix,
+                )
+                .map_err(|source| {
                     runtime_error("device_simulator.worker.subnet_invalid", source.to_string())
                 })?;
-            FirewallRemoteScope::SelectedSubnet(subnet)
+                FirewallRemoteScope::SelectedSubnet(subnet)
+            }
         };
         let firewall_rules = plan_session_firewall(&self.session_id, &payload, remote_scope)?;
         let now = now_ms();
@@ -448,6 +507,7 @@ impl WorkerRuntime {
             payload,
             assets: Some(Arc::new(assets)),
             firewall_rules,
+            access_policy,
         });
         self.state = SessionState::Preflighting;
         self.save_journal().await?;
@@ -527,7 +587,7 @@ impl WorkerRuntime {
             let backend = Arc::clone(&self.ip_alias);
             let interface_id = resource.interface_id.clone();
             let added = tokio::task::spawn_blocking(move || {
-                backend.add_alias(&interface_id, resource.address, resource.prefix_len)
+                backend.add_alias(&interface_id, resource.address, resource.prefix_len, false)
             })
             .await
             .map_err(|source| {
@@ -553,6 +613,8 @@ impl WorkerRuntime {
                 return self.fail_start_and_cleanup(source).await;
             }
         }
+
+        tokio::time::sleep(LEGACY_ALIAS_SETTLE_DELAY).await;
 
         self.set_state(SessionState::StartingServices).await?;
         let initialized = self.initialized.as_ref().expect("initialized session");
@@ -605,6 +667,7 @@ impl WorkerRuntime {
             preview: initialized.payload.preview.clone(),
             assets: initialized.assets.clone(),
             app_data_dir: initialized.payload.app_data_dir.clone(),
+            access_policy: initialized.access_policy.clone(),
         };
         if let Err(source) = self.services.start(service_config).await {
             return self.fail_start_and_cleanup(source).await;
@@ -682,6 +745,9 @@ impl WorkerRuntime {
         });
         for stats in alarm_stats {
             self.event_batcher.update_alarm(stats);
+        }
+        if let Some(subscription) = self.services.alarm_subscription() {
+            self.event_batcher.update_alarm_subscription(subscription);
         }
         RuntimeTelemetrySnapshot {
             status,
@@ -1196,6 +1262,7 @@ mod tests {
     struct FakeIpBackend {
         addresses: TestMutex<HashSet<Ipv4Addr>>,
         fail_add: TestMutex<Option<Ipv4Addr>>,
+        skip_as_source: TestMutex<Vec<bool>>,
     }
 
     impl IpAliasBackend for FakeIpBackend {
@@ -1208,10 +1275,12 @@ mod tests {
             _interface_id: &str,
             address: Ipv4Addr,
             _prefix_len: u8,
+            skip_as_source: bool,
         ) -> Result<(), IpAliasBackendError> {
             if *self.fail_add.lock().unwrap() == Some(address) {
                 return Err(IpAliasBackendError::Native("injected add failure".into()));
             }
+            self.skip_as_source.lock().unwrap().push(skip_as_source);
             self.addresses.lock().unwrap().insert(address);
             Ok(())
         }
@@ -1265,7 +1334,13 @@ mod tests {
                 self.started = true;
                 Ok(ProtocolRuntimeSummary {
                     total_devices: config.preview.total_devices,
-                    discovery_listeners: config.preview.devices.len(),
+                    discovery_listeners: config
+                        .preview
+                        .devices
+                        .iter()
+                        .map(|device| device.profile_id.as_str())
+                        .collect::<BTreeSet<_>>()
+                        .len(),
                     http_listeners: config.preview.devices.len(),
                     rtsp_listeners: config.preview.devices.len() * 3,
                     bind_addresses: vec![],
@@ -1320,6 +1395,10 @@ mod tests {
         fn protocol_stats(&self) -> ProtocolRuntimeStats {
             ProtocolRuntimeStats::default()
         }
+
+        fn alarm_subscription(&self) -> Option<AlarmSubscriptionSnapshot> {
+            None
+        }
     }
 
     fn request() -> crate::device_simulator::api::SimulatorStartRequest {
@@ -1331,7 +1410,9 @@ mod tests {
                     host: "127.0.0.1".into(),
                     port: 18080,
                 }],
+                access_mode: PlatformAccessMode::Open,
                 alarm_receiver_url: None,
+                alarm_receiver_port: Some(55_025),
             },
             interface_id: "test-interface".into(),
             start_ip: "127.20.0.10".parse().unwrap(),
@@ -1343,6 +1424,8 @@ mod tests {
                 sub: 18555,
                 third: 18556,
             },
+            _legacy_allow_local_player_access: true,
+            media_theme_id: crate::device_simulator::api::DEFAULT_MEDIA_THEME_ID.into(),
             groups: vec![DeviceGroupDraft {
                 id: "group".into(),
                 profile_id: "ipc-smart".into(),
@@ -1435,6 +1518,7 @@ mod tests {
             payload,
             assets: None,
             firewall_rules,
+            access_policy: PlatformAccessPolicy::open(),
         });
         runtime
     }
@@ -1463,7 +1547,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_backends_prove_owned_resources_are_added_then_precisely_removed() {
+    async fn local_player_access_is_always_enabled_and_owned_resources_are_removed() {
         let root = TempDir::new().unwrap();
         let ip = Arc::new(FakeIpBackend::default());
         let firewall = Arc::new(FakeFirewallBackend::default());
@@ -1472,6 +1556,7 @@ mod tests {
         let status = runtime.start_services().await.unwrap();
         assert_eq!(status.state, SessionState::Running);
         assert_eq!(ip.addresses.lock().unwrap().len(), 2);
+        assert_eq!(*ip.skip_as_source.lock().unwrap(), vec![false, false]);
         assert_eq!(firewall.rules.lock().unwrap().len(), 3);
 
         let status = runtime.stop_services().await.unwrap();

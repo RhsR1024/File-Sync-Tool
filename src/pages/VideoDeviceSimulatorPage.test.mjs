@@ -3,14 +3,29 @@ import { readFileSync } from 'node:fs';
 
 const page = readFileSync(new URL('./VideoDeviceSimulatorPage.vue', import.meta.url), 'utf8');
 const composable = readFileSync(new URL('../composables/useDeviceSimulator.ts', import.meta.url), 'utf8');
+const deviceSimulatorTypes = readFileSync(new URL('../lib/deviceSimulator.ts', import.meta.url), 'utf8');
 const router = readFileSync(new URL('../router/index.ts', import.meta.url), 'utf8');
 const sidebar = readFileSync(new URL('../lib/sidebarNavigation.ts', import.meta.url), 'utf8');
 const messages = readFileSync(new URL('../locales/messages.ts', import.meta.url), 'utf8');
+const header = page.match(/<header[\s\S]*?<\/header>/)?.[0] ?? '';
+const alarmStatsListener = composable.match(/listen<AlarmJobStats>\(DEVICE_SIMULATOR_EVENTS\.alarmStats,[\s\S]*?\n\s*\}\),/)?.[0] ?? '';
+const applyStatusAction = composable.match(/function applyStatus\(next: SimulatorStatus\)[\s\S]*?(?=\r?\n\s*function selectAvailableInterface)/)?.[0] ?? '';
+const simulatorStopAction = composable.match(/async function stop\(\)[\s\S]*?(?=\r?\n\s*async function recover)/)?.[0] ?? '';
+const startAlarmAction = composable.match(/async function startAlarm[\s\S]*?(?=\r?\n\s*async function stopAlarm)/)?.[0] ?? '';
+const stopAlarmAction = composable.match(/async function stopAlarm[\s\S]*?(?=\r?\n\s*function addGroup)/)?.[0] ?? '';
 
 assert.match(router, /path: '\/tools\/video-device-simulator'/);
 assert.match(sidebar, /labelKey: 'sidebar\.videoDeviceSimulator'/);
 assert.ok(messages.match(/videoDeviceSimulator: 'Virtual Device Simulation'/));
 assert.ok(messages.match(/videoDeviceSimulator: '虚拟设备模拟'/));
+assert.equal((messages.match(/paperTodo: 'PaperTodo'/g) ?? []).length, 1, 'the English sidebar name must remain PaperTodo');
+assert.equal((messages.match(/title: 'PaperTodo'/g) ?? []).length, 1, 'the English PaperTodo title must remain unchanged');
+assert.ok(messages.includes("paperTodo: 'PaperTodo便签'"));
+assert.ok(messages.includes("title: 'PaperTodo便签'"));
+assert.ok(messages.includes("settingsTitle: 'PaperTodo便签设置'"));
+assert.ok(messages.includes("confirmImport: '导入会替换当前 PaperTodo便签数据，是否继续？'"));
+assert.ok(messages.includes("settingsTitle: 'PaperTodo Settings'"));
+assert.ok(messages.includes("confirmImport: 'Importing replaces the current PaperTodo data. Continue?'"));
 assert.ok(messages.includes("title: '虚拟设备模拟'"));
 assert.ok(messages.includes("title: '发图配置'"));
 for (const legacyLabel of ['服务器配置', '虚拟设备起始 IP', '虚拟设备数量', '设备类型', '发送图片规格', '发送图片间隔（毫秒）', '预设发包数', '告警类型', '数据统计']) {
@@ -23,7 +38,9 @@ assert.match(page, /prefers-reduced-motion: reduce/, 'reduced motion must be res
 assert.match(page, /:disabled="simulator\.topologyLocked\.value"/, 'topology fields must lock while active');
 assert.match(page, /simulator\.recoverySessionId\.value/, 'residual sessions must be presented before normal work');
 assert.match(page, /const recoveryRequired = computed/, 'recovery must be distinct from a running session');
-assert.match(page, /v-else-if="stoppable"/, 'normal stop must not be offered for a recovery-only session');
+assert.match(header, /v-if="stoppable"/, 'runtime stop must remain available in the page header on every tab');
+assert.match(header, /@click="simulator\.stop"/, 'the persistent header stop must invoke the simulator stop action');
+assert.match(header, /busyAction\.value === 'stop'[\s\S]*<Square[\s\S]*deviceSimulator\.actions\.stop/, 'the header stop must reuse the existing loading, icon, and label');
 assert.match(page, /deviceSimulator\.actions\.recovering/, 'recovery must expose visible in-progress feedback');
 assert.match(page, /simulator\.runPreflight/, 'structured preflight must be available');
 assert.match(page, /address_assessments/, 'address checks must expose per-address evidence');
@@ -31,6 +48,14 @@ assert.match(page, /addressEvidenceText/, 'address evidence must identify local 
 assert.ok(messages.includes("addressConflicts: '地址占用检查'"));
 assert.ok(messages.includes("inconclusive: '暂时无法确认以下地址是否空闲：{addresses}。这不表示地址已经被占用。'"));
 assert.match(page, /simulator\.alarmStats\.value/, 'alarm statistics must be visible');
+assert.match(deviceSimulatorTypes, /interface AlarmJobStats[\s\S]*last_http_status: number \| null;/, 'alarm statistics must carry the latest HTTP response status');
+assert.match(page, /deviceSimulator\.alarms\.lastHttpStatus[\s\S]*simulator\.alarmStats\.value\?\.last_http_status \?\? '—'/, 'the latest HTTP status must use a dash when no response was received');
+assert.ok(messages.includes("lastHttpStatus: 'Last HTTP status'"));
+assert.ok(messages.includes("lastHttpStatus: '最近 HTTP 状态'"));
+assert.ok(messages.includes("unverified: 'Responded, not verified'"));
+assert.ok(messages.includes("unverifiedHint: 'An HTTP response was received, but whether UMS processed the picture successfully has not been verified.'"));
+assert.ok(messages.includes("unverified: '已响应未验证数'"));
+assert.ok(messages.includes("unverifiedHint: '已收到 HTTP 响应，但尚未验证 UMS 是否已正确处理图片。'"));
 assert.match(page, /simulator\.alarmTypes\.value/, 'alarm names must come from the prepared device files');
 assert.match(page, /requiredFileLabel/, 'internal file identifiers must use familiar display labels');
 assert.doesNotMatch(messages, /告警类型 ID/, 'internal alarm IDs must not be shown to users');
@@ -39,18 +64,77 @@ assert.doesNotMatch(page, /value="vms"|>VMS</i, 'the simulator must expose UMS o
 assert.match(page, /ipc-structured/, 'structured camera must be available');
 assert.match(page, /ipc-face-access/, 'face access camera must be available');
 assert.match(page, /send_count: continuousAlarm\.value \? null/, 'continuous alarm mode must cross the API as null, never a magic zero');
-assert.match(page, /alarm\.mode !== 'configured'/, 'random and sequential reporting must not retain a selected alarm type');
+assert.match(page, /v-model="selectedAlarmTypeId"[^>]*:disabled="availableAlarmTypes\.length === 0"/, 'the alarm type picker must only wait on prepared files, never on the dispatch mode');
+assert.match(page, /!alarmTypeId && alarm\.mode === 'configured'/, 'clearing the alarm type must leave configured mode, which requires exactly one type');
 assert.match(page, /downloadJson\('device-simulator-logs\.json'/, 'logs must be exportable');
 
 assert.match(composable, /DEVICE_SIMULATOR_EVENTS\.status/);
 assert.match(composable, /DEVICE_SIMULATOR_EVENTS\.cleanupProgress/);
 assert.match(composable, /hasBlockingPreflightFailure/);
-assert.match(composable, /payload\.state === 'ready'[\s\S]*await refreshAlarmTypes\(\)/, 'alarm names must refresh when required files finish preparing');
+assert.match(composable, /payload\.state === 'ready'[\s\S]*refreshAlarmTypes\(\)/, 'alarm names must refresh when required files finish preparing');
 assert.match(composable, /result\.state === 'ready' \|\| result\.state === 'update_available'/, 'installed alarm names must remain available when a newer file set exists');
 assert.match(composable, /last_platform_servers[\s\S]*\[\{ id: newId\('server'\), host: '', port: 80 \}\]/, 'saved servers must be restored with a visible empty fallback');
+assert.match(simulatorStopAction, /if \(stopped === null\) return;[\s\S]*activeAlarmJobId\.value = null;[\s\S]*deviceSimulatorApi\.getStatus\(\)/, 'a successful simulator stop must clear the active alarm before refreshing status');
+assert.match(composable, /last_alarm_receiver_port: 22_815/, 'the observed UMS receiver port 22815 must be the fallback default');
+assert.match(composable, /alarm_receiver_port: settings\.last_alarm_receiver_port/, 'saved receiver port must enter the runtime request');
+assert.match(composable, /last_alarm_receiver_port: request\.platform\.alarm_receiver_port/, 'receiver port must persist with app settings');
+assert.match(page, /v-model\.number="simulator\.request\.platform\.alarm_receiver_port"[\s\S]*type="number"[\s\S]*min="1"[\s\S]*max="65535"/, 'advanced settings must expose a bounded picture receiver port input');
+assert.match(messages, /alarmReceiverPort:\s*'Picture \/ alarm receiver port'/, 'English copy must name the independent receiver port');
+assert.match(messages, /alarmReceiverPort:\s*'图片\/告警接收端口'/, 'Chinese copy must name the independent receiver port');
+assert.match(page, /deviceSimulator\.fields\.alarmReceiverHint/, 'the complete receiver URL must explain that it pins the destination');
+assert.match(page, /deviceSimulator\.fields\.alarmReceiverPortHint/, 'the receiver port must explain that it is only a pre-subscription fallback');
+assert.match(messages, /alarmReceiverPortHint: 'Fallback used only until the platform subscribes[^']*Default 22815\.'/, 'English receiver port copy must present the port as a fallback and name 22815');
+assert.match(messages, /alarmReceiverPortHint: '仅在尚未收到平台订阅时作为兜底使用[^']*默认 22815。'/, 'Chinese receiver port copy must present the port as a fallback and name 22815');
+
+// The advanced receiver URL and the asset pack download URL are unrelated
+// settings that were previously side by side and easy to confuse.
+assert.match(page, /deviceSimulator\.configuration\.advanced[\s\S]*deviceSimulator\.fields\.alarmReceiver\b[\s\S]*deviceSimulator\.fields\.assetServer/, 'both advanced URLs must live inside the collapsed advanced block');
+assert.match(messages, /assetServer: 'Asset pack download URL \(advanced\)'/, 'English asset source copy must name asset packs, not generic files');
+assert.match(messages, /assetServer: '资源包下载地址（高级）'/, 'Chinese asset source copy must name asset packs, not generic files');
+assert.match(messages, /assetServerHint: '设备类型资源包的下载来源，与告警投递无关。/, 'the asset source hint must state that it is unrelated to alarm delivery');
+assert.match(page, /deviceSimulator\.configuration\.serversHint/, 'the server list must explain that alarms are distributed, not broadcast');
+assert.match(messages, /serversHint: '这里的服务器是告警投递目标。[^']*按顺序分摊/, 'Chinese server copy must state that devices are distributed one by one');
+
+// A learned subscription is the difference between alarms reaching the platform
+// and silently going to a port nobody listens on, so it must be visible.
+assert.match(composable, /DEVICE_SIMULATOR_EVENTS\.alarmSubscription/, 'the composable must subscribe to alarm subscription telemetry');
+assert.match(composable, /const alarmSubscription = ref<AlarmSubscription \| null>\(null\)/, 'learned subscription state must be exposed to the page');
+assert.match(simulatorStopAction, /alarmSubscription\.value = null/, 'stopping must clear the learned subscription with the session');
+assert.match(page, /deviceSimulator\.subscription\.waitingTitle/, 'the page must call out that no platform subscription has arrived');
+assert.match(page, /deviceSimulator\.subscription\.expiredTitle/, 'the page must call out an expired platform subscription');
+assert.match(page, /subscription\.destinations\.join/, 'the effective alarm destination must be rendered');
+assert.match(messages, /waitingDescription: '平台通常在添加设备时、或设备离线再上线后才下发订阅。/, 'the waiting copy must explain when a platform normally subscribes');
+
+// The real failure code was previously dropped, leaving only one generic
+// sentence for every distinct cause.
+assert.match(page, /alarmError\.code/, 'the raw alarm error code must always be rendered');
+assert.match(page, /alarmError\.details/, 'the sanitized failure cause must be rendered');
+assert.match(composable, /component: 'alarm:dispatch'/, 'alarm failures must reach the run log');
+assert.match(composable, /const signature = `\$\{stats\.job_id\}\|\$\{error\.code\}\|\$\{error\.details \?\? ''\}`/, 'repeated identical alarm failures must not flood the run log');
 assert.match(composable, /sharedDeviceSimulator/, 'page drafts and asset state must survive route changes');
 assert.match(composable, /if \(stopped === null\) return;/, 'a failed stop must preserve its error instead of refreshing it away');
 assert.match(composable, /if \(!recovered\) return;/, 'a failed recovery must preserve its error instead of refreshing it away');
+assert.match(composable, /const activeAlarmJobId = ref<string \| null>\(null\)/, 'the API-returned alarm job id must have an explicit active-state source');
+assert.match(composable, /const alarmStartPending = ref\(false\)/, 'an in-flight alarm start must reject duplicate starts before the API returns');
+assert.match(composable, /const alarmStopPending = ref\(false\)/, 'an alarm stop must latch immediately to prevent duplicate requests');
+assert.match(applyStatusAction, /shouldReleaseActiveAlarmJob\(next, alarmStartPending\.value\)[\s\S]*activeAlarmJobId\.value = null/, 'backend status with no alarm jobs must release a stale frontend job id without racing an in-flight start');
+assert.match(composable, /DEVICE_SIMULATOR_EVENTS\.status[\s\S]*applyStatus\(payload\)/, 'live backend status must reconcile alarm button state');
+assert.match(composable, /statusResult\.status === 'fulfilled'\) applyStatus\(statusResult\.value\)/, 'initial and manual status refreshes must reconcile alarm button state after a Worker restart');
+assert.match(startAlarmAction, /if \(activeAlarmJobId\.value \|\| alarmStartPending\.value \|\| alarmStopPending\.value\) return;/, 'active, starting, or stopping alarm work must block another start');
+assert.match(startAlarmAction, /const jobId = await run\('start-alarm',[\s\S]*deviceSimulatorApi\.startAlarm\(alarm\)[\s\S]*activeAlarmJobId\.value = jobId/, 'start must save the job id returned by the API');
+assert.match(startAlarmAction, /activeAlarmJobId\.value = jobId;[\s\S]*alarmStats\.value\?\.job_id === jobId[\s\S]*alarmStats\.value\.state === 'completed'[\s\S]*alarmStats\.value\.state === 'failed'[\s\S]*activeAlarmJobId\.value = null/, 'a terminal event received before the start response must not restore a finished job as active');
+assert.match(stopAlarmAction, /const jobId = activeAlarmJobId\.value;[\s\S]*if \(!jobId \|\| alarmStopPending\.value\) return;/, 'stop must use the active job id and reject repeat requests');
+assert.match(stopAlarmAction, /alarmStopPending\.value = true;[\s\S]*deviceSimulatorApi\.stopAlarm\(jobId\)/, 'stop must latch before invoking the API with the active id');
+assert.match(stopAlarmAction, /if \(stopped && activeAlarmJobId\.value === jobId\) activeAlarmJobId\.value = null;/, 'a successful stop must clear only the stopped active job');
+assert.match(stopAlarmAction, /finally[\s\S]*alarmStopPending\.value = false/, 'the stop latch must be released after the request settles');
+assert.doesNotMatch(stopAlarmAction, /alarmStats\.value = null/, 'stopping must retain the final alarm statistics');
+assert.match(alarmStatsListener, /alarmStats\.value = payload/, 'alarm events must continue updating visible statistics');
+assert.match(alarmStatsListener, /activeAlarmJobId\.value === payload\.job_id/, 'terminal stats must only clear their matching active job');
+assert.match(alarmStatsListener, /payload\.state === 'completed'/, 'completed alarm stats must clear active state');
+assert.match(alarmStatsListener, /payload\.state === 'failed'/, 'failed alarm stats must clear active state');
+assert.match(alarmStatsListener, /activeAlarmJobId\.value = null/, 'terminal stats must release the active job without discarding stats');
+assert.match(page, /:disabled="simulator\.busyAction\.value !== null \|\| !running \|\| simulator\.activeAlarmJobId\.value !== null \|\| simulator\.alarmStopPending\.value" @click="startAlarm"/, 'alarm start must be disabled while an alarm is active or stopping');
+assert.match(page, /:disabled="simulator\.busyAction\.value !== null \|\| !simulator\.activeAlarmJobId\.value \|\| simulator\.alarmStopPending\.value" @click="simulator\.stopAlarm"/, 'alarm stop must only be enabled for an active job and latch after its first click');
 assert.match(page, /assetDownloadActive[\s\S]*role="progressbar"/, 'file preparation must expose visible progress');
 assert.match(page, /simulator\.request\.device_ips/, 'non-contiguous device addresses must cross the API boundary');
 assert.match(page, /openPingScanner/, 'the network ping scanner must be reachable from device IP configuration');

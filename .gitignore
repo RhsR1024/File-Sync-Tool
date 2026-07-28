@@ -37,6 +37,12 @@ vite.config.ts.timestamp-*.mjs
 /.trellis/
 /design_handoff_share_web_redesign/
 
+# Locally generated release archives
+/scripts/release-server/virtual-device-assets.rar
+
+# Locally generated media packs, validation captures, and UI debug screenshots
+/artifacts/
+
 # Generated Python bytecode
 __pycache__/
 *.py[cod]

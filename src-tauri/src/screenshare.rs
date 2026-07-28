@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
+use std::future::Future;
 use std::io;
 #[cfg(target_os = "windows")]
 use std::mem;
@@ -137,7 +138,7 @@ const BLACK_FRAME_BRIGHT_THRESHOLD: u8 = 12;
 const BLACK_FRAME_MAX_BRIGHT_PIXELS_PER_10K: usize = 35;
 const MEDIA_JPEG_SAMPLE_WINDOW: usize = 512;
 const MEDIA_STREAM_SAMPLE_WINDOW: usize = 256;
-const H264_STREAM_COOPERATIVE_DELAY: Duration = Duration::from_millis(1);
+const H264_STREAM_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 type ViewerIpMap = HashMap<String, Instant>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4511,6 +4512,7 @@ async fn run_http_server(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .tcp_nodelay(true)
     .with_graceful_shutdown(async move {
         shutdown_rx.await.ok();
         let _ = drain_started_tx.send(());
@@ -4963,12 +4965,11 @@ async fn run_h264_media_socket(
                         {
                             let payload = segment.bytes.as_ref().clone();
                             let length = payload.len();
-                            if socket.send(Message::Binary(payload.to_vec())).await.is_err() {
+                            if send_h264_message(&mut socket, Message::Binary(payload.to_vec())).await.is_err() {
                                 break;
                             }
                             bytes_sent.fetch_add(length as u64, Ordering::Relaxed);
                             sequence = segment.sequence;
-                            tokio::time::sleep(H264_STREAM_COOPERATIVE_DELAY).await;
                             if !first_frame_sent {
                                 first_frame_sent = true;
                                 media_metrics.record_stream_first_frame(started_at.elapsed(), is_reconnect);
@@ -4986,23 +4987,17 @@ async fn run_h264_media_socket(
                                 "error": error,
                             })
                             .to_string();
-                            if socket.send(Message::Text(message)).await.is_err() {
+                            if send_h264_message(&mut socket, Message::Text(message)).await.is_err() {
                                 break;
                             }
                         }
                     },
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         media_metrics.record_lagged_frames(skipped);
-                        if let Some(snapshot) = media.snapshot() {
-                            match send_h264_snapshot(&mut socket, &snapshot, &bytes_sent).await {
-                                Ok((sent_generation, sent_sequence, sent_frame)) => {
-                                    generation = sent_generation;
-                                    sequence = sent_sequence;
-                                    first_frame_sent = sent_frame;
-                                }
-                                Err(_) => break,
-                            }
-                        }
+                        // A lagged client is already slower than the live stream. Disconnect it
+                        // so its normal reconnect can consume one cached snapshot, rather than
+                        // replaying a GOP here and making this socket fall even farther behind.
+                        break;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -5011,7 +5006,7 @@ async fn run_h264_media_socket(
                 let Some(Ok(message)) = incoming else { break; };
                 match message {
                     Message::Ping(payload) => {
-                        if socket.send(Message::Pong(payload)).await.is_err() {
+                        if send_h264_message(&mut socket, Message::Pong(payload)).await.is_err() {
                             break;
                         }
                     }
@@ -5034,11 +5029,10 @@ async fn send_h264_snapshot(
     for segment in &snapshot.segments {
         let payload = segment.bytes.as_ref().clone();
         let length = payload.len();
-        socket.send(Message::Binary(payload.to_vec())).await?;
+        send_h264_message(socket, Message::Binary(payload.to_vec())).await?;
         bytes_sent.fetch_add(length as u64, Ordering::Relaxed);
         sequence = segment.sequence;
         sent_frame = true;
-        tokio::time::sleep(H264_STREAM_COOPERATIVE_DELAY).await;
     }
     Ok((snapshot.descriptor.generation, sequence, sent_frame))
 }
@@ -5061,13 +5055,25 @@ async fn send_h264_descriptor(
         "bitrate_bps": descriptor.bitrate_bps,
     })
     .to_string();
-    socket.send(Message::Text(message)).await?;
+    send_h264_message(socket, Message::Text(message)).await?;
     let init = descriptor.init_segment.as_ref().clone();
     let length = init.len();
-    socket.send(Message::Binary(init.to_vec())).await?;
+    send_h264_message(socket, Message::Binary(init.to_vec())).await?;
     bytes_sent.fetch_add(length as u64, Ordering::Relaxed);
-    tokio::time::sleep(H264_STREAM_COOPERATIVE_DELAY).await;
     Ok(())
+}
+
+async fn send_h264_message(socket: &mut WebSocket, message: Message) -> Result<(), axum::Error> {
+    with_h264_send_timeout(H264_STREAM_SEND_TIMEOUT, socket.send(message)).await
+}
+
+async fn with_h264_send_timeout<F>(timeout: Duration, send: F) -> Result<(), axum::Error>
+where
+    F: Future<Output = Result<(), axum::Error>>,
+{
+    tokio::time::timeout(timeout, send)
+        .await
+        .map_err(axum::Error::new)?
 }
 
 #[derive(Deserialize)]
@@ -6114,6 +6120,22 @@ mod tests {
         assert_eq!(snapshot.stream_reconnect_p95_ms, Some(140));
         assert_eq!(snapshot.fps_actual, 15.0);
         assert_eq!(snapshot.bitrate_kbps, 8_192);
+    }
+
+    #[tokio::test]
+    async fn h264_send_timeout_allows_ready_sends_and_stops_stalled_sends() {
+        let ready = with_h264_send_timeout(Duration::from_millis(10), async {
+            Ok::<(), axum::Error>(())
+        })
+        .await;
+        assert!(ready.is_ok());
+
+        let stalled = with_h264_send_timeout(
+            Duration::from_millis(1),
+            std::future::pending::<Result<(), axum::Error>>(),
+        )
+        .await;
+        assert!(stalled.is_err());
     }
 
     fn test_http_state() -> Arc<HttpServerState> {

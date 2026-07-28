@@ -34,7 +34,20 @@ pub struct ScanResult {
     pub found_folders: Vec<String>,
     pub copied_folders: Vec<String>,
     pub errors: Vec<String>,
+    /// True when the cycle stopped early to let already-queued copies run first.
+    /// The remaining candidates were not skipped, only postponed to a later cycle.
+    #[serde(default)]
+    pub deferred_for_copy_queue: bool,
 }
+
+/// Whether copies the user has already queued are still waiting to run.
+///
+/// A scan cycle copies its candidates one after another while holding the single copy
+/// executor, so without this check a candidate the scan discovers on its own would start
+/// ahead of a copy the user explicitly queued minutes earlier — and it would do so
+/// without ever appearing in the queue. The scan therefore hands the executor back at
+/// the next candidate boundary instead of jumping the queue.
+pub type CopyQueuePendingProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
 #[derive(Debug, serde::Serialize, Clone)]
 struct LogEvent {
@@ -182,6 +195,52 @@ fn task_record_ignored_in(
     })
 }
 
+/// Whether a scheduled scan should leave this candidate alone because its last copy was
+/// cancelled. Re-copying a folder the user just stopped only re-opens the dialog they
+/// closed, so a cancel holds until they retry the run manually or clear the task record.
+fn copy_was_cancelled(
+    task_manager: &TaskManager,
+    source_path: &Path,
+    local_target_path: &Path,
+) -> bool {
+    task_manager.last_copy_was_cancelled(
+        &source_path.to_string_lossy(),
+        &local_target_path.to_string_lossy(),
+    )
+}
+
+/// Stop the scan cycle when the user already has copies waiting in the queue.
+///
+/// Candidates are copied one at a time while the scan owns the single copy executor, so
+/// a candidate that has not started yet must never take the executor ahead of a copy the
+/// user queued earlier. Handing the cycle back here lets the copy queue drain first; the
+/// remaining candidates are rediscovered by the next cycle.
+fn defer_for_copy_queue<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    copy_queue_pending: &CopyQueuePendingProbe,
+    result: &mut ScanResult,
+) -> bool {
+    if !copy_queue_pending() {
+        return false;
+    }
+
+    result.deferred_for_copy_queue = true;
+    emit_log(
+        app_handle,
+        "Copies queued earlier are still waiting, so the rest of this scan cycle is postponed until the copy queue is empty."
+            .to_string(),
+        "info",
+    );
+    true
+}
+
+fn cancelled_skip_message(folder_name: &str) -> String {
+    format!(
+        "Skipping '{}' because its last copy was cancelled. Retry the run manually or clear the task record to copy it again.",
+        folder_name
+    )
+}
+
 fn should_recopy_size_mismatch(
     _records: &[PersistedTaskRecord],
     _folder: &str,
@@ -302,6 +361,22 @@ fn emit_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, le
         },
     );
     write_log_to_file(app_handle, &msg, level);
+}
+
+// Owner window for the Windows native copy dialog. Giving the shell an owner keeps it in
+// charge of the dialog's lifetime, so closing it cancels cleanly instead of wedging the
+// copy engine.
+#[cfg(target_os = "windows")]
+fn main_window_hwnd<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Option<isize> {
+    app_handle
+        .get_webview_window("main")
+        .and_then(|window| window.hwnd().ok())
+        .map(|hwnd| hwnd.0 as isize)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn main_window_hwnd<R: tauri::Runtime>(_app_handle: &tauri::AppHandle<R>) -> Option<isize> {
+    None
 }
 
 fn mark_copy_completed_for_handle(
@@ -1692,7 +1767,13 @@ async fn perform_copy<R: tauri::Runtime>(
                     })
                     .collect();
 
-                match copy_files_with_dialog(requests) {
+                let owner_hwnd = main_window_hwnd(&handle);
+                match copy_files_with_dialog(
+                    requests,
+                    owner_hwnd,
+                    &should_cancel_clone,
+                    &mut |copied_so_far| update_stats(copied_so_far, total_filtered_bytes),
+                ) {
                     Ok(copied_bytes) => {
                         update_stats(copied_bytes, total_filtered_bytes);
                         copied_bytes
@@ -1978,9 +2059,11 @@ async fn perform_copy<R: tauri::Runtime>(
                 } else {
                     format!("Copy cancelled: {}", folder_name)
                 };
-                if !is_paused {
-                    mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &msg);
-                }
+                // Reaching here means the copy loop already exited: pause blocks inside the
+                // loop, so an Interrupted result always means cancel/skip won the race. The
+                // run cannot be resumed, so it must reach a terminal state even when the
+                // group still carries a pause flag — otherwise it stays "copying" forever.
+                mark_copy_cancelled_for_handle(&task_manager, task_handle.as_ref(), &msg);
                 emit_log(app_handle, msg.clone(), "warn");
                 if source == "manual" {
                     result.errors.push(msg);
@@ -2121,6 +2204,7 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         found_folders: vec![folder_name.clone()],
         copied_folders: vec![],
         errors: vec![],
+        deferred_for_copy_queue: false,
     };
 
     // Manual copies always allow size-mismatch re-copy (user explicitly triggered),
@@ -2350,6 +2434,7 @@ async fn temporary_copy_file<R: tauri::Runtime>(
     let source_display = source_path.to_string_lossy().to_string();
     let copy_buffer_size = (config.copy_buffer_size_kb as usize).max(64) * 1024;
     let copy_mode = config.copy_mode.clone();
+    let owner_hwnd = main_window_hwnd(app_handle);
     if let Some(handle) = task_handle.as_ref() {
         let mode_label = match &copy_mode {
             CopyMode::BuiltIn => "Built-in copy engine",
@@ -2425,13 +2510,26 @@ async fn temporary_copy_file<R: tauri::Runtime>(
                         .to_string(),
                     "info",
                 );
-                match copy_files_with_dialog(vec![WindowsCopyRequest {
-                    source: source_clone,
-                    target: target_file_clone,
-                    expected_size: file_size,
-                }]) {
+                let mut reported = 0u64;
+                match copy_files_with_dialog(
+                    vec![WindowsCopyRequest {
+                        source: source_clone,
+                        target: target_file_clone,
+                        expected_size: file_size,
+                    }],
+                    owner_hwnd,
+                    &should_cancel,
+                    &mut |copied_so_far| {
+                        if copied_so_far > reported {
+                            on_progress(copied_so_far - reported);
+                            reported = copied_so_far;
+                        }
+                    },
+                ) {
                     Ok(bytes_copied) => {
-                        on_progress(bytes_copied);
+                        if bytes_copied > reported {
+                            on_progress(bytes_copied - reported);
+                        }
                         Ok(bytes_copied)
                     }
                     Err(WindowsCopyError::Cancelled) => {
@@ -2495,12 +2593,14 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
     should_skip: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     scan_queue_removals: Arc<Mutex<HashSet<String>>>,
+    copy_queue_pending: CopyQueuePendingProbe,
 ) -> ScanResult {
     let mut result = ScanResult {
         scanned_paths: 0,
         found_folders: vec![],
         copied_folders: vec![],
         errors: vec![],
+        deferred_for_copy_queue: false,
     };
 
     // Load persisted task records once for the entire scan cycle
@@ -2552,6 +2652,10 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
 
         if should_cancel.load(Ordering::SeqCst) {
             emit_log(app_handle, "Scan cancelled by user".to_string(), "info");
+            return result;
+        }
+
+        if defer_for_copy_queue(app_handle, &copy_queue_pending, &mut result) {
             return result;
         }
 
@@ -2678,6 +2782,15 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                 "info",
                             );
                             continue;
+                        }
+
+                        if copy_was_cancelled(&task_manager, &latest.path, &local_target_path) {
+                            emit_log(app_handle, cancelled_skip_message(&latest.name), "info");
+                            continue;
+                        }
+
+                        if defer_for_copy_queue(app_handle, &copy_queue_pending, &mut result) {
+                            return result;
                         }
 
                         result.found_folders.push(latest.name.clone());
@@ -2831,6 +2944,11 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             continue;
                         }
 
+                        if copy_was_cancelled(&task_manager, &sub_path, &local_target_path) {
+                            emit_log(app_handle, cancelled_skip_message(&sub_name), "info");
+                            continue;
+                        }
+
                         // Check if this folder was removed from queue
                         {
                             let removals = scan_queue_removals.lock().unwrap();
@@ -2845,6 +2963,10 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                                 );
                                 continue;
                             }
+                        }
+
+                        if defer_for_copy_queue(app_handle, &copy_queue_pending, &mut result) {
+                            return result;
                         }
 
                         result

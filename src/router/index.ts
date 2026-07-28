@@ -1,11 +1,17 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
-import SyncOverviewPage from '@/pages/sync/SyncOverviewPage.vue'
-import RuntimeLogsPage from '@/pages/RuntimeLogsPage.vue'
-import SettingsPage from '@/pages/SettingsPage.vue'
-import EnableApplianceSshPage from '@/pages/EnableApplianceSshPage.vue'
-import SyncConsolePage from '@/pages/sync/SyncConsolePage.vue'
-import SyncTasksPage from '@/pages/sync/SyncTasksPage.vue'
-import SyncDeliveryPage from '@/pages/sync/SyncDeliveryPage.vue'
+
+// Every route loads on demand. The console pages only exist in the main window,
+// and eager imports would put them in the shared entry chunk that each
+// borderless helper window — clipboard panel, paper capsules, overlays — has to
+// download and parse before it can paint. Keep-alive still matches these pages
+// by their declared component names.
+const SyncOverviewPage = () => import('@/pages/sync/SyncOverviewPage.vue')
+const RuntimeLogsPage = () => import('@/pages/RuntimeLogsPage.vue')
+const SettingsPage = () => import('@/pages/SettingsPage.vue')
+const EnableApplianceSshPage = () => import('@/pages/EnableApplianceSshPage.vue')
+const SyncConsolePage = () => import('@/pages/sync/SyncConsolePage.vue')
+const SyncTasksPage = () => import('@/pages/sync/SyncTasksPage.vue')
+const SyncDeliveryPage = () => import('@/pages/sync/SyncDeliveryPage.vue')
 
 const routes: RouteRecordRaw[] = [
   {
@@ -72,6 +78,10 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/tools/appliance-ssh',
     component: EnableApplianceSshPage,
+  },
+  {
+    path: '/tools/portal-auto-login',
+    component: () => import('../pages/PortalAutoLoginPage.vue'),
   },
   {
     path: '/tools/remote-package-patch',

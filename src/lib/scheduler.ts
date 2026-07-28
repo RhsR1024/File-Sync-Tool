@@ -9,6 +9,31 @@ const t = (key: string, args?: any) => {
 
 let timer: ReturnType<typeof setInterval> | null = null;
 
+/**
+ * How long to wait before retrying a cycle that stood aside for the copy queue.
+ * Short enough that postponed candidates do not sit until the next interval tick,
+ * long enough that a busy queue is not polled aggressively.
+ */
+const DEFERRED_SCAN_RETRY_MS = 60 * 1000;
+let deferredRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearDeferredRetry() {
+    if (deferredRetryTimer) {
+        clearTimeout(deferredRetryTimer);
+        deferredRetryTimer = null;
+    }
+}
+
+/** Re-run a postponed cycle once the copy queue has had time to drain. */
+function scheduleDeferredRetry() {
+    if (deferredRetryTimer) return;
+    deferredRetryTimer = setTimeout(() => {
+        deferredRetryTimer = null;
+        if (!appStore.isRunning) return;
+        void executeScan();
+    }, DEFERRED_SCAN_RETRY_MS);
+}
+
 export async function executeScan() {
     addLog(t('console.running'), 'info');
     try {
@@ -24,11 +49,18 @@ export async function executeScan() {
         if (result.errors.length > 0) {
             result.errors.forEach(e => addLog(`Error: ${e}`, 'error'));
         }
+        if (result.deferred_for_copy_queue) {
+            addLog(t('console.scanDeferredForQueue'), 'info');
+            scheduleDeferredRetry();
+        } else {
+            clearDeferredRetry();
+        }
     } catch (e) {
         const errMsg = String(e);
         if (errMsg.includes('already in progress') || errMsg.includes('queue already in progress')) {
             // Previous scan/deploy still running — this is normal, just skip quietly
             addLog(t('console.scanSkipped'), 'info');
+            scheduleDeferredRetry();
         } else {
             addLog(t('console.scanFailed', { error: e }), 'error');
         }
@@ -78,6 +110,7 @@ export async function startScheduler(isRestart = false) {
 
 export function stopScheduler() {
     appStore.isRunning = false;
+    clearDeferredRetry();
     if (timer) {
         clearInterval(timer);
         timer = null;

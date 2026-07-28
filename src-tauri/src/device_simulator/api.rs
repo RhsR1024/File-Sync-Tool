@@ -12,12 +12,19 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::Ipv4Addr;
 
+/// Fallback alarm receiver port used until the platform advertises its own via
+/// `Event/Subscription`. Observed on real UMS deployments; a learned port always
+/// replaces it.
+pub const DEFAULT_ALARM_RECEIVER_PORT: u16 = 22_815;
+pub const DEFAULT_MEDIA_THEME_ID: &str = "classic";
+
 pub const DEVICE_SIMULATOR_EVENT_STATUS: &str = "device-simulator-status";
 pub const DEVICE_SIMULATOR_EVENT_LOG: &str = "device-simulator-log";
 pub const DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS: &str = "device-simulator-asset-progress";
 pub const DEVICE_SIMULATOR_EVENT_DEVICE_STATUS: &str = "device-simulator-device-status";
 pub const DEVICE_SIMULATOR_EVENT_RTSP_STATS: &str = "device-simulator-rtsp-stats";
 pub const DEVICE_SIMULATOR_EVENT_ALARM_STATS: &str = "device-simulator-alarm-stats";
+pub const DEVICE_SIMULATOR_EVENT_ALARM_SUBSCRIPTION: &str = "device-simulator-alarm-subscription";
 pub const DEVICE_SIMULATOR_EVENT_CLEANUP_PROGRESS: &str = "device-simulator-cleanup-progress";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,12 +62,35 @@ pub struct TargetPlatformServer {
     pub port: u16,
 }
 
+/// Which callers a running session answers.
+///
+/// The virtual devices are ordinary listeners with no protocol-level
+/// credentials, so by default any platform that can route to them may discover
+/// and add them. `ConfiguredServersOnly` narrows that to the addresses behind
+/// [`TargetPlatformConfig::servers`], enforced in-process rather than relying on
+/// Windows Firewall scoping alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformAccessMode {
+    /// Legacy behaviour: answer every reachable caller.
+    #[default]
+    Open,
+    /// Answer only the configured platform servers (and loopback).
+    ConfiguredServersOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetPlatformConfig {
     pub kind: TargetPlatform,
     pub servers: Vec<TargetPlatformServer>,
+    /// Defaulted so journals and settings written before admission control
+    /// existed keep deserializing as `Open`.
+    #[serde(default)]
+    pub access_mode: PlatformAccessMode,
     pub alarm_receiver_url: Option<String>,
+    #[serde(default)]
+    pub alarm_receiver_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -96,8 +126,34 @@ pub struct SimulatorStartRequest {
     pub subnet_prefix: u8,
     pub device_http_port: u16,
     pub rtsp_ports: RtspPorts,
+    /// Accepted only so journals created by older versions remain recoverable.
+    /// Local RTSP player access is now always enabled, regardless of this value.
+    #[serde(
+        rename = "allow_local_player_access",
+        default = "local_player_access_enabled",
+        skip_serializing
+    )]
+    pub _legacy_allow_local_player_access: bool,
+    #[serde(default = "default_media_theme_id")]
+    pub media_theme_id: String,
     pub groups: Vec<DeviceGroupDraft>,
     pub stream: StreamRuntimeConfig,
+}
+
+fn default_media_theme_id() -> String {
+    DEFAULT_MEDIA_THEME_ID.to_owned()
+}
+
+fn local_player_access_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaThemeSummary {
+    pub id: String,
+    pub display_name_key: String,
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,7 +429,36 @@ pub struct AlarmJobStatsSnapshot {
     pub unverified: u64,
     pub in_flight: u64,
     pub average_duration_ms: f64,
+    pub last_http_status: Option<u16>,
     pub last_error: Option<SimulatorErrorBody>,
+}
+
+/// Where alarms are currently delivered, and whether that came from a platform
+/// subscription or from the configured fallback.
+///
+/// Surfaced continuously so an operator can tell "the platform has subscribed
+/// and I am pointed at its receiver" from "nothing has subscribed and I am
+/// guessing" *before* sending an alarm and reading the failure back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlarmSubscriptionSnapshot {
+    /// Absolute URLs alarms would currently be posted to.
+    pub destinations: Vec<String>,
+    /// `true` once the platform advertised a receiver via `Event/Subscription`.
+    pub learned: bool,
+    /// Receiver host from the subscription body, when the platform named one.
+    pub host: Option<String>,
+    /// Receiver port from the subscription body.
+    pub port: Option<u16>,
+    /// Subscription lifetime the platform declared, in seconds.
+    pub duration_secs: Option<u32>,
+    /// Wall-clock milliseconds when the subscription was last accepted.
+    pub learned_at_ms: Option<u64>,
+    /// Wall-clock milliseconds when the subscription lapses.
+    pub expires_at_ms: Option<u64>,
+    /// `true` when an explicit receiver URL is configured, which deliberately
+    /// pins the destination and suppresses subscription learning.
+    pub overridden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -382,6 +467,8 @@ pub struct RuntimeEventBatch {
     pub device_status: Option<DeviceStatusBatch>,
     pub rtsp_stats: Option<RtspStatsSnapshot>,
     pub alarm_stats: Vec<AlarmJobStatsSnapshot>,
+    #[serde(default)]
+    pub alarm_subscription: Option<AlarmSubscriptionSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -397,6 +484,7 @@ pub struct RuntimeEventBatcher {
     pending_devices: BTreeMap<String, DeviceRuntimeStatusSnapshot>,
     latest_rtsp: Option<RtspStatsSnapshot>,
     latest_alarm_jobs: BTreeMap<String, AlarmJobStatsSnapshot>,
+    latest_alarm_subscription: Option<AlarmSubscriptionSnapshot>,
 }
 
 impl RuntimeEventBatcher {
@@ -411,6 +499,10 @@ impl RuntimeEventBatcher {
 
     pub fn update_alarm(&mut self, stats: AlarmJobStatsSnapshot) {
         self.latest_alarm_jobs.insert(stats.job_id.clone(), stats);
+    }
+
+    pub fn update_alarm_subscription(&mut self, subscription: AlarmSubscriptionSnapshot) {
+        self.latest_alarm_subscription = Some(subscription);
     }
 
     pub fn drain(&mut self, session_id: &str, max_devices: usize) -> RuntimeEventBatch {
@@ -441,6 +533,7 @@ impl RuntimeEventBatcher {
             alarm_stats: std::mem::take(&mut self.latest_alarm_jobs)
                 .into_values()
                 .collect(),
+            alarm_subscription: self.latest_alarm_subscription.take(),
         }
     }
 }
@@ -607,6 +700,32 @@ fn validate_start_request(request: &SimulatorStartRequest) -> Result<(), Simulat
         ));
     }
     validate_ports(request.device_http_port, request.rtsp_ports)?;
+    if !is_safe_media_theme_id(&request.media_theme_id) {
+        return Err(validation_error(
+            "device_simulator.validation.media_theme_invalid",
+            "media theme id must be a lowercase ASCII token",
+        ));
+    }
+    if request.platform.alarm_receiver_port == Some(0) {
+        return Err(validation_error(
+            "device_simulator.validation.port_invalid",
+            "alarm receiver port must be non-zero when configured",
+        ));
+    }
+    // Restricted admission derives its allow list from the server entries, so an
+    // empty list would silently block every caller including the intended one.
+    if request.platform.access_mode == PlatformAccessMode::ConfiguredServersOnly
+        && !request
+            .platform
+            .servers
+            .iter()
+            .any(|server| !server.host.trim().is_empty() && server.port != 0)
+    {
+        return Err(validation_error(
+            "device_simulator.validation.platform_access_servers_required",
+            "restricted platform access requires at least one configured server",
+        ));
+    }
     if request.stream.audio_enabled
         || request.stream.transport != StreamTransport::TcpInterleaved
         || request
@@ -676,6 +795,14 @@ fn validate_start_request(request: &SimulatorStartRequest) -> Result<(), Simulat
         }
     }
     Ok(())
+}
+
+fn is_safe_media_theme_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn validate_ports(http: u16, rtsp: RtspPorts) -> Result<(), SimulatorErrorBody> {
@@ -771,7 +898,9 @@ mod tests {
             platform: TargetPlatformConfig {
                 kind: TargetPlatform::Ums,
                 servers: vec![],
+                access_mode: PlatformAccessMode::Open,
                 alarm_receiver_url: None,
+                alarm_receiver_port: Some(55_025),
             },
             interface_id: "guid:a0b1c2d3-1234-5678-90ab-010203040506".into(),
             start_ip: "10.20.0.254".parse().unwrap(),
@@ -779,6 +908,8 @@ mod tests {
             subnet_prefix: 23,
             device_http_port: 81,
             rtsp_ports: RtspPorts::default(),
+            _legacy_allow_local_player_access: true,
+            media_theme_id: DEFAULT_MEDIA_THEME_ID.into(),
             groups: vec![
                 DeviceGroupDraft {
                     id: "smart".into(),
@@ -803,6 +934,32 @@ mod tests {
                 audio_enabled: false,
             },
         }
+    }
+
+    #[test]
+    fn target_platform_config_accepts_optional_alarm_receiver_port() {
+        let config: TargetPlatformConfig = serde_json::from_value(serde_json::json!({
+            "kind": "ums",
+            "servers": [],
+            "alarm_receiver_url": null,
+            "alarm_receiver_port": 55025
+        }))
+        .expect("alarm receiver port is part of the persisted start contract");
+        assert_eq!(config.alarm_receiver_port, Some(55_025));
+    }
+
+    #[test]
+    fn legacy_local_player_flag_is_read_but_not_written() {
+        let mut value = serde_json::to_value(start_request()).unwrap();
+        assert!(value.get("allow_local_player_access").is_none());
+        value["allow_local_player_access"] = serde_json::Value::Bool(false);
+
+        let request: SimulatorStartRequest = serde_json::from_value(value).unwrap();
+        assert!(!request._legacy_allow_local_player_access);
+        assert!(serde_json::to_value(request)
+            .unwrap()
+            .get("allow_local_player_access")
+            .is_none());
     }
 
     #[test]
@@ -835,10 +992,60 @@ mod tests {
             "device_simulator.validation.port_invalid"
         );
         request = start_request();
+        request.platform.alarm_receiver_port = Some(0);
+        assert_eq!(
+            preview_devices(&request).unwrap_err().code,
+            "device_simulator.validation.port_invalid"
+        );
+        request = start_request();
         request.groups[0].profile_id = "downloaded-code".into();
         assert_eq!(
             preview_devices(&request).unwrap_err().code,
             "device_simulator.validation.profile_unknown"
+        );
+    }
+
+    #[test]
+    fn restricted_platform_access_requires_a_usable_server_entry() {
+        let mut request = start_request();
+        request.platform.access_mode = PlatformAccessMode::ConfiguredServersOnly;
+        assert_eq!(
+            preview_devices(&request).unwrap_err().code,
+            "device_simulator.validation.platform_access_servers_required"
+        );
+        request.platform.servers = vec![TargetPlatformServer {
+            id: "blank".into(),
+            host: "   ".into(),
+            port: 80,
+        }];
+        assert_eq!(
+            preview_devices(&request).unwrap_err().code,
+            "device_simulator.validation.platform_access_servers_required"
+        );
+        request.platform.servers = vec![TargetPlatformServer {
+            id: "ums".into(),
+            host: "192.0.2.10".into(),
+            port: 80,
+        }];
+        assert!(preview_devices(&request).is_ok());
+        // Open access keeps working without any server entry, as before.
+        request.platform.access_mode = PlatformAccessMode::Open;
+        request.platform.servers.clear();
+        assert!(preview_devices(&request).is_ok());
+    }
+
+    #[test]
+    fn platform_access_mode_defaults_to_open_for_payloads_written_before_it_existed() {
+        let legacy = serde_json::json!({
+            "kind": "ums",
+            "servers": [],
+            "alarm_receiver_url": null,
+        });
+        let parsed: TargetPlatformConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(parsed.access_mode, PlatformAccessMode::Open);
+        assert_eq!(
+            serde_json::to_value(PlatformAccessMode::ConfiguredServersOnly).unwrap(),
+            serde_json::json!("configured_servers_only")
         );
     }
 
@@ -921,6 +1128,7 @@ mod tests {
             unverified: 0,
             in_flight: 0,
             average_duration_ms: 12.5,
+            last_http_status: Some(202),
             last_error: None,
         });
         let batch = batcher.drain("session-1", 100);
@@ -930,6 +1138,8 @@ mod tests {
         assert!(devices.devices[0].online);
         assert_eq!(batch.rtsp_stats.unwrap().active_clients, 3);
         assert_eq!(batch.alarm_stats.len(), 1);
+        let alarm_json = serde_json::to_value(&batch.alarm_stats[0]).unwrap();
+        assert_eq!(alarm_json["last_http_status"], 202);
     }
 
     #[test]

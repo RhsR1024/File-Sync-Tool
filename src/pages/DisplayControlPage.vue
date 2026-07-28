@@ -174,6 +174,19 @@ function rangeMax(feature: MonitorControlFeature): number {
   return featureRange(feature).max;
 }
 
+function featurePercent(value: number, feature: MonitorControlFeature): number {
+  const { min, max } = featureRange(feature);
+  if (max <= min) return 0;
+  return Math.round(((clamp(value, min, max) - min) / (max - min)) * 100);
+}
+
+function dimmerStyle(value: number, feature: MonitorControlFeature, fill: string) {
+  const pct = featurePercent(value, feature);
+  return {
+    background: `linear-gradient(to right, ${fill} 0%, ${fill} ${pct}%, #e2e8f0 ${pct}%, #e2e8f0 100%)`,
+  };
+}
+
 onMounted(() => {
   void loadMonitors();
 });
@@ -184,12 +197,12 @@ onMounted(() => {
     <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 px-6 py-6 pb-10">
       <header class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div class="flex items-start gap-3">
-          <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-500 to-blue-600 text-white shadow-lg shadow-sky-500/20">
-            <MonitorCog class="h-5 w-5" aria-hidden="true" />
+          <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-blue-600 shadow-sm">
+            <MonitorCog class="h-5 w-5 text-white" aria-hidden="true" />
           </div>
           <div>
-            <h1 class="text-2xl font-bold tracking-tight text-slate-950">{{ t('displayControl.title') }}</h1>
-            <p class="mt-1 max-w-2xl text-sm leading-6 text-slate-500">{{ t('displayControl.description') }}</p>
+            <h1 class="text-2xl font-bold text-slate-900">{{ t('displayControl.title') }}</h1>
+            <p class="mt-1 max-w-2xl text-sm text-slate-500">{{ t('displayControl.description') }}</p>
           </div>
         </div>
 
@@ -200,7 +213,7 @@ onMounted(() => {
           :aria-label="t('displayControl.actions.refresh')"
           @click="loadMonitors"
         >
-          <LoaderCircle v-if="loading" class="h-4 w-4 animate-spin" aria-hidden="true" />
+          <LoaderCircle v-if="loading" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
           <RefreshCw v-else class="h-4 w-4" aria-hidden="true" />
           <span>{{ t('displayControl.actions.refresh') }}</span>
         </button>
@@ -225,7 +238,7 @@ onMounted(() => {
         aria-live="polite"
       >
         <div class="flex items-center gap-3 text-sm font-medium text-slate-600">
-          <LoaderCircle class="h-5 w-5 animate-spin text-sky-500" aria-hidden="true" />
+          <LoaderCircle class="h-5 w-5 animate-spin text-sky-500 motion-reduce:animate-none" aria-hidden="true" />
           <span>{{ t('displayControl.loading') }}</span>
         </div>
       </div>
@@ -361,7 +374,8 @@ onMounted(() => {
                 id="display-control-brightness"
                 v-model.number="brightnessDraft"
                 type="range"
-                class="h-2 w-full cursor-pointer accent-amber-500 disabled:cursor-not-allowed disabled:opacity-40"
+                class="dimmer h-2 w-full cursor-pointer text-amber-500 disabled:cursor-not-allowed disabled:opacity-40"
+                :style="dimmerStyle(brightnessDraft, 'brightness', '#f59e0b')"
                 :min="rangeMin('brightness')"
                 :max="rangeMax('brightness')"
                 step="1"
@@ -375,7 +389,7 @@ onMounted(() => {
                 <span>{{ rangeMax('brightness') }}</span>
               </div>
               <p v-if="settingFeature === 'brightness'" class="flex items-center gap-1.5 text-xs font-medium text-sky-600" role="status" aria-live="polite">
-                <LoaderCircle class="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                <LoaderCircle class="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
                 {{ t('displayControl.controls.applying') }}
               </p>
             </div>
@@ -400,7 +414,8 @@ onMounted(() => {
                 id="display-control-contrast"
                 v-model.number="contrastDraft"
                 type="range"
-                class="h-2 w-full cursor-pointer accent-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+                class="dimmer h-2 w-full cursor-pointer text-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+                :style="dimmerStyle(contrastDraft, 'contrast', '#6366f1')"
                 :min="rangeMin('contrast')"
                 :max="rangeMax('contrast')"
                 step="1"
@@ -414,7 +429,7 @@ onMounted(() => {
                 <span>{{ rangeMax('contrast') }}</span>
               </div>
               <p v-if="settingFeature === 'contrast'" class="flex items-center gap-1.5 text-xs font-medium text-sky-600" role="status" aria-live="polite">
-                <LoaderCircle class="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                <LoaderCircle class="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
                 {{ t('displayControl.controls.applying') }}
               </p>
             </div>
@@ -428,3 +443,42 @@ onMounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* Brightness / contrast rendered as a physical light dimmer: a value-filled
+   track (background bound inline) with a knob riding on it. currentColor lets
+   each slider tint its own knob (amber for light, indigo for contrast). */
+.dimmer {
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: 9999px;
+  outline: none;
+}
+
+.dimmer::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 1.125rem;
+  width: 1.125rem;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid currentColor;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.25);
+  cursor: pointer;
+  transition: box-shadow 0.15s ease;
+}
+
+.dimmer:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 35%, transparent);
+}
+
+.dimmer:disabled::-webkit-slider-thumb {
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dimmer::-webkit-slider-thumb {
+    transition: none;
+  }
+}
+</style>

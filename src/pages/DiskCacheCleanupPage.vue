@@ -1244,14 +1244,14 @@ onBeforeUnmount(() => {
               <span class="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-500">Redis Cache Ops</span>
             </div>
             <div class="flex items-start gap-3">
-              <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#1E40AF] via-[#3B82F6] to-[#6366F1] text-white shadow-lg shadow-blue-500/20">
-                <HardDrive class="h-6 w-6" />
+              <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#1E40AF] via-[#3B82F6] to-[#6366F1] shadow-sm">
+                <HardDrive class="h-5 w-5 text-white" />
               </div>
               <div>
-                <h1 class="text-2xl font-bold tracking-tight text-[#0F172A]">
+                <h1 class="text-2xl font-bold text-slate-900">
                   {{ t('diskCacheCleanup.title') }}
                 </h1>
-                <p class="mt-1 max-w-3xl text-sm leading-6 text-[#334155]">
+                <p class="mt-1 max-w-3xl text-sm text-slate-500">
                   {{ t('diskCacheCleanup.description') }}
                 </p>
               </div>

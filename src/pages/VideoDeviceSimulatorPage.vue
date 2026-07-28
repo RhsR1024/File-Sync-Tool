@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { useRouter } from 'vue-router';
@@ -9,9 +9,11 @@ import {
   BellRing,
   Cable,
   CheckCircle2,
+  ChevronDown,
   Clipboard,
   Download,
   FileDown,
+  Globe,
   ImagePlus,
   LoaderCircle,
   List,
@@ -23,7 +25,7 @@ import {
   Search,
   Server,
   ShieldAlert,
-  SlidersHorizontal,
+  ShieldCheck,
   Square,
   Trash2,
   Video,
@@ -32,14 +34,19 @@ import {
 
 import { useDeviceSimulator } from '@/composables/useDeviceSimulator';
 import {
+  alarmErrorHttpStatus,
+  alarmErrorMessageKey,
+  isAlarmSubscriptionExpired,
   isDeviceSimulatorRuntimeActive,
   type AddressConflictAssessment,
   type AlarmJobRequest,
   type ConflictEvidence,
+  type MediaThemeSummary,
+  type PlatformAccessMode,
   type PreflightCheck,
 } from '@/lib/deviceSimulator';
 
-const { t } = useI18n();
+const { t, te } = useI18n();
 const router = useRouter();
 const simulator = useDeviceSimulator();
 const activeTab = ref<'configuration' | 'runtime' | 'alarms' | 'logs'>('configuration');
@@ -47,7 +54,9 @@ const logLevel = ref('all');
 const logQuery = ref('');
 const copiedValue = ref('');
 const continuousAlarm = ref(false);
-const advancedSettingsOpen = ref(false);
+const now = ref(Date.now());
+let subscriptionTicker: number | null = null;
+const assetDetailsOpen = ref(false);
 const interfaceSelectorOpen = ref(false);
 const ipAllocationMode = ref<'continuous' | 'explicit'>('continuous');
 const deviceIpText = ref('');
@@ -115,6 +124,79 @@ const assetTone = computed(() => {
   return 'attention';
 });
 
+const alarmError = computed(() => simulator.alarmStats.value?.last_error ?? null);
+/**
+ * Explain the failure when the code is one we recognise, and otherwise fall back
+ * to the generic sentence. Either way the raw code is rendered separately, so a
+ * code we have no phrasing for is still fully visible.
+ */
+const alarmErrorSummary = computed(() => {
+  const error = alarmError.value;
+  if (!error) return '';
+  const status = alarmErrorHttpStatus(error.code);
+  const key = alarmErrorMessageKey(error.code);
+  if (key && te(key)) return status ? t(key, { status }) : t(key);
+  return t(error.message_key);
+});
+
+const subscription = computed(() => simulator.alarmSubscription.value);
+const subscriptionExpired = computed(() => {
+  const current = subscription.value;
+  return current !== null && current.learned && isAlarmSubscriptionExpired(current, now.value);
+});
+const subscriptionTone = computed(() => {
+  const current = subscription.value;
+  if (current?.overridden) {
+    return {
+      container: 'border-slate-200 bg-slate-50',
+      icon: Server,
+      icon_color: 'text-slate-500',
+      title: 'text-slate-900',
+      body: 'text-slate-600',
+      title_key: 'deviceSimulator.subscription.overriddenTitle',
+      description_key: 'deviceSimulator.subscription.overriddenDescription',
+    };
+  }
+  if (!current?.learned) {
+    return {
+      container: 'border-amber-200 bg-amber-50',
+      icon: AlertTriangle,
+      icon_color: 'text-amber-600',
+      title: 'text-amber-900',
+      body: 'text-amber-800',
+      title_key: 'deviceSimulator.subscription.waitingTitle',
+      description_key: 'deviceSimulator.subscription.waitingDescription',
+    };
+  }
+  if (subscriptionExpired.value) {
+    return {
+      container: 'border-amber-200 bg-amber-50',
+      icon: AlertTriangle,
+      icon_color: 'text-amber-600',
+      title: 'text-amber-900',
+      body: 'text-amber-800',
+      title_key: 'deviceSimulator.subscription.expiredTitle',
+      description_key: 'deviceSimulator.subscription.expiredDescription',
+    };
+  }
+  return {
+    container: 'border-emerald-200 bg-emerald-50',
+    icon: CheckCircle2,
+    icon_color: 'text-emerald-600',
+    title: 'text-emerald-900',
+    body: 'text-emerald-800',
+    title_key: 'deviceSimulator.subscription.activeTitle',
+    description_key: 'deviceSimulator.subscription.activeDescription',
+  };
+});
+const subscriptionLifetime = computed(() => {
+  const current = subscription.value;
+  if (!current?.learned || current.duration_secs === null) return '';
+  if (current.expires_at_ms === null) return t('deviceSimulator.subscription.duration', { seconds: current.duration_secs });
+  const remaining = Math.max(0, Math.round((current.expires_at_ms - now.value) / 1_000));
+  return t('deviceSimulator.subscription.remaining', { seconds: current.duration_secs, remaining });
+});
+
 watch(
   () => simulator.request.groups.map((group) => group.profile_id).join(','),
   () => {
@@ -134,17 +216,45 @@ watch(selectedAlarmProfileId, () => {
   alarm.target_device_ids = [];
   if (alarm.mode === 'configured') alarm.mode = 'sequential';
 });
-const assetDownloadActive = computed(() => new Set([
-  'checking',
-  'downloading',
-  'verifying',
-  'installing',
-]).has(simulator.assetProgress.value?.state ?? ''));
+const assetDownloadActive = computed(() => {
+  // Asset readiness is refreshed independently from progress events. If a
+  // terminal event was missed, never let its stale progress contradict the
+  // authoritative status shown in the details below.
+  if (simulator.assets.value?.state === 'ready') return false;
+  return new Set([
+    'checking',
+    'downloading',
+    'verifying',
+    'installing',
+  ]).has(simulator.assetProgress.value?.state ?? '');
+});
 const assetPercent = computed(() => {
   const progress = simulator.assetProgress.value;
   if (!progress?.total) return null;
   return Math.min(100, Math.round((progress.downloaded / progress.total) * 100));
 });
+const assetSummaryLabel = computed(() => {
+  if (assetDownloadActive.value) {
+    return assetPercent.value !== null
+      ? t('deviceSimulator.assets.summary.preparingPercent', { percent: assetPercent.value })
+      : t('deviceSimulator.assets.summary.preparing');
+  }
+  if (assetTone.value === 'ready') return t('deviceSimulator.assets.summary.ready');
+  if (assetTone.value === 'error') return t('deviceSimulator.assets.summary.failed');
+  return t('deviceSimulator.assets.summary.attention');
+});
+const assetChipClass = computed(() => {
+  if (assetTone.value === 'ready') return 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100';
+  if (assetTone.value === 'error') return 'border-rose-200 bg-rose-50 text-rose-800 hover:bg-rose-100';
+  return 'border-amber-200 bg-amber-50 text-amber-900 hover:bg-amber-100';
+});
+
+/** Keep the details out of the way while files are ready, and open them the moment they need attention. */
+watch(() => simulator.assets.value?.state ?? 'unknown', (state) => {
+  if (state === 'unknown' || state === 'checking') return;
+  assetDetailsOpen.value = state !== 'ready';
+}, { immediate: true });
+
 const configuredDeviceCount = computed(() => simulator.request.groups
   .reduce((total, group) => total + Math.max(0, Number(group.count) || 0), 0));
 const explicitIpCountMismatch = computed(() => ipAllocationMode.value === 'explicit'
@@ -175,20 +285,27 @@ const interfaceSelectionDescription = computed(() => {
   });
 });
 
+// The runtime treats the type list as a filter in every mode, so a chosen type
+// survives a mode switch. Only "configured" carries the extra requirement of
+// exactly one type, so clearing the type has to drop that mode.
 watch(selectedAlarmTypeId, (alarmTypeId) => {
   if (!alarmTypeId && alarm.mode === 'configured') alarm.mode = 'sequential';
 });
 
-watch(() => alarm.mode, (mode) => {
-  if (mode !== 'configured') selectedAlarmTypeId.value = '';
-});
-
 onMounted(async () => {
+  // The subscription lifetime counts down against wall-clock time, so the view
+  // needs its own tick; telemetry alone would leave a stale "remaining" value.
+  subscriptionTicker = window.setInterval(() => { now.value = Date.now(); }, 1_000);
   await simulator.initialize();
   if (simulator.request.device_ips.length > 0) {
     ipAllocationMode.value = 'explicit';
     deviceIpText.value = simulator.request.device_ips.join('\n');
   }
+});
+
+onUnmounted(() => {
+  if (subscriptionTicker !== null) window.clearInterval(subscriptionTicker);
+  subscriptionTicker = null;
 });
 
 function addServer() {
@@ -205,9 +322,26 @@ function removeServer(id: string) {
   simulator.request.platform.servers = simulator.request.platform.servers.filter((server) => server.id !== id);
 }
 
+function setPlatformAccessMode(mode: PlatformAccessMode) {
+  if (simulator.topologyLocked.value) return;
+  simulator.request.platform.access_mode = mode;
+}
+
+/** Restricted admission derives its allow list from the server hosts, so an
+ * empty list would block the intended platform too. The backend rejects this at
+ * start; surface it while the user is still editing. */
+const platformAccessNeedsServer = computed(
+  () => simulator.request.platform.access_mode === 'configured_servers_only'
+    && !simulator.request.platform.servers.some((server) => server.host.trim() !== '' && server.port > 0),
+);
+
 function profileLabel(profileId: string) {
   const profile = profilesById.value.get(profileId);
   return profile ? t(profile.display_name_key) : t(`deviceSimulator.profiles.${profileId}`);
+}
+
+function mediaThemeLabel(theme: MediaThemeSummary) {
+  return te(theme.display_name_key) ? t(theme.display_name_key) : theme.id;
 }
 
 function requiredFileLabel(fileId: string) {
@@ -401,14 +535,14 @@ async function openPingScanner() {
     <div class="mx-auto w-full max-w-[1600px] space-y-5 p-4 sm:p-6 lg:p-8">
       <header class="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div class="flex min-w-0 items-start gap-4">
-            <div class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-600 to-cyan-500 text-white shadow-lg shadow-sky-500/20">
-              <Video class="h-6 w-6" aria-hidden="true" />
+          <div class="flex min-w-0 items-start gap-3">
+            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-600 to-cyan-500 shadow-sm">
+              <Video class="h-5 w-5 text-white" aria-hidden="true" />
             </div>
             <div class="min-w-0">
               <p class="text-xs font-bold uppercase tracking-[0.16em] text-sky-700">{{ t('deviceSimulator.eyebrow') }}</p>
-              <h1 class="mt-1 text-2xl font-bold tracking-tight text-slate-900">{{ t('deviceSimulator.title') }}</h1>
-              <p class="mt-1 max-w-3xl text-sm leading-6 text-slate-600">{{ t('deviceSimulator.description') }}</p>
+              <h1 class="mt-1 text-2xl font-bold text-slate-900">{{ t('deviceSimulator.title') }}</h1>
+              <p class="mt-1 max-w-3xl text-sm text-slate-500">{{ t('deviceSimulator.description') }}</p>
             </div>
           </div>
           <div class="flex flex-wrap items-center gap-2">
@@ -420,14 +554,38 @@ async function openPingScanner() {
               {{ statusLabel(simulator.status.value.state) }}
             </span>
             <button
+              v-if="stoppable"
               type="button"
-              class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+              class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-rose-700 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60"
               :class="buttonFocus"
-              :aria-pressed="advancedSettingsOpen"
-              @click="advancedSettingsOpen = !advancedSettingsOpen"
+              :disabled="simulator.busyAction.value !== null"
+              @click="simulator.stop"
             >
-              <SlidersHorizontal class="h-4 w-4" aria-hidden="true" />
-              {{ t(advancedSettingsOpen ? 'deviceSimulator.actions.hideAdvanced' : 'deviceSimulator.actions.advanced') }}
+              <LoaderCircle v-if="simulator.busyAction.value === 'stop'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              <Square v-else class="h-4 w-4" aria-hidden="true" />
+              {{ t('deviceSimulator.actions.stop') }}
+            </button>
+            <button
+              type="button"
+              class="relative inline-flex min-h-11 cursor-pointer items-center gap-2 overflow-hidden rounded-xl border px-3 py-2 text-sm font-semibold transition-colors"
+              :class="[buttonFocus, assetChipClass]"
+              :aria-expanded="assetDetailsOpen"
+              aria-controls="asset-details"
+              @click="assetDetailsOpen = !assetDetailsOpen"
+            >
+              <LoaderCircle v-if="assetDownloadActive" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              <CheckCircle2 v-else-if="assetTone === 'ready'" class="h-4 w-4" aria-hidden="true" />
+              <XCircle v-else-if="assetTone === 'error'" class="h-4 w-4" aria-hidden="true" />
+              <AlertTriangle v-else class="h-4 w-4" aria-hidden="true" />
+              <span class="tabular-nums">{{ assetSummaryLabel }}</span>
+              <ChevronDown class="h-4 w-4 transition-transform" :class="assetDetailsOpen ? 'rotate-180' : ''" aria-hidden="true" />
+              <span
+                v-if="assetDownloadActive"
+                class="absolute inset-x-0 bottom-0 h-0.5 bg-sky-600 transition-[width] duration-200"
+                :class="assetPercent === null ? 'w-1/3 animate-pulse motion-reduce:animate-none' : ''"
+                :style="assetPercent === null ? undefined : { width: `${assetPercent}%` }"
+                aria-hidden="true"
+              ></span>
             </button>
             <button
               type="button"
@@ -441,29 +599,13 @@ async function openPingScanner() {
             </button>
           </div>
         </div>
-      </header>
 
-      <section
-        class="rounded-2xl border p-4 sm:p-5"
-        :class="assetTone === 'ready'
-          ? 'border-emerald-200 bg-emerald-50/80'
-          : assetTone === 'error'
-            ? 'border-rose-200 bg-rose-50/80'
-            : 'border-amber-200 bg-amber-50/80'"
-        aria-labelledby="asset-banner-title"
-      >
-        <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <div class="flex min-w-0 items-start gap-3">
-            <CheckCircle2 v-if="assetTone === 'ready'" class="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" aria-hidden="true" />
-            <XCircle v-else-if="assetTone === 'error'" class="mt-0.5 h-5 w-5 shrink-0 text-rose-700" aria-hidden="true" />
-            <AlertTriangle v-else class="mt-0.5 h-5 w-5 shrink-0 text-amber-700" aria-hidden="true" />
-            <div>
-              <h2 id="asset-banner-title" class="font-bold text-slate-900">{{ t('deviceSimulator.assets.title') }}</h2>
-              <p class="mt-1 text-sm leading-6 text-slate-700">
+        <div v-if="assetDetailsOpen" id="asset-details" class="mt-5 border-t border-slate-200 pt-5">
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div class="min-w-0">
+              <h2 class="text-sm font-bold text-slate-900">{{ t('deviceSimulator.assets.title') }}</h2>
+              <p class="mt-1 text-sm leading-6 text-slate-600" aria-live="polite">
                 {{ t(`deviceSimulator.assets.states.${simulator.assets.value?.state ?? 'unknown'}`) }}
-              </p>
-              <p v-if="advancedSettingsOpen && assetTone === 'ready'" class="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-900">
-                {{ t('deviceSimulator.assets.staticReviewWarning') }}
               </p>
               <p v-if="assetDownloadActive && simulator.assetProgress.value" class="mt-2 text-xs font-medium text-slate-700" aria-live="polite">
                 {{ simulator.assetProgress.value.current_pack_id
@@ -477,32 +619,35 @@ async function openPingScanner() {
                   · {{ formatImageSize(simulator.assetProgress.value.speed_bps) }}/s
                 </template>
               </p>
-              <div v-if="assetDownloadActive" class="mt-2 h-2 w-full max-w-xl overflow-hidden rounded-full bg-white/80" role="progressbar" :aria-label="t('deviceSimulator.assets.progressLabel')" :aria-valuenow="assetPercent ?? undefined" aria-valuemin="0" aria-valuemax="100">
+              <div v-if="assetDownloadActive" class="mt-2 h-2 w-full max-w-xl overflow-hidden rounded-full bg-slate-200" role="progressbar" :aria-label="t('deviceSimulator.assets.progressLabel')" :aria-valuenow="assetPercent ?? undefined" aria-valuemin="0" aria-valuemax="100">
                 <div v-if="assetPercent !== null" class="h-full rounded-full bg-sky-600 transition-[width] duration-200" :style="{ width: `${assetPercent}%` }" />
                 <div v-else class="h-full w-1/3 animate-pulse rounded-full bg-sky-600 motion-reduce:animate-none" />
               </div>
-              <ul v-if="advancedSettingsOpen && simulator.assets.value?.packs.length" class="mt-2 space-y-1 text-xs text-slate-600">
+              <ul v-if="simulator.assets.value?.packs.length" class="mt-3 space-y-1 text-xs text-slate-600">
                 <li v-for="pack in simulator.assets.value.packs" :key="pack.id" class="flex flex-wrap gap-x-2">
                   <span class="font-semibold text-slate-700">{{ requiredFileLabel(pack.id) }}</span>
                   <span>{{ t('deviceSimulator.assets.version') }} {{ pack.installed_version ?? '—' }} / {{ pack.required_version }}</span>
                   <span v-if="pack.error_code" class="text-rose-700">{{ t('deviceSimulator.assets.fileError') }}</span>
                 </li>
               </ul>
+              <p v-if="assetTone === 'ready'" class="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-900">
+                {{ t('deviceSimulator.assets.staticReviewWarning') }}
+              </p>
+            </div>
+            <div class="flex shrink-0 flex-wrap gap-2">
+              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.refreshAssets">
+                <RefreshCw class="h-4 w-4" :class="simulator.busyAction.value === 'check-assets' ? 'animate-spin motion-reduce:animate-none' : ''" aria-hidden="true" />{{ t('deviceSimulator.actions.checkAssets') }}
+              </button>
+              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.prepareAssets">
+                <Download class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.downloadAssets') }}
+              </button>
+              <button v-if="assetDownloadActive" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-rose-300 bg-white px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50" :class="buttonFocus" @click="simulator.cancelAssetDownload">
+                <Square class="h-4 w-4" aria-hidden="true" />{{ t('common.cancel') }}
+              </button>
             </div>
           </div>
-          <div class="flex flex-wrap gap-2">
-            <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.refreshAssets">
-              <RefreshCw class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.checkAssets') }}
-            </button>
-            <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.prepareAssets">
-              <Download class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.downloadAssets') }}
-            </button>
-            <button v-if="assetDownloadActive" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-rose-300 bg-white px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50" :class="buttonFocus" @click="simulator.cancelAssetDownload">
-              <Square class="h-4 w-4" aria-hidden="true" />{{ t('common.cancel') }}
-            </button>
-          </div>
         </div>
-      </section>
+      </header>
 
       <section v-if="simulator.recoverySessionId.value" class="rounded-2xl border border-rose-300 bg-rose-50 p-5" aria-labelledby="recovery-title">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -565,22 +710,69 @@ async function openPingScanner() {
                 <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.platform') }}
                   <div :class="[fieldClass, 'mt-2', 'flex items-center bg-slate-100 font-semibold']" aria-readonly="true">UMS</div>
                 </label>
-                <label v-if="advancedSettingsOpen" class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.alarmReceiver') }}
-                  <input v-model="simulator.request.platform.alarm_receiver_url" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://192.168.1.10/alarm" />
-                </label>
-                <label v-if="advancedSettingsOpen" class="block text-sm font-semibold text-slate-700 md:col-span-2">{{ t('deviceSimulator.fields.assetServer') }}
-                  <input v-model="simulator.settings.value.asset_server_url_override" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://127.0.0.1:3000/virtual-device-assets" />
-                  <span class="mt-1 block text-xs font-normal leading-5 text-slate-500">{{ t('deviceSimulator.fields.assetServerHint') }}</span>
+                <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.alarmReceiverPort') }}
+                  <input v-model.number="simulator.request.platform.alarm_receiver_port" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" />
+                  <span class="mt-1 block text-xs font-normal leading-5 text-slate-500">{{ t('deviceSimulator.fields.alarmReceiverPortHint') }}</span>
                 </label>
               </div>
               <div class="mt-4 space-y-3">
+                <p class="text-xs leading-5 text-slate-500">{{ t('deviceSimulator.configuration.serversHint') }}</p>
                 <div v-for="serverItem in simulator.request.platform.servers" :key="serverItem.id" class="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:grid-cols-[1fr_8rem_2.75rem]">
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.serverHost') }}<input v-model="serverItem.host" :class="[fieldClass, 'mt-1']" type="text" /></label>
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.port') }}<input v-model.number="serverItem.port" :class="[fieldClass, 'mt-1']" type="number" min="1" max="65535" inputmode="numeric" /></label>
-                  <button v-if="advancedSettingsOpen" type="button" class="mt-5 inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl text-rose-700 hover:bg-rose-100" :class="buttonFocus" :aria-label="t('deviceSimulator.actions.removeServer')" @click="removeServer(serverItem.id)"><Trash2 class="h-5 w-5" aria-hidden="true" /></button>
+                  <button type="button" class="mt-5 inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl text-rose-700 hover:bg-rose-100" :class="buttonFocus" :aria-label="t('deviceSimulator.actions.removeServer')" @click="removeServer(serverItem.id)"><Trash2 class="h-5 w-5" aria-hidden="true" /></button>
                 </div>
-                <button v-if="advancedSettingsOpen || simulator.request.platform.servers.length === 0" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:border-sky-400 hover:bg-sky-50" :class="buttonFocus" @click="addServer"><Plus class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.addServer') }}</button>
+                <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-dashed border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:border-sky-400 hover:bg-sky-50" :class="buttonFocus" @click="addServer"><Plus class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.addServer') }}</button>
               </div>
+
+              <div class="mt-5 border-t border-slate-200 pt-4">
+                <p class="text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.accessMode') }}</p>
+                <div class="mt-2 inline-flex rounded-lg border border-slate-300 bg-slate-100 p-1" role="group" :aria-label="t('deviceSimulator.fields.accessMode')">
+                  <button v-for="mode in (['open', 'configured_servers_only'] as const)" :key="mode" type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors" :class="simulator.request.platform.access_mode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'" :aria-pressed="simulator.request.platform.access_mode === mode" @click="setPlatformAccessMode(mode)"><ShieldCheck v-if="mode === 'configured_servers_only'" class="h-4 w-4" aria-hidden="true" /><Globe v-else class="h-4 w-4" aria-hidden="true" />{{ t(`deviceSimulator.fields.accessModes.${mode}`) }}</button>
+                </div>
+                <p class="mt-2 text-xs leading-5 text-slate-500">{{ t(`deviceSimulator.fields.accessModeHints.${simulator.request.platform.access_mode}`) }}</p>
+                <p v-if="platformAccessNeedsServer" class="mt-2 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"><AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{{ t('deviceSimulator.fields.accessModeServerRequired') }}</p>
+              </div>
+
+              <div v-if="subscription" class="mt-5 rounded-xl border p-4" :class="subscriptionTone.container">
+                <div class="flex items-start gap-3">
+                  <component :is="subscriptionTone.icon" class="mt-0.5 h-5 w-5 shrink-0" :class="subscriptionTone.icon_color" aria-hidden="true" />
+                  <div class="min-w-0 flex-1">
+                    <p class="text-sm font-bold" :class="subscriptionTone.title">{{ t(subscriptionTone.title_key) }}</p>
+                    <p class="mt-1 text-xs leading-5" :class="subscriptionTone.body">{{ t(subscriptionTone.description_key) }}</p>
+                    <dl class="mt-3 space-y-1.5 text-xs">
+                      <div class="flex flex-wrap gap-x-2">
+                        <dt class="font-semibold" :class="subscriptionTone.body">{{ t('deviceSimulator.subscription.destination') }}</dt>
+                        <dd class="min-w-0 break-all font-mono" :class="subscriptionTone.body">{{ subscription.destinations.join('、') || '—' }}</dd>
+                      </div>
+                      <div v-if="subscription.learned" class="flex flex-wrap gap-x-2">
+                        <dt class="font-semibold" :class="subscriptionTone.body">{{ t('deviceSimulator.subscription.advertised') }}</dt>
+                        <dd class="min-w-0 break-all font-mono" :class="subscriptionTone.body">{{ [subscription.host, subscription.port].filter(Boolean).join(':') }}</dd>
+                      </div>
+                      <div v-if="subscriptionLifetime" class="flex flex-wrap gap-x-2">
+                        <dt class="font-semibold" :class="subscriptionTone.body">{{ t('deviceSimulator.subscription.lifetime') }}</dt>
+                        <dd class="min-w-0" :class="subscriptionTone.body">{{ subscriptionLifetime }}</dd>
+                      </div>
+                    </dl>
+                  </div>
+                </div>
+              </div>
+
+              <details class="mt-5 rounded-xl border border-slate-200 bg-slate-50">
+                <summary class="min-h-11 cursor-pointer list-none px-4 py-3 text-sm font-semibold text-slate-700">
+                  {{ t('deviceSimulator.configuration.advanced') }}
+                </summary>
+                <div class="grid gap-4 border-t border-slate-200 p-4">
+                  <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.alarmReceiver') }}
+                    <input v-model="simulator.request.platform.alarm_receiver_url" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://192.168.1.10/alarm" />
+                    <span class="mt-1 block text-xs font-normal leading-5 text-slate-500">{{ t('deviceSimulator.fields.alarmReceiverHint') }}</span>
+                  </label>
+                  <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.assetServer') }}
+                    <input v-model="simulator.settings.value.asset_server_url_override" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://127.0.0.1:3000/virtual-device-assets" />
+                    <span class="mt-1 block text-xs font-normal leading-5 text-slate-500">{{ t('deviceSimulator.fields.assetServerHint') }}</span>
+                  </label>
+                </div>
+              </details>
             </section>
 
             <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="network-title">
@@ -624,10 +816,45 @@ async function openPingScanner() {
               <div class="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 <label v-if="ipAllocationMode === 'continuous'" class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.startIp') }}<input v-model="simulator.request.start_ip" :class="[fieldClass, 'mt-2']" type="text" inputmode="decimal" /></label>
                 <label v-else class="block text-sm font-semibold text-slate-700 sm:col-span-2 lg:col-span-3">{{ t('deviceSimulator.fields.explicitIps') }}<textarea v-model="deviceIpText" :class="[fieldClass, 'mt-2', 'min-h-28 resize-y font-mono']" rows="4" :placeholder="t('deviceSimulator.fields.explicitIpsPlaceholder')" @input="updateExplicitIps" /><span class="mt-1 block text-xs font-normal leading-5" :class="explicitIpCountMismatch ? 'text-rose-700' : 'text-slate-500'">{{ t('deviceSimulator.fields.explicitIpsHint', { addresses: simulator.request.device_ips.length, devices: configuredDeviceCount }) }}</span></label>
-                <label v-if="advancedSettingsOpen" class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.prefix') }}<input v-model.number="simulator.request.subnet_prefix" :class="[fieldClass, 'mt-2']" type="number" min="1" max="30" inputmode="numeric" /></label>
+                <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.prefix') }}<input v-model.number="simulator.request.subnet_prefix" :class="[fieldClass, 'mt-2']" type="number" min="1" max="30" inputmode="numeric" /></label>
                 <label class="block text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.httpPort') }}<input v-model.number="simulator.request.device_http_port" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" /></label>
-                <label v-for="stream in (advancedSettingsOpen ? ['main', 'sub', 'third'] as const : [])" :key="stream" class="block text-sm font-semibold text-slate-700">{{ t(`deviceSimulator.fields.rtsp.${stream}`) }}<input v-model.number="simulator.request.rtsp_ports[stream]" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" /></label>
+                <label v-for="stream in (['main', 'sub', 'third'] as const)" :key="stream" class="block text-sm font-semibold text-slate-700">{{ t(`deviceSimulator.fields.rtsp.${stream}`) }}<input v-model.number="simulator.request.rtsp_ports[stream]" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" /></label>
               </div>
+            </section>
+
+            <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="media-theme-title">
+              <div class="flex items-start gap-3">
+                <Video class="mt-0.5 h-5 w-5 shrink-0 text-sky-700" aria-hidden="true" />
+                <div>
+                  <h2 id="media-theme-title" class="font-bold text-slate-900">{{ t('deviceSimulator.mediaThemes.title') }}</h2>
+                  <p class="mt-1 text-sm leading-6 text-slate-600">{{ t('deviceSimulator.mediaThemes.description') }}</p>
+                </div>
+              </div>
+              <div class="mt-4 grid gap-3 sm:grid-cols-2" role="radiogroup" :aria-label="t('deviceSimulator.mediaThemes.title')">
+                <label
+                  v-for="theme in simulator.mediaThemes.value"
+                  :key="theme.id"
+                  class="relative flex min-h-20 cursor-pointer items-start gap-3 rounded-xl border p-4 transition-colors duration-200 motion-reduce:transition-none"
+                  :class="simulator.request.media_theme_id === theme.id
+                    ? 'border-sky-500 bg-sky-50 text-sky-950 shadow-sm'
+                    : 'border-slate-200 bg-slate-50 text-slate-800 hover:border-sky-300 hover:bg-sky-50/60'"
+                >
+                  <input v-model="simulator.request.media_theme_id" class="peer sr-only" type="radio" name="device-simulator-media-theme" :value="theme.id" />
+                  <span class="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" :class="simulator.request.media_theme_id === theme.id ? 'bg-sky-600 text-white' : 'bg-white text-slate-500'" aria-hidden="true">
+                    <CheckCircle2 v-if="simulator.request.media_theme_id === theme.id" class="h-5 w-5" />
+                    <Video v-else class="h-5 w-5" />
+                  </span>
+                  <span class="min-w-0">
+                    <span class="block text-sm font-semibold">{{ mediaThemeLabel(theme) }}</span>
+                    <span v-if="theme.is_default" class="mt-1 block text-xs font-medium text-sky-700">{{ t('deviceSimulator.mediaThemes.defaultLabel') }}</span>
+                  </span>
+                  <span class="pointer-events-none absolute inset-0 rounded-xl peer-focus-visible:ring-2 peer-focus-visible:ring-sky-500 peer-focus-visible:ring-offset-2" aria-hidden="true" />
+                </label>
+              </div>
+              <p class="mt-3 flex items-start gap-2 text-xs leading-5 text-slate-500">
+                <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                {{ t('deviceSimulator.mediaThemes.restartHint') }}
+              </p>
             </section>
 
             <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="groups-title">
@@ -636,7 +863,7 @@ async function openPingScanner() {
                 <article v-for="group in simulator.request.groups" :key="group.id" class="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 md:grid-cols-[minmax(12rem,1fr)_8rem_9rem_2.75rem]">
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.profile') }}<select :value="group.profile_id" :class="[fieldClass, 'mt-1']" @change="simulator.updateGroupProfile(group, ($event.target as HTMLSelectElement).value)"><option v-for="profile in simulator.profiles.value" :key="profile.id" :value="profile.id">{{ profileLabel(profile.id) }}</option><template v-if="simulator.profiles.value.length === 0"><option v-for="id in ['ipc-custom', 'ipc-smart', 'ipc-structured', 'ipc-face-access', 'nvr-common', 'nvr-vehicle']" :key="id" :value="id">{{ profileLabel(id) }}</option></template></select></label>
                   <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.count') }}<input v-model.number="group.count" :class="[fieldClass, 'mt-1']" type="number" min="1" max="500" inputmode="numeric" /></label>
-                  <label v-if="advancedSettingsOpen && group.profile_id.startsWith('nvr-')" class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.channels') }}<input v-model.number="group.nvr_channel_count" :class="[fieldClass, 'mt-1']" type="number" min="1" max="128" inputmode="numeric" /></label>
+                  <label v-if="group.profile_id.startsWith('nvr-')" class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.channels') }}<input v-model.number="group.nvr_channel_count" :class="[fieldClass, 'mt-1']" type="number" min="1" max="128" inputmode="numeric" /></label>
                   <button type="button" class="mt-5 inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40" :class="buttonFocus" :disabled="simulator.request.groups.length <= 1" :aria-label="t('deviceSimulator.actions.removeGroup')" @click="simulator.removeGroup(group.id)"><Trash2 class="h-5 w-5" aria-hidden="true" /></button>
                 </article>
               </div>
@@ -648,7 +875,7 @@ async function openPingScanner() {
               <h2 id="preflight-title" class="font-bold text-slate-900">{{ t('deviceSimulator.preflight.title') }}</h2>
               <p class="mt-1 text-sm leading-6 text-slate-600">{{ t('deviceSimulator.preflight.description') }}</p>
               <div class="mt-4 flex flex-wrap gap-2">
-                <button v-if="advancedSettingsOpen" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.previewDevices"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preview') }}</button>
+                <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.previewDevices"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preview') }}</button>
                 <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.runPreflight"><ShieldAlert class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.preflight') }}</button>
               </div>
               <ul v-if="simulator.preflight.value" class="mt-4 space-y-2" aria-live="polite">
@@ -666,12 +893,11 @@ async function openPingScanner() {
                 </li>
               </ul>
               <div v-if="simulator.preview.value" class="mt-5 grid grid-cols-2 gap-3">
-                <div class="rounded-xl bg-slate-100 p-3"><p class="text-xs font-semibold text-slate-500">{{ t('deviceSimulator.metrics.devices') }}</p><p class="mt-1 text-2xl font-bold text-slate-900">{{ simulator.preview.value.total_devices }}</p></div>
-                <div class="rounded-xl bg-slate-100 p-3"><p class="text-xs font-semibold text-slate-500">{{ t('deviceSimulator.metrics.channels') }}</p><p class="mt-1 text-2xl font-bold text-slate-900">{{ simulator.preview.value.total_channels }}</p></div>
+                <div class="rounded-xl bg-slate-100 p-3"><p class="text-xs font-semibold text-slate-500">{{ t('deviceSimulator.metrics.devices') }}</p><p class="mt-1 text-2xl font-bold tabular-nums text-slate-900">{{ simulator.preview.value.total_devices }}</p></div>
+                <div class="rounded-xl bg-slate-100 p-3"><p class="text-xs font-semibold text-slate-500">{{ t('deviceSimulator.metrics.channels') }}</p><p class="mt-1 text-2xl font-bold tabular-nums text-slate-900">{{ simulator.preview.value.total_channels }}</p></div>
               </div>
               <div class="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
                 <button v-if="!stoppable && !recoveryRequired" type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.start"><LoaderCircle v-if="simulator.busyAction.value === 'start'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><RadioTower v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.start') }}</button>
-                <button v-else-if="stoppable" type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl bg-rose-700 px-4 py-2 text-sm font-bold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.stop"><LoaderCircle v-if="simulator.busyAction.value === 'stop'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><Square v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.stop') }}</button>
                 <button type="button" class="inline-flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || simulator.topologyLocked.value" @click="simulator.saveSettings">{{ t('common.save') }}</button>
               </div>
               <p v-if="simulator.topologyLocked.value" class="mt-3 flex items-start gap-2 text-xs leading-5 text-amber-800"><AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{{ t('deviceSimulator.configuration.locked') }}</p>
@@ -687,7 +913,7 @@ async function openPingScanner() {
             ['channels', simulator.status.value.metrics.total_channels],
             ['clients', simulator.rtspStats.value?.active_clients ?? simulator.status.value.metrics.active_rtsp_clients],
             ['bitrate', `${simulator.rtspStats.value?.bitrate_kbps ?? simulator.status.value.metrics.outbound_bitrate_kbps} kbps`],
-          ]" :key="metric[0]" class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><p class="text-xs font-bold uppercase tracking-wider text-slate-500">{{ t(`deviceSimulator.metrics.${metric[0]}`) }}</p><p class="mt-2 text-2xl font-bold text-slate-900">{{ metric[1] }}</p></div>
+          ]" :key="metric[0]" class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition-colors hover:border-sky-200"><p class="text-xs font-bold uppercase tracking-wider text-slate-500">{{ t(`deviceSimulator.metrics.${metric[0]}`) }}</p><p class="mt-2 text-2xl font-bold tabular-nums text-slate-900">{{ metric[1] }}</p></div>
         </section>
         <section class="mt-5 rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="streams-title">
           <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-5"><div><h2 id="streams-title" class="font-bold text-slate-900">{{ t('deviceSimulator.runtime.streams') }}</h2><p class="mt-1 text-sm text-slate-600">{{ t('deviceSimulator.runtime.streamsDescription') }}</p></div><button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="allStreamAddresses.length === 0" @click="downloadJson('device-simulator-streams.json', allStreamAddresses)"><FileDown class="h-4 w-4" aria-hidden="true" />{{ t('common.export') }}</button></div>
@@ -695,7 +921,7 @@ async function openPingScanner() {
             <table class="min-w-full text-left text-sm"><thead class="sticky top-0 bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th class="px-5 py-3">{{ t('deviceSimulator.fields.device') }}</th><th class="px-5 py-3">{{ t('deviceSimulator.fields.stream') }}</th><th class="px-5 py-3">URL</th><th class="px-5 py-3"><span class="sr-only">{{ t('common.actions') }}</span></th></tr></thead><tbody class="divide-y divide-slate-100"><tr v-for="stream in allStreamAddresses" :key="`${stream.device_id}-${stream.channel_id}-${stream.stream}`"><td class="whitespace-nowrap px-5 py-3 font-medium text-slate-800">{{ stream.device_id }}<span v-if="stream.channel_id" class="ml-1 text-slate-500">/ {{ stream.channel_id }}</span></td><td class="px-5 py-3 text-slate-600">{{ stream.stream }}</td><td class="max-w-xl truncate px-5 py-3 font-mono text-xs text-slate-600" :title="stream.url">{{ stream.url }}</td><td class="px-5 py-3"><button type="button" class="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-xl text-sky-700 hover:bg-sky-50" :class="buttonFocus" :aria-label="t('deviceSimulator.actions.copyUrl')" @click="copyText(stream.url)"><CheckCircle2 v-if="copiedValue === stream.url" class="h-4 w-4 text-emerald-600" aria-hidden="true" /><Clipboard v-else class="h-4 w-4" aria-hidden="true" /></button></td></tr><tr v-if="allStreamAddresses.length === 0"><td colspan="4" class="px-5 py-12 text-center text-slate-500">{{ t('deviceSimulator.runtime.noStreams') }}</td></tr></tbody></table>
           </div>
         </section>
-        <section v-if="advancedSettingsOpen" class="mt-5 rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="identity-title"><div class="flex items-center justify-between border-b border-slate-200 p-5"><h2 id="identity-title" class="font-bold text-slate-900">{{ t('deviceSimulator.runtime.identities') }}</h2><button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="!simulator.preview.value" @click="downloadJson('device-simulator-identities.json', simulator.preview.value)"><FileDown class="h-4 w-4" aria-hidden="true" />{{ t('common.export') }}</button></div><div class="max-h-96 overflow-auto"><table class="min-w-full text-left text-sm"><thead class="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500"><tr><th class="px-5 py-3">ID</th><th class="px-5 py-3">IP</th><th class="px-5 py-3">MAC</th><th class="px-5 py-3">{{ t('deviceSimulator.fields.profile') }}</th></tr></thead><tbody class="divide-y divide-slate-100"><tr v-for="device in visibleDevices" :key="device.device_id"><td class="px-5 py-3 font-medium text-slate-800">{{ device.device_id }}</td><td class="px-5 py-3 font-mono text-xs text-slate-600">{{ device.ip }}</td><td class="px-5 py-3 font-mono text-xs text-slate-600">{{ device.mac }}</td><td class="px-5 py-3 text-slate-600">{{ profileLabel(device.profile_id) }}</td></tr></tbody></table></div></section>
+        <section class="mt-5 rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="identity-title"><div class="flex items-center justify-between border-b border-slate-200 p-5"><h2 id="identity-title" class="font-bold text-slate-900">{{ t('deviceSimulator.runtime.identities') }}</h2><button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="!simulator.preview.value" @click="downloadJson('device-simulator-identities.json', simulator.preview.value)"><FileDown class="h-4 w-4" aria-hidden="true" />{{ t('common.export') }}</button></div><div class="max-h-96 overflow-auto"><table class="min-w-full text-left text-sm"><thead class="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500"><tr><th class="px-5 py-3">ID</th><th class="px-5 py-3">IP</th><th class="px-5 py-3">MAC</th><th class="px-5 py-3">{{ t('deviceSimulator.fields.profile') }}</th></tr></thead><tbody class="divide-y divide-slate-100"><tr v-for="device in visibleDevices" :key="device.device_id"><td class="px-5 py-3 font-medium text-slate-800">{{ device.device_id }}</td><td class="px-5 py-3 font-mono text-xs text-slate-600">{{ device.ip }}</td><td class="px-5 py-3 font-mono text-xs text-slate-600">{{ device.mac }}</td><td class="px-5 py-3 text-slate-600">{{ profileLabel(device.profile_id) }}</td></tr></tbody></table></div></section>
       </template>
 
       <template v-else-if="activeTab === 'alarms'">
@@ -715,7 +941,7 @@ async function openPingScanner() {
               </label>
               <label class="text-sm font-semibold text-slate-700">
                 {{ t('deviceSimulator.fields.alarmTypes') }}
-                <select v-model="selectedAlarmTypeId" :class="[fieldClass, 'mt-2']" :disabled="availableAlarmTypes.length === 0 || alarm.mode !== 'configured'">
+                <select v-model="selectedAlarmTypeId" :class="[fieldClass, 'mt-2']" :disabled="availableAlarmTypes.length === 0">
                   <option value="">{{ t('deviceSimulator.alarms.allTypes') }}</option>
                   <option v-for="alarmType in availableAlarmTypes" :key="alarmType.id" :value="alarmType.id">{{ alarmType.display_name }}</option>
                 </select>
@@ -737,7 +963,7 @@ async function openPingScanner() {
                 {{ t('deviceSimulator.fields.sendCount') }}
                 <input v-model.number="alarm.send_count" :class="[fieldClass, 'mt-2']" type="number" min="1" max="100000" inputmode="numeric" :disabled="continuousAlarm">
               </label>
-              <label v-if="advancedSettingsOpen" class="text-sm font-semibold text-slate-700">
+              <label class="text-sm font-semibold text-slate-700">
                 {{ t('deviceSimulator.fields.recoveryDelay') }}
                 <input v-model.number="alarm.recovery_delay_secs" :class="[fieldClass, 'mt-2']" type="number" min="0" max="86400" inputmode="numeric">
               </label>
@@ -761,7 +987,7 @@ async function openPingScanner() {
                   <span class="block text-xs font-normal text-slate-500">{{ t('deviceSimulator.alarms.continuousHint') }}</span>
                 </span>
               </label>
-              <div v-if="advancedSettingsOpen" class="sm:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4" aria-labelledby="alarm-user-image-title">
+              <div class="sm:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4" aria-labelledby="alarm-user-image-title">
                 <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div class="min-w-0">
                     <h3 id="alarm-user-image-title" class="text-sm font-semibold text-slate-800">{{ t('deviceSimulator.fields.customImage') }}</h3>
@@ -800,8 +1026,8 @@ async function openPingScanner() {
             </div>
             <div class="mt-5 flex flex-wrap gap-2">
               <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="triggerAlarm"><BellRing class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.triggerOnce') }}</button>
-              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="startAlarm"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.startAlarm') }}</button>
-              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-rose-700 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !simulator.alarmStats.value" @click="simulator.stopAlarm"><Square class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.stopAlarm') }}</button>
+              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running || simulator.activeAlarmJobId.value !== null || simulator.alarmStopPending.value" @click="startAlarm"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.startAlarm') }}</button>
+              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-rose-700 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !simulator.activeAlarmJobId.value || simulator.alarmStopPending.value" @click="simulator.stopAlarm"><Square class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.stopAlarm') }}</button>
             </div>
           </section>
           <aside class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" aria-labelledby="alarm-stats-title">
@@ -809,17 +1035,29 @@ async function openPingScanner() {
             <dl class="mt-4 grid grid-cols-2 gap-3">
               <div v-for="key in ['attempted', 'succeeded', 'failed', 'unverified', 'in_flight']" :key="key" class="rounded-xl bg-slate-100 p-3">
                 <dt class="text-xs font-semibold text-slate-500">{{ t(`deviceSimulator.alarms.${key}`) }}</dt>
-                <dd class="mt-1 text-xl font-bold text-slate-900">{{ simulator.alarmStats.value?.[key as keyof typeof simulator.alarmStats.value] ?? simulator.lastAlarmResult.value?.[key as keyof typeof simulator.lastAlarmResult.value] ?? 0 }}</dd>
+                <dd class="mt-1 text-xl font-bold tabular-nums text-slate-900">{{ simulator.alarmStats.value?.[key as keyof typeof simulator.alarmStats.value] ?? simulator.lastAlarmResult.value?.[key as keyof typeof simulator.lastAlarmResult.value] ?? 0 }}</dd>
+              </div>
+              <div class="rounded-xl bg-slate-100 p-3">
+                <dt class="text-xs font-semibold text-slate-500">{{ t('deviceSimulator.alarms.lastHttpStatus') }}</dt>
+                <dd class="mt-1 text-xl font-bold tabular-nums text-slate-900">{{ simulator.alarmStats.value?.last_http_status ?? '—' }}</dd>
               </div>
             </dl>
             <p class="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">{{ t('deviceSimulator.alarms.unverifiedHint') }}</p>
-            <p v-if="simulator.alarmStats.value?.last_error" class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{{ t(simulator.alarmStats.value.last_error.message_key) }}</p>
+            <div v-if="alarmError" class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-rose-800">
+              <p class="text-sm font-semibold">{{ alarmErrorSummary }}</p>
+              <p v-if="alarmError.details" class="mt-1.5 break-all font-mono text-xs leading-5 text-rose-700">{{ alarmError.details }}</p>
+              <p class="mt-1.5 break-all font-mono text-[11px] leading-4 text-rose-600">{{ alarmError.code }}</p>
+            </div>
+            <div v-if="subscription" class="mt-4 rounded-xl border p-3 text-xs leading-5" :class="subscriptionTone.container">
+              <p class="font-semibold" :class="subscriptionTone.title">{{ t(subscriptionTone.title_key) }}</p>
+              <p class="mt-1 break-all font-mono" :class="subscriptionTone.body">{{ subscription.destinations.join('、') || '—' }}</p>
+            </div>
           </aside>
         </div>
       </template>
 
       <template v-else>
-        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="logs-title"><div class="flex flex-col gap-3 border-b border-slate-200 p-5 lg:flex-row lg:items-center lg:justify-between"><div><h2 id="logs-title" class="font-bold text-slate-900">{{ t('deviceSimulator.logs.title') }}</h2><p class="mt-1 text-sm text-slate-600">{{ t('deviceSimulator.logs.description') }}</p></div><div class="flex flex-col gap-2 sm:flex-row"><label class="sr-only" for="simulator-log-level">{{ t('deviceSimulator.logs.level') }}</label><select id="simulator-log-level" v-model="logLevel" :class="[fieldClass, 'sm:w-40']"><option value="all">{{ t('common.all') }}</option><option v-for="level in ['trace', 'debug', 'info', 'warning', 'error']" :key="level" :value="level">{{ level }}</option></select><label class="sr-only" for="simulator-log-search">{{ t('common.search') }}</label><input id="simulator-log-search" v-model="logQuery" :class="[fieldClass, 'sm:w-64']" type="search" :placeholder="t('deviceSimulator.logs.search')" /><button type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="filteredLogs.length === 0" @click="downloadJson('device-simulator-logs.json', filteredLogs)"><FileDown class="h-4 w-4" aria-hidden="true" />{{ t('common.export') }}</button></div></div><ol class="max-h-[42rem] divide-y divide-slate-100 overflow-auto font-mono text-xs"><li v-for="(entry, index) in filteredLogs" :key="`${entry.timestamp}-${index}`" class="grid gap-1 px-5 py-3" :class="advancedSettingsOpen ? 'lg:grid-cols-[11rem_5rem_10rem_1fr]' : 'lg:grid-cols-[11rem_5rem_1fr]'"><time class="text-slate-500">{{ entry.timestamp }}</time><span class="font-bold uppercase" :class="entry.level === 'error' ? 'text-rose-700' : entry.level === 'warning' ? 'text-amber-700' : 'text-sky-700'">{{ entry.level }}</span><span v-if="advancedSettingsOpen" class="truncate text-slate-500" :title="entry.component">{{ entry.component }}</span><span class="break-words text-slate-800">{{ entry.message }}<span v-if="advancedSettingsOpen && entry.error_code" class="ml-2 rounded bg-rose-100 px-1.5 py-0.5 text-rose-700">{{ entry.error_code }}</span></span></li><li v-if="filteredLogs.length === 0" class="px-5 py-12 text-center font-sans text-sm text-slate-500">{{ t('deviceSimulator.logs.empty') }}</li></ol></section>
+        <section class="rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="logs-title"><div class="flex flex-col gap-3 border-b border-slate-200 p-5 lg:flex-row lg:items-center lg:justify-between"><div><h2 id="logs-title" class="font-bold text-slate-900">{{ t('deviceSimulator.logs.title') }}</h2><p class="mt-1 text-sm text-slate-600">{{ t('deviceSimulator.logs.description') }}</p></div><div class="flex flex-col gap-2 sm:flex-row"><label class="sr-only" for="simulator-log-level">{{ t('deviceSimulator.logs.level') }}</label><select id="simulator-log-level" v-model="logLevel" :class="[fieldClass, 'sm:w-40']"><option value="all">{{ t('common.all') }}</option><option v-for="level in ['trace', 'debug', 'info', 'warning', 'error']" :key="level" :value="level">{{ level }}</option></select><label class="sr-only" for="simulator-log-search">{{ t('common.search') }}</label><input id="simulator-log-search" v-model="logQuery" :class="[fieldClass, 'sm:w-64']" type="search" :placeholder="t('deviceSimulator.logs.search')" /><button type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="filteredLogs.length === 0" @click="downloadJson('device-simulator-logs.json', filteredLogs)"><FileDown class="h-4 w-4" aria-hidden="true" />{{ t('common.export') }}</button></div></div><ol class="max-h-[42rem] divide-y divide-slate-100 overflow-auto font-mono text-xs"><li v-for="(entry, index) in filteredLogs" :key="`${entry.timestamp}-${index}`" class="grid gap-1 px-5 py-3 lg:grid-cols-[11rem_5rem_10rem_1fr]"><time class="text-slate-500">{{ entry.timestamp }}</time><span class="font-bold uppercase" :class="entry.level === 'error' ? 'text-rose-700' : entry.level === 'warning' ? 'text-amber-700' : 'text-sky-700'">{{ entry.level }}</span><span class="truncate text-slate-500" :title="entry.component">{{ entry.component }}</span><span class="break-words text-slate-800">{{ entry.message }}<span v-if="entry.error_code" class="ml-2 rounded bg-rose-100 px-1.5 py-0.5 text-rose-700">{{ entry.error_code }}</span></span></li><li v-if="filteredLogs.length === 0" class="px-5 py-12 text-center font-sans text-sm text-slate-500">{{ t('deviceSimulator.logs.empty') }}</li></ol></section>
       </template>
     </div>
   </main>

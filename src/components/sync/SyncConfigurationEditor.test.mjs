@@ -35,7 +35,8 @@ test('combined tasks and strategy section preserves every production configurati
 });
 
 test('delivery workspace retains advanced server, manual deployment, command and local script controls', () => {
-  assert.match(editorSource, /sync-delivery-grid/);
+  assert.match(editorSource, /sync-delivery-stack/);
+  assert.doesNotMatch(editorSource, /sync-delivery-grid/);
   assert.match(editorSource, /serverForm\.ssh_timeout_secs/);
   assert.match(editorSource, /testAllServers/);
   assert.match(editorSource, /manualServerBindings/);

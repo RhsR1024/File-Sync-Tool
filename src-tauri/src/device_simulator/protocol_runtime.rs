@@ -1,3 +1,5 @@
+use crate::device_simulator::access_control::PlatformAccessPolicy;
+use crate::device_simulator::alarm_runtime::{LearnedAlarmEndpoint, SharedLearnedAlarmEndpoint};
 use crate::device_simulator::alarms::{ImageCache, SharedImageCache};
 use crate::device_simulator::api::{
     DeviceIdentityPreviewDto, DevicePreview, DeviceSimulatorStreamKind, SimulatorStartRequest,
@@ -39,6 +41,13 @@ pub struct ProtocolRuntimeConfig {
     pub preview: DevicePreview,
     pub assets: Arc<RuntimeAssetLayout>,
     pub picture_cache: SharedImageCache,
+    /// Written when the platform advertises its alarm receiver endpoint during
+    /// subscription; the alarm runtime reads it so dispatch follows the
+    /// platform. See [`SharedLearnedAlarmEndpoint`].
+    pub learned_endpoint: SharedLearnedAlarmEndpoint,
+    /// Which callers discovery and HTTP answer. Resolved once by the Worker from
+    /// [`crate::device_simulator::api::TargetPlatformConfig`]; RTSP is not gated.
+    pub access_policy: PlatformAccessPolicy,
     /// Tests may disable the fixed legacy multicast port while still exercising
     /// HTTP and RTSP on loopback. Production Worker sessions always enable it.
     pub enable_discovery: bool,
@@ -146,6 +155,10 @@ pub struct ProtocolRuntime {
 impl ProtocolRuntime {
     pub async fn start(config: ProtocolRuntimeConfig) -> Result<Self, ProtocolRuntimeError> {
         validate_runtime_config(&config)?;
+        log::info!(
+            "device simulator platform access policy: {}",
+            config.access_policy.describe()
+        );
         let mut runtime = Self {
             summary: ProtocolRuntimeSummary {
                 total_devices: config.preview.total_devices,
@@ -176,6 +189,8 @@ impl ProtocolRuntime {
             match start_http_task(
                 Arc::clone(&config.assets),
                 Arc::clone(&config.picture_cache),
+                Arc::clone(&config.learned_endpoint),
+                config.access_policy.clone(),
                 config.request.platform.kind,
                 config.request.device_http_port,
                 device.clone(),
@@ -192,27 +207,6 @@ impl ProtocolRuntime {
                 Err(source) => {
                     let _ = runtime.stop().await;
                     return Err(source);
-                }
-            }
-
-            if config.enable_discovery {
-                match start_discovery_task(
-                    Arc::clone(&config.assets),
-                    config.request.device_http_port,
-                    device.clone(),
-                    profile.clone(),
-                )
-                .await
-                {
-                    Ok((task, address)) => {
-                        runtime.summary.discovery_listeners += 1;
-                        runtime.summary.bind_addresses.push(address);
-                        runtime.discovery.push(task);
-                    }
-                    Err(source) => {
-                        let _ = runtime.stop().await;
-                        return Err(source);
-                    }
                 }
             }
 
@@ -282,6 +276,29 @@ impl ProtocolRuntime {
                     bitrate_bps: media.actual_bitrate_bps(),
                     handle,
                 });
+            }
+        }
+
+        if config.enable_discovery {
+            for devices in legacy_discovery_batches(&config.preview.devices) {
+                match start_discovery_task(
+                    Arc::clone(&config.assets),
+                    config.access_policy.clone(),
+                    config.request.device_http_port,
+                    devices,
+                )
+                .await
+                {
+                    Ok((task, address)) => {
+                        runtime.summary.discovery_listeners += 1;
+                        runtime.summary.bind_addresses.push(address);
+                        runtime.discovery.push(task);
+                    }
+                    Err(source) => {
+                        let _ = runtime.stop().await;
+                        return Err(source);
+                    }
+                }
             }
         }
 
@@ -379,9 +396,12 @@ fn validate_runtime_config(config: &ProtocolRuntimeConfig) -> Result<(), Protoco
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_http_task(
     assets: Arc<RuntimeAssetLayout>,
     picture_cache: SharedImageCache,
+    learned_endpoint: SharedLearnedAlarmEndpoint,
+    access_policy: PlatformAccessPolicy,
     platform: TargetPlatform,
     http_port: u16,
     device: DeviceIdentityPreviewDto,
@@ -411,6 +431,16 @@ async fn start_http_task(
                 accepted = listener.accept() => {
                     match accepted {
                         Ok((stream, peer)) => {
+                            // Close before a single byte is read, so a platform
+                            // outside the allow list cannot even fingerprint the
+                            // device from its HTTP responses.
+                            if !access_policy.permits_socket(peer) {
+                                drop(stream);
+                                log::debug!(
+                                    "device simulator HTTP connection from {peer} refused by the platform access policy"
+                                );
+                                continue;
+                            }
                             if clients.len() >= HTTP_CLIENT_TASK_LIMIT {
                                 drop(stream);
                                 continue;
@@ -418,6 +448,7 @@ async fn start_http_task(
                             let listener = Arc::clone(&listener);
                             let assets = Arc::clone(&assets);
                             let picture_cache = Arc::clone(&picture_cache);
+                            let learned_endpoint = Arc::clone(&learned_endpoint);
                             let device = device.clone();
                             let profile = profile.clone();
                             let device_metrics = Arc::clone(&device_metrics);
@@ -427,6 +458,7 @@ async fn start_http_task(
                                     listener,
                                     assets,
                                     picture_cache,
+                                    learned_endpoint,
                                     platform,
                                     http_port,
                                     device,
@@ -463,6 +495,7 @@ async fn serve_http_connection(
     listener: Arc<DeviceHttpListener>,
     assets: Arc<RuntimeAssetLayout>,
     picture_cache: SharedImageCache,
+    learned_endpoint: SharedLearnedAlarmEndpoint,
     platform: TargetPlatform,
     http_port: u16,
     device: DeviceIdentityPreviewDto,
@@ -475,6 +508,10 @@ async fn serve_http_connection(
         .await
         .map_err(|source| runtime_error(source.code, source.message))?;
     let profile_id = parse_profile_id(&device.profile_id)?;
+    // Learn the platform's alarm receiver endpoint from subscription requests so
+    // alarm dispatch and the rendered subscription Reference follow it, exactly
+    // as the legacy tool wrote picconfig/sendport from the subscription Port.
+    let subscription_port = learn_subscription_endpoint(&request, &learned_endpoint);
     let response =
         if request.method == HttpMethod::Get && request.path == "/LAPI/V1.0/System/Picture" {
             picture_response(&request, &picture_cache.read())
@@ -485,7 +522,14 @@ async fn serve_http_connection(
                         .read_profile_or_core(profile_id, &selection.path)
                         .map_err(|source| runtime_error(source.code, source.message))?;
                     let body = render_legacy_template(
-                        &bytes, &request, peer, platform, http_port, &device, &profile,
+                        &bytes,
+                        &request,
+                        peer,
+                        platform,
+                        http_port,
+                        &device,
+                        &profile,
+                        subscription_port,
                     )?;
                     HttpResponse {
                         status: if matches!(
@@ -510,7 +554,7 @@ async fn serve_http_connection(
                         status: 200,
                         content_type: "application/json; charset=utf-8".into(),
                         body: render_legacy_template(
-                            &bytes, &request, peer, platform, http_port, &device, &profile,
+                            &bytes, &request, peer, platform, http_port, &device, &profile, None,
                         )?,
                     }
                 }
@@ -529,11 +573,26 @@ async fn serve_http_connection(
 
 async fn start_discovery_task(
     assets: Arc<RuntimeAssetLayout>,
+    access_policy: PlatformAccessPolicy,
     http_port: u16,
-    device: DeviceIdentityPreviewDto,
-    profile: DeviceProfileV1,
+    devices: Vec<DeviceIdentityPreviewDto>,
 ) -> Result<(ServiceTask, String), ProtocolRuntimeError> {
-    let profile_id = parse_profile_id(&device.profile_id)?;
+    let first_device = devices.first().ok_or_else(|| {
+        runtime_error(
+            "device_simulator.discovery.batch_empty",
+            "legacy discovery batch must contain at least one virtual device",
+        )
+    })?;
+    let profile_id = parse_profile_id(&first_device.profile_id)?;
+    if devices
+        .iter()
+        .any(|device| device.profile_id != first_device.profile_id)
+    {
+        return Err(runtime_error(
+            "device_simulator.discovery.batch_profile_mismatch",
+            "legacy discovery batch must contain exactly one device profile",
+        ));
+    }
     let template_path = match profile_id {
         FirstReleaseProfileId::NvrCommon | FirstReleaseProfileId::NvrVehicle => {
             "xml/Common/search-aibox.xml"
@@ -546,11 +605,25 @@ async fn start_discovery_task(
     let template = assets
         .read_from_pack("protocol-core", template_path)
         .map_err(|source| runtime_error(source.code, source.message))?;
+    let profile = assets.profile(profile_id).cloned().ok_or_else(|| {
+        runtime_error(
+            "device_simulator.protocol.profile_missing",
+            format!(
+                "runtime profile '{}' is not loaded",
+                first_device.profile_id
+            ),
+        )
+    })?;
     let metrics = Arc::new(ProtocolFailureMetrics::default());
     let listener = Arc::new(
-        DiscoveryListener::bind(DiscoveryBindPlan::legacy_ws_discovery(device.ip), metrics)
-            .await
-            .map_err(|source| runtime_error(source.code, source.message))?,
+        // Legacy Vsocket_ip.py binds the batch's first virtual address and
+        // answers for every device in that same device-type batch.
+        DiscoveryListener::bind(
+            DiscoveryBindPlan::legacy_ws_discovery(first_device.ip),
+            metrics,
+        )
+        .await
+        .map_err(|source| runtime_error(source.code, source.message))?,
     );
     let local_addr = listener
         .local_addr()
@@ -562,30 +635,57 @@ async fn start_discovery_task(
                 received = listener.receive_probe(now_ms(), PROTOCOL_LOG_INTERVAL_MS) => {
                     match received {
                         Ok((probe, _)) => {
-                            let mut response = match render_discovery_template(
-                                &template,
-                                &probe.message_id,
-                                http_port,
-                                &device,
-                                &profile,
-                            ) {
-                                Ok(response) => response,
-                                Err(source) => {
-                                    log::warn!("device simulator discovery render failed: {source}");
-                                    continue;
-                                }
-                            };
-                            if response.len() > MAX_DISCOVERY_RESPONSE_BYTES {
-                                log::warn!("device simulator discovery response exceeded the safety limit");
+                            // Staying silent is what keeps the devices out of an
+                            // unconfigured platform's search results entirely.
+                            if !access_policy.permits(*probe.source.ip()) {
+                                log::debug!(
+                                    "device simulator discovery probe from {} refused by the platform access policy",
+                                    probe.source
+                                );
                                 continue;
                             }
-                            if let Err(source) = listener
-                                .send_response(&probe, &response, now_ms(), PROTOCOL_LOG_INTERVAL_MS)
-                                .await
-                            {
-                                log::warn!("device simulator discovery response failed: {source}");
+                            for device in &devices {
+                                let response = match render_discovery_template(
+                                    &template,
+                                    &probe.message_id,
+                                    http_port,
+                                    device,
+                                    &profile,
+                                ) {
+                                    Ok(response) => response,
+                                    Err(source) => {
+                                        log::warn!(
+                                            "device simulator discovery render failed for {}: {source}",
+                                            device.ip
+                                        );
+                                        continue;
+                                    }
+                                };
+                                if response.len() > MAX_DISCOVERY_RESPONSE_BYTES {
+                                    log::warn!(
+                                        "device simulator discovery response exceeded the safety limit for {}",
+                                        device.ip
+                                    );
+                                    continue;
+                                }
+                                if let Err(source) = listener
+                                    .send_response_from(
+                                        device.ip,
+                                        &probe,
+                                        &response,
+                                        now_ms(),
+                                        PROTOCOL_LOG_INTERVAL_MS,
+                                    )
+                                    .await
+                                {
+                                    // Vsocket_ip.py isolates response failures to
+                                    // the affected virtual device and continues.
+                                    log::warn!(
+                                        "device simulator discovery response failed for {}: {source}",
+                                        device.ip
+                                    );
+                                }
                             }
-                            response.clear();
                         }
                         Err(source) => log::debug!("device simulator discovery probe ignored: {source}"),
                     }
@@ -601,9 +701,113 @@ async fn start_discovery_task(
     Ok((ServiceTask { shutdown, join }, local_addr.to_string()))
 }
 
+/// Legacy `devip_info` is keyed by device type. The nearest current equivalent
+/// is profile ID: one listener is created for each profile, bound to that
+/// profile batch's first virtual IP, with devices kept in preview order.
+fn legacy_discovery_batches(
+    devices: &[DeviceIdentityPreviewDto],
+) -> Vec<Vec<DeviceIdentityPreviewDto>> {
+    let mut profile_indexes = BTreeMap::<String, usize>::new();
+    let mut batches = Vec::<Vec<DeviceIdentityPreviewDto>>::new();
+    for device in devices {
+        if let Some(index) = profile_indexes.get(&device.profile_id).copied() {
+            batches[index].push(device.clone());
+        } else {
+            profile_indexes.insert(device.profile_id.clone(), batches.len());
+            batches.push(vec![device.clone()]);
+        }
+    }
+    batches
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HttpTemplateSelection {
     path: String,
+}
+
+/// Extract the alarm receiver endpoint the platform advertised in a subscription
+/// request body and publish it to the shared learned-endpoint handle. Returns
+/// the port for immediate response rewriting.
+///
+/// The request path and method are the only gate: a body carrying `Port` on
+/// `POST`/`PUT .../Event/Subscription` is unambiguously a subscription, so no
+/// port range may be assumed on top of that. Real UMS deployments allocate the
+/// receiver port dynamically (observed: `22815`), and the legacy
+/// `55000..55999` assumption silently discarded every such subscription,
+/// leaving alarms pointed at the fallback port.
+fn learn_subscription_endpoint(
+    request: &HttpRequest,
+    learned_endpoint: &SharedLearnedAlarmEndpoint,
+) -> Option<u16> {
+    if !request.path.contains("Event/Subscription")
+        || !matches!(request.method, HttpMethod::Post | HttpMethod::Put)
+    {
+        return None;
+    }
+    let port = extract_subscription_u16(&request.body, "Port").filter(|port| *port != 0)?;
+    *learned_endpoint.write() = Some(LearnedAlarmEndpoint {
+        host: extract_subscription_host(&request.body),
+        port,
+        duration_secs: extract_subscription_u32(&request.body, "Duration")
+            .filter(|duration| *duration != 0),
+        learned_at_ms: now_ms(),
+    });
+    Some(port)
+}
+
+/// Read the `IPAddress` field out of a LAPI subscription body. Unspecified and
+/// broadcast addresses are meaningless as a destination and are ignored so the
+/// configured server host stays in effect.
+fn extract_subscription_host(body: &[u8]) -> Option<Ipv4Addr> {
+    let text = std::str::from_utf8(body).ok()?;
+    let key = text.find("\"IPAddress\"")?;
+    let after_key = &text[key + "\"IPAddress\"".len()..];
+    let colon = after_key.find(':')?;
+    let value = after_key[colon + 1..]
+        .trim_start_matches([' ', '\t', '"'])
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '.')
+        .collect::<String>();
+    let address = value.parse::<Ipv4Addr>().ok()?;
+    (!address.is_unspecified() && !address.is_broadcast()).then_some(address)
+}
+
+fn extract_subscription_u32(body: &[u8], key: &str) -> Option<u32> {
+    extract_subscription_number(body, key)?.parse::<u32>().ok()
+}
+
+/// Read a numeric field out of a LAPI subscription request body. The body is
+/// tab-indented JSON, so a lightweight scan mirrors the old line split.
+fn extract_subscription_u16(body: &[u8], key: &str) -> Option<u16> {
+    extract_subscription_number(body, key)?.parse::<u16>().ok()
+}
+
+fn extract_subscription_number(body: &[u8], key: &str) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let quoted = format!("\"{key}\"");
+    let start = text.find(&quoted)?;
+    let after_key = &text[start + quoted.len()..];
+    let colon = after_key.find(':')?;
+    Some(
+        after_key[colon + 1..]
+            .trim_start_matches([' ', '\t', '"'])
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>(),
+    )
+    .filter(|value| !value.is_empty())
+}
+
+/// Subscription renew/keepalive URLs end in the numeric subscription ID, e.g.
+/// `/LAPI/V1.0/System/Event/Subscription/178`.
+fn subscription_id_from_path(path: &str) -> Option<String> {
+    let last = path.rsplit('/').next()?;
+    (!last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit())).then(|| last.to_owned())
+}
+
+/// Random subscription ID in the legacy `100..=200` range.
+fn random_subscription_id() -> u16 {
+    100 + u16::from(uuid::Uuid::new_v4().as_bytes()[0]) % 101
 }
 
 fn resolve_http_template(
@@ -814,6 +1018,7 @@ fn safe_path_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b','))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_legacy_template(
     bytes: &[u8],
     request: &HttpRequest,
@@ -822,6 +1027,7 @@ fn render_legacy_template(
     http_port: u16,
     device: &DeviceIdentityPreviewDto,
     profile: &DeviceProfileV1,
+    subscription_port: Option<u16>,
 ) -> Result<Vec<u8>, ProtocolRuntimeError> {
     let mut text = std::str::from_utf8(bytes)
         .map_err(|source| {
@@ -831,6 +1037,21 @@ fn render_legacy_template(
             )
         })?
         .to_owned();
+    // NVR subscription responses carry a fixed ID (178) and receiver port
+    // (55000) in the approved templates. HTTPServer.py rewrote both at runtime:
+    // POST assigns a random ID and echoes the platform's port; PUT echoes the
+    // subscription ID from the request URL. Apply the same on the raw template
+    // (before other placeholders) so a real hardware_id can never collide.
+    if device.device_kind == crate::device_simulator::assets::catalog::DeviceKind::Nvr
+        && request.path.contains("Event/Subscription")
+    {
+        if let Some(port) = subscription_port {
+            text = text.replace("55000", &port.to_string());
+        }
+        let subscription_id = subscription_id_from_path(&request.path)
+            .unwrap_or_else(|| random_subscription_id().to_string());
+        text = text.replace("178", &subscription_id);
+    }
     let compact_mac = device.mac.replace(':', "").to_ascii_lowercase();
     let colon_mac = compact_mac
         .as_bytes()
@@ -1173,6 +1394,7 @@ fn render_discovery_template(
         http_port,
         device,
         profile,
+        None,
     )?)
     .map_err(|source| {
         runtime_error(
@@ -1289,8 +1511,8 @@ mod tests {
     use super::*;
     use crate::device_simulator::alarms::{image_reference_token, ImageAssetRef, ImageExtension};
     use crate::device_simulator::api::{
-        DeviceGroupDraft, RtspPorts, StreamRuntimeConfig, StreamTransport, TargetPlatformConfig,
-        TargetPlatformServer,
+        DeviceGroupDraft, PlatformAccessMode, RtspPorts, StreamRuntimeConfig, StreamTransport,
+        TargetPlatformConfig, TargetPlatformServer,
     };
     use crate::device_simulator::assets::catalog::DeviceKind;
     use crate::device_simulator::profiles::schema::{
@@ -1374,6 +1596,19 @@ mod tests {
                 url: "rtsp://192.0.2.10:554/media/video1".into(),
             }],
         }
+    }
+
+    fn device_at(
+        profile_id: &str,
+        group_id: &str,
+        device_id: &str,
+        ip: &str,
+    ) -> DeviceIdentityPreviewDto {
+        let mut device = device(profile_id);
+        device.group_id = group_id.into();
+        device.device_id = device_id.into();
+        device.ip = ip.parse().unwrap();
+        device
     }
 
     fn request(
@@ -1531,6 +1766,7 @@ mod tests {
             80,
             &device("ipc-face-access"),
             &face_profile,
+            None,
         )
         .unwrap();
         let ipc: serde_json::Value = serde_json::from_slice(&ipc_body).unwrap();
@@ -1552,6 +1788,7 @@ mod tests {
             80,
             &device("nvr-common"),
             &profile(FirstReleaseProfileId::NvrCommon),
+            None,
         )
         .unwrap();
         let nvr: serde_json::Value = serde_json::from_slice(&nvr_body).unwrap();
@@ -1559,6 +1796,105 @@ mod tests {
             nvr["TerminationTime"].as_i64().unwrap() - nvr["CurrentTime"].as_i64().unwrap(),
             60
         );
+    }
+
+    #[test]
+    fn nvr_subscription_response_echoes_platform_port_and_reassigns_id() {
+        let learned: SharedLearnedAlarmEndpoint = std::sync::Arc::new(parking_lot::RwLock::new(None));
+        // POST subscription carrying the platform's alarm receiver port.
+        let post = request(
+            HttpMethod::Post,
+            "/LAPI/V1.0/System/Event/Subscription",
+            None,
+            b"{\n\t\"Duration\":\t60,\n\t\"Port\":\t55321\n}",
+        );
+        let subscription_port = learn_subscription_endpoint(&post, &learned);
+        assert_eq!(subscription_port, Some(55321));
+        assert_eq!(learned.read().as_ref().unwrap().port, 55321);
+
+        let template = br#"{"Data":{"ID":178,"Reference":"206.2.18.166:55000/210235C1XMA161000144/Subscription/Subscribers/178"}}"#;
+        let rendered = render_legacy_template(
+            template,
+            &post,
+            "198.51.100.7:40000".parse().unwrap(),
+            TargetPlatform::Ums,
+            81,
+            &device("nvr-common"),
+            &profile(FirstReleaseProfileId::NvrCommon),
+            subscription_port,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
+        let id = value["Data"]["ID"].as_u64().unwrap();
+        assert!((100..=200).contains(&id) && id != 178);
+        let reference = value["Data"]["Reference"].as_str().unwrap();
+        assert!(reference.contains(":55321/"));
+        assert!(!reference.contains(":55000/"));
+        assert!(reference.ends_with(&format!("/Subscribers/{id}")));
+    }
+
+    #[test]
+    fn subscription_learning_accepts_any_advertised_port_and_captures_the_endpoint() {
+        let learned: SharedLearnedAlarmEndpoint = std::sync::Arc::new(parking_lot::RwLock::new(None));
+        // PUT renew echoes the subscription ID from the URL, not a random one.
+        let put = request(
+            HttpMethod::Put,
+            "/LAPI/V1.0/System/Event/Subscription/142",
+            None,
+            b"{\n\t\"Duration\":\t60\n}",
+        );
+        assert_eq!(subscription_id_from_path(&put.path).as_deref(), Some("142"));
+
+        // Captured from a real UMS deployment: the receiver port sits far
+        // outside the legacy 55000..55999 range, and the platform names the
+        // receiver host explicitly.
+        let post = request(
+            HttpMethod::Post,
+            "/LAPI/V1.0/System/Event/Subscription",
+            None,
+            b"{\"AddressType\":0,\"IPAddress\":\"192.115.1.55\",\"Port\":22815,\"Duration\":600}",
+        );
+        assert_eq!(learn_subscription_endpoint(&post, &learned), Some(22815));
+        let endpoint = learned.read().clone().unwrap();
+        assert_eq!(endpoint.port, 22815);
+        assert_eq!(endpoint.host, Some(Ipv4Addr::new(192, 115, 1, 55)));
+        assert_eq!(endpoint.duration_secs, Some(600));
+        assert_eq!(
+            endpoint.expires_at_ms(),
+            Some(endpoint.learned_at_ms + 600_000)
+        );
+
+        // A zero port is not a destination and must not replace what was learned.
+        let zero = request(
+            HttpMethod::Post,
+            "/LAPI/V1.0/System/Event/Subscription",
+            None,
+            b"{\"Port\":0,\"Duration\":600}",
+        );
+        assert_eq!(learn_subscription_endpoint(&zero, &learned), None);
+        assert_eq!(learned.read().as_ref().unwrap().port, 22815);
+
+        // Non-subscription traffic never touches the learned endpoint.
+        let unrelated = request(
+            HttpMethod::Post,
+            "/LAPI/V1.0/System/DeviceBasicInfo",
+            None,
+            b"{\"Port\":9000}",
+        );
+        assert_eq!(learn_subscription_endpoint(&unrelated, &learned), None);
+        assert_eq!(learned.read().as_ref().unwrap().port, 22815);
+
+        // An unspecified receiver address leaves the configured host in effect.
+        let unspecified = request(
+            HttpMethod::Post,
+            "/LAPI/V1.0/System/Event/Subscription",
+            None,
+            b"{\"IPAddress\":\"0.0.0.0\",\"Port\":30000}",
+        );
+        assert_eq!(learn_subscription_endpoint(&unspecified, &learned), Some(30000));
+        let endpoint = learned.read().clone().unwrap();
+        assert_eq!(endpoint.host, None);
+        assert_eq!(endpoint.duration_secs, None);
     }
 
     #[test]
@@ -1642,7 +1978,9 @@ mod tests {
                     host: "127.0.0.1".into(),
                     port: 18080,
                 }],
+                access_mode: PlatformAccessMode::Open,
                 alarm_receiver_url: None,
+                alarm_receiver_port: Some(55_025),
             },
             interface_id: "loopback-fixture".into(),
             start_ip: Ipv4Addr::LOCALHOST,
@@ -1654,6 +1992,8 @@ mod tests {
                 sub: ports[2],
                 third: ports[3],
             },
+            _legacy_allow_local_player_access: true,
+            media_theme_id: crate::device_simulator::api::DEFAULT_MEDIA_THEME_ID.into(),
             groups: vec![DeviceGroupDraft {
                 id: "smart".into(),
                 profile_id: "ipc-smart".into(),
@@ -1676,6 +2016,8 @@ mod tests {
             preview,
             assets,
             picture_cache: Arc::new(parking_lot::RwLock::new(ImageCache::default())),
+            learned_endpoint: Arc::new(parking_lot::RwLock::new(None)),
+            access_policy: PlatformAccessPolicy::open(),
             enable_discovery: false,
         })
         .await
@@ -1738,6 +2080,7 @@ mod tests {
             81,
             &device("ipc-smart"),
             &profile(FirstReleaseProfileId::IpcSmart),
+            None,
         )
         .unwrap();
         let rendered = String::from_utf8(rendered).unwrap();
@@ -1762,5 +2105,26 @@ mod tests {
         let rendered = String::from_utf8(rendered).unwrap();
         assert!(rendered.contains("uuid:a&amp;b"));
         assert!(rendered.contains("http://192.0.2.10:81"));
+    }
+
+    #[test]
+    fn legacy_discovery_batches_once_per_profile_and_preserves_device_order() {
+        let devices = vec![
+            device_at("ipc-smart", "smart-a", "smart-a-0001", "192.0.2.10"),
+            device_at("nvr-common", "nvr", "nvr-0001", "192.0.2.20"),
+            device_at("ipc-smart", "smart-b", "smart-b-0001", "192.0.2.30"),
+        ];
+
+        let batches = legacy_discovery_batches(&devices);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            batches[0]
+                .iter()
+                .map(|device| device.device_id.as_str())
+                .collect::<Vec<_>>(),
+            ["smart-a-0001", "smart-b-0001"]
+        );
+        assert_eq!(batches[0][0].ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(batches[1][0].device_id, "nvr-0001");
     }
 }

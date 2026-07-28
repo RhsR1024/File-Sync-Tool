@@ -38,21 +38,24 @@ import {
 
 defineOptions({ name: 'TftpServerPage' });
 
-const STORAGE_KEY = 'tftp_server_config_v1';
+const STORAGE_KEY = 'tftp_server_config_v2';
+const LEGACY_STORAGE_KEY = 'tftp_server_config_v1';
 const { t } = useI18n();
 
 const defaultConfig = (): TftpServerConfig => ({
   root_dir: '',
   bind_address: '0.0.0.0',
   port: 69,
-  allow_upload: false,
-  allow_overwrite: false,
+  allow_upload: true,
+  allow_overwrite: true,
   block_size_limit: 8192,
   window_size_limit: 8,
 });
 
 const defaultStatus = (): TftpServerStatus => ({
   ...defaultConfig(),
+  allow_upload: false,
+  allow_overwrite: false,
   is_active: false,
   uptime_secs: 0,
   active_transfers: [],
@@ -72,6 +75,20 @@ function loadStoredConfig(): TftpServerConfig {
     if (stored) {
       const parsed = { ...defaultConfig(), ...JSON.parse(stored) };
       if (parsed.block_size_limit === 1468) parsed.block_size_limit = 8192;
+      return parsed;
+    }
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy) {
+      // v1 kept -pl receive and overwrite opt-in. Carry the directory and network
+      // settings over, but adopt the new defaults for those two switches.
+      const parsed = {
+        ...defaultConfig(),
+        ...JSON.parse(legacy),
+        allow_upload: true,
+        allow_overwrite: true,
+      };
+      if (parsed.block_size_limit === 1468) parsed.block_size_limit = 8192;
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
       return parsed;
     }
   } catch {
@@ -146,7 +163,15 @@ function formatDuration(seconds: number): string {
 
 function formatTime(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
+  if (Number.isNaN(date.getTime())) return value;
+  // The log survives restarts, so date-stamp anything that is not from today.
+  const isToday = date.toDateString() === new Date().toDateString();
+  if (isToday) return date.toLocaleTimeString();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${month}-${day} ${hours}:${minutes}`;
 }
 
 function eventLabel(event: TftpEvent): string {
@@ -307,12 +332,12 @@ onUnmounted(() => {
     <div class="mx-auto flex w-full max-w-7xl flex-col gap-5 px-5 py-5 pb-10 lg:px-7">
       <header class="flex flex-col gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex min-w-0 items-center gap-3">
-          <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-cyan-600 text-white shadow-sm">
-            <RadioTower class="h-5 w-5" aria-hidden="true" />
+          <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500 to-teal-600 shadow-sm">
+            <RadioTower class="h-5 w-5 text-white" aria-hidden="true" />
           </div>
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">
-              <h1 class="text-xl font-bold text-slate-950">{{ t('tools.tftpServer.title') }}</h1>
+              <h1 class="text-2xl font-bold text-slate-900">{{ t('tools.tftpServer.title') }}</h1>
               <span
                 class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-semibold"
                 :class="status.is_active ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'"
@@ -362,22 +387,22 @@ onUnmounted(() => {
       </header>
 
       <section class="grid grid-cols-2 gap-3 lg:grid-cols-4" :aria-label="t('tools.tftpServer.runtime')">
-        <div class="rounded-lg border border-slate-200 bg-white p-4">
+        <div class="rounded-xl border border-slate-200 bg-white p-4 transition-colors hover:border-cyan-200">
           <div class="flex items-center gap-2 text-xs font-semibold text-slate-500"><ArrowDownToLine class="h-4 w-4 text-cyan-600" />{{ t('tools.tftpServer.downloads') }}</div>
-          <div class="mt-2 text-2xl font-bold text-slate-950">{{ status.stats.completed_downloads }}</div>
+          <div class="mt-2 text-2xl font-bold tabular-nums text-slate-950">{{ status.stats.completed_downloads }}</div>
           <div class="mt-1 text-xs text-slate-500">{{ formatBytes(status.stats.bytes_sent) }}</div>
         </div>
-        <div class="rounded-lg border border-slate-200 bg-white p-4">
+        <div class="rounded-xl border border-slate-200 bg-white p-4 transition-colors hover:border-cyan-200">
           <div class="flex items-center gap-2 text-xs font-semibold text-slate-500"><ArrowUpFromLine class="h-4 w-4 text-blue-600" />{{ t('tools.tftpServer.uploads') }}</div>
-          <div class="mt-2 text-2xl font-bold text-slate-950">{{ status.stats.completed_uploads }}</div>
+          <div class="mt-2 text-2xl font-bold tabular-nums text-slate-950">{{ status.stats.completed_uploads }}</div>
           <div class="mt-1 text-xs text-slate-500">{{ formatBytes(status.stats.bytes_received) }}</div>
         </div>
-        <div class="rounded-lg border border-slate-200 bg-white p-4">
+        <div class="rounded-xl border border-slate-200 bg-white p-4 transition-colors hover:border-cyan-200">
           <div class="flex items-center gap-2 text-xs font-semibold text-slate-500"><Server class="h-4 w-4 text-emerald-600" />{{ t('tools.tftpServer.activeTransfers') }}</div>
-          <div class="mt-2 text-2xl font-bold text-slate-950">{{ status.active_transfers.length }}</div>
+          <div class="mt-2 text-2xl font-bold tabular-nums text-slate-950">{{ status.active_transfers.length }}</div>
           <div class="mt-1 text-xs text-slate-500">UDP {{ activePort }}</div>
         </div>
-        <div class="rounded-lg border border-slate-200 bg-white p-4">
+        <div class="rounded-xl border border-slate-200 bg-white p-4 transition-colors hover:border-cyan-200">
           <div class="flex items-center gap-2 text-xs font-semibold text-slate-500"><RadioTower class="h-4 w-4 text-violet-600" />{{ t('tools.tftpServer.uptime') }}</div>
           <div class="mt-2 font-mono text-2xl font-bold text-slate-950">{{ uptime }}</div>
           <div class="mt-1 truncate text-xs text-slate-500">{{ status.is_active ? `${status.bind_address}:${status.port}` : t('tools.tftpServer.notListening') }}</div>
@@ -390,7 +415,7 @@ onUnmounted(() => {
       </div>
 
       <div class="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(380px,0.95fr)]">
-        <section class="min-w-0 rounded-lg border border-slate-200 bg-white p-5" :aria-labelledby="'tftp-config-title'">
+        <section class="min-w-0 rounded-2xl border border-slate-200 bg-white p-5" :aria-labelledby="'tftp-config-title'">
           <div class="mb-5 flex items-center justify-between gap-3">
             <div>
               <h2 id="tftp-config-title" class="text-base font-bold text-slate-950">{{ t('tools.tftpServer.configuration') }}</h2>
@@ -460,7 +485,7 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <section class="min-w-0 rounded-lg border border-slate-200 bg-white p-5" :aria-labelledby="'tftp-command-title'">
+        <section class="min-w-0 rounded-2xl border border-slate-200 bg-white p-5" :aria-labelledby="'tftp-command-title'">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h2 id="tftp-command-title" class="text-base font-bold text-slate-950">{{ t('tools.tftpServer.deviceCommands') }}</h2>
@@ -511,9 +536,9 @@ onUnmounted(() => {
           </div>
 
           <div class="mt-4">
-            <div class="group flex min-w-0 items-center gap-3 rounded-lg border border-slate-200 bg-slate-950 px-3 py-3 text-slate-100">
-              <span class="shrink-0 text-xs font-semibold text-slate-400">{{ t('tools.tftpServer.runOnDevice') }}</span>
-              <code class="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs">{{ generatedCommand }}</code>
+            <div class="group flex min-w-0 items-start gap-3 rounded-lg border border-slate-200 bg-slate-950 px-3 py-3 text-slate-100">
+              <span class="shrink-0 pt-1.5 text-xs font-semibold text-slate-400">{{ t('tools.tftpServer.runOnDevice') }}</span>
+              <code class="min-w-0 flex-1 whitespace-pre-wrap break-all py-1 font-mono text-xs leading-5">{{ generatedCommand }}</code>
               <button type="button" class="inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded text-slate-400 transition-colors hover:bg-slate-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400" :aria-label="t('tools.tftpServer.copyCommand')" :title="t('tools.tftpServer.copyCommand')" @click="copyCommand(generatedCommand)">
                 <Check v-if="copiedCommand === generatedCommand" class="h-4 w-4 text-emerald-400" />
                 <Clipboard v-else class="h-4 w-4" />
@@ -529,7 +554,7 @@ onUnmounted(() => {
       </div>
 
       <div class="grid gap-5 xl:grid-cols-[minmax(340px,0.8fr)_minmax(0,1.2fr)]">
-        <section class="min-w-0 rounded-lg border border-slate-200 bg-white" :aria-labelledby="'tftp-files-title'">
+        <section class="min-w-0 rounded-2xl border border-slate-200 bg-white" :aria-labelledby="'tftp-files-title'">
           <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3.5">
             <div class="min-w-0">
               <h2 id="tftp-files-title" class="text-sm font-bold text-slate-900">{{ t('tools.tftpServer.sharedFiles') }}</h2>
@@ -552,7 +577,7 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <section class="min-w-0 rounded-lg border border-slate-200 bg-white" :aria-labelledby="'tftp-events-title'">
+        <section class="min-w-0 rounded-2xl border border-slate-200 bg-white" :aria-labelledby="'tftp-events-title'">
           <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3.5">
             <div>
               <h2 id="tftp-events-title" class="text-sm font-bold text-slate-900">{{ t('tools.tftpServer.transferLog') }}</h2>
@@ -561,7 +586,7 @@ onUnmounted(() => {
             <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">{{ status.events.length }}</span>
           </div>
           <div class="max-h-80 overflow-auto">
-            <div v-for="event in visibleEvents" :key="event.id" class="grid min-h-12 grid-cols-[72px_18px_minmax(0,1fr)_auto] items-center gap-2 border-b border-slate-100 px-4 py-2 text-xs last:border-b-0">
+            <div v-for="event in visibleEvents" :key="event.id" class="grid min-h-12 grid-cols-[84px_18px_minmax(0,1fr)_auto] items-center gap-2 border-b border-slate-100 px-4 py-2 text-xs last:border-b-0">
               <span class="font-mono tabular-nums text-slate-400">{{ formatTime(event.timestamp) }}</span>
               <span class="h-2 w-2 rounded-full" :class="event.level === 'success' ? 'bg-emerald-500' : event.level === 'error' ? 'bg-rose-500' : 'bg-cyan-500'"></span>
               <span class="min-w-0 truncate text-slate-700" :title="event.message || eventLabel(event)">{{ eventLabel(event) }}</span>

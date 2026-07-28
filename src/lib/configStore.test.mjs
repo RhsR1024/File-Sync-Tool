@@ -45,6 +45,20 @@ function makeConfig(overrides = {}) {
       auto_check_asset_updates: true,
       manage_firewall: true,
     },
+    portal_login: {
+      enabled: false,
+      host: 'http://1.1.1.3',
+      login_url: '/ac_portal/login.php',
+      portal_url: '/ac_portal/default/pc.html',
+      username: '',
+      password: '',
+      password_saved: false,
+      remember_pwd: true,
+      retry_count: 3,
+      retry_interval_secs: 5,
+      network_wait_secs: 30,
+      request_timeout_secs: 15,
+    },
     ...overrides,
   };
 }

@@ -330,6 +330,7 @@ pub trait IpAliasBackend: Send + Sync {
         interface_id: &str,
         address: Ipv4Addr,
         prefix_len: u8,
+        skip_as_source: bool,
     ) -> Result<(), IpAliasBackendError>;
     fn remove_alias(
         &self,
@@ -352,6 +353,7 @@ impl IpAliasBackend for UnsupportedIpAliasBackend {
         _interface_id: &str,
         _address: Ipv4Addr,
         _prefix_len: u8,
+        _skip_as_source: bool,
     ) -> Result<(), IpAliasBackendError> {
         Err(IpAliasBackendError::UnsupportedPlatform)
     }
@@ -379,8 +381,9 @@ impl IpAliasBackend for SystemIpAliasBackend {
         interface_id: &str,
         address: Ipv4Addr,
         prefix_len: u8,
+        skip_as_source: bool,
     ) -> Result<(), IpAliasBackendError> {
-        add_system_alias(interface_id, address, prefix_len)
+        add_system_alias(interface_id, address, prefix_len, skip_as_source)
     }
 
     fn remove_alias(
@@ -595,11 +598,12 @@ fn add_system_alias(
     interface_id: &str,
     address: Ipv4Addr,
     prefix_len: u8,
+    skip_as_source: bool,
 ) -> Result<(), IpAliasBackendError> {
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::NetworkManagement::IpHelper::CreateUnicastIpAddressEntry;
 
-    let row = build_unicast_row(interface_id, address, prefix_len)?;
+    let row = build_unicast_row(interface_id, address, prefix_len, skip_as_source)?;
     let status = unsafe { CreateUnicastIpAddressEntry(&row) };
     if status != ERROR_SUCCESS {
         return Err(IpAliasBackendError::Native(format!(
@@ -615,6 +619,7 @@ fn add_system_alias(
     _interface_id: &str,
     _address: Ipv4Addr,
     _prefix_len: u8,
+    _skip_as_source: bool,
 ) -> Result<(), IpAliasBackendError> {
     Err(IpAliasBackendError::UnsupportedPlatform)
 }
@@ -628,7 +633,7 @@ fn remove_system_alias(
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::NetworkManagement::IpHelper::DeleteUnicastIpAddressEntry;
 
-    let row = build_unicast_row(interface_id, address, prefix_len)?;
+    let row = build_unicast_row(interface_id, address, prefix_len, true)?;
     let status = unsafe { DeleteUnicastIpAddressEntry(&row) };
     if status != ERROR_SUCCESS {
         return Err(IpAliasBackendError::Native(format!(
@@ -653,6 +658,7 @@ fn build_unicast_row(
     interface_id: &str,
     address: Ipv4Addr,
     prefix_len: u8,
+    skip_as_source: bool,
 ) -> Result<
     windows::Win32::NetworkManagement::IpHelper::MIB_UNICASTIPADDRESS_ROW,
     IpAliasBackendError,
@@ -705,9 +711,9 @@ fn build_unicast_row(
     row.ValidLifetime = u32::MAX;
     row.PreferredLifetime = u32::MAX;
     row.OnLinkPrefixLength = prefix_len;
-    // Simulator aliases must not become the preferred source address for the
-    // user's unrelated outbound traffic.
-    row.SkipAsSource = BOOLEAN(1);
+    // Virtual-device aliases remain available for normal source selection so
+    // same-host RTSP clients work without a player-specific source-bind option.
+    row.SkipAsSource = BOOLEAN(u8::from(skip_as_source));
     row.DadState = IpDadStatePreferred;
     Ok(row)
 }

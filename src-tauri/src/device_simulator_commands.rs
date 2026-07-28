@@ -3,12 +3,12 @@ use app_lib::device_simulator::alarms::{AlarmHandlerId, AlarmTypeId};
 use app_lib::device_simulator::api::{
     list_first_release_profiles, preview_devices, AlarmJobRequest, AlarmTriggerResult,
     AlarmTypeSummary, AssetPackStatus, AssetProgressSnapshot, AssetStatus, DevicePreview,
-    DeviceProfileAvailability, DeviceProfileSummary, ImportedAlarmImage, PreflightReport,
-    ProfileAlarmTypes, RecoveryResult, RuntimeTelemetrySnapshot, SimulatorStartRequest,
-    SimulatorStatusSnapshot, DEVICE_SIMULATOR_EVENT_ALARM_STATS,
-    DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS, DEVICE_SIMULATOR_EVENT_CLEANUP_PROGRESS,
-    DEVICE_SIMULATOR_EVENT_DEVICE_STATUS, DEVICE_SIMULATOR_EVENT_LOG,
-    DEVICE_SIMULATOR_EVENT_RTSP_STATS, DEVICE_SIMULATOR_EVENT_STATUS,
+    DeviceProfileAvailability, DeviceProfileSummary, ImportedAlarmImage, MediaThemeSummary,
+    PreflightReport, ProfileAlarmTypes, RecoveryResult, RuntimeTelemetrySnapshot,
+    SimulatorStartRequest, SimulatorStatusSnapshot, DEVICE_SIMULATOR_EVENT_ALARM_STATS,
+    DEVICE_SIMULATOR_EVENT_ALARM_SUBSCRIPTION, DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS,
+    DEVICE_SIMULATOR_EVENT_CLEANUP_PROGRESS, DEVICE_SIMULATOR_EVENT_DEVICE_STATUS,
+    DEVICE_SIMULATOR_EVENT_LOG, DEVICE_SIMULATOR_EVENT_RTSP_STATS, DEVICE_SIMULATOR_EVENT_STATUS,
 };
 use app_lib::device_simulator::assets::cache::{
     validate_installed_pack, AssetStore, AssetStorePaths,
@@ -28,7 +28,7 @@ use app_lib::device_simulator::models::{AssetState, SessionState, SimulatorStatu
 use app_lib::device_simulator::preflight::{run_preflight, PreflightEnvironment};
 use app_lib::device_simulator::profiles::loader::load_profile_from_pack;
 use app_lib::device_simulator::profiles::schema::EvidenceStatus;
-use app_lib::device_simulator::runtime_assets::PinnedPackDirectory;
+use app_lib::device_simulator::runtime_assets::{list_media_themes, PinnedPackDirectory};
 use app_lib::device_simulator::session_journal::SessionJournalStore;
 use app_lib::device_simulator::windows::interfaces::{
     list_system_interfaces, NetworkInterfaceInfo,
@@ -196,6 +196,53 @@ pub async fn device_simulator_list_alarm_types(
     .map_err(|source| {
         runtime_error(
             "device_simulator.alarm.type_list_task_failed",
+            "deviceSimulator.errors.assetPreparationFailed",
+            source.to_string(),
+        )
+    })?
+}
+
+#[tauri::command]
+pub async fn device_simulator_list_media_themes(
+    app_handle: AppHandle,
+    app_state: State<'_, AppState>,
+) -> Result<Vec<MediaThemeSummary>, SimulatorErrorBody> {
+    let context = load_catalog_context(&app_handle, app_state.inner(), false).await?;
+    tokio::task::spawn_blocking(move || {
+        let pin = AssetStore::new(context.paths)
+            .pin_active(&context.cached.catalog)
+            .map_err(|source| {
+                runtime_error(
+                    source.code,
+                    "deviceSimulator.errors.assetPreparationFailed",
+                    source.message,
+                )
+            })?;
+        let media_directory = pin
+            .selection
+            .packs
+            .iter()
+            .zip(pin.pack_directories)
+            .find_map(|(pack, directory)| (pack.id == "media-h264-live").then_some(directory))
+            .ok_or_else(|| {
+                runtime_error(
+                    "device_simulator.assets.media_pack_missing",
+                    "deviceSimulator.errors.assetPreparationFailed",
+                    "active media-h264-live pack is missing",
+                )
+            })?;
+        list_media_themes(&media_directory).map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.assetPreparationFailed",
+                source.message,
+            )
+        })
+    })
+    .await
+    .map_err(|source| {
+        runtime_error(
+            "device_simulator.assets.media_theme_task_failed",
             "deviceSimulator.errors.assetPreparationFailed",
             source.to_string(),
         )
@@ -805,11 +852,18 @@ pub async fn shutdown_for_exit(
         SessionState::Idle | SessionState::Stopped | SessionState::Failed => {
             state.manager.shutdown_worker().await.map_err(manager_error)
         }
-        SessionState::RecoveryRequired | SessionState::Recovering => Err(runtime_error(
-            "device_simulator.exit.recovery_required",
-            "deviceSimulator.errors.exitRecoveryRequired",
-            "application exit cannot claim simulator cleanup while a recovery journal remains",
-        )),
+        SessionState::RecoveryRequired | SessionState::Recovering => {
+            // A residual/recovery journal must not trap the user inside the app.
+            // The journal is durable on disk and is reconciled idempotently on
+            // the next launch (foreign or stale resources are simply released),
+            // so exiting now leaks nothing. Blocking exit here previously left
+            // "cleanup failed" as the only outcome and forced users to kill the
+            // process, which orphaned a hung instance holding the single-instance
+            // guard and made the app impossible to relaunch. Let exit proceed and
+            // shut down any connected worker best-effort.
+            let _ = state.manager.shutdown_worker().await;
+            Ok(())
+        }
         _ => stop_active_session(app_handle, &state.manager).await,
     }
 }
@@ -995,6 +1049,7 @@ fn spawn_manager_notification_forwarder(
                             unverified: 0,
                             in_flight: stats.in_flight,
                             average_duration_ms: 0.0,
+                            last_http_status: None,
                             last_error: None,
                         };
                         let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_ALARM_STATS, payload);
@@ -1061,6 +1116,9 @@ fn spawn_runtime_telemetry_forwarder(
             }
             for alarm_stats in events.alarm_stats {
                 let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_ALARM_STATS, alarm_stats);
+            }
+            if let Some(subscription) = events.alarm_subscription {
+                let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_ALARM_SUBSCRIPTION, subscription);
             }
         }
     });

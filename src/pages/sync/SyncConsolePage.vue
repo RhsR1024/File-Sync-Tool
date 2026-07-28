@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, ListChecks, Send } from 'lucide-vue-next';
+import { Activity, FolderSync, ListChecks, Send } from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
 
 defineOptions({ name: 'SyncConsolePage' });
@@ -16,9 +16,14 @@ const tabs = [
   <div class="flex h-full min-h-0 flex-col bg-slate-50">
     <header class="shrink-0 border-b border-slate-200 bg-white px-7 pt-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
       <div class="sync-console-workspace w-full">
-        <div class="min-w-0">
-          <h1 class="text-[21px] font-extrabold tracking-tight text-slate-950">{{ t('sync.title') }}</h1>
-          <p class="mt-1 max-w-3xl text-[13px] leading-5 text-slate-500">{{ t('sync.description') }}</p>
+        <div class="flex items-start gap-3">
+          <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 shadow-sm">
+            <FolderSync class="h-5 w-5 text-white" aria-hidden="true" />
+          </div>
+          <div class="min-w-0">
+            <h1 class="text-2xl font-bold text-slate-900">{{ t('sync.title') }}</h1>
+            <p class="mt-1 max-w-3xl text-sm text-slate-500">{{ t('sync.description') }}</p>
+          </div>
         </div>
 
         <nav class="mt-4 flex gap-1 overflow-x-auto pb-3" :aria-label="t('sync.navigation')">

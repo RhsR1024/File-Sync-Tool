@@ -3,8 +3,17 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { X as XIcon } from 'lucide-vue-next';
-import { pingScan, cancelPingScan, saveTextFile, type PingResult, type PingScanRequest } from '../../lib/tauri';
+import { X as XIcon, TerminalSquare as TerminalIcon } from 'lucide-vue-next';
+import {
+  pingScan,
+  cancelPingScan,
+  openPingConsole,
+  saveTextFile,
+  type PingProbeMethod,
+  type PingResult,
+  type PingScanPhase,
+  type PingScanRequest,
+} from '../../lib/tauri';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../../lib/recentHistory';
 import Empty from '../Empty.vue';
 
@@ -107,6 +116,56 @@ const isScanning = ref(false);
 const results = ref(new Map<string, PingResult>());
 const viewMode = ref<'grid' | 'table'>('grid');
 const tableFilter = ref<'all' | 'online' | 'offline'>('all');
+const scanPhase = ref<PingScanPhase | null>(null);
+
+// ── Probe method presentation ──────────────────────────────────────────────
+
+const METHOD_LABEL_KEYS: Record<PingProbeMethod, string> = {
+  arp: 'networkTools.ping.methodArp',
+  icmp: 'networkTools.ping.methodIcmp',
+  tcp: 'networkTools.ping.methodTcp',
+  'arp-cache': 'networkTools.ping.methodArpCache',
+};
+
+const METHOD_HINT_KEYS: Record<PingProbeMethod, string> = {
+  arp: 'networkTools.ping.methodArpHint',
+  icmp: 'networkTools.ping.methodIcmpHint',
+  tcp: 'networkTools.ping.methodTcpHint',
+  'arp-cache': 'networkTools.ping.methodArpCacheHint',
+};
+
+// ARP is link-layer proof the address is taken, so it reads as the strongest
+// signal; the others only tell us something answered at a higher layer.
+const METHOD_BADGE_CLASS: Record<PingProbeMethod, string> = {
+  arp: 'bg-emerald-50 text-emerald-700',
+  icmp: 'bg-sky-50 text-sky-700',
+  tcp: 'bg-violet-50 text-violet-700',
+  'arp-cache': 'bg-amber-50 text-amber-700',
+};
+
+function methodLabel(method: PingProbeMethod | null) {
+  return method ? t(METHOD_LABEL_KEYS[method]) : '';
+}
+
+function methodHint(method: PingProbeMethod | null) {
+  return method ? t(METHOD_HINT_KEYS[method]) : '';
+}
+
+function methodBadgeClass(method: PingProbeMethod | null) {
+  return method ? METHOD_BADGE_CLASS[method] : '';
+}
+
+const phaseMessage = computed(() => {
+  const phase = scanPhase.value;
+  if (!phase || !isScanning.value) return '';
+  if (phase.phase === 'rescanning') {
+    return t('networkTools.ping.phaseRescanning', { count: phase.remaining });
+  }
+  if (phase.phase === 'arpSweep') {
+    return t('networkTools.ping.phaseArpSweep');
+  }
+  return '';
+});
 
 // ── Validation ─────────────────────────────────────────────────────────────
 
@@ -143,12 +202,21 @@ const progressPct = computed(() =>
 
 // ── Grid cells ─────────────────────────────────────────────────────────────
 
+type GridCell = {
+  octet: number;
+  ip: string;
+  state: 'online' | 'offline' | 'scanning' | 'waiting';
+  latencyMs: number | null;
+  mac: string | null;
+  method: PingProbeMethod | null;
+};
+
 const gridCells = computed(() => {
-  const cells: Array<{ octet: number; ip: string; state: 'online' | 'offline' | 'scanning' | 'waiting'; latencyMs: number | null }> = [];
+  const cells: GridCell[] = [];
   for (let i = start.value; i <= end.value; i++) {
     const ip = `${prefix.value}.${i}`;
     const res = results.value.get(ip);
-    let state: 'online' | 'offline' | 'scanning' | 'waiting';
+    let state: GridCell['state'];
     if (res) {
       state = res.alive ? 'online' : 'offline';
     } else if (isScanning.value) {
@@ -156,7 +224,14 @@ const gridCells = computed(() => {
     } else {
       state = 'waiting';
     }
-    cells.push({ octet: i, ip, state, latencyMs: res?.latencyMs ?? null });
+    cells.push({
+      octet: i,
+      ip,
+      state,
+      latencyMs: res?.latencyMs ?? null,
+      mac: res?.mac ?? null,
+      method: res?.method ?? null,
+    });
   }
   return cells;
 });
@@ -164,14 +239,14 @@ const gridCells = computed(() => {
 // ── Table rows (filtered) ──────────────────────────────────────────────────
 
 const tableRows = computed(() => {
-  const rows: Array<{ ip: string; alive: boolean; latencyMs: number | null }> = [];
+  const rows: PingResult[] = [];
   for (let i = start.value; i <= end.value; i++) {
     const ip = `${prefix.value}.${i}`;
     const res = results.value.get(ip);
     if (!res) continue;
     if (tableFilter.value === 'online' && !res.alive) continue;
     if (tableFilter.value === 'offline' && res.alive) continue;
-    rows.push({ ip, alive: res.alive, latencyMs: res.latencyMs });
+    rows.push(res);
   }
   return rows;
 });
@@ -196,21 +271,30 @@ function cellClass(state: 'online' | 'offline' | 'scanning' | 'waiting') {
 
 let unlistenResult: UnlistenFn | null = null;
 let unlistenComplete: UnlistenFn | null = null;
+let unlistenPhase: UnlistenFn | null = null;
 
 async function attachListeners() {
   unlistenResult = await listen<PingResult>('ping-result', event => {
+    // Later passes re-emit an address once they find it after all, so keying by
+    // IP lets a rescan or ARP-cache hit replace an earlier offline verdict.
     results.value = new Map(results.value).set(event.payload.ip, event.payload);
+  });
+  unlistenPhase = await listen<PingScanPhase>('ping-scan-phase', event => {
+    scanPhase.value = event.payload;
   });
   unlistenComplete = await listen('ping-scan-complete', () => {
     isScanning.value = false;
+    scanPhase.value = null;
   });
 }
 
 function detachListeners() {
   unlistenResult?.();
   unlistenComplete?.();
+  unlistenPhase?.();
   unlistenResult = null;
   unlistenComplete = null;
+  unlistenPhase = null;
 }
 
 onUnmounted(() => {
@@ -223,6 +307,7 @@ async function startScan() {
   if (!isFormValid.value || isScanning.value) return;
   const normalizedPrefix = prefix.value.trim();
   results.value = new Map();
+  scanPhase.value = null;
   isScanning.value = true;
   await attachListeners();
   const request: PingScanRequest = {
@@ -248,6 +333,7 @@ async function stopScan() {
     console.error('cancelPingScan error:', err);
   } finally {
     isScanning.value = false;
+    scanPhase.value = null;
     detachListeners();
   }
 }
@@ -255,26 +341,53 @@ async function stopScan() {
 // ── CSV Export ─────────────────────────────────────────────────────────────
 
 async function exportCsv() {
-  const lines: string[] = ['IP,Status,Latency(ms)'];
+  const lines: string[] = ['IP,Status,Latency(ms),MAC,Method'];
   for (let i = start.value; i <= end.value; i++) {
     const ip = `${prefix.value}.${i}`;
     const res = results.value.get(ip);
     if (!res) continue;
     const status = res.alive ? t('networkTools.ping.online') : t('networkTools.ping.offline');
     const latency = res.latencyMs !== null ? String(res.latencyMs) : '';
-    lines.push(`${ip},${status},${latency}`);
+    lines.push(`${ip},${status},${latency},${res.mac ?? ''},${methodLabel(res.method)}`);
   }
   const content = lines.join('\n');
   await saveTextFile(content, 'ping-scan.csv', 'CSV', ['csv']);
 }
 
+// ── Manual recheck ─────────────────────────────────────────────────────────
+
+// A scan samples each address at one instant, so a host that was asleep or
+// dropped a packet can read as free. This opens a real console for the user to
+// judge for themselves rather than making the scan pretend to be certain.
+async function pingInConsole(ip: string) {
+  try {
+    await openPingConsole(ip);
+  } catch (err) {
+    console.error('openPingConsole error:', err);
+  }
+}
+
 // ── Tooltip state ──────────────────────────────────────────────────────────
 
-const tooltip = ref<{ ip: string; latencyMs: number | null; x: number; y: number } | null>(null);
+const tooltip = ref<{
+  ip: string;
+  latencyMs: number | null;
+  mac: string | null;
+  method: PingProbeMethod | null;
+  x: number;
+  y: number;
+} | null>(null);
 
-function showTooltip(cell: { ip: string; latencyMs: number | null }, event: MouseEvent) {
+function showTooltip(cell: GridCell, event: MouseEvent) {
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-  tooltip.value = { ip: cell.ip, latencyMs: cell.latencyMs, x: rect.left + rect.width / 2, y: rect.top };
+  tooltip.value = {
+    ip: cell.ip,
+    latencyMs: cell.latencyMs,
+    mac: cell.mac,
+    method: cell.method,
+    x: rect.left + rect.width / 2,
+    y: rect.top,
+  };
 }
 
 function hideTooltip() {
@@ -494,17 +607,38 @@ function hideTooltip() {
         ></div>
       </div>
 
+      <!-- Later passes keep running after every address has a first answer,
+           so say what the scan is still doing. -->
+      <p v-if="phaseMessage" class="flex items-center gap-1.5 text-xs text-amber-600">
+        <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse inline-block"></span>
+        {{ phaseMessage }}
+      </p>
+
       <!-- Grid view -->
       <div v-if="viewMode === 'grid'" class="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
         <div class="grid gap-1" style="grid-template-columns: repeat(16, minmax(0, 1fr));">
           <div
             v-for="cell in gridCells"
             :key="cell.ip"
-            :class="['rounded flex items-center justify-center text-[11px] font-mono font-medium cursor-default select-none aspect-square', cellClass(cell.state)]"
+            :class="['group relative rounded flex items-center justify-center text-[11px] font-mono font-medium cursor-default select-none aspect-square', cellClass(cell.state)]"
             @mouseenter="showTooltip(cell, $event)"
             @mouseleave="hideTooltip"
           >
-            .{{ cell.octet }}
+            <span class="transition-opacity group-hover:opacity-0">.{{ cell.octet }}</span>
+            <!-- Manual recheck: the scan is a single sample, this is the
+                 second opinion. -->
+            <button
+              type="button"
+              :title="t('networkTools.ping.pingInConsole', { ip: cell.ip })"
+              :aria-label="t('networkTools.ping.pingInConsole', { ip: cell.ip })"
+              class="absolute inset-0 flex flex-col items-center justify-center gap-0.5 rounded bg-slate-900/75 text-white opacity-0 transition-opacity hover:bg-slate-900/90 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 group-hover:opacity-100"
+              @click="pingInConsole(cell.ip)"
+            >
+              <TerminalIcon class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span class="text-[9px] font-semibold leading-none tracking-wide">
+                {{ t('networkTools.ping.pingAction') }}
+              </span>
+            </button>
           </div>
         </div>
 
@@ -525,6 +659,10 @@ function hideTooltip() {
           <span class="flex items-center gap-1.5 text-xs text-slate-500">
             <span class="w-3 h-3 rounded bg-slate-700 inline-block"></span>
             {{ t('networkTools.ping.waiting') }}
+          </span>
+          <span class="flex items-center gap-1.5 text-xs text-slate-400 ml-auto">
+            <TerminalIcon class="w-3.5 h-3.5" />
+            {{ t('networkTools.ping.recheckHint') }}
           </span>
         </div>
       </div>
@@ -564,6 +702,15 @@ function hideTooltip() {
                 <th scope="col" class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
                   {{ t('networkTools.ping.latency') }}
                 </th>
+                <th scope="col" class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                  {{ t('networkTools.ping.macAddress') }}
+                </th>
+                <th scope="col" class="px-4 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                  {{ t('networkTools.ping.method') }}
+                </th>
+                <th scope="col" class="px-4 py-2.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                  {{ t('networkTools.ping.recheck') }}
+                </th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100">
@@ -588,9 +735,36 @@ function hideTooltip() {
                 <td class="px-4 py-2.5 text-sm text-slate-600 tabular-nums">
                   {{ row.latencyMs !== null ? `${row.latencyMs} ms` : '—' }}
                 </td>
+                <td class="px-4 py-2.5 text-sm font-mono text-slate-600">
+                  {{ row.mac ?? '—' }}
+                </td>
+                <td class="px-4 py-2.5">
+                  <span
+                    v-if="row.method"
+                    :class="[
+                      'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium',
+                      methodBadgeClass(row.method),
+                    ]"
+                    :title="methodHint(row.method)"
+                  >
+                    {{ methodLabel(row.method) }}
+                  </span>
+                  <span v-else class="text-sm text-slate-400">—</span>
+                </td>
+                <td class="px-4 py-2.5 text-right">
+                  <button
+                    type="button"
+                    :title="t('networkTools.ping.pingInConsole', { ip: row.ip })"
+                    class="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-50 hover:text-slate-800"
+                    @click="pingInConsole(row.ip)"
+                  >
+                    <TerminalIcon class="w-3.5 h-3.5" />
+                    {{ t('networkTools.ping.pingAction') }}
+                  </button>
+                </td>
               </tr>
               <tr v-if="tableRows.length === 0">
-                <td colspan="3" class="px-4 py-6 text-center text-sm text-slate-400">
+                <td colspan="6" class="px-4 py-6 text-center text-sm text-slate-400">
                   —
                 </td>
               </tr>
@@ -610,6 +784,10 @@ function hideTooltip() {
         <div class="font-mono font-medium">{{ tooltip.ip }}</div>
         <div class="text-slate-300 mt-0.5">
           {{ tooltip.latencyMs !== null ? `${tooltip.latencyMs} ms` : t('networkTools.ping.waiting') }}
+        </div>
+        <div v-if="tooltip.mac" class="font-mono text-slate-300 mt-0.5">{{ tooltip.mac }}</div>
+        <div v-if="tooltip.method" class="text-slate-400 mt-0.5">
+          {{ t('networkTools.ping.method') }}: {{ methodLabel(tooltip.method) }}
         </div>
       </div>
     </Teleport>

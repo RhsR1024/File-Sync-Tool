@@ -8,8 +8,14 @@ pub enum RtspMethod {
     Describe,
     Setup,
     Play,
+    FastPlay,
     GetParameter,
     Teardown,
+    /// Any other verb. The legacy IPCRtsp server only branched on OPTIONS,
+    /// SETUP, PLAY, FASTPLAY and GET_PARAMETER and answered every remaining
+    /// request with its DESCRIBE SDP, so PAUSE/SET_PARAMETER/ANNOUNCE never
+    /// broke a session. Keeping that fallback is required for parity.
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +40,7 @@ pub enum RtspDecision {
     Describe,
     SetupTcpInterleaved { rtp_channel: u8, rtcp_channel: u8 },
     Play,
+    FastPlay,
     KeepAlive,
     Teardown,
     Error { status: u16, reason: &'static str },
@@ -75,13 +82,16 @@ impl RtspSession {
         match request.method {
             RtspMethod::Options => RtspDecision::Options,
             RtspMethod::Describe => RtspDecision::Describe,
+            // Legacy answered every SETUP with the same 200, including the
+            // extra track some platforms set up after PLAY. The service only
+            // ever spawns one stream task, so a late SETUP cannot disturb the
+            // video already in flight.
             RtspMethod::Setup => {
-                if self.state == RtspSessionState::Playing {
-                    return error(455, "Method Not Valid in This State");
-                }
                 match parse_tcp_interleaved(request.headers.get("transport")) {
                     Ok((rtp_channel, rtcp_channel)) => {
-                        self.state = RtspSessionState::Ready;
+                        if self.state != RtspSessionState::Playing {
+                            self.state = RtspSessionState::Ready;
+                        }
                         RtspDecision::SetupTcpInterleaved {
                             rtp_channel,
                             rtcp_channel,
@@ -90,28 +100,28 @@ impl RtspSession {
                     Err(()) => error(461, "Unsupported Transport"),
                 }
             }
+            // The legacy server started streaming on the first PLAY it saw and
+            // never tracked SETUP state, so clients that PLAY an aggregate URL
+            // without a per-track SETUP still get video. Rejecting those with
+            // 455 is a port regression, not legacy behaviour.
             RtspMethod::Play => {
-                if self.state != RtspSessionState::Ready {
-                    error(455, "Method Not Valid in This State")
-                } else {
-                    self.state = RtspSessionState::Playing;
-                    RtspDecision::Play
-                }
+                self.state = RtspSessionState::Playing;
+                RtspDecision::Play
             }
-            RtspMethod::GetParameter => {
-                if matches!(
-                    self.state,
-                    RtspSessionState::Ready | RtspSessionState::Playing
-                ) {
-                    RtspDecision::KeepAlive
-                } else {
-                    error(455, "Method Not Valid in This State")
-                }
+            // A repeated FASTPLAY re-sent the SDP in the legacy server; only one
+            // stream task is ever started, so answering again is safe.
+            RtspMethod::FastPlay => {
+                self.state = RtspSessionState::Playing;
+                RtspDecision::FastPlay
             }
+            // Legacy answered GET_PARAMETER with 200 in every state; platforms
+            // use it as a pre-SETUP probe as well as a keep-alive.
+            RtspMethod::GetParameter => RtspDecision::KeepAlive,
             RtspMethod::Teardown => {
                 self.state = RtspSessionState::Closed;
                 RtspDecision::Teardown
             }
+            RtspMethod::Other => RtspDecision::Describe,
         }
     }
 }
@@ -147,17 +157,12 @@ pub fn parse_rtsp_request(bytes: &[u8]) -> Result<RtspRequest, RtspParseError> {
         "DESCRIBE" => RtspMethod::Describe,
         "SETUP" => RtspMethod::Setup,
         "PLAY" => RtspMethod::Play,
+        "FASTPLAY" => RtspMethod::FastPlay,
         "GET_PARAMETER" => RtspMethod::GetParameter,
         "TEARDOWN" => RtspMethod::Teardown,
-        _ => {
-            return Err(RtspParseError::new(
-                "device_simulator.rtsp.method_unsupported",
-                format!(
-                    "unsupported RTSP method '{}': no compatibility evidence",
-                    parts[0]
-                ),
-            ));
-        }
+        // PAUSE, SET_PARAMETER, ANNOUNCE and anything else fall back to the
+        // legacy SDP answer instead of tearing the connection down.
+        _ => RtspMethod::Other,
     };
     if !parts[1].starts_with("rtsp://") && !parts[1].starts_with('/') && parts[1] != "*" {
         return Err(RtspParseError::new(
@@ -188,15 +193,10 @@ pub fn parse_rtsp_request(bytes: &[u8]) -> Result<RtspRequest, RtspParseError> {
                 "RTSP header name is invalid",
             ));
         }
-        if headers
-            .insert(name.clone(), value.trim().to_string())
-            .is_some()
-        {
-            return Err(RtspParseError::new(
-                "device_simulator.rtsp.header_duplicate",
-                format!("duplicate RTSP header '{name}'"),
-            ));
-        }
+        // Legacy read the first occurrence of each header and ignored the rest.
+        // Rejecting duplicates dropped sessions from clients that repeat a
+        // header, so keep the first value instead.
+        headers.entry(name).or_insert_with(|| value.trim().to_string());
     }
     let cseq = headers
         .get("cseq")
@@ -238,6 +238,24 @@ pub fn build_rtsp_response(
     bytes
 }
 
+/// Declared body length of a request whose headers have already been read.
+/// RTSP bodies are rare but GET_PARAMETER and SET_PARAMETER carry them; leaving
+/// the bytes in the socket would desynchronise the next request.
+pub fn declared_body_length(header_bytes: &[u8]) -> usize {
+    let Ok(text) = std::str::from_utf8(header_bytes) else {
+        return 0;
+    };
+    text.split("\r\n")
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0)
+        .min(MAX_RTSP_REQUEST_BYTES)
+}
+
 fn parse_tcp_interleaved(value: Option<&String>) -> Result<(u8, u8), ()> {
     let value = value.ok_or(())?;
     if !value
@@ -277,28 +295,38 @@ mod tests {
     }
 
     #[test]
-    fn parses_bounded_requests_and_rejects_unknown_or_duplicate_headers() {
+    fn parses_bounded_requests_and_tolerates_unknown_methods_or_repeated_headers() {
         assert_eq!(request("OPTIONS", "").cseq, 7);
         assert_eq!(
             parse_rtsp_request(b"PAUSE * RTSP/1.0\r\nCSeq: 1\r\n\r\n")
-                .unwrap_err()
-                .code,
-            "device_simulator.rtsp.method_unsupported"
+                .unwrap()
+                .method,
+            RtspMethod::Other
         );
+        // A repeated header keeps the first value instead of dropping the
+        // session, matching the legacy parser.
         assert_eq!(
             parse_rtsp_request(b"OPTIONS * RTSP/1.0\r\nCSeq: 1\r\nCSeq: 2\r\n\r\n")
-                .unwrap_err()
-                .code,
-            "device_simulator.rtsp.header_duplicate"
+                .unwrap()
+                .cseq,
+            1
         );
+        assert_eq!(
+            declared_body_length(b"GET_PARAMETER * RTSP/1.0\r\nContent-Length: 12\r\n"),
+            12
+        );
+        assert_eq!(declared_body_length(b"OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n"), 0);
     }
 
     #[test]
     fn enforces_tcp_only_and_valid_state_transitions() {
         let mut session = RtspSession::new("session-1".into());
+        // Legacy started streaming on a bare PLAY, so this must not 455.
+        assert_eq!(session.handle(&request("PLAY", "")), RtspDecision::Play);
+        session.state = RtspSessionState::Initial;
         assert_eq!(
-            session.handle(&request("PLAY", "")),
-            error(455, "Method Not Valid in This State")
+            session.handle(&request("PAUSE", "")),
+            RtspDecision::Describe
         );
         assert_eq!(
             session.handle(&request(

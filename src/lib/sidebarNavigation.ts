@@ -5,6 +5,7 @@ export type SidebarIconKey =
   | 'toolsOverview'
   | 'frameworkPassword'
   | 'applianceSsh'
+  | 'portalAutoLogin'
   | 'remotePackagePatch'
   | 'codeStatistics'
   | 'networkTools'
@@ -102,6 +103,13 @@ export const SIDEBAR_NAV_SECTIONS = [
         labelKey: 'sidebar.networkTools',
         path: '/tools/network',
         iconKey: 'networkTools',
+        matchMode: 'prefix',
+      },
+      {
+        key: 'portal-auto-login',
+        labelKey: 'sidebar.portalAutoLogin',
+        path: '/tools/portal-auto-login',
+        iconKey: 'portalAutoLogin',
         matchMode: 'prefix',
       },
       {

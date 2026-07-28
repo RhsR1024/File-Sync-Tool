@@ -63,6 +63,20 @@ fn show_panel(panel: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn remember_paste_target(app: &AppHandle) {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let target = unsafe { GetForegroundWindow() };
+    if !target.0.is_null() {
+        let state = app.state::<AppState>();
+        *state.clipboard.paste_target_window.lock() = Some(target.0 as isize);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn remember_paste_target(_app: &AppHandle) {}
+
 #[cfg(not(target_os = "windows"))]
 fn show_panel(panel: &WebviewWindow) -> Result<(), String> {
     panel.show().map_err(|e| e.to_string())?;
@@ -432,6 +446,8 @@ pub fn cb_toggle_panel_internal(app: AppHandle) -> Result<(), String> {
         let _ = panel.hide();
         return Ok(());
     }
+
+    remember_paste_target(&app);
 
     // Position near cursor, clamped to current monitor bounds
     if let Ok(pos) = app.cursor_position() {

@@ -1,6 +1,7 @@
 use crate::task_domain::{
-    CopyState, DeployAttempt, DeployStage, DeployState, LocalExecState, TaskGroup, TaskMergeKey,
-    TaskRun, TaskRunType, TaskSourceType, TaskState, TaskSummaryStatus, TaskTriggerSource,
+    normalize_path_for_merge, CopyState, DeployAttempt, DeployStage, DeployState, LocalExecState,
+    TaskGroup, TaskMergeKey, TaskRun, TaskRunType, TaskSourceType, TaskState, TaskSummaryStatus,
+    TaskTriggerSource,
 };
 use crate::task_events::{
     TaskGroupDetailSnapshot, TaskGroupListItem, TaskGroupsSnapshot, TaskLogEntry,
@@ -455,6 +456,27 @@ impl TaskManager {
         }
         self.after_change(Some(task_group_id));
         Ok(())
+    }
+
+    /// Whether the newest recorded copy for this source/target pair was cancelled.
+    ///
+    /// Matching on the paths rather than on the merge key means a manual re-copy of the
+    /// same folder counts too, even though it lands in its own group: a manual retry is
+    /// how the user takes a cancelled candidate off the skip list again.
+    pub fn last_copy_was_cancelled(&self, source_path: &str, local_target_path: &str) -> bool {
+        let source = normalize_path_for_merge(source_path);
+        let target = normalize_path_for_merge(local_target_path);
+        let state = self.inner.state.lock().unwrap();
+        state
+            .groups
+            .iter()
+            .filter(|group| {
+                normalize_path_for_merge(&group.source_path) == source
+                    && normalize_path_for_merge(&group.local_target_path) == target
+            })
+            .flat_map(|group| group.runs.iter())
+            .max_by_key(|run| run_start_millis(&run.started_at))
+            .is_some_and(|run| run.copy_phase == CopyState::Cancelled)
     }
 
     // Drop a scheduled run that produced no real work (0 files matched the copy rules).
@@ -1021,6 +1043,16 @@ fn current_timestamp() -> String {
     chrono::Local::now().to_rfc3339()
 }
 
+/// Sortable start time for a run. Unparsable timestamps sort oldest so they never
+/// shadow a run whose time is known. Runs that share a millisecond are broken by
+/// iteration order — groups and their runs are both appended chronologically, and
+/// `max_by_key` keeps the last of equal keys — so the newest still wins.
+fn run_start_millis(started_at: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(started_at)
+        .map(|value| value.timestamp_millis())
+        .unwrap_or(i64::MIN)
+}
+
 fn compute_elapsed_seconds(started_at: &str, finished_at: Option<&str>) -> u64 {
     let Ok(start) = chrono::DateTime::parse_from_rfc3339(started_at) else {
         return 0;
@@ -1097,6 +1129,73 @@ mod tests {
             .expect("mark_copy_started should succeed");
         let groups = manager.list_groups();
         assert_eq!(groups[0].summary_status, TaskSummaryStatus::Copying);
+    }
+
+    #[test]
+    fn cancelled_copy_marks_the_source_target_pair_as_cancelled() {
+        let manager = TaskManager::new_in_memory();
+        let request = TaskStartRequest::sample();
+        let source = request.source_path.clone();
+        let target = request.local_target_path.clone();
+        let handle = manager.begin_scheduled_copy(request);
+        assert!(!manager.last_copy_was_cancelled(&source, &target));
+
+        manager
+            .mark_copy_cancelled(&handle.task_group_id, &handle.run_id)
+            .unwrap();
+
+        assert!(manager.last_copy_was_cancelled(&source, &target));
+        // Path spelling differences must not let a cancelled candidate slip back in.
+        assert!(manager.last_copy_was_cancelled(&source.to_lowercase(), &target.replace('\\', "/")));
+        assert!(!manager.last_copy_was_cancelled(&source, "E:\\target\\Other"));
+    }
+
+    #[test]
+    fn failed_copy_is_not_treated_as_cancelled() {
+        let manager = TaskManager::new_in_memory();
+        let request = TaskStartRequest::sample();
+        let source = request.source_path.clone();
+        let target = request.local_target_path.clone();
+        let handle = manager.begin_scheduled_copy(request);
+
+        manager
+            .mark_copy_failed(
+                &handle.task_group_id,
+                &handle.run_id,
+                "disk full".to_string(),
+            )
+            .unwrap();
+
+        assert!(!manager.last_copy_was_cancelled(&source, &target));
+    }
+
+    #[test]
+    fn a_manual_recopy_clears_an_earlier_cancel() {
+        let manager = TaskManager::new_in_memory();
+        let request = TaskStartRequest::sample();
+        let source = request.source_path.clone();
+        let target = request.local_target_path.clone();
+        let cancelled = manager.begin_scheduled_copy(request);
+        manager
+            .mark_copy_cancelled(&cancelled.task_group_id, &cancelled.run_id)
+            .unwrap();
+
+        // A manual retry lands in its own group (no task_config_id) but copies the same
+        // folder to the same place, so it must take the candidate off the skip list.
+        let retried = manager
+            .begin_manual_copy_run(StartManualCopyRequest {
+                display_name: "Release_01".to_string(),
+                folder_name: "Release_01".to_string(),
+                source_path: source.clone(),
+                local_target_path: target.clone(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+        manager
+            .mark_copy_completed(&retried.task_group_id, &retried.run_id, false)
+            .unwrap();
+
+        assert!(!manager.last_copy_was_cancelled(&source, &target));
     }
 
     #[test]

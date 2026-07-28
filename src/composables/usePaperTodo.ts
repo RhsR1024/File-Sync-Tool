@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { computed, ref } from 'vue';
+import { computed, ref, toRaw } from 'vue';
 
 import {
   MAX_PAPERS,
@@ -21,6 +21,7 @@ interface PaperTodoChangedEvent {
   revision: number;
   paperId: string | null;
   source: string | null;
+  paper: PaperDocument | null;
 }
 
 interface PaperHistory {
@@ -33,6 +34,7 @@ const loading = ref(false);
 const loaded = ref(false);
 const error = ref('');
 const savingIds = ref(new Set<string>());
+const geometrySuspensions = ref(0);
 const histories = new Map<string, PaperHistory>();
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingPaperSaves = new Map<string, Promise<void>>();
@@ -40,12 +42,23 @@ let settingsTimer: ReturnType<typeof setTimeout> | null = null;
 let initPromise: Promise<void> | null = null;
 let unlisten: UnlistenFn | null = null;
 
+// Papers are cloned on every debounced save and every history entry, and a note
+// can hold 500 KB of text. `structuredClone` copies that natively instead of
+// serialising to a JSON string and parsing it back; `toRaw` keeps Vue's proxy
+// out of the copy, which it cannot clone.
+function deepCopy<T>(value: T): T {
+  const raw = toRaw(value);
+  return typeof structuredClone === 'function'
+    ? structuredClone(raw)
+    : (JSON.parse(JSON.stringify(raw)) as T);
+}
+
 function clonePaper(paper: PaperDocument): PaperDocument {
-  return JSON.parse(JSON.stringify(paper)) as PaperDocument;
+  return deepCopy(paper);
 }
 
 function cloneSettings(settings: PaperTodoSettings): PaperTodoSettings {
-  return JSON.parse(JSON.stringify(settings)) as PaperTodoSettings;
+  return deepCopy(settings);
 }
 
 function historyFor(id: string): PaperHistory {
@@ -110,6 +123,24 @@ async function refreshFromDisk(): Promise<void> {
   if (next.revision >= state.value.revision) state.value = next;
 }
 
+function applyRemoteChange(event: PaperTodoChangedEvent): void {
+  // A null paperId means settings/order changed and we still need a full read.
+  if (!event.paperId) {
+    void refreshFromDisk();
+    return;
+  }
+  if (event.revision < state.value.revision) return;
+  const index = state.value.papers.findIndex((paper) => paper.id === event.paperId);
+  if (event.paper) {
+    if (index >= 0) state.value.papers[index] = event.paper;
+    else state.value.papers.push(event.paper);
+  } else if (index >= 0) {
+    state.value.papers.splice(index, 1);
+    histories.delete(event.paperId);
+  }
+  state.value.revision = event.revision;
+}
+
 async function initialize(): Promise<void> {
   if (loaded.value) return;
   if (initPromise) return initPromise;
@@ -120,7 +151,7 @@ async function initialize(): Promise<void> {
       if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window && !unlisten) {
         unlisten = await listen<PaperTodoChangedEvent>('paper-todo-changed', (event) => {
           if (event.payload.source === PAPER_TODO_SESSION_ID) return;
-          void refreshFromDisk();
+          applyRemoteChange(event.payload);
         });
       }
       loaded.value = true;
@@ -225,6 +256,18 @@ async function reorderPapers(ids: string[]): Promise<void> {
   state.value.revision = await savePaperOrder(ids);
 }
 
+/**
+ * Ignore window-move events for `durationMs`. Edge-peek and docking reposition
+ * the capsule themselves; persisting those frames would save an off-screen
+ * origin and restore the paper hidden at the display edge on the next launch.
+ */
+function suspendGeometryTracking(durationMs: number): void {
+  geometrySuspensions.value += 1;
+  setTimeout(() => {
+    geometrySuspensions.value = Math.max(0, geometrySuspensions.value - 1);
+  }, durationMs);
+}
+
 async function flush(): Promise<void> {
   const pending = [...saveTimers.keys()];
   for (const id of pending) {
@@ -251,6 +294,8 @@ export function usePaperTodo() {
     loaded,
     error,
     savingIds,
+    geometryTrackingSuspended: computed(() => geometrySuspensions.value > 0),
+    suspendGeometryTracking,
     initialize,
     refreshFromDisk,
     addPaper,

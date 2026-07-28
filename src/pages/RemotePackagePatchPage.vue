@@ -748,13 +748,13 @@ onBeforeUnmount(() => {
     <div class="mx-auto flex w-full max-w-[1440px] flex-col gap-5 px-6 py-6">
       <!-- 标题 -->
       <header class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div class="flex items-center gap-3">
-          <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-50 text-sky-600">
-            <PackageSearch class="h-5 w-5" />
+        <div class="flex items-start gap-3">
+          <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-blue-600 shadow-sm">
+            <PackageSearch class="h-5 w-5 text-white" />
           </div>
           <div>
-            <h1 class="text-lg font-bold text-slate-950">{{ t('remotePackagePatch.title') }}</h1>
-            <p class="text-xs text-slate-500">{{ t('remotePackagePatch.headerNote') }}</p>
+            <h1 class="text-2xl font-bold text-slate-900">{{ t('remotePackagePatch.title') }}</h1>
+            <p class="mt-1 text-sm text-slate-500">{{ t('remotePackagePatch.headerNote') }}</p>
           </div>
         </div>
         <!-- 任务摘要条 -->
@@ -1424,7 +1424,7 @@ onBeforeUnmount(() => {
         <ChevronRight v-if="index > 0" class="h-3.5 w-3.5 shrink-0 text-slate-300" />
         <button
           type="button"
-          class="shrink-0 cursor-pointer rounded-md px-2 py-1 font-mono text-xs text-slate-600 hover:bg-slate-100 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
+          class="shrink-0 cursor-pointer rounded-md px-2 py-1 font-mono text-xs text-slate-600 hover:bg-slate-100 hover:text-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50"
           @click="browsingDirectoryPath = crumb.path"
         >
           {{ crumb.label }}
@@ -1437,7 +1437,7 @@ onBeforeUnmount(() => {
         v-for="directory in browsingChildren"
         :key="directory.key"
         type="button"
-        class="flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/50"
+        class="flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-sky-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500/50"
         @click="browsingDirectoryPath = directory.path"
       >
         <Folder class="h-5 w-5 shrink-0 fill-amber-100 text-amber-500" />
@@ -1478,7 +1478,7 @@ onBeforeUnmount(() => {
 @reference "../style.css";
 
 .rpp-input {
-  @apply rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400;
+  @apply rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition-colors focus:border-sky-500 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400;
 }
 
 .rpp-label {
@@ -1490,15 +1490,15 @@ onBeforeUnmount(() => {
 }
 
 .rpp-primary {
-  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-semibold text-white transition-colors hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-300;
+  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-semibold text-white transition-colors hover:bg-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-300;
 }
 
 .rpp-secondary {
-  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition-colors hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .rpp-segment {
-  @apply cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2;
+  @apply cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50 focus-visible:ring-offset-2;
 }
 
 .rpp-segment-active {
@@ -1515,8 +1515,8 @@ onBeforeUnmount(() => {
 }
 
 .rpp-step-active {
-  @apply bg-blue-600 text-white;
-  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.15);
+  @apply bg-sky-600 text-white;
+  box-shadow: 0 0 0 4px rgba(2, 132, 199, 0.15);
 }
 
 .rpp-step-done {
@@ -1577,22 +1577,28 @@ onBeforeUnmount(() => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #2563eb;
-  box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.6);
+  background: #0284c7;
+  box-shadow: 0 0 0 0 rgba(2, 132, 199, 0.6);
   animation: rpp-pulse 1.6s infinite;
 }
 
 @keyframes rpp-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.6);
+    box-shadow: 0 0 0 0 rgba(2, 132, 199, 0.6);
   }
 
   70% {
-    box-shadow: 0 0 0 6px rgba(37, 99, 235, 0);
+    box-shadow: 0 0 0 6px rgba(2, 132, 199, 0);
   }
 
   100% {
-    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+    box-shadow: 0 0 0 0 rgba(2, 132, 199, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rpp-pulse-dot {
+    animation: none;
   }
 }
 

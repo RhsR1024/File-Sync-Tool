@@ -1,7 +1,8 @@
 use super::rtp::{tcp_interleaved_frame, RtpPacketizer};
 use super::scheduler::{ScheduledAccessUnit, SharedFrameScheduler};
 use super::state::{
-    build_rtsp_response, parse_rtsp_request, RtspDecision, RtspSession, MAX_RTSP_REQUEST_BYTES,
+    build_rtsp_response, declared_body_length, parse_rtsp_request, RtspDecision, RtspSession,
+    MAX_RTSP_REQUEST_BYTES,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -141,6 +142,20 @@ fn service_error(code: &'static str, message: impl Into<String>) -> RtspServiceE
 }
 
 impl RtspEndpointConfig {
+    /// Resolve a request URI to a stream.
+    ///
+    /// The legacy IPCRtsp server never inspected the request path: every URI on
+    /// a listener was answered with that listener's stream. Exact matches keep
+    /// the reviewed per-path behaviour (notably the metadata-only track), and
+    /// anything else falls back to the listener's video route so NVR channels
+    /// `c2..cN`, trailing slashes, `trackID` suffixes and query strings play
+    /// instead of failing with 404.
+    fn resolve_route(&self, path: &str) -> Option<&RtspStreamSource> {
+        self.routes
+            .get(path)
+            .or_else(|| self.routes.values().find(|source| !source.metadata_only))
+    }
+
     pub fn validate(&self) -> Result<(), RtspServiceError> {
         if self.bind_addr.ip().is_unspecified() || self.bind_addr.port() == 0 {
             return Err(service_error(
@@ -254,7 +269,8 @@ impl<T> Drop for AbortTaskOnDrop<T> {
 pub struct RtspServerHandle {
     local_addr: SocketAddr,
     shutdown: watch::Sender<bool>,
-    join: tokio::task::JoinHandle<Result<(), RtspServiceError>>,
+    join: AbortTaskOnDrop<Result<(), RtspServiceError>>,
+    producer_tasks: Vec<AbortTaskOnDrop<()>>,
     metrics: Arc<RtspServerMetrics>,
 }
 
@@ -267,22 +283,40 @@ impl RtspServerHandle {
         self.metrics.snapshot()
     }
 
-    pub async fn stop(self, timeout: Duration) -> Result<(), RtspServiceError> {
+    pub async fn stop(mut self, timeout: Duration) -> Result<(), RtspServiceError> {
         let _ = self.shutdown.send(true);
-        tokio::time::timeout(timeout, self.join)
-            .await
-            .map_err(|_| {
-                service_error(
-                    "device_simulator.rtsp.stop_timeout",
-                    "RTSP service did not stop within the finite timeout",
-                )
-            })?
-            .map_err(|source| {
-                service_error(
+        tokio::time::timeout(timeout, async {
+            let mut first_error = match self.join.join().await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(source) => Some(service_error(
                     "device_simulator.rtsp.task_panicked",
                     format!("RTSP service task failed: {source}"),
-                )
-            })?
+                )),
+            };
+            for producer_task in &mut self.producer_tasks {
+                if let Err(source) = producer_task.join().await {
+                    let error = service_error(
+                        "device_simulator.rtsp.task_panicked",
+                        format!("RTSP scheduler task failed: {source}"),
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+            match first_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        })
+        .await
+        .map_err(|_| {
+            service_error(
+                "device_simulator.rtsp.stop_timeout",
+                "RTSP service did not stop within the finite timeout",
+            )
+        })?
     }
 }
 
@@ -308,6 +342,23 @@ pub async fn start_rtsp_server(
         )
     })?;
     let (shutdown, shutdown_rx) = watch::channel(false);
+    let mut schedulers = Vec::<SharedFrameScheduler>::new();
+    for source in config
+        .routes
+        .values()
+        .filter(|source| !source.metadata_only)
+    {
+        if !schedulers
+            .iter()
+            .any(|scheduler| scheduler.shares_channel_with(&source.scheduler))
+        {
+            schedulers.push(source.scheduler.clone());
+        }
+    }
+    let producer_tasks = schedulers
+        .into_iter()
+        .map(|scheduler| AbortTaskOnDrop::new(scheduler.spawn(shutdown.subscribe())))
+        .collect();
     let metrics = Arc::new(RtspServerMetrics::default());
     let join = tokio::spawn(serve(
         listener,
@@ -318,7 +369,8 @@ pub async fn start_rtsp_server(
     Ok(RtspServerHandle {
         local_addr,
         shutdown,
-        join,
+        join: AbortTaskOnDrop::new(join),
+        producer_tasks,
         metrics,
     })
 }
@@ -388,18 +440,21 @@ async fn serve_client(
         };
         let request = match parse_rtsp_request(&bytes) {
             Ok(request) => request,
-            Err(error) => {
-                outgoing
-                    .send(build_rtsp_response(0, 400, "Bad Request", &[], &[]))
-                    .await
-                    .map_err(|_| disconnected())?;
-                return Err(service_error(error.code, error.message));
+            // A malformed request is answered and skipped. Legacy ignored what
+            // it could not parse and kept serving, so one odd probe from a
+            // platform must not drop an established video session.
+            Err(_) => {
+                send_response(
+                    &outgoing,
+                    build_rtsp_response(0, 400, "Bad Request", &[], &[]),
+                )
+                .await?;
+                continue;
             }
         };
-        let path = request_path(&request.uri).ok_or_else(|| {
-            service_error("device_simulator.rtsp.uri_invalid", "RTSP URI is invalid")
-        })?;
-        let selected = config.routes.get(path).cloned();
+        let selected = request_path(&request.uri)
+            .and_then(|path| config.resolve_route(path))
+            .cloned();
         let route_switch_rejected = selected
             .as_ref()
             .zip(source.as_ref())
@@ -408,6 +463,7 @@ async fn serve_client(
                 request.method,
                 super::state::RtspMethod::Setup
                     | super::state::RtspMethod::Play
+                    | super::state::RtspMethod::FastPlay
                     | super::state::RtspMethod::GetParameter
                     | super::state::RtspMethod::Teardown
             );
@@ -435,7 +491,7 @@ async fn serve_client(
                         "OK",
                         &[(
                             "Public",
-                            "OPTIONS,DESCRIBE,SETUP,PLAY,PAUSE,TEARDOWN,ANNOUNCE,SET_PARAMETER,GET_PARAMETER",
+                            "OPTIONS,DESCRIBE,SETUP,PLAY,FASTPLAY,PAUSE,TEARDOWN,ANNOUNCE,SET_PARAMETER,GET_PARAMETER",
                         )],
                         &[],
                     ),
@@ -445,11 +501,7 @@ async fn serve_client(
             RtspDecision::Describe => {
                 let selected = selected.expect("selected route checked");
                 source = Some(selected.clone());
-                let content_base = format!(
-                    "rtsp://{}:{}",
-                    config.bind_addr.ip(),
-                    config.bind_addr.port()
-                );
+                let content_base = content_base_for_request(config.bind_addr, &request.uri);
                 send_response(
                     &outgoing,
                     build_rtsp_response(
@@ -488,15 +540,42 @@ async fn serve_client(
                 .await?;
             }
             RtspDecision::Play => {
-                let selected = source.clone().ok_or_else(|| {
+                // A PLAY that never ran SETUP still streams, on the legacy
+                // default interleaved channel pair, exactly as IPCRtsp did.
+                let selected = source.clone().or(selected).ok_or_else(|| {
                     service_error(
                         "device_simulator.rtsp.route_missing",
                         "RTSP stream is missing",
                     )
                 })?;
+                source = Some(selected.clone());
                 send_response(
                     &outgoing,
                     build_rtsp_response(request.cseq, 200, "OK", &[("Session", &session_id)], &[]),
+                )
+                .await?;
+                if stream_task.is_none() && !selected.metadata_only {
+                    stream_task = Some(AbortTaskOnDrop::new(tokio::spawn(stream_frames(
+                        selected,
+                        channels.0,
+                        outgoing.clone(),
+                        client_rtp_state,
+                    ))));
+                }
+            }
+            RtspDecision::FastPlay => {
+                let selected = selected.expect("selected route checked");
+                source = Some(selected.clone());
+                let content_base = content_base_for_request(config.bind_addr, &request.uri);
+                send_response(
+                    &outgoing,
+                    build_rtsp_response(
+                        request.cseq,
+                        200,
+                        "OK",
+                        &[("Content-Base", &content_base), ("Content-Type", "application/sdp")],
+                        &selected.sdp,
+                    ),
                 )
                 .await?;
                 if stream_task.is_none() && !selected.metadata_only {
@@ -680,6 +759,20 @@ async fn read_request<R: AsyncRead + Unpin>(
             ));
         }
         if bytes.ends_with(b"\r\n\r\n") {
+            // GET_PARAMETER and SET_PARAMETER may carry a body. Draining it
+            // here keeps the next request aligned with the socket; leaving it
+            // behind would make the following parse fail on body text.
+            let body_length = declared_body_length(&bytes);
+            if body_length > 0 {
+                let mut body = vec![0_u8; body_length];
+                reader.read_exact(&mut body).await.map_err(|source| {
+                    service_error(
+                        "device_simulator.rtsp.request_truncated",
+                        format!("RTSP request body is truncated: {source}"),
+                    )
+                })?;
+                bytes.extend_from_slice(&body);
+            }
             return Ok(Some(bytes));
         }
     }
@@ -689,13 +782,28 @@ fn request_path(uri: &str) -> Option<&str> {
     if uri == "*" {
         return Some("*");
     }
+    // Query strings and fragments are addressing decoration, not part of the
+    // stream path; strip them so a decorated URI resolves like the bare one.
+    let uri = uri.split(['?', '#']).next().unwrap_or(uri);
     if uri.starts_with('/') {
         return valid_route(uri).then_some(uri);
     }
     let authority_and_path = uri.strip_prefix("rtsp://")?;
-    let slash = authority_and_path.find('/')?;
+    let Some(slash) = authority_and_path.find('/') else {
+        // live555 may use an authority-only Content-Base as the aggregate PLAY
+        // target. Treat it as the listener root so legacy path-agnostic routing
+        // can reuse the stream selected by DESCRIBE/SETUP instead of returning 404.
+        return Some("/");
+    };
     let path = &authority_and_path[slash..];
     valid_route(path).then_some(path)
+}
+
+fn content_base_for_request(bind_addr: SocketAddr, request_uri: &str) -> String {
+    let path = request_path(request_uri)
+        .filter(|path| !matches!(*path, "*" | "/"))
+        .unwrap_or("/");
+    format!("rtsp://{bind_addr}{path}")
 }
 
 #[cfg(test)]
@@ -723,23 +831,26 @@ mod tests {
         }
     }
 
+    /// `read_request` already drains a declared body, so the response comes
+    /// back with its SDP appended and framed.
     async fn read_response(client: &mut TcpStream) -> Vec<u8> {
-        let mut response = read_request(client)
+        read_request(client)
             .await
             .unwrap()
-            .expect("RTSP response headers");
-        let headers = String::from_utf8_lossy(&response);
-        let content_length = headers
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("Content-Length:")
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-            })
-            .unwrap_or(0);
-        let mut body = vec![0_u8; content_length];
-        client.read_exact(&mut body).await.unwrap();
-        response.extend_from_slice(&body);
-        response
+            .expect("RTSP response headers")
+    }
+
+    async fn read_interleaved_rtp(client: &mut TcpStream) -> (u8, u16, u32, u32) {
+        let mut interleaved = [0_u8; 4];
+        client.read_exact(&mut interleaved).await.unwrap();
+        assert_eq!(interleaved[0], b'$');
+        let length = u16::from_be_bytes([interleaved[2], interleaved[3]]) as usize;
+        let mut rtp = vec![0_u8; length];
+        client.read_exact(&mut rtp).await.unwrap();
+        let sequence = u16::from_be_bytes([rtp[2], rtp[3]]);
+        let timestamp = u32::from_be_bytes([rtp[4], rtp[5], rtp[6], rtp[7]]);
+        let ssrc = u32::from_be_bytes([rtp[8], rtp[9], rtp[10], rtp[11]]);
+        (interleaved[1], sequence, timestamp, ssrc)
     }
 
     async fn connect_and_play(address: SocketAddr) -> (TcpStream, u16, u32, u32) {
@@ -765,16 +876,8 @@ mod tests {
             .unwrap();
         assert!(String::from_utf8_lossy(&read_response(&mut client).await).contains("200 OK"));
 
-        let mut interleaved = [0_u8; 4];
-        client.read_exact(&mut interleaved).await.unwrap();
-        assert_eq!(interleaved[0], b'$');
-        assert_eq!(interleaved[1], 2);
-        let length = u16::from_be_bytes([interleaved[2], interleaved[3]]) as usize;
-        let mut rtp = vec![0_u8; length];
-        client.read_exact(&mut rtp).await.unwrap();
-        let sequence = u16::from_be_bytes([rtp[2], rtp[3]]);
-        let timestamp = u32::from_be_bytes([rtp[4], rtp[5], rtp[6], rtp[7]]);
-        let ssrc = u32::from_be_bytes([rtp[8], rtp[9], rtp[10], rtp[11]]);
+        let (channel, sequence, timestamp, ssrc) = read_interleaved_rtp(&mut client).await;
+        assert_eq!(channel, 2);
         (client, sequence, timestamp, ssrc)
     }
 
@@ -793,7 +896,71 @@ mod tests {
             request_path("rtsp://192.0.2.2/media/video1"),
             Some("/media/video1")
         );
+        assert_eq!(request_path("rtsp://192.0.2.2:554"), Some("/"));
         assert_eq!(request_path("/../secret"), None);
+    }
+
+    #[tokio::test]
+    async fn vlc_aggregate_play_without_path_reuses_the_selected_video_stream() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let shared_source = source();
+        let server = start_rtsp_server(RtspEndpointConfig {
+            bind_addr: SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port),
+            routes: BTreeMap::from([
+                ("/media/video1".into(), shared_source.clone()),
+                ("/media/video1/video".into(), shared_source),
+            ]),
+            client_write_queue: 16,
+        })
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(server.local_addr()).await.unwrap();
+
+        client
+            .write_all(
+                format!(
+                    "DESCRIBE rtsp://127.0.0.1:{port}/media/video1 RTSP/1.0\r\nCSeq: 1\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let describe = String::from_utf8_lossy(&read_response(&mut client).await).into_owned();
+        assert!(describe.contains("RTSP/1.0 200 OK"));
+        assert!(describe.contains(&format!(
+            "Content-Base: rtsp://127.0.0.1:{port}/media/video1"
+        )));
+
+        client
+            .write_all(
+                format!(
+                    "SETUP rtsp://127.0.0.1:{port}/media/video1/video RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&read_response(&mut client).await).contains("200 OK"));
+
+        // live555 uses the aggregate Content-Base for PLAY and some versions
+        // omit its trailing slash. The listener must still start RTP.
+        client
+            .write_all(
+                format!("PLAY rtsp://127.0.0.1:{port} RTSP/1.0\r\nCSeq: 3\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&read_response(&mut client).await).contains("200 OK"));
+        let (channel, _, _, _) =
+            tokio::time::timeout(Duration::from_secs(1), read_interleaved_rtp(&mut client))
+                .await
+                .expect("VLC-compatible aggregate PLAY starts interleaved RTP");
+        assert_eq!(channel, 0);
+
+        drop(client);
+        server.stop(Duration::from_secs(2)).await.unwrap();
     }
 
     #[tokio::test]
@@ -808,22 +975,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_owns_one_producer_per_cloned_route_and_stops_it() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let shared_source = source();
+        let scheduler_probe = shared_source.scheduler.clone();
+        let server = start_rtsp_server(RtspEndpointConfig {
+            bind_addr: SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port),
+            routes: BTreeMap::from([
+                ("/media/video1".into(), shared_source.clone()),
+                ("/media/video1/video".into(), shared_source),
+            ]),
+            client_write_queue: 16,
+        })
+        .await
+        .unwrap();
+
+        let (mut client, _, first_timestamp, _) = tokio::time::timeout(
+            Duration::from_secs(1),
+            connect_and_play(server.local_addr()),
+        )
+        .await
+        .expect("server-owned scheduler producer sends an interleaved RTP frame");
+        let mut previous_timestamp = first_timestamp;
+        for _ in 0..3 {
+            let (_, _, timestamp, _) =
+                tokio::time::timeout(Duration::from_secs(1), read_interleaved_rtp(&mut client))
+                    .await
+                    .expect("server-owned scheduler producer keeps sending RTP frames");
+            assert_eq!(timestamp.wrapping_sub(previous_timestamp), 3_600);
+            previous_timestamp = timestamp;
+        }
+        drop(client);
+
+        server.stop(Duration::from_secs(2)).await.unwrap();
+        let mut after_stop = scheduler_probe.subscribe();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), after_stop.recv())
+                .await
+                .is_err(),
+            "scheduler producer must stop before RtspServerHandle::stop returns"
+        );
+        TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_fastplay_returns_sdp_and_starts_interleaved_rtp_without_setup() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = start_rtsp_server(RtspEndpointConfig {
+            bind_addr: SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port),
+            routes: BTreeMap::from([("/media/video1".into(), source())]),
+            client_write_queue: 16,
+        })
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(server.local_addr()).await.unwrap();
+        client
+            .write_all(b"FASTPLAY rtsp://127.0.0.1/media/video1 RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+            .await
+            .unwrap();
+
+        let response = String::from_utf8_lossy(&read_response(&mut client).await).into_owned();
+        assert!(response.contains("RTSP/1.0 200 OK"));
+        assert!(response.contains("Content-Type: application/sdp"));
+        assert!(response.contains("m=video 0 RTP/AVP 105"));
+        let (channel, _, _, _) =
+            tokio::time::timeout(Duration::from_secs(1), read_interleaved_rtp(&mut client))
+                .await
+                .expect("legacy FASTPLAY starts the RTP stream without SETUP");
+        assert_eq!(channel, 0);
+
+        drop(client);
+        server.stop(Duration::from_secs(2)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_path_agnostic_routing_keeps_unknown_urls_and_verbs_playing() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = start_rtsp_server(RtspEndpointConfig {
+            bind_addr: SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port),
+            routes: BTreeMap::from([("/unicast/c1/s0/live".into(), source())]),
+            client_write_queue: 16,
+        })
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(server.local_addr()).await.unwrap();
+
+        // An NVR channel the plan never registered, carrying a query string.
+        client
+            .write_all(
+                b"DESCRIBE rtsp://127.0.0.1/unicast/c7/s0/live?tcp RTSP/1.0\r\nCSeq: 1\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let describe = String::from_utf8_lossy(&read_response(&mut client).await).into_owned();
+        assert!(describe.contains("RTSP/1.0 200 OK"));
+        assert!(describe.contains("m=video 0 RTP/AVP 105"));
+
+        // An unhandled verb with a body falls back to the SDP without
+        // desynchronising the next request.
+        client
+            .write_all(
+                b"SET_PARAMETER rtsp://127.0.0.1/unicast/c7/s0/live RTSP/1.0\r\nCSeq: 2\r\nContent-Length: 5\r\n\r\nhello",
+            )
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&read_response(&mut client).await).contains("200 OK"));
+
+        // PLAY without a preceding SETUP still streams, on channel 0.
+        client
+            .write_all(b"PLAY rtsp://127.0.0.1/unicast/c7/s0/live RTSP/1.0\r\nCSeq: 3\r\n\r\n")
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&read_response(&mut client).await).contains("200 OK"));
+        let (channel, _, _, _) =
+            tokio::time::timeout(Duration::from_secs(1), read_interleaved_rtp(&mut client))
+                .await
+                .expect("an unregistered channel still streams the listener's media");
+        assert_eq!(channel, 0);
+
+        drop(client);
+        server.stop(Duration::from_secs(2)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_joins_remaining_producers_after_a_task_failure() {
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let cleanup_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup_finished_task = Arc::clone(&cleanup_finished);
+        let failed_producer = tokio::spawn(std::future::pending::<()>());
+        failed_producer.abort();
+        let cleanup_producer = tokio::spawn(async move {
+            shutdown_rx.changed().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cleanup_finished_task.store(true, Ordering::Release);
+        });
+        let server = RtspServerHandle {
+            local_addr: SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 554),
+            shutdown,
+            join: AbortTaskOnDrop::new(tokio::spawn(async { Ok::<(), RtspServiceError>(()) })),
+            producer_tasks: vec![
+                AbortTaskOnDrop::new(failed_producer),
+                AbortTaskOnDrop::new(cleanup_producer),
+            ],
+            metrics: Arc::new(RtspServerMetrics::default()),
+        };
+
+        let error = server.stop(Duration::from_secs(1)).await.unwrap_err();
+        assert_eq!(error.code, "device_simulator.rtsp.task_panicked");
+        assert!(
+            cleanup_finished.load(Ordering::Acquire),
+            "stop must join every producer even after an earlier join fails"
+        );
+    }
+
+    #[tokio::test]
     async fn server_handles_options_and_releases_port_after_bounded_stop() {
         let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let scheduler = source().scheduler;
-        let (scheduler_stop, scheduler_stop_rx) = watch::channel(false);
-        let scheduler_task = scheduler.spawn(scheduler_stop_rx);
         let config = RtspEndpointConfig {
             bind_addr: SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port),
-            routes: BTreeMap::from([(
-                "/media/video1".into(),
-                RtspStreamSource {
-                    scheduler,
-                    ..source()
-                },
-            )]),
+            routes: BTreeMap::from([("/media/video1".into(), source())]),
             client_write_queue: 8,
         };
         let server = start_rtsp_server(config).await.unwrap();
@@ -840,8 +1158,6 @@ mod tests {
         assert!(stats.bytes_sent >= read as u64);
         drop(client);
         server.stop(Duration::from_secs(2)).await.unwrap();
-        scheduler_stop.send(true).unwrap();
-        scheduler_task.await.unwrap();
         TcpListener::bind(("127.0.0.1", port)).await.unwrap();
     }
 
@@ -851,9 +1167,6 @@ mod tests {
         let port = probe.local_addr().unwrap().port();
         drop(probe);
         let shared_source = source();
-        let scheduler = shared_source.scheduler.clone();
-        let (scheduler_stop, scheduler_stop_rx) = watch::channel(false);
-        let scheduler_task = scheduler.spawn(scheduler_stop_rx);
         let config = RtspEndpointConfig {
             bind_addr: SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port),
             routes: BTreeMap::from([
@@ -886,8 +1199,6 @@ mod tests {
         .await
         .expect("active client closes after server cancellation")
         .expect("read connection shutdown");
-        scheduler_stop.send(true).unwrap();
-        scheduler_task.await.unwrap();
         TcpListener::bind(("127.0.0.1", port)).await.unwrap();
     }
 
@@ -897,9 +1208,6 @@ mod tests {
         let port = probe.local_addr().unwrap().port();
         drop(probe);
         let shared_source = source();
-        let scheduler = shared_source.scheduler.clone();
-        let (scheduler_stop, scheduler_stop_rx) = watch::channel(false);
-        let scheduler_task = scheduler.spawn(scheduler_stop_rx);
         let metadata_source = RtspStreamSource {
             metadata_only: true,
             ..shared_source.clone()
@@ -932,7 +1240,5 @@ mod tests {
 
         drop(client);
         server.stop(Duration::from_secs(2)).await.unwrap();
-        scheduler_stop.send(true).unwrap();
-        scheduler_task.await.unwrap();
     }
 }

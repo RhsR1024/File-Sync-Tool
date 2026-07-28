@@ -4,7 +4,9 @@ import {
   createDefaultSettings,
   createPaper,
   createTodoItem,
+  isPaperEmpty,
   isPowerPaper,
+  movePaperId,
   normalizePaperTodoState,
   powerScriptBody,
   splitTodoPaste,
@@ -49,5 +51,38 @@ describe('paper todo core data', () => {
     expect(settings.hotkeys.toggleAll).toBe('Ctrl+Shift+Space');
     expect(settings.launcherEnabled).toBe(true);
     expect(settings.launcherEdge).toBe('right');
+  });
+
+  it('starts a fresh profile with one todo and one note paper', () => {
+    const papers = normalizePaperTodoState(null).papers;
+    expect(papers).toHaveLength(2);
+    expect(papers.map((paper) => paper.kind)).toEqual(['todo', 'note']);
+    expect(papers.every((paper) => !paper.desktopOpen)).toBe(true);
+  });
+
+  it('treats untouched papers as disposable but keeps any authored content', () => {
+    const todo = createPaper('todo');
+    const note = createPaper('note');
+    expect(isPaperEmpty(todo)).toBe(true);
+    expect(isPaperEmpty(note)).toBe(true);
+
+    todo.items.push(createTodoItem('remember this'));
+    note.content = 'A saved note';
+    expect(isPaperEmpty(todo)).toBe(false);
+    expect(isPaperEmpty(note)).toBe(false);
+
+    const titled = createPaper('note', 'Custom title');
+    expect(isPaperEmpty(titled)).toBe(false);
+  });
+
+  it('moves a dragged paper before or after the target without dropping ids', () => {
+    const ids = ['todo-1', 'note-1', 'todo-2', 'note-2'];
+    expect(movePaperId(ids, 'todo-2', 'note-1', 'before')).toEqual([
+      'todo-1', 'todo-2', 'note-1', 'note-2',
+    ]);
+    expect(movePaperId(ids, 'todo-1', 'todo-2', 'after')).toEqual([
+      'note-1', 'todo-2', 'todo-1', 'note-2',
+    ]);
+    expect(movePaperId(ids, 'missing', 'todo-1', 'before')).toEqual(ids);
   });
 });

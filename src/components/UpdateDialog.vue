@@ -3,8 +3,10 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import {
   AlertCircle,
+  ArrowRight,
   CheckCircle2,
   Download,
+  FolderDown,
   RefreshCw,
   Rocket,
   X,
@@ -44,6 +46,13 @@ const percent = computed(() => {
 });
 
 const canCloseViaChrome = computed(() => dialogState.value !== 'downloading');
+
+const changelogCount = computed(() => latestEntry.value?.changelog.length ?? 0);
+
+// The server may omit Content-Length. Without a total there is no meaningful
+// percentage, so the bar runs as an indeterminate sweep instead of parking at
+// a fake fixed width.
+const isIndeterminate = computed(() => percent.value === null);
 
 function formatBytes(value: number) {
   if (value < 1024) {
@@ -249,9 +258,9 @@ onBeforeUnmount(() => {
           <X class="h-4 w-4" aria-hidden="true" />
         </button>
 
-        <div class="flex min-h-0 flex-1 flex-col gap-6 px-6 py-7">
+        <div class="flex min-h-0 flex-1 flex-col gap-5 px-6 py-7">
           <template v-if="dialogState === 'found' && latestEntry">
-            <div class="shrink-0 space-y-2">
+            <div class="shrink-0 space-y-3">
               <p class="text-xs font-semibold uppercase tracking-[0.24em] text-sky-500">
                 {{ t('about.title') }}
               </p>
@@ -259,42 +268,48 @@ onBeforeUnmount(() => {
                 <Rocket class="h-5 w-5 text-sky-500" aria-hidden="true" />
                 {{ t('updater.dialog.titleFound') }}
               </h2>
-              <p class="text-sm leading-6 text-slate-600">
-                {{
-                  t('updater.dialog.bodyCurrentLatest', {
-                    current: state?.current ?? '',
-                    latest: latestEntry.version,
-                    date: latestEntry.released_at,
-                  })
-                }}
-              </p>
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+                <span class="rounded-full border border-slate-200 bg-white px-3 py-1 font-mono text-slate-500 tabular-nums">
+                  {{ state?.current ?? '' }}
+                </span>
+                <ArrowRight class="h-4 w-4 shrink-0 text-slate-300" aria-hidden="true" />
+                <span class="rounded-full bg-sky-600 px-3 py-1 font-mono font-semibold text-white tabular-nums">
+                  {{ latestEntry.version }}
+                </span>
+                <span class="text-slate-500">
+                  {{ t('about.bannerReleasedOn', { date: formatReleaseDate(latestEntry.released_at) }) }}
+                </span>
+              </div>
             </div>
 
-            <div class="rounded-2xl min-h-0 flex-1 overflow-y-auto border border-slate-200 bg-slate-50/80 p-4 pr-3">
-              <div class="flex items-center justify-between gap-3">
-                <div>
-                  <div class="text-lg font-semibold text-slate-900">{{ latestEntry.version }}</div>
-                  <div class="text-sm text-slate-500">
-                    {{ t('about.bannerReleasedOn', { date: formatReleaseDate(latestEntry.released_at) }) }}
-                  </div>
-                </div>
-                <div class="rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700">
-                  {{ t('about.upgradeCta') }}
-                </div>
-              </div>
-
-              <div class="mt-4 space-y-2">
+            <!-- The changelog is the only region allowed to grow: it takes the
+                 leftover height and scrolls inside itself, so the footer
+                 actions stay on screen no matter how long the release notes
+                 are. -->
+            <section class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50/80">
+              <header class="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white/70 px-4 py-2.5">
                 <p class="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                   {{ t('updater.dialog.changelogHeader') }}
                 </p>
-                <ul class="list-disc space-y-1 pl-5 text-sm leading-6 text-slate-700">
+                <span
+                  v-if="changelogCount > 0"
+                  class="rounded-full bg-sky-100 px-2.5 py-0.5 text-[11px] font-semibold text-sky-700 tabular-nums"
+                >
+                  {{ changelogCount }} {{ t('about.changelogCount') }}
+                </span>
+              </header>
+              <div class="scrollbar-light min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3.5">
+                <ul
+                  v-if="changelogCount > 0"
+                  class="list-disc space-y-2 pl-5 text-sm leading-6 text-slate-700 marker:text-sky-500"
+                >
                   <li v-for="(line, index) in latestEntry.changelog" :key="index">{{ line }}</li>
-                  <li v-if="latestEntry.changelog.length === 0" class="list-none pl-0 text-slate-400">
-                    {{ t('about.changelogEmpty') }}
-                  </li>
                 </ul>
+                <p v-else class="text-sm text-slate-400">
+                  {{ t('about.changelogEmpty') }}
+                </p>
               </div>
-            </div>
+            </section>
 
             <div class="shrink-0 flex justify-end gap-3">
               <button
@@ -324,7 +339,7 @@ onBeforeUnmount(() => {
                 {{ t('updater.dialog.titleDownloading', { version: latestEntry?.version ?? '' }) }}
               </h2>
               <p class="text-sm leading-6 text-slate-600">
-                {{ t('updater.dialog.changelogHeader') }}
+                {{ t('updater.dialog.bodyDownloading') }}
               </p>
             </div>
 
@@ -338,11 +353,20 @@ onBeforeUnmount(() => {
                 class="h-3 overflow-hidden rounded-full bg-slate-200"
               >
                 <div
+                  v-if="isIndeterminate"
+                  class="progress-indeterminate h-full w-2/5 rounded-full bg-gradient-to-r from-cyan-400 via-sky-500 to-indigo-500"
+                ></div>
+                <div
+                  v-else
                   class="h-full rounded-full bg-gradient-to-r from-cyan-400 via-sky-500 to-indigo-500 transition-all duration-150"
-                  :style="{ width: `${percent ?? 12}%` }"
+                  :style="{ width: `${percent}%` }"
                 ></div>
               </div>
-              <p class="mt-3 text-sm text-slate-600" v-if="progress && percent !== null">
+              <p
+                class="mt-3 text-sm text-slate-600 tabular-nums"
+                aria-live="polite"
+                v-if="progress && percent !== null"
+              >
                 {{
                   t('updater.dialog.progress', {
                     percent,
@@ -352,13 +376,16 @@ onBeforeUnmount(() => {
                   })
                 }}
               </p>
-              <p class="mt-3 text-sm text-slate-600" v-else-if="progress">
+              <p class="mt-3 text-sm text-slate-600 tabular-nums" aria-live="polite" v-else-if="progress">
                 {{
                   t('updater.dialog.progressUnknownTotal', {
                     downloaded: formatBytes(progress.downloaded),
                     speed: formatBytes(progress.speed_bps),
                   })
                 }}
+              </p>
+              <p class="mt-3 text-sm text-slate-400" v-else>
+                {{ t('updater.dialog.progressStarting') }}
               </p>
             </div>
 
@@ -389,16 +416,26 @@ onBeforeUnmount(() => {
                     : t('updater.dialog.bodyCurrentLatest', {
                         current: state?.current ?? '',
                         latest: pendingEntry?.target_version ?? latestEntry?.version ?? '',
-                        date: latestEntry?.released_at ?? '',
+                        date: formatReleaseDate(latestEntry?.released_at ?? ''),
                       })
                 }}
               </p>
             </div>
 
-            <div class="shrink-0 rounded-2xl border border-emerald-200 bg-emerald-50/80 p-4 text-sm text-emerald-800">
-              <div class="font-medium">{{ pendingEntry?.target_file_name || pendingEntry?.target_version || latestEntry?.version }}</div>
-              <div class="mt-1 break-all text-xs text-emerald-700/80">
-                {{ pendingEntry?.temp_path }}
+            <div class="scrollbar-light min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-2xl border border-emerald-200 bg-emerald-50/80 p-4">
+              <div class="flex items-start gap-3">
+                <FolderDown class="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden="true" />
+                <div class="min-w-0">
+                  <div class="text-sm font-medium text-emerald-900">
+                    {{ pendingEntry?.target_file_name || pendingEntry?.target_version || latestEntry?.version }}
+                  </div>
+                  <div class="mt-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-700/70">
+                    {{ t('updater.dialog.savedTo') }}
+                  </div>
+                  <div class="mt-0.5 break-all font-mono text-xs leading-5 text-emerald-800/80">
+                    {{ pendingEntry?.temp_path }}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -438,13 +475,21 @@ onBeforeUnmount(() => {
                 {{
                   dialogState === 'verify_failed'
                     ? t('updater.dialog.verifyHint')
-                    : (dialogError || t('updater.toast.networkFail', { detail: 'unknown' }))
+                    : t('updater.dialog.bodyError')
                 }}
               </p>
             </div>
 
-            <div v-if="dialogError" class="shrink-0 rounded-2xl border border-rose-200 bg-rose-50/80 p-4 text-sm text-rose-700">
-              {{ dialogError }}
+            <!-- The raw error can be a multi-line transport dump; give it its
+                 own scroll box so it never pushes the actions out of reach. -->
+            <div
+              v-if="dialogError"
+              class="scrollbar-light min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-2xl border border-rose-200 bg-rose-50/80 p-4"
+            >
+              <p class="text-[11px] font-semibold uppercase tracking-[0.16em] text-rose-500">
+                {{ t('updater.dialog.errorDetail') }}
+              </p>
+              <p class="mt-1.5 break-all font-mono text-xs leading-5 text-rose-700">{{ dialogError }}</p>
             </div>
 
             <div class="shrink-0 flex justify-end gap-3">
@@ -471,3 +516,26 @@ onBeforeUnmount(() => {
     </div>
   </transition>
 </template>
+
+<style scoped>
+.progress-indeterminate {
+  animation: update-progress-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes update-progress-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-indeterminate {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+</style>

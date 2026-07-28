@@ -182,6 +182,10 @@ impl SharedFrameScheduler {
         self.clock_rate
     }
 
+    pub(crate) fn shares_channel_with(&self, other: &Self) -> bool {
+        self.sender.same_channel(&other.sender)
+    }
+
     pub fn spawn(&self, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
         let frames = Arc::clone(&self.frames);
         let sender = self.sender.clone();

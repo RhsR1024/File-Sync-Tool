@@ -95,7 +95,7 @@ onMounted(load);
         </div>
         <div>
           <h2 class="text-2xl font-bold text-slate-950">{{ t('settings.title') }}</h2>
-          <p class="mt-0.5 text-sm text-slate-500">{{ t('settings.applicationSettingsDesc') }}</p>
+          <p class="mt-1 text-sm text-slate-500">{{ t('settings.applicationSettingsDesc') }}</p>
         </div>
       </div>
 

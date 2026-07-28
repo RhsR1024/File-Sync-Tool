@@ -34,6 +34,12 @@ pub fn recover_recorded_session(
     let mut journal = store.load(session_id)?;
     reconcile_recorded_worker(journal.worker_process.as_ref())?;
     journal.worker_process = None;
+    // Repair a stale cleanup stage before persisting, so the write guard in
+    // `save` accepts the journal and recovery can go on to release the owned
+    // resources. Without this, a residual journal that recorded `Complete`
+    // while still owning resources would be rejected here and could never be
+    // cleaned up.
+    journal.reconcile_cleanup_stage();
     store.save(&journal)?;
 
     let mut cleaner = SystemSessionCleaner::default();

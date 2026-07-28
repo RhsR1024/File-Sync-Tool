@@ -1,3 +1,4 @@
+use crate::device_simulator::api::{MediaThemeSummary, DEFAULT_MEDIA_THEME_ID};
 use crate::device_simulator::assets::catalog::{PackManifest, PackRef};
 use crate::device_simulator::assets::validation::validate_pack_path;
 use crate::device_simulator::media::{MediaPackCache, SharedMediaPack};
@@ -12,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MAX_RUNTIME_ASSET_BYTES: u64 = 32 * 1024 * 1024;
+const MEDIA_THEME_CATALOG_PATH: &str = "media/themes.json";
+const MEDIA_THEME_CATALOG_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +44,40 @@ pub struct RuntimeAssetLayout {
     manifests: BTreeMap<String, PackManifest>,
     profiles: ProfileRegistry,
     media: BTreeMap<RuntimeMediaKind, Arc<SharedMediaPack>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaThemeCatalogV1 {
+    schema_version: u32,
+    default_theme_id: String,
+    themes: Vec<MediaThemeDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaThemeDefinition {
+    id: String,
+    display_name_key: String,
+    streams: MediaThemeStreams,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaThemeStreams {
+    main: String,
+    sub: String,
+    third: String,
+}
+
+impl MediaThemeStreams {
+    fn manifest_path(&self, kind: RuntimeMediaKind) -> &str {
+        match kind {
+            RuntimeMediaKind::Main => &self.main,
+            RuntimeMediaKind::Sub => &self.sub,
+            RuntimeMediaKind::Third => &self.third,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -78,6 +115,14 @@ impl RuntimeAssetLayout {
     pub fn load(
         pinned: &[PinnedPackDirectory],
         selected_profiles: &[String],
+    ) -> Result<Self, RuntimeAssetError> {
+        Self::load_for_theme(pinned, selected_profiles, DEFAULT_MEDIA_THEME_ID)
+    }
+
+    pub fn load_for_theme(
+        pinned: &[PinnedPackDirectory],
+        selected_profiles: &[String],
+        media_theme_id: &str,
     ) -> Result<Self, RuntimeAssetError> {
         if pinned.is_empty() || selected_profiles.is_empty() {
             return Err(error(
@@ -160,6 +205,20 @@ impl RuntimeAssetLayout {
             .get("media-h264-live")
             .expect("required media pack checked")
             .directory;
+        let media_manifest = manifests
+            .get("media-h264-live")
+            .expect("required media pack manifest checked");
+        let catalog = load_media_theme_catalog(media_root, media_manifest)?;
+        let selected_theme = catalog
+            .themes
+            .iter()
+            .find(|theme| theme.id == media_theme_id)
+            .ok_or_else(|| {
+                error(
+                    "device_simulator.assets.media_theme_missing",
+                    format!("media theme '{media_theme_id}' is not available in the active pack"),
+                )
+            })?;
         let cache = MediaPackCache::new();
         let mut media = BTreeMap::new();
         for kind in [
@@ -167,8 +226,10 @@ impl RuntimeAssetLayout {
             RuntimeMediaKind::Sub,
             RuntimeMediaKind::Third,
         ] {
+            let manifest_path = selected_theme.streams.manifest_path(kind);
+            ensure_declared_media_path(media_manifest, manifest_path)?;
             let pack = cache
-                .load(media_root, kind.manifest_path())
+                .load(media_root, manifest_path)
                 .map_err(|source| error(source.code, source.message))?;
             media.insert(kind, pack);
         }
@@ -265,6 +326,151 @@ impl RuntimeAssetLayout {
     }
 }
 
+pub fn list_media_themes(pack_dir: &Path) -> Result<Vec<MediaThemeSummary>, RuntimeAssetError> {
+    let manifest_bytes = read_bounded(&pack_dir.join("pack.json"))?;
+    let manifest: PackManifest = serde_json::from_slice(&manifest_bytes).map_err(|source| {
+        error(
+            "device_simulator.assets.manifest_invalid",
+            format!("media pack manifest is invalid: {source}"),
+        )
+    })?;
+    if manifest.id != "media-h264-live" {
+        return Err(error(
+            "device_simulator.assets.pin_identity_mismatch",
+            "selected pack is not media-h264-live",
+        ));
+    }
+    let catalog = load_media_theme_catalog(pack_dir, &manifest)?;
+    Ok(catalog
+        .themes
+        .into_iter()
+        .map(|theme| MediaThemeSummary {
+            is_default: theme.id == catalog.default_theme_id,
+            id: theme.id,
+            display_name_key: theme.display_name_key,
+        })
+        .collect())
+}
+
+fn load_media_theme_catalog(
+    media_root: &Path,
+    manifest: &PackManifest,
+) -> Result<MediaThemeCatalogV1, RuntimeAssetError> {
+    if !manifest
+        .files
+        .iter()
+        .any(|file| file.path == MEDIA_THEME_CATALOG_PATH)
+    {
+        for kind in [
+            RuntimeMediaKind::Main,
+            RuntimeMediaKind::Sub,
+            RuntimeMediaKind::Third,
+        ] {
+            ensure_declared_media_path(manifest, kind.manifest_path())?;
+        }
+        return Ok(MediaThemeCatalogV1 {
+            schema_version: MEDIA_THEME_CATALOG_SCHEMA_VERSION,
+            default_theme_id: DEFAULT_MEDIA_THEME_ID.into(),
+            themes: vec![MediaThemeDefinition {
+                id: DEFAULT_MEDIA_THEME_ID.into(),
+                display_name_key: "deviceSimulator.mediaThemes.classic".into(),
+                streams: MediaThemeStreams {
+                    main: RuntimeMediaKind::Main.manifest_path().into(),
+                    sub: RuntimeMediaKind::Sub.manifest_path().into(),
+                    third: RuntimeMediaKind::Third.manifest_path().into(),
+                },
+            }],
+        });
+    }
+
+    let bytes = read_bounded(&media_root.join(MEDIA_THEME_CATALOG_PATH))?;
+    let catalog: MediaThemeCatalogV1 = serde_json::from_slice(&bytes).map_err(|source| {
+        error(
+            "device_simulator.assets.media_theme_catalog_invalid",
+            format!("media theme catalog is invalid: {source}"),
+        )
+    })?;
+    validate_media_theme_catalog(&catalog, manifest)?;
+    Ok(catalog)
+}
+
+fn validate_media_theme_catalog(
+    catalog: &MediaThemeCatalogV1,
+    manifest: &PackManifest,
+) -> Result<(), RuntimeAssetError> {
+    if catalog.schema_version != MEDIA_THEME_CATALOG_SCHEMA_VERSION
+        || catalog.themes.is_empty()
+        || catalog.themes.len() > 64
+    {
+        return Err(error(
+            "device_simulator.assets.media_theme_catalog_invalid",
+            "media theme catalog schema or theme count is invalid",
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for theme in &catalog.themes {
+        validate_theme_id(&theme.id)?;
+        if !ids.insert(theme.id.as_str()) {
+            return Err(error(
+                "device_simulator.assets.media_theme_duplicate",
+                format!("media theme '{}' is duplicated", theme.id),
+            ));
+        }
+        if theme.display_name_key.trim().is_empty() || theme.display_name_key.len() > 160 {
+            return Err(error(
+                "device_simulator.assets.media_theme_catalog_invalid",
+                format!("media theme '{}' has an invalid display name key", theme.id),
+            ));
+        }
+        for path in [
+            &theme.streams.main,
+            &theme.streams.sub,
+            &theme.streams.third,
+        ] {
+            ensure_declared_media_path(manifest, path)?;
+        }
+    }
+    if !ids.contains(catalog.default_theme_id.as_str()) {
+        return Err(error(
+            "device_simulator.assets.media_theme_default_missing",
+            "default media theme is absent from the catalog",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_declared_media_path(
+    manifest: &PackManifest,
+    relative_path: &str,
+) -> Result<(), RuntimeAssetError> {
+    validate_pack_path(relative_path)
+        .map_err(|source| error(source.code, source.message.clone()))?;
+    if !relative_path.ends_with("/media.json")
+        || !manifest.files.iter().any(|file| file.path == relative_path)
+    {
+        return Err(error(
+            "device_simulator.assets.media_theme_file_missing",
+            format!("media manifest '{relative_path}' is not declared by the media pack"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_theme_id(id: &str) -> Result<(), RuntimeAssetError> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(error(
+            "device_simulator.assets.media_theme_id_invalid",
+            format!("media theme id '{id}' is invalid"),
+        ));
+    }
+    Ok(())
+}
+
 fn read_bounded(path: &Path) -> Result<Vec<u8>, RuntimeAssetError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| {
         error(
@@ -317,7 +523,27 @@ fn error(code: &'static str, message: impl Into<String>) -> RuntimeAssetError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device_simulator::assets::catalog::{non_commercial_usage, PackFile};
     use crate::device_simulator::profiles::scope::FirstReleaseProfileId;
+    use tempfile::TempDir;
+
+    fn media_pack_manifest(paths: &[&str]) -> PackManifest {
+        PackManifest {
+            schema_version: 1,
+            id: "media-h264-live".into(),
+            version: Version::new(1, 1, 0),
+            engine_api: 1,
+            usage: non_commercial_usage(),
+            files: paths
+                .iter()
+                .map(|path| PackFile {
+                    path: (*path).into(),
+                    sha256: "a".repeat(64),
+                    size: 1,
+                })
+                .collect(),
+        }
+    }
 
     #[test]
     fn pinned_pack_contract_rejects_relative_paths_and_invalid_versions() {
@@ -339,6 +565,60 @@ mod tests {
         }
         .pack_ref()
         .is_err());
+    }
+
+    #[test]
+    fn lists_catalog_themes_and_falls_back_for_legacy_media_packs() {
+        let modern = TempDir::new().unwrap();
+        let modern_paths = [
+            MEDIA_THEME_CATALOG_PATH,
+            "media/themes/windows-tech/main/media.json",
+            "media/themes/windows-tech/sub/media.json",
+            "media/themes/windows-tech/third/media.json",
+        ];
+        fs::create_dir_all(modern.path().join("media")).unwrap();
+        fs::write(
+            modern.path().join("pack.json"),
+            serde_json::to_vec(&media_pack_manifest(&modern_paths)).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            modern.path().join(MEDIA_THEME_CATALOG_PATH),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "default_theme_id": "windows-tech",
+                "themes": [{
+                    "id": "windows-tech",
+                    "display_name_key": "deviceSimulator.mediaThemes.windowsTech",
+                    "streams": {
+                        "main": modern_paths[1],
+                        "sub": modern_paths[2],
+                        "third": modern_paths[3]
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let themes = list_media_themes(modern.path()).unwrap();
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].id, "windows-tech");
+        assert!(themes[0].is_default);
+
+        let legacy = TempDir::new().unwrap();
+        let legacy_paths = [
+            "media/main/media.json",
+            "media/sub/media.json",
+            "media/third/media.json",
+        ];
+        fs::write(
+            legacy.path().join("pack.json"),
+            serde_json::to_vec(&media_pack_manifest(&legacy_paths)).unwrap(),
+        )
+        .unwrap();
+        let themes = list_media_themes(legacy.path()).unwrap();
+        assert_eq!(themes[0].id, DEFAULT_MEDIA_THEME_ID);
+        assert!(themes[0].is_default);
     }
 
     #[test]

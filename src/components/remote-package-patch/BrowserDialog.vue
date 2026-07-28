@@ -78,7 +78,7 @@ watch(
         @keydown.tab="keepFocusInside"
       >
         <header class="flex items-center gap-3 border-b border-slate-200 px-5 py-4">
-          <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+          <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-600">
             <slot name="icon">
               <FolderOpen class="h-5 w-5" />
             </slot>
@@ -89,7 +89,7 @@ watch(
           </div>
           <button
             type="button"
-            class="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
+            class="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50"
             :aria-label="closeLabel"
             @click="close"
           >

@@ -55,8 +55,8 @@ mod windows_impl {
     use windows::Win32::System::DataExchange::COPYDATASTRUCT;
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        ChangeWindowMessageFilterEx, FindWindowW, SendMessageTimeoutW, MSGFLT_ALLOW,
-        SMTO_ABORTIFHUNG, WM_COPYDATA,
+        ChangeWindowMessageFilterEx, FindWindowW, MessageBoxW, SendMessageTimeoutW, MB_ICONWARNING,
+        MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MSGFLT_ALLOW, SMTO_ABORTIFHUNG, WM_COPYDATA,
     };
 
     /// `SECURITY_DESCRIPTOR_REVISION`。windows crate 需要 Win32_System_SystemServices
@@ -149,6 +149,9 @@ mod windows_impl {
                                 GetLastError()
                             ),
                         );
+                        // 用户视角这里等价于“双击没反应”：已有实例真实存在但唤醒失败，
+                        // 不弹提示的话本进程会直接静默退出，看起来像 exe 打不开。
+                        show_wake_failed_dialog();
                     } else {
                         crate::startup_log("info", "单实例守卫：已成功通知已有实例显示主窗口");
                     }
@@ -164,6 +167,25 @@ mod windows_impl {
             }
         }
         std::process::exit(0);
+    }
+
+    /// 已有实例存在但唤醒失败时的用户可见反馈：不弹的话本进程会静默退出，
+    /// 双击 exe 在用户看来就是“毫无反应”。无父窗口可依附，用置顶+抢前台
+    /// 保证消息框不会被已有实例（哪怕它卡死）挡住或压到后台。
+    fn show_wake_failed_dialog() {
+        let title = wide("文件同步工具");
+        let text = wide(
+            "检测到程序已在运行，但未能唤醒其窗口（可能已卡死）。\n\n\
+             请在任务管理器中结束所有相关的旧进程后重新打开本程序。",
+        );
+        unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR(text.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND,
+            );
+        }
     }
 
     pub fn allow_notifications_from_lower_integrity(identifier: &str) {

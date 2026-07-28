@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { computed, nextTick, onBeforeUnmount, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
@@ -22,22 +21,6 @@ function setPaperWindowTransparency(enabled: boolean): void {
   document.body.classList.toggle(PAPER_WINDOW_CLASS, enabled);
 }
 
-async function onKeydown(event: KeyboardEvent): Promise<void> {
-  if (event.key !== 'Escape') return;
-  const paper = store.state.value.papers.find((candidate) => candidate.id === paperId.value);
-  if (paper?.collapsed) return;
-  store.updatePaper(paperId.value, (value) => { value.collapsed = true; }, { immediate: true });
-  if (paper) {
-    await invoke('paper_todo_set_window_mode', {
-      id: paper.id,
-      collapsed: true,
-      pinned: paper.pinned,
-      width: paper.geometry.width,
-      height: paper.geometry.height,
-    });
-  }
-}
-
 onMounted(async () => {
   setPaperWindowTransparency(true);
   try {
@@ -53,6 +36,10 @@ onMounted(async () => {
     }
     const currentWindow = getCurrentWindow();
     unlisteners.push(await currentWindow.onMoved(async ({ payload }) => {
+      // Docking and edge-peek move the window themselves. Recording those
+      // frames would persist an off-screen origin and restore the paper hidden
+      // at the display edge on the next launch.
+      if (store.geometryTrackingSuspended.value) return;
       const scale = await currentWindow.scaleFactor();
       store.updatePaper(paperId.value, (paper) => {
         paper.geometry.x = payload.x / scale;
@@ -68,7 +55,6 @@ onMounted(async () => {
         value.geometry.height = payload.height / scale;
       });
     }));
-    window.addEventListener('keydown', onKeydown);
     await currentWindow.show();
   } catch (reason) {
     store.error.value = String(reason);
@@ -82,7 +68,6 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeydown);
   unlisteners.splice(0).forEach((unlisten) => unlisten());
   setPaperWindowTransparency(false);
   void store.flush();
@@ -90,11 +75,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="h-screen w-screen overflow-hidden bg-transparent p-1">
-    <div v-if="store.loading.value" class="flex h-full items-center justify-center rounded-[7px] bg-slate-100/95 p-4 text-sm text-slate-600">
+  <div class="h-screen w-screen overflow-hidden bg-transparent">
+    <div v-if="store.loading.value" class="flex h-full items-center justify-center rounded-xl bg-slate-100/95 p-4 text-sm text-slate-600">
       {{ t('common.loading') }}
     </div>
-    <div v-else-if="store.error.value" class="flex h-full flex-col items-center justify-center gap-3 rounded-[7px] bg-rose-50 p-5 text-center text-sm text-rose-700" role="alert">
+    <div v-else-if="store.error.value" class="flex h-full flex-col items-center justify-center gap-3 rounded-xl bg-rose-50 p-5 text-center text-sm text-rose-700" role="alert">
       <p>{{ store.error.value }}</p>
       <button type="button" class="rounded border border-rose-300 bg-white px-3 py-1.5 font-semibold" @click="getCurrentWindow().close()">
         {{ t('common.close') }}

@@ -13,6 +13,7 @@ export interface SessionClientOptions {
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
   heartbeatMs?: number;
+  maxPointerMoveBufferedBytes?: number;
   webSocketFactory?: (url: string) => WebSocket;
 }
 
@@ -61,7 +62,10 @@ function parseMessage(data: unknown): SessionServerMessage | null {
 }
 
 export class ScreenShareSessionClient {
-  private readonly options: Required<Pick<SessionClientOptions, 'reconnectBaseMs' | 'reconnectMaxMs' | 'heartbeatMs'>> & SessionClientOptions;
+  private readonly options: Required<Pick<
+    SessionClientOptions,
+    'reconnectBaseMs' | 'reconnectMaxMs' | 'heartbeatMs' | 'maxPointerMoveBufferedBytes'
+  >> & SessionClientOptions;
   private socket: WebSocket | null = null;
   private reconnectTimer: number | null = null;
   private heartbeatTimer: number | null = null;
@@ -81,6 +85,7 @@ export class ScreenShareSessionClient {
       reconnectMaxMs: 8000,
       heartbeatMs: 15000,
       ...options,
+      maxPointerMoveBufferedBytes: options.maxPointerMoveBufferedBytes ?? 64 * 1024,
     };
     this.clientId = options.clientId ?? getStableClientId();
   }
@@ -135,6 +140,10 @@ export class ScreenShareSessionClient {
 
   send(type: string, payload?: unknown): boolean {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false;
+    if (
+      type === 'input.pointer_move'
+      && this.socket.bufferedAmount > this.options.maxPointerMoveBufferedBytes
+    ) return false;
     const message: SessionEnvelope = {
       v: 1,
       type,

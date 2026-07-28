@@ -35,5 +35,6 @@ export function buildAppPatch(config: AppConfig): AppDomainConfigPatch {
     notify_on_new_version: config.notify_on_new_version,
     clipboard: config.clipboard,
     device_simulator: config.device_simulator,
+    portal_login: config.portal_login,
   };
 }

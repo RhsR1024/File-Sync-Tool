@@ -1,12 +1,8 @@
 <script setup lang="ts">
-import Sidebar from '@/components/Sidebar.vue';
-import ScreenShareControlRequestDialog from '@/components/ScreenShareControlRequestDialog.vue';
-import ToastContainer from '@/components/ToastContainer.vue';
-import UpdateDialog from '@/components/UpdateDialog.vue';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
-import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { RouterView, useRouter } from 'vue-router';
 
@@ -45,6 +41,16 @@ import {
   type TaskLogEntry,
 } from '@/lib/tauri';
 
+// The application chrome belongs to the main window. Loading it lazily keeps it
+// out of the entry chunk that borderless helper windows have to parse.
+const Sidebar = defineAsyncComponent(() => import('@/components/Sidebar.vue'));
+const ToastContainer = defineAsyncComponent(() => import('@/components/ToastContainer.vue'));
+const UpdateDialog = defineAsyncComponent(() => import('@/components/UpdateDialog.vue'));
+const ScreenShareControlRequestDialog = defineAsyncComponent(
+  () => import('@/components/ScreenShareControlRequestDialog.vue'),
+);
+const QuitConfirmDialog = defineAsyncComponent(() => import('@/components/QuitConfirmDialog.vue'));
+
 let unlistenLog: (() => void) | null = null;
 let unlistenProgress: (() => void) | null = null;
 let unlistenScanQueued: (() => void) | null = null;
@@ -67,6 +73,9 @@ const { t } = useI18n();
 const pendingScreenShareControlRequest = ref<ScreenShareControlRequest | null>(null);
 const respondingToScreenShareControlRequest = ref(false);
 const screenShareControlRequestError = ref('');
+const quitConfirmOpen = ref(false);
+const quitConfirmTaskNames = ref<string[]>([]);
+let resolveQuitConfirm: ((confirmed: boolean) => void) | null = null;
 
 interface ScanQueuedEvent {
   folder: string;
@@ -114,8 +123,28 @@ function scheduleSave() {
   }, 3000);
 }
 
-function hasActiveCopyTask(groups: Awaited<ReturnType<typeof listTaskGroups>>): boolean {
-  return groups.some((group) => group.copy_status === 'running');
+function activeCopyTaskNames(groups: Awaited<ReturnType<typeof listTaskGroups>>): string[] {
+  return groups
+    .filter((group) => group.copy_status === 'running')
+    .map((group) => group.display_name || group.folder_name);
+}
+
+/// Ask inside the app instead of through `window.confirm`, which the webview renders
+/// as an OS strip pinned to the top of the window with no context around it.
+function askQuitConfirmation(taskNames: string[]): Promise<boolean> {
+  resolveQuitConfirm?.(false);
+  quitConfirmTaskNames.value = taskNames;
+  quitConfirmOpen.value = true;
+  return new Promise<boolean>((resolve) => {
+    resolveQuitConfirm = resolve;
+  });
+}
+
+function settleQuitConfirmation(confirmed: boolean) {
+  quitConfirmOpen.value = false;
+  const resolve = resolveQuitConfirm;
+  resolveQuitConfirm = null;
+  resolve?.(confirmed);
 }
 
 function applyScreenShareStatus(status: ScreenShareStatus) {
@@ -291,17 +320,17 @@ onMounted(async () => {
   });
 
   unlistenBeforeQuit = await listen('before-quit', async () => {
-    let activeCopyTask = hasActiveCopyTask(taskStateStore.groups);
+    let runningCopyTasks = activeCopyTaskNames(taskStateStore.groups);
     try {
       // Refresh from Rust so a close request cannot race a task snapshot event.
-      activeCopyTask = hasActiveCopyTask(await listTaskGroups());
+      runningCopyTasks = activeCopyTaskNames(await listTaskGroups());
     } catch {
       // Keep the last event-backed state if the refresh fails during shutdown.
     }
 
-    if (activeCopyTask) {
+    if (runningCopyTasks.length > 0) {
       // A tray exit can arrive while the main window is hidden. Restore it so
-      // the browser confirmation is visible and can be answered.
+      // the confirmation is visible and can be answered.
       try {
         const mainWindow = getCurrentWindow();
         await mainWindow.show();
@@ -310,7 +339,17 @@ onMounted(async () => {
         // The confirmation still falls back to the current window state.
       }
 
-      if (!window.confirm(t('common.quitWhileCopyingConfirm'))) {
+      // Surface the task list behind the dialog so the runs being abandoned are
+      // visible while the decision is made.
+      if (router.currentRoute.value.path !== '/sync') {
+        try {
+          await router.push('/sync');
+        } catch {
+          // Navigation is context, not a precondition for the confirmation.
+        }
+      }
+
+      if (!await askQuitConfirmation(runningCopyTasks)) {
         try {
           await cancelQuit();
         } catch (error) {
@@ -435,10 +474,18 @@ onUnmounted(() => {
     <ToastContainer />
   </div>
   <ScreenShareControlRequestDialog
+    v-if="pendingScreenShareControlRequest"
     :request="pendingScreenShareControlRequest"
     :busy="respondingToScreenShareControlRequest"
     :error="screenShareControlRequestError"
     @allow="respondToScreenShareControlRequest(true)"
     @deny="respondToScreenShareControlRequest(false)"
+  />
+  <QuitConfirmDialog
+    v-if="quitConfirmOpen"
+    :open="quitConfirmOpen"
+    :task-names="quitConfirmTaskNames"
+    @confirm="settleQuitConfirmation(true)"
+    @cancel="settleQuitConfirmation(false)"
   />
 </template>

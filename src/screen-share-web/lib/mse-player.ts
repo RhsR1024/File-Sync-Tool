@@ -23,21 +23,54 @@ export interface MseH264PlayerOptions {
 
 export type MsePlayerStateListener = (state: MsePlayerState) => void;
 
-const LIVE_EDGE_MAX_LATENCY_SECONDS = 0.25;
-const LIVE_EDGE_TARGET_LATENCY_SECONDS = 0.05;
+const LIVE_EDGE_TARGET_LATENCY_SECONDS = 0.12;
+const LIVE_EDGE_RATE_TOLERANCE_SECONDS = 0.04;
+const LIVE_EDGE_MAX_RATE_LATENCY_SECONDS = 0.5;
+const LIVE_EDGE_SEEK_LATENCY_SECONDS = 1;
+const MAX_LIVE_EDGE_PLAYBACK_RATE = 1.1;
+const RETAINED_HISTORY_SECONDS = 2;
+const RETAINED_CURRENT_TIME_MARGIN_SECONDS = 0.5;
 
-export function lowLatencySeekTarget(
+export interface LiveEdgeAction {
+  seekTo: number | null;
+  playbackRate: number;
+}
+
+export function lowLatencyAction(
   currentTime: number,
   bufferedStart: number,
   bufferedEnd: number,
-): number | null {
+  hasSyncedLiveEdge: boolean,
+): LiveEdgeAction {
   if (![currentTime, bufferedStart, bufferedEnd].every(Number.isFinite) || bufferedEnd <= bufferedStart) {
-    return null;
+    return { seekTo: null, playbackRate: 1 };
   }
-  if (currentTime < bufferedStart || bufferedEnd - currentTime > LIVE_EDGE_MAX_LATENCY_SECONDS) {
-    return Math.max(bufferedStart, bufferedEnd - LIVE_EDGE_TARGET_LATENCY_SECONDS);
+  const latency = bufferedEnd - currentTime;
+  if (
+    !hasSyncedLiveEdge
+    || currentTime < bufferedStart
+    || currentTime > bufferedEnd
+    || latency >= LIVE_EDGE_SEEK_LATENCY_SECONDS
+  ) {
+    return {
+      seekTo: Math.max(bufferedStart, bufferedEnd - LIVE_EDGE_TARGET_LATENCY_SECONDS),
+      playbackRate: 1,
+    };
   }
-  return null;
+  if (latency <= LIVE_EDGE_TARGET_LATENCY_SECONDS + LIVE_EDGE_RATE_TOLERANCE_SECONDS) {
+    return { seekTo: null, playbackRate: 1 };
+  }
+  const rateWindow = LIVE_EDGE_MAX_RATE_LATENCY_SECONDS
+    - LIVE_EDGE_TARGET_LATENCY_SECONDS
+    - LIVE_EDGE_RATE_TOLERANCE_SECONDS;
+  const progress = Math.min(
+    1,
+    (latency - LIVE_EDGE_TARGET_LATENCY_SECONDS - LIVE_EDGE_RATE_TOLERANCE_SECONDS) / rateWindow,
+  );
+  return {
+    seekTo: null,
+    playbackRate: 1 + progress * (MAX_LIVE_EDGE_PLAYBACK_RATE - 1),
+  };
 }
 
 export function buildMediaWebSocketUrl(reconnect = false): string {
@@ -92,6 +125,7 @@ export class MseH264Player {
   private attempts = 0;
   private generation = 0;
   private queuedSegments: ArrayBuffer[] = [];
+  private hasSyncedLiveEdge = false;
   private state: MsePlayerState = {
     status: 'idle',
     attempts: 0,
@@ -109,7 +143,7 @@ export class MseH264Player {
       reconnectBaseMs: options.reconnectBaseMs ?? 700,
       reconnectMaxMs: options.reconnectMaxMs ?? 8000,
       readyTimeoutMs: options.readyTimeoutMs ?? 7000,
-      maxQueuedSegments: options.maxQueuedSegments ?? 180,
+      maxQueuedSegments: options.maxQueuedSegments ?? 60,
     };
   }
 
@@ -155,6 +189,7 @@ export class MseH264Player {
     this.video = null;
     this.generation = 0;
     this.queuedSegments = [];
+    this.hasSyncedLiveEdge = false;
     if (markClosed) this.setState({ status: 'closed', lastError: null });
   }
 
@@ -293,8 +328,12 @@ export class MseH264Player {
     const index = sourceBuffer.buffered.length - 1;
     const start = sourceBuffer.buffered.start(index);
     const end = sourceBuffer.buffered.end(index);
-    const target = lowLatencySeekTarget(video.currentTime, start, end);
-    if (target !== null) video.currentTime = target;
+    const action = lowLatencyAction(video.currentTime, start, end, this.hasSyncedLiveEdge);
+    if (action.seekTo !== null) {
+      video.currentTime = action.seekTo;
+      this.hasSyncedLiveEdge = true;
+    }
+    if (video.playbackRate !== action.playbackRate) video.playbackRate = action.playbackRate;
     void video.play().catch(() => undefined);
   }
 
@@ -304,8 +343,11 @@ export class MseH264Player {
     if (!sourceBuffer || !video || sourceBuffer.updating || sourceBuffer.buffered.length === 0) return;
     const start = sourceBuffer.buffered.start(0);
     const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-    const removeUntil = Math.min(video.currentTime - 5, end - 20);
-    if (removeUntil > start + 1) {
+    const removeUntil = Math.min(
+      video.currentTime - RETAINED_CURRENT_TIME_MARGIN_SECONDS,
+      end - RETAINED_HISTORY_SECONDS,
+    );
+    if (removeUntil > start + 0.25) {
       try {
         sourceBuffer.remove(start, removeUntil);
       } catch {
@@ -384,6 +426,7 @@ export class MseH264Player {
       }
     }
     this.mediaSource = null;
+    this.hasSyncedLiveEdge = false;
     if (this.objectUrl) {
       this.options.revokeObjectUrl(this.objectUrl);
       this.objectUrl = null;

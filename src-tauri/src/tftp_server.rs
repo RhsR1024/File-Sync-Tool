@@ -8,7 +8,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{mpsc, Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tauri::{State, WebviewWindow};
@@ -43,7 +43,7 @@ pub struct TftpTransfer {
     pub started_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TftpEvent {
     pub id: u64,
     pub timestamp: String,
@@ -115,6 +115,62 @@ impl Default for TftpServerStatus {
     }
 }
 
+/// Off-thread writer that keeps the transfer log on disk so it survives a restart.
+///
+/// Events are low frequency — one per request, completion or failure, never per data
+/// block — but they are produced from inside the async TFTP handlers, so the file write
+/// is handed to a dedicated thread instead of blocking the runtime.
+struct EventHistory {
+    sender: mpsc::Sender<Vec<TftpEvent>>,
+}
+
+impl EventHistory {
+    fn open(path: PathBuf) -> Self {
+        let (sender, receiver) = mpsc::channel::<Vec<TftpEvent>>();
+        let spawned = std::thread::Builder::new()
+            .name("tftp-event-history".to_string())
+            .spawn(move || {
+                while let Ok(mut events) = receiver.recv() {
+                    // Collapse a burst so only the newest snapshot reaches the disk.
+                    while let Ok(newer) = receiver.try_recv() {
+                        events = newer;
+                    }
+                    write_events(&path, &events);
+                }
+            });
+        if let Err(error) = &spawned {
+            log::warn!("[tftp] failed to start the transfer log writer: {error}");
+        }
+        Self { sender }
+    }
+
+    fn store(&self, events: &VecDeque<TftpEvent>) {
+        let _ = self.sender.send(events.iter().cloned().collect());
+    }
+}
+
+fn read_events(path: &Path) -> Vec<TftpEvent> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn write_events(path: &Path, events: &[TftpEvent]) {
+    let Ok(json) = serde_json::to_string(events) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let temporary = path.with_extension("tmp");
+    if std::fs::write(&temporary, json).is_ok() {
+        let _ = std::fs::rename(&temporary, path);
+    }
+}
+
 #[derive(Default)]
 struct SharedState {
     next_id: u64,
@@ -122,25 +178,47 @@ struct SharedState {
     events: VecDeque<TftpEvent>,
     stats: TftpStats,
     last_error: Option<String>,
+    history: Option<Arc<EventHistory>>,
 }
 
 impl SharedState {
+    fn with_history(path: PathBuf) -> Self {
+        let mut events: VecDeque<TftpEvent> = read_events(&path).into();
+        while events.len() > MAX_EVENTS {
+            events.pop_front();
+        }
+        Self {
+            // Restored events keep their ids so the UI list keys stay stable; new ids
+            // continue past them instead of colliding with restored rows.
+            next_id: events.iter().map(|event| event.id).max().unwrap_or(0),
+            events,
+            history: Some(Arc::new(EventHistory::open(path))),
+            ..Self::default()
+        }
+    }
+
     fn next_id(&mut self) -> u64 {
         self.next_id = self.next_id.saturating_add(1);
         self.next_id
     }
 
-    fn push_event(&mut self, event: TftpEvent) {
+    /// Append an event, giving it a fresh id. Callers pass whatever id they have on
+    /// hand — a transfer id repeats across its start and finish events, so the log
+    /// assigns its own to keep every row uniquely identifiable.
+    fn push_event(&mut self, mut event: TftpEvent) {
+        event.id = self.next_id();
         self.events.push_back(event);
         while self.events.len() > MAX_EVENTS {
             self.events.pop_front();
         }
+        if let Some(history) = &self.history {
+            history.store(&self.events);
+        }
     }
 
     fn server_event(&mut self, action: &str, level: &str, message: String) {
-        let id = self.next_id();
         self.push_event(TftpEvent {
-            id,
+            id: 0,
             timestamp: timestamp(),
             level: level.to_string(),
             action: action.to_string(),
@@ -172,7 +250,7 @@ impl SharedState {
             },
         );
         self.push_event(TftpEvent {
-            id,
+            id: 0,
             timestamp: timestamp(),
             level: "info".to_string(),
             action: format!("{direction}_started"),
@@ -210,7 +288,7 @@ impl SharedState {
             }
         }
         self.push_event(TftpEvent {
-            id,
+            id: 0,
             timestamp: timestamp(),
             level: if completed { "success" } else { "error" }.to_string(),
             action: format!(
@@ -232,9 +310,8 @@ impl SharedState {
         file_name: &str,
         message: String,
     ) {
-        let id = self.next_id();
         self.push_event(TftpEvent {
-            id,
+            id: 0,
             timestamp: timestamp(),
             level: "error".to_string(),
             action: format!("{direction}_failed"),
@@ -276,6 +353,17 @@ pub struct TftpServerState {
 }
 
 impl TftpServerState {
+    /// Build the state with the transfer log restored from the app data directory.
+    pub fn new(app_handle: &tauri::AppHandle) -> Self {
+        let path = crate::config::get_data_dir(app_handle).join("tftp_events.json");
+        Self {
+            runtime: Mutex::new(Runtime {
+                shared: Arc::new(StdMutex::new(SharedState::with_history(path))),
+                ..Runtime::default()
+            }),
+        }
+    }
+
     async fn start(&self, config: TftpServerConfig) -> Result<TftpServerStatus, String> {
         validate_config(&config)?;
 
@@ -905,6 +993,47 @@ mod tests {
             block_size_limit: 8192,
             window_size_limit: 8,
         }
+    }
+
+    #[test]
+    fn the_transfer_log_survives_a_restart() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tftp_events.json");
+
+        let mut state = SharedState::with_history(path.clone());
+        state.server_event("server_started", "success", "127.0.0.1:69".to_string());
+        let transfer = state.transfer_started(
+            "download",
+            &"192.168.1.9:52096".parse().unwrap(),
+            "firmware.bin",
+            Some(13),
+        );
+        state.transfer_finished(transfer, true, String::new());
+        let live_ids: Vec<u64> = state.events.iter().map(|event| event.id).collect();
+        drop(state);
+
+        // The writer thread owns the file, so give the last snapshot a moment to land.
+        for _ in 0..50 {
+            if read_events(&path).len() == 3 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let restored = SharedState::with_history(path);
+        let restored_actions: Vec<&str> = restored
+            .events
+            .iter()
+            .map(|event| event.action.as_str())
+            .collect();
+        assert_eq!(
+            restored_actions,
+            vec!["server_started", "download_started", "download_completed"]
+        );
+        // Every row keeps a distinct id — the download's start and finish no longer
+        // share the transfer id — and new events continue past the restored ones.
+        assert_eq!(live_ids, vec![1, 3, 4]);
+        assert_eq!(restored.next_id, 4);
     }
 
     #[tokio::test]

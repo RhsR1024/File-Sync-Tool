@@ -22,15 +22,52 @@ pub const MAX_ALARM_INTERVAL_MS: u64 = 24 * 60 * 60 * 1_000;
 
 pub type AlarmFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlarmSenderResponse {
     pub status: u16,
+    /// Absolute URL the request actually reached, reported back so a rejected
+    /// status names the endpoint that rejected it.
+    pub endpoint: Option<String>,
+    /// Application-level acknowledgement decoded from the platform response
+    /// body. HTTP 2xx alone only proves that an HTTP handler answered; UMS may
+    /// still reject the alarm in its JSON response envelope.
+    pub application_status: Option<AlarmApplicationStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlarmApplicationStatus {
+    Accepted,
+    Rejected { details: String },
+}
+
+impl AlarmSenderResponse {
+    pub fn new(status: u16) -> Self {
+        Self {
+            status,
+            endpoint: None,
+            application_status: None,
+        }
+    }
+
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+
+    pub fn with_application_status(mut self, status: AlarmApplicationStatus) -> Self {
+        self.application_status = Some(status);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlarmSendError {
     pub code: String,
     pub retryable: bool,
+    /// Sanitized, operator-facing cause (destination, transport reason). Carried
+    /// all the way to the UI so a failure names what actually went wrong instead
+    /// of only a generic "the alarm could not be sent".
+    pub details: Option<String>,
 }
 
 impl AlarmSendError {
@@ -38,7 +75,13 @@ impl AlarmSendError {
         Self {
             code: code.into(),
             retryable,
+            details: None,
         }
+    }
+
+    pub fn with_details(mut self, details: impl Into<String>) -> Self {
+        self.details = Some(details.into());
+        self
     }
 }
 
@@ -237,7 +280,9 @@ pub struct DeviceAlarmStats {
     pub rejected: u64,
     pub in_flight: u64,
     pub total_duration_ms: u64,
+    pub last_http_status: Option<u16>,
     pub last_error_code: Option<String>,
+    pub last_error_details: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,13 +298,16 @@ pub struct AlarmJobSnapshot {
     pub rejected: u64,
     pub in_flight: u64,
     pub average_duration_ms: u64,
+    pub last_http_status: Option<u16>,
     pub last_error_code: Option<String>,
+    pub last_error_details: Option<String>,
     pub devices: BTreeMap<String, DeviceAlarmStats>,
 }
 
 #[derive(Debug)]
 struct JobStatsInner {
     state: ScheduledAlarmJobState,
+    last_http_status: Option<u16>,
     devices: BTreeMap<String, DeviceAlarmStats>,
 }
 
@@ -275,6 +323,7 @@ impl AlarmJobTracker {
             job_id: Arc::from(job_id),
             inner: Arc::new(Mutex::new(JobStatsInner {
                 state: ScheduledAlarmJobState::Starting,
+                last_http_status: None,
                 devices: targets
                     .iter()
                     .map(|target| (target.device_id.clone(), DeviceAlarmStats::default()))
@@ -300,32 +349,39 @@ impl AlarmJobTracker {
     }
 
     async fn finish_attempt(&self, device_id: &str, outcome: AttemptResult, duration_ms: u64) {
+        let last_http_status = outcome.http_status();
         let mut inner = self.inner.lock().await;
+        inner.last_http_status = last_http_status;
         let stats = inner.devices.entry(device_id.to_owned()).or_default();
         stats.in_flight = stats.in_flight.saturating_sub(1);
         stats.total_duration_ms = stats.total_duration_ms.saturating_add(duration_ms);
+        stats.last_http_status = last_http_status;
         match outcome {
-            AttemptResult::Succeeded => {
+            AttemptResult::Succeeded { .. } => {
                 stats.succeeded = stats.succeeded.saturating_add(1);
                 stats.last_error_code = None;
+                stats.last_error_details = None;
+            }
+            AttemptResult::Unverified { .. } => {
+                stats.unverified = stats.unverified.saturating_add(1);
+                stats.last_error_code = None;
+                stats.last_error_details = None;
             }
             AttemptResult::Failed {
                 code,
-                unverified,
+                details,
                 timed_out,
                 ..
             } => {
-                if unverified {
-                    stats.unverified = stats.unverified.saturating_add(1);
-                } else {
-                    stats.failed = stats.failed.saturating_add(1);
-                }
+                stats.failed = stats.failed.saturating_add(1);
                 stats.timed_out = stats.timed_out.saturating_add(u64::from(timed_out));
                 stats.last_error_code = Some(code);
+                stats.last_error_details = details;
             }
             AttemptResult::Cancelled => {
                 stats.cancelled = stats.cancelled.saturating_add(1);
                 stats.last_error_code = Some("device_simulator.alarm.cancelled".into());
+                stats.last_error_details = None;
             }
         }
     }
@@ -335,6 +391,7 @@ impl AlarmJobTracker {
         let stats = inner.devices.entry(device_id.to_owned()).or_default();
         stats.rejected = stats.rejected.saturating_add(1);
         stats.last_error_code = Some(code.into());
+        stats.last_error_details = None;
     }
 }
 
@@ -349,6 +406,7 @@ fn snapshot_from_inner(job_id: &str, inner: &JobStatsInner) -> AlarmJobSnapshot 
     let mut in_flight = 0_u64;
     let mut total_duration = 0_u64;
     let mut last_error_code = None;
+    let mut last_error_details = None;
     for stats in inner.devices.values() {
         attempted = attempted.saturating_add(stats.attempted);
         succeeded = succeeded.saturating_add(stats.succeeded);
@@ -361,6 +419,7 @@ fn snapshot_from_inner(job_id: &str, inner: &JobStatsInner) -> AlarmJobSnapshot 
         total_duration = total_duration.saturating_add(stats.total_duration_ms);
         if stats.last_error_code.is_some() {
             last_error_code.clone_from(&stats.last_error_code);
+            last_error_details.clone_from(&stats.last_error_details);
         }
     }
     AlarmJobSnapshot {
@@ -379,7 +438,9 @@ fn snapshot_from_inner(job_id: &str, inner: &JobStatsInner) -> AlarmJobSnapshot 
         } else {
             total_duration / attempted
         },
+        last_http_status: inner.last_http_status,
         last_error_code,
+        last_error_details,
         devices: inner.devices.clone(),
     }
 }
@@ -775,10 +836,7 @@ impl AlarmScheduler {
                     )
                     .await;
                 match outcome {
-                    AttemptResult::Succeeded
-                    | AttemptResult::Failed {
-                        unverified: true, ..
-                    } => break,
+                    AttemptResult::Succeeded { .. } | AttemptResult::Unverified { .. } => break,
                     AttemptResult::Cancelled => return false,
                     AttemptResult::Failed {
                         retryable: false, ..
@@ -877,9 +935,13 @@ impl AlarmScheduler {
             ),
             _ = timeout => AttemptResult::Failed {
                 code: "device_simulator.alarm.request_timeout".into(),
+                details: Some(format!(
+                    "no response within {} ms",
+                    self.limits.request_timeout_ms
+                )),
                 retryable: true,
-                unverified: false,
                 timed_out: true,
+                http_status: None,
             },
         };
         let duration = self.clock.now_ms().saturating_sub(started_at);
@@ -977,14 +1039,32 @@ impl RateGate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AttemptResult {
-    Succeeded,
+    Succeeded {
+        http_status: u16,
+    },
+    Unverified {
+        http_status: u16,
+    },
     Failed {
         code: String,
+        details: Option<String>,
         retryable: bool,
-        unverified: bool,
         timed_out: bool,
+        http_status: Option<u16>,
     },
     Cancelled,
+}
+
+impl AttemptResult {
+    fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Succeeded { http_status } | Self::Unverified { http_status } => {
+                Some(*http_status)
+            }
+            Self::Failed { http_status, .. } => *http_status,
+            Self::Cancelled => None,
+        }
+    }
 }
 
 fn classify_sender_result(
@@ -996,32 +1076,56 @@ fn classify_sender_result(
     match result {
         Err(error) => AttemptResult::Failed {
             code: error.code,
+            details: error.details,
             retryable: error.retryable,
-            unverified: false,
             timed_out: false,
+            http_status: None,
         },
         Ok(response) => {
-            if !platform_verified {
+            if !(200..=299).contains(&response.status) {
                 return AttemptResult::Failed {
-                    code: "device_simulator.alarm.success_evidence_unverified".into(),
-                    retryable: false,
-                    unverified: true,
+                    code: format!("device_simulator.alarm.http_status.{}", response.status),
+                    details: response.endpoint.clone(),
+                    retryable: retryable_statuses.contains(&response.status),
                     timed_out: false,
+                    http_status: Some(response.status),
+                };
+            }
+            match response.application_status {
+                Some(AlarmApplicationStatus::Accepted) => {
+                    return AttemptResult::Succeeded {
+                        http_status: response.status,
+                    };
+                }
+                Some(AlarmApplicationStatus::Rejected { details }) => {
+                    return AttemptResult::Failed {
+                        code: "device_simulator.alarm.application_rejected".into(),
+                        details: Some(details),
+                        retryable: false,
+                        timed_out: false,
+                        http_status: Some(response.status),
+                    };
+                }
+                None => {}
+            }
+            if !platform_verified {
+                return AttemptResult::Unverified {
+                    http_status: response.status,
                 };
             }
             match success_rule.evaluate(response.status) {
-                None => AttemptResult::Failed {
-                    code: "device_simulator.alarm.success_rule_unverified".into(),
-                    retryable: false,
-                    unverified: true,
-                    timed_out: false,
+                None => AttemptResult::Unverified {
+                    http_status: response.status,
                 },
-                Some(true) => AttemptResult::Succeeded,
+                Some(true) => AttemptResult::Succeeded {
+                    http_status: response.status,
+                },
                 Some(false) => AttemptResult::Failed {
                     code: format!("device_simulator.alarm.http_status.{}", response.status),
+                    details: response.endpoint,
                     retryable: retryable_statuses.contains(&response.status),
-                    unverified: false,
                     timed_out: false,
+                    http_status: Some(response.status),
                 },
             }
         }
@@ -1235,7 +1339,7 @@ mod tests {
                     .lock()
                     .await
                     .pop_front()
-                    .unwrap_or(Ok(AlarmSenderResponse { status: 200 }))
+                    .unwrap_or(Ok(AlarmSenderResponse::new(200)))
             })
         }
     }
@@ -1490,6 +1594,87 @@ mod tests {
         assert_eq!(snapshot.failed, 0);
         assert_eq!(snapshot.unverified, 1);
         assert_eq!(snapshot.attempted, 1);
+        assert_eq!(snapshot.last_error_code, None);
+        assert_eq!(snapshot.last_http_status, Some(200));
+        assert_eq!(snapshot.devices["one"].last_http_status, Some(200));
+    }
+
+    #[test]
+    fn application_acknowledgement_distinguishes_acceptance_from_http_200_rejection() {
+        let retryable = BTreeSet::new();
+        let accepted = classify_sender_result(
+            Ok(AlarmSenderResponse::new(200)
+                .with_application_status(AlarmApplicationStatus::Accepted)),
+            false,
+            &ResponseSuccessRule::Unverified,
+            &retryable,
+        );
+        assert_eq!(accepted, AttemptResult::Succeeded { http_status: 200 });
+
+        let rejected = classify_sender_result(
+            Ok(AlarmSenderResponse::new(200).with_application_status(
+                AlarmApplicationStatus::Rejected {
+                    details: "ResponseCode=17".into(),
+                },
+            )),
+            true,
+            &ResponseSuccessRule::StatusRange {
+                minimum: 200,
+                maximum: 299,
+            },
+            &retryable,
+        );
+        assert_eq!(
+            rejected,
+            AttemptResult::Failed {
+                code: "device_simulator.alarm.application_rejected".into(),
+                details: Some("ResponseCode=17".into()),
+                retryable: false,
+                timed_out: false,
+                http_status: Some(200),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn unverified_handler_still_reports_http_failures() {
+        let clock: Arc<dyn AlarmClock> = Arc::new(TestClock::default());
+        let sender = Arc::new(ScriptedSender::successful(clock.clone()));
+        sender.responses.lock().await.extend([
+            Ok(AlarmSenderResponse::new(500)),
+            Ok(AlarmSenderResponse::new(500)),
+        ]);
+        let scheduler = AlarmScheduler::new(sender, clock, limits()).unwrap();
+        let handler = definition(
+            AlarmHandlerId::SmartV1,
+            ResponseSuccessRule::StatusRange {
+                minimum: 200,
+                maximum: 299,
+            },
+            false,
+            false,
+        );
+
+        let snapshot = scheduler
+            .trigger_once(OneShotAlarmJob {
+                job_id: "unverified-http-error".into(),
+                targets: vec![target("one", vec![handler])],
+                mode: AlarmDispatchMode::Specified,
+                recovery_delay_ms: None,
+                random_seed: 1,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.attempted, 2);
+        assert_eq!(snapshot.failed, 2);
+        assert_eq!(snapshot.unverified, 0);
+        assert_eq!(
+            snapshot.last_error_code.as_deref(),
+            Some("device_simulator.alarm.http_status.500")
+        );
+        assert_eq!(snapshot.last_http_status, Some(500));
+        assert_eq!(snapshot.devices["one"].last_http_status, Some(500));
     }
 
     #[tokio::test]
@@ -1547,9 +1732,9 @@ mod tests {
         let clock: Arc<dyn AlarmClock> = Arc::new(TestClock::default());
         let sender = Arc::new(ScriptedSender::successful(clock.clone()));
         sender.responses.lock().await.extend([
-            Ok(AlarmSenderResponse { status: 500 }),
-            Ok(AlarmSenderResponse { status: 500 }),
-            Ok(AlarmSenderResponse { status: 200 }),
+            Ok(AlarmSenderResponse::new(500)),
+            Ok(AlarmSenderResponse::new(500)),
+            Ok(AlarmSenderResponse::new(200)),
         ]);
         let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
         let handler = definition(
@@ -1602,7 +1787,80 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.attempted, 2);
         assert_eq!(snapshot.timed_out, 2);
+        assert_eq!(snapshot.last_http_status, None);
+        assert_eq!(snapshot.devices["one"].last_http_status, None);
         assert_eq!(sender.calls.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn transport_failure_after_http_response_clears_the_attempt_status() {
+        let clock: Arc<dyn AlarmClock> = Arc::new(TestClock::default());
+        let sender = Arc::new(ScriptedSender::successful(clock.clone()));
+        sender.responses.lock().await.extend([
+            Ok(AlarmSenderResponse::new(500)),
+            Err(AlarmSendError::new(
+                "device_simulator.alarm.transport_failed",
+                false,
+            )),
+        ]);
+        let scheduler = AlarmScheduler::new(sender, clock, limits()).unwrap();
+        let handler = definition(
+            AlarmHandlerId::SmartV1,
+            ResponseSuccessRule::StatusRange {
+                minimum: 200,
+                maximum: 299,
+            },
+            true,
+            false,
+        );
+
+        let snapshot = scheduler
+            .trigger_once(OneShotAlarmJob {
+                job_id: "response-then-transport-error".into(),
+                targets: vec![target("one", vec![handler])],
+                mode: AlarmDispatchMode::Specified,
+                recovery_delay_ms: None,
+                random_seed: 1,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.attempted, 2);
+        assert_eq!(snapshot.last_http_status, None);
+        assert_eq!(snapshot.devices["one"].last_http_status, None);
+        assert_eq!(
+            snapshot.last_error_code.as_deref(),
+            Some("device_simulator.alarm.transport_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn last_http_status_follows_attempt_completion_order_across_devices() {
+        let handler = definition(
+            AlarmHandlerId::SmartV1,
+            ResponseSuccessRule::StatusRange {
+                minimum: 200,
+                maximum: 299,
+            },
+            true,
+            false,
+        );
+        let targets = vec![
+            target("z-first", vec![handler.clone()]),
+            target("a-last", vec![handler]),
+        ];
+        let tracker = AlarmJobTracker::new("completion-order".into(), &targets);
+
+        tracker.begin_attempt("z-first").await;
+        tracker
+            .finish_attempt("z-first", AttemptResult::Succeeded { http_status: 201 }, 1)
+            .await;
+        tracker.begin_attempt("a-last").await;
+        tracker
+            .finish_attempt("a-last", AttemptResult::Succeeded { http_status: 202 }, 1)
+            .await;
+
+        assert_eq!(tracker.snapshot().await.last_http_status, Some(202));
     }
 
     #[tokio::test]
