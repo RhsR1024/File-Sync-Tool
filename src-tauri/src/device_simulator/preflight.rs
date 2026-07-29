@@ -504,7 +504,10 @@ mod tests {
             .checks
             .iter()
             .any(|check| check.id == "assets" && check.status == PreflightCheckStatus::Failed));
-        assert!(!report.checks.iter().any(|check| check.id == "profile-evidence"));
+        assert!(!report
+            .checks
+            .iter()
+            .any(|check| check.id == "profile-evidence"));
     }
 
     #[test]

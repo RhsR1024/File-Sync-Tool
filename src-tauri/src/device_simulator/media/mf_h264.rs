@@ -674,11 +674,35 @@ struct EncodedOutput {
     sample_time_100ns: i64,
 }
 
+/// `ProcessOutput` 的两类结果：真正的失败，以及"MFT 要求重新协商输出类型"这个
+/// 正常协议事件。分开是为了让后者能在协商后重试，而不是把编码器整体否掉。
+#[cfg(target_os = "windows")]
+enum EncoderOutputError {
+    StreamChange,
+    Failed(String),
+}
+
+#[cfg(target_os = "windows")]
+impl From<String> for EncoderOutputError {
+    fn from(value: String) -> Self {
+        Self::Failed(value)
+    }
+}
+
+#[cfg(target_os = "windows")]
+enum EncoderOutputOutcome {
+    Produced(EncodedOutput),
+    Renegotiated,
+    NeedMoreInput,
+}
+
 #[cfg(target_os = "windows")]
 struct MfH264Encoder {
     transform: windows::Win32::Media::MediaFoundation::IMFTransform,
     codec_api: Option<windows::Win32::Media::MediaFoundation::ICodecAPI>,
     async_adapter: Option<AsyncMftAdapter>,
+    width: u32,
+    height: u32,
     output_size: u32,
     output_provides_samples: bool,
     frame_duration_100ns: i64,
@@ -904,6 +928,8 @@ impl MfH264Encoder {
             transform,
             codec_api,
             async_adapter,
+            width,
+            height,
             output_size: info.cbSize.max(width.saturating_mul(height)).max(1),
             output_provides_samples,
             frame_duration_100ns,
@@ -944,22 +970,125 @@ impl MfH264Encoder {
                 .as_mut()
                 .is_some_and(AsyncMftAdapter::take_output_credit)
             {
-                if let Some(output) = self.process_one_output(sample_time)? {
-                    outputs.push(output);
+                match self.process_one_output(sample_time)? {
+                    EncoderOutputOutcome::Produced(output) => outputs.push(output),
+                    // 格式变更消耗了这次 HaveOutput 事件，等下一个事件再取输出。
+                    EncoderOutputOutcome::Renegotiated => {}
+                    EncoderOutputOutcome::NeedMoreInput => {}
                 }
                 if let Some(adapter) = self.async_adapter.as_mut() {
                     adapter.poll_available()?;
                 }
             }
         } else {
-            while let Some(output) = self.process_one_output(sample_time)? {
-                outputs.push(output);
+            loop {
+                match self.process_one_output(sample_time)? {
+                    EncoderOutputOutcome::Produced(output) => outputs.push(output),
+                    // 同步 MFT 在协商后已就地重试，这里不会出现；保留分支只为穷尽。
+                    EncoderOutputOutcome::Renegotiated => {}
+                    EncoderOutputOutcome::NeedMoreInput => break,
+                }
             }
         }
         Ok(outputs)
     }
 
-    fn process_one_output(&self, fallback_time: i64) -> Result<Option<EncodedOutput>, String> {
+    /// `MF_E_TRANSFORM_STREAM_CHANGE` 是 Media Foundation 的正常协议事件，不是
+    /// 失败：MFT 要求重新协商输出类型后才继续产出。Intel Quick Sync 等硬件编码器
+    /// 常在首帧输入之后才最终确定输出类型，把它当硬错误会让整条水印管线起不来。
+    ///
+    /// 异步 MFT 的格式变更会消耗掉本次 `METransformHaveOutput`：协商完成后必须
+    /// 等待下一个事件，立即重调 `ProcessOutput` 会得到 `E_UNEXPECTED`。同步 MFT
+    /// 没有事件模型，协商后直接重试。
+    fn process_one_output(&mut self, fallback_time: i64) -> Result<EncoderOutputOutcome, String> {
+        match self.try_process_one_output(fallback_time) {
+            Ok(Some(output)) => Ok(EncoderOutputOutcome::Produced(output)),
+            Ok(None) => Ok(EncoderOutputOutcome::NeedMoreInput),
+            Err(EncoderOutputError::Failed(message)) => Err(message),
+            Err(EncoderOutputError::StreamChange) => {
+                self.renegotiate_output_type()?;
+                if self.async_adapter.is_some() {
+                    return Ok(EncoderOutputOutcome::Renegotiated);
+                }
+                match self.try_process_one_output(fallback_time) {
+                    Ok(Some(output)) => Ok(EncoderOutputOutcome::Produced(output)),
+                    Ok(None) => Ok(EncoderOutputOutcome::NeedMoreInput),
+                    Err(EncoderOutputError::Failed(message)) => Err(message),
+                    Err(EncoderOutputError::StreamChange) => Err(
+                        "H.264 encoder requested another output type change immediately after renegotiation"
+                            .to_string(),
+                    ),
+                }
+            }
+        }
+    }
+
+    /// 按 MFT 协议重新协商输出类型。新类型可能改变输出缓冲大小，也可能改变由谁
+    /// 分配样本，沿用旧值会让随后的 `ProcessOutput` 收到无效参数，因此必须重新读取
+    /// `GetOutputStreamInfo`。帧尺寸也要复核：水印管线的 SDP 已按原尺寸发布，编码器
+    /// 换分辨率会让下游 SPS 校验在更晚、更难定位的地方失败。
+    fn renegotiate_output_type(&mut self) -> Result<(), String> {
+        use windows::Win32::Media::MediaFoundation::{
+            MFVideoFormat_H264, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_E_NO_MORE_TYPES,
+            MF_MT_FRAME_SIZE, MF_MT_SUBTYPE,
+        };
+
+        let expected_frame_size = (u64::from(self.width) << 32) | u64::from(self.height);
+        // 上限只是防御一个不断返回类型的异常 MFT，不是协议要求。
+        for index in 0..32u32 {
+            let candidate = match unsafe { self.transform.GetOutputAvailableType(0, index) } {
+                Ok(candidate) => candidate,
+                Err(error) if error.code() == MF_E_NO_MORE_TYPES => break,
+                Err(error) => {
+                    return Err(format!(
+                        "H.264 encoder output enumeration after a stream change failed: {error}"
+                    ))
+                }
+            };
+            let is_h264 = unsafe { candidate.GetGUID(&MF_MT_SUBTYPE) }
+                .is_ok_and(|subtype| subtype == MFVideoFormat_H264);
+            if !is_h264 {
+                continue;
+            }
+            // 未声明帧尺寸的类型交给 SetOutputType 判定，不在这里提前否掉。
+            let frame_size_matches = match unsafe { candidate.GetUINT64(&MF_MT_FRAME_SIZE) } {
+                Ok(size) => size == expected_frame_size,
+                Err(_) => true,
+            };
+            if !frame_size_matches {
+                continue;
+            }
+            win(
+                unsafe { self.transform.SetOutputType(0, &candidate, 0) },
+                "H.264 encoder rejected its own renegotiated output type",
+            )?;
+            let info = unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
+                format!("H.264 encoder output stream info after renegotiation failed: {error}")
+            })?;
+            self.output_size = info
+                .cbSize
+                .max(self.width.saturating_mul(self.height))
+                .max(1);
+            self.output_provides_samples =
+                info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
+            log::debug!(
+                "H.264 encoder '{}' renegotiated its output type: {} byte buffer, provides_samples={}",
+                self.name,
+                self.output_size,
+                self.output_provides_samples
+            );
+            return Ok(());
+        }
+        Err(format!(
+            "H.264 encoder '{}' exposed no {}x{} H.264 output type after requesting a stream change",
+            self.name, self.width, self.height
+        ))
+    }
+
+    fn try_process_one_output(
+        &self,
+        fallback_time: i64,
+    ) -> Result<Option<EncodedOutput>, EncoderOutputError> {
         use std::mem::ManuallyDrop;
         use windows::Win32::Media::MediaFoundation::*;
         let requested = if self.output_provides_samples {
@@ -1000,7 +1129,12 @@ impl MfH264Encoder {
                 }))
             }
             Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(None),
-            Err(error) => Err(format!("H.264 encoder ProcessOutput failed: {error}")),
+            Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                Err(EncoderOutputError::StreamChange)
+            }
+            Err(error) => Err(EncoderOutputError::Failed(format!(
+                "H.264 encoder ProcessOutput failed: {error}"
+            ))),
         }
     }
 
@@ -1317,5 +1451,56 @@ mod tests {
         assert_eq!(&output[12..16], &[4; 4]);
         assert_eq!(&output[16..20], &[9; 4]);
         assert_eq!(&output[20..24], &[10; 4]);
+    }
+
+    /// 在真实编码器上跑完一段帧序列。硬件 MFT（Intel Quick Sync 等）常在首帧输入
+    /// 之后才最终确定输出类型并返回 `MF_E_TRANSFORM_STREAM_CHANGE`；把它当硬错误
+    /// 会让整条水印管线在预热阶段就起不来。
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires a Windows Media Foundation H.264 encoder"]
+    fn encoder_keeps_producing_output_across_a_stream_change() {
+        let _runtime = MediaFoundationRuntime::startup().unwrap();
+        // 主码流通常是 1080p，子码流是 720p，两种尺寸都要能撑过重新协商。
+        for (width, height) in [(1920u32, 1080u32), (1280, 720)] {
+            let mut encoder = MfH264Encoder::new(width, height, 25, 1, 4_000_000).unwrap();
+            eprintln!(
+                "{width}x{height}: encoder='{}', path={}",
+                encoder.name,
+                if encoder.hardware {
+                    "hardware"
+                } else {
+                    "software"
+                }
+            );
+
+            let luma_len = (width * height) as usize;
+            let mut nv12 = vec![128u8; luma_len * 3 / 2];
+            let mut frame_index = 0i64;
+            let mut encode_next = |encoder: &mut MfH264Encoder, index: &mut i64| {
+                // 每帧改变亮度，避免编码器把完全静止的画面整段跳过。
+                nv12[..luma_len].fill((*index * 3) as u8);
+                let sample_time = *index * encoder.frame_duration_100ns;
+                *index += 1;
+                encoder.encode(&nv12, sample_time).unwrap().len()
+            };
+
+            let before = (0..30)
+                .map(|_| encode_next(&mut encoder, &mut frame_index))
+                .sum::<usize>();
+            assert!(
+                before > 0,
+                "{width}x{height}: no output before renegotiation"
+            );
+
+            // 编码器是否自发请求换类型取决于驱动，这里直接走一遍协商代码，确保
+            // 它选出的输出类型能让后续 ProcessOutput 继续产出，而不是留成死路。
+            encoder.renegotiate_output_type().unwrap();
+            let after = (0..30)
+                .map(|_| encode_next(&mut encoder, &mut frame_index))
+                .sum::<usize>();
+            assert!(after > 0, "{width}x{height}: no output after renegotiation");
+            eprintln!("{width}x{height}: {before} frames before, {after} frames after");
+        }
     }
 }

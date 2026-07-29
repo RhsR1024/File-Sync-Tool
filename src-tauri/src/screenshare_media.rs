@@ -1278,6 +1278,15 @@ fn target_bitrate_bps(width: u32, height: u32, fps: u8, quality: u8) -> u32 {
     scaled.clamp(1_200_000, 12_000_000) as u32
 }
 
+/// 软件回退的分辨率/帧率上限（规格 §5.3 要求的显式策略）。
+///
+/// 上限保持 1920x1080@30。曾经下调到 720p30 以缓解一台 Intel 目标机上的卡顿，
+/// 但那次测量里同时存在一路 MJPEG 观看端（每帧约 1.2 MB、强制全帧 CPU 回读、
+/// 外加 JPEG 编码），卡顿的主因是它而不是 1080p 软编；而屏幕共享的内容以文字
+/// 为主，降采样——尤其是配合最近邻缩放——会让正文直接不可读。
+///
+/// 因此这里只保留"超出 1080p 才等比缩小"的硬上限。真正需要降级时应当由实测的
+/// 编码耗时驱动自适应降档，而不是对最常见的 1080p 桌面无条件降低清晰度。
 fn software_encoder_limits(width: usize, height: usize, fps: u8) -> (usize, usize, u8) {
     const MAX_WIDTH: usize = 1920;
     const MAX_HEIGHT: usize = 1080;
@@ -1967,6 +1976,30 @@ struct EncodedH264Output {
     sample_duration_100ns: i64,
     sample_time_from_encoder: bool,
     sample_duration_from_encoder: bool,
+}
+
+/// `ProcessOutput` 的两类结果：真正的失败，以及"MFT 要求重新协商输出类型"这个
+/// 正常协议事件。分开是为了让后者能被重新协商后重试，而不是把候选编码器否掉。
+#[cfg(target_os = "windows")]
+enum H264ProcessOutputError {
+    StreamChange,
+    Failed(String),
+}
+
+#[cfg(target_os = "windows")]
+impl From<String> for H264ProcessOutputError {
+    fn from(value: String) -> Self {
+        Self::Failed(value)
+    }
+}
+
+/// 一次取输出的结果。`Renegotiated` 表示本次事件被输出类型变更消耗掉了：
+/// 异步 MFT 必须等下一个 `METransformHaveOutput`，不能当成"缺输入"报错。
+#[cfg(target_os = "windows")]
+enum H264OutputOutcome {
+    Produced(EncodedH264Output),
+    NeedMoreInput,
+    Renegotiated,
 }
 
 #[cfg(target_os = "windows")]
@@ -3848,7 +3881,9 @@ impl WindowsH264Encoder {
         let output_provides_samples =
             output_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
         unsafe {
-            win_result(transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0))?;
+            // 不在这里发 MFT_MESSAGE_COMMAND_FLUSH：刚激活并完成类型协商的 MFT
+            // 没有任何可丢弃的缓冲数据，而 Microsoft 的软件 H.264 MFT 会对尚未
+            // 开始流传输的 FLUSH 返回 E_FAIL，把本可用的候选整个否掉。
             win_result(transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0))?;
             win_result(transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0))?;
         }
@@ -4383,27 +4418,130 @@ impl WindowsH264Encoder {
                 .as_mut()
                 .is_some_and(WindowsAsyncMftAdapter::take_output_credit)
             {
-                let output = self.process_one_output(sample_time_100ns)?.ok_or_else(|| {
-                    "async H.264 MFT signaled HaveOutput but ProcessOutput requested more input"
-                        .to_string()
-                })?;
-                outputs.push(output);
+                match self.process_one_output(sample_time_100ns)? {
+                    H264OutputOutcome::Produced(output) => outputs.push(output),
+                    // 格式变更消耗了这次事件，等下一个 HaveOutput 再取。
+                    H264OutputOutcome::Renegotiated => {}
+                    H264OutputOutcome::NeedMoreInput => {
+                        return Err(
+                            "async H.264 MFT signaled HaveOutput but ProcessOutput requested more input"
+                                .to_string(),
+                        )
+                    }
+                }
                 if let Some(adapter) = self.async_adapter.as_mut() {
                     adapter.poll_available()?;
                 }
             }
         } else {
-            while let Some(output) = self.process_one_output(sample_time_100ns)? {
-                outputs.push(output);
+            loop {
+                match self.process_one_output(sample_time_100ns)? {
+                    H264OutputOutcome::Produced(output) => outputs.push(output),
+                    // 同步 MFT 在协商后已就地重试，这里不会出现；保留分支只为穷尽。
+                    H264OutputOutcome::Renegotiated => {}
+                    H264OutputOutcome::NeedMoreInput => break,
+                }
             }
         }
         Ok(outputs)
     }
 
+    /// `MF_E_TRANSFORM_STREAM_CHANGE` 是 Media Foundation 的正常协议事件，不是
+    /// 失败：MFT 要求重新协商输出类型后才继续产出。Intel Quick Sync 等硬件编码器
+    /// 在起始若干帧后经常触发它，早期实现把它当硬错误，导致这些编码器被整体否掉
+    /// 并一路回退到 MJPEG。
+    ///
+    /// 异步 MFT 的格式变更会消耗掉本次 `METransformHaveOutput`：协商完成后必须
+    /// 等待下一个事件，立即重调 `ProcessOutput` 会得到 `E_UNEXPECTED`。同步 MFT
+    /// 没有事件模型，协商后直接重试。
     fn process_one_output(
+        &mut self,
+        fallback_sample_time_100ns: i64,
+    ) -> Result<H264OutputOutcome, String> {
+        match self.try_process_one_output(fallback_sample_time_100ns) {
+            Ok(Some(output)) => Ok(H264OutputOutcome::Produced(output)),
+            Ok(None) => Ok(H264OutputOutcome::NeedMoreInput),
+            Err(H264ProcessOutputError::Failed(message)) => Err(message),
+            Err(H264ProcessOutputError::StreamChange) => {
+                self.renegotiate_output_type()?;
+                if self.async_adapter.is_some() {
+                    return Ok(H264OutputOutcome::Renegotiated);
+                }
+                match self.try_process_one_output(fallback_sample_time_100ns) {
+                    Ok(Some(output)) => Ok(H264OutputOutcome::Produced(output)),
+                    Ok(None) => Ok(H264OutputOutcome::NeedMoreInput),
+                    Err(H264ProcessOutputError::Failed(message)) => Err(message),
+                    Err(H264ProcessOutputError::StreamChange) => Err(
+                        "H.264 encoder requested another output type change immediately after renegotiation"
+                            .to_string(),
+                    ),
+                }
+            }
+        }
+    }
+
+    /// 按 MFT 协议重新协商输出类型。两个必须做的动作：
+    /// 1. 重新读取 `GetOutputStreamInfo`——新类型可能改变输出缓冲大小，也可能改变
+    ///    由谁分配样本；沿用旧值会让随后的 `ProcessOutput` 收到无效参数。
+    /// 2. 重新校验 §2.2 的时间线前提：当前 muxer 假设 DTS = PTS，因此只有仍是
+    ///    Baseline profile、或 B=0 属性已确认可写时才允许继续使用该编码器。
+    fn renegotiate_output_type(&mut self) -> Result<(), String> {
+        use windows::Win32::Media::MediaFoundation::{
+            eAVEncH264VProfile_Base, MFVideoFormat_H264, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+            MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
+        };
+
+        // 上限只是防御一个不断返回类型的异常 MFT，不是协议要求。
+        for index in 0..32u32 {
+            let candidate = unsafe { self.transform.GetOutputAvailableType(0, index) }
+                .map_err(|error| {
+                    format!(
+                        "H.264 encoder requested an output type change but exposed no usable type: {error}"
+                    )
+                })?;
+            let is_h264 = unsafe { candidate.GetGUID(&MF_MT_SUBTYPE) }
+                .is_ok_and(|subtype| subtype == MFVideoFormat_H264);
+            if !is_h264 {
+                continue;
+            }
+            unsafe { win_result(self.transform.SetOutputType(0, &candidate, 0))? };
+            let baseline_profile = unsafe { self.transform.GetOutputCurrentType(0) }
+                .ok()
+                .and_then(|current| unsafe { current.GetUINT32(&MF_MT_MPEG2_PROFILE) }.ok())
+                .is_some_and(|profile| profile == eAVEncH264VProfile_Base.0 as u32);
+            // 复用 §2.2 的唯一判定实现：自检已确认无 B-slice，因此这里传 0。
+            if !b_frame_configuration_confirmed(
+                &self.diagnostics.capabilities.b_frames_disabled,
+                baseline_profile,
+                0,
+            ) {
+                return Err(
+                    "H.264 encoder renegotiated to an output type without a confirmed B-frame guarantee"
+                        .to_string(),
+                );
+            }
+            // 新输出类型可能改变缓冲大小与样本归属，必须重新读取后再取输出。
+            let output_info =
+                unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
+                    format!("H.264 output stream info after renegotiation failed: {error}")
+                })?;
+            self.output_size = output_info
+                .cbSize
+                .max(self.input_width.saturating_mul(self.input_height));
+            self.output_provides_samples =
+                output_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
+            return Ok(());
+        }
+        Err(
+            "H.264 encoder exposed no H.264 output type after requesting a stream change"
+                .to_string(),
+        )
+    }
+
+    fn try_process_one_output(
         &self,
         fallback_sample_time_100ns: i64,
-    ) -> Result<Option<EncodedH264Output>, String> {
+    ) -> Result<Option<EncodedH264Output>, H264ProcessOutputError> {
         use std::mem::ManuallyDrop;
         use windows::Win32::Media::MediaFoundation::*;
 
@@ -4459,7 +4597,12 @@ impl WindowsH264Encoder {
                 }))
             }
             Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(None),
-            Err(error) => Err(format!("H.264 ProcessOutput failed: {error}")),
+            Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                Err(H264ProcessOutputError::StreamChange)
+            }
+            Err(error) => Err(H264ProcessOutputError::Failed(format!(
+                "H.264 ProcessOutput failed: {error}"
+            ))),
         }
     }
 
@@ -4722,6 +4865,10 @@ mod tests {
         assert_eq!(software_encoder_limits(2160, 3840, 60), (606, 1080, 30));
         assert_eq!(software_encoder_limits(1280, 720, 60), (1280, 720, 30));
         assert_eq!(software_encoder_limits(1280, 720, 15), (1280, 720, 15));
+        // 1080p 是屏幕共享最常见的桌面尺寸，且内容以文字为主：不得无条件降采样，
+        // 否则正文不可读。降级必须由实测编码耗时驱动，而不是写死在上限里。
+        assert_eq!(software_encoder_limits(1920, 1080, 30), (1920, 1080, 30));
+        assert_eq!(software_encoder_limits(1024, 768, 30), (1024, 768, 30));
     }
 
     #[test]
@@ -5242,6 +5389,49 @@ mod tests {
         if encoder.diagnostics.hardware {
             assert!(encoder.diagnostics.async_mode);
         }
+    }
+
+    /// 软件 H.264 MFT 是降级链的最后一级，硬件候选被拒时全靠它出图。上面那个
+    /// 门禁在有硬件编码器的机器上会直接采纳硬件候选，永远走不到这一级，因此
+    /// 单独锁定：曾经在 `NOTIFY_BEGIN_STREAMING` 之前发 `COMMAND_FLUSH`，
+    /// Microsoft 的软件编码器对此返回 E_FAIL，使这一级也失败并一路掉到 MJPEG。
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires Windows Media Foundation software H.264 encoder and decoder components"]
+    fn windows_software_h264_encoder_passes_startup_self_test() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        use windows::core::HRESULT;
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+        const RPC_E_CHANGED_MODE: HRESULT = HRESULT(0x80010106u32 as i32);
+        let com_result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        let com_initialized = if com_result.is_ok() {
+            true
+        } else if com_result == RPC_E_CHANGED_MODE {
+            false
+        } else {
+            panic!("CoInitializeEx failed: {com_result:?}");
+        };
+        let _runtime = MediaFoundationRuntime::startup(com_initialized).unwrap();
+        // hardware_allowed=false 强制走 enumerate_h264_encoder_candidates(false)。
+        let encoder = WindowsH264Encoder::new(320, 240, 15, 1_200_000, false, None)
+            .expect("software H.264 encoder must remain usable as the last fallback");
+        eprintln!(
+            "screen-share software MF encoder: name={:?}, hardware={}, self_test={:#?}",
+            encoder.diagnostics.name, encoder.diagnostics.hardware, encoder.diagnostics.self_test,
+        );
+        assert!(!encoder.diagnostics.hardware);
+        assert!(encoder.diagnostics.self_test.passed);
+        assert!(encoder.diagnostics.self_test.found_sps);
+        assert!(encoder.diagnostics.self_test.found_pps);
+        assert!(encoder.diagnostics.self_test.found_idr);
+        assert!(encoder.diagnostics.self_test.decoder_frame_count > 0);
+        assert!(encoder.diagnostics.self_test.timeline_monotonic);
+        assert!(b_frame_configuration_confirmed(
+            &encoder.diagnostics.capabilities.b_frames_disabled,
+            encoder.diagnostics.self_test.baseline_profile_confirmed,
+            encoder.diagnostics.self_test.b_slice_count,
+        ));
     }
 
     #[cfg(target_os = "windows")]

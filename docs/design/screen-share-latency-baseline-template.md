@@ -185,6 +185,8 @@ pnpm benchmark:screen-share -- --base-url https://192.0.2.10:9870/ --transport w
 pnpm benchmark:screen-share:resource-sample -- -ProcessName app -DurationSeconds 1800 -Label perf-matrix-run-a -Output artifacts/screen-share-benchmarks/resource-usage-host-a.json
 ```
 
+`-ProcessName` 默认的 `app` 只匹配 `pnpm tauri dev` 的开发进程。版本化裸 EXE 的进程名是重命名后的文件名，需要用通配符或直接指定 PID：`-ProcessName 'file-sync-tool*'`、或 `-ProcessId <pid>`。同名进程有多个时脚本取累计 CPU 最高的那个，避免残留的后台副本让测量变成静音。
+
 CPU 按逻辑核归一化；GPU 取该进程 GPU engine 计数器之和，默认 5 秒采一次（枚举实例较慢，不与 CPU/内存同频）。计数器不可用时会写入 `evidence_gaps` 并返回 2，不会用 0 冒充测量值。
 
 | 项目 | 基线 | 优化后 | 结论 |

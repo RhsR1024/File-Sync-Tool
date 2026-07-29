@@ -22,7 +22,7 @@
 | 产品清理 | `code-done` | 完成 | 刷新频率、共享冻结、本地暂停及 snapshot/single-frame 路径已删除 |
 | M0 度量 | `code-done` | `external-hardware-blocked` | 三代 Intel、真实浏览器呈现、受控远控响应和 20–30 独立设备基线；断线重连恢复与共享端资源采样已补齐产出方 |
 | M1 低风险修复 | `code-done` | `external-hardware-blocked` | 30 客户端 30 分钟、慢客户端、锁屏/多屏/控制完整回归 |
-| M2 编码器 | `code-done` | `external-hardware-blocked` | Broadwell、Skylake、10 代 Intel 的 capability/self-test/长稳报告 |
+| M2 编码器 | `code-done` | `external-hardware-blocked` | Broadwell、Skylake、10 代 Intel 的 capability/self-test/长稳报告；2026-07-29 已由 Intel 目标机实测发现并修复两个降级链缺陷，见 §5.1 |
 | M3 WGC GPU | `code-done` | `external-hardware-blocked` | Intel/NVIDIA/AMD、1080p/4K、锁屏/重配置/故障注入与资源曲线 |
 | M4 传输原型 | `code-done` | `decision-pending` | 受管 Edge/策略/证书、真实媒体与丢包抖动、三代 Intel 和 30 独立客户端同条件比较 |
 | 30/60 FPS 可选档 | `code-done` | 完成 | 界面 60 FPS 实验开关、1–60 FPS 服务端范围与微秒节拍已落地 |
@@ -98,6 +98,23 @@ M1 的 30 客户端 30 分钟、2 秒慢客户端隔离、3 秒状态回收、�
 | 失败诊断 | `code-done` | 候选创建、运行时编码、无输出均关闭 active；状态保留最多 16 条结构化候选报告并另报总尝试数，全部报告同时写日志 |
 
 当前开发机的 system-memory Media Foundation 编码→独立解码自检已确认使用同一个 `NVIDIA H.264 Encoder MFT` 并通过。真实 `BGRA -> VideoProcessor NV12 -> DXGI buffer -> MFT` 集成门禁在 GTX 1660、1280×720、15 FPS 下未通过：该 NVIDIA activation 未暴露有效 `MFT_ENUM_ADAPTER_LUID` blob，现于 `adapter_match` 阶段快速拒绝并回退 CPU/SIMD。修复前强制设置 device manager 的 A/B 证据为 `ProcessInput` 成功后约 1.8 秒没有后续 `NeedInput/HaveOutput`；动态纹理改用 `D3D11_BIND_VIDEO_ENCODER` 也没有改变结果。由此只能判定当前驱动组合不可安全直连，不能计作 NVIDIA 零拷贝通过。三代 Intel、其他 NVIDIA 驱动和 AMD 矩阵与长稳仍为 `external-hardware-blocked`。驱动内核调用永久挂死无法由 Rust 用户态线程安全抢占，必须依靠目标机故障注入和进程级看护验证。
+
+### 5.1 真机测试发现并修复的两个编码器缺陷（2026-07-29，Intel 目标机）
+
+在一台 Intel 核显目标机上实测时，`/status` 的 `h264_media.error` 显示 §5.2 的降级链**四级全部失败**，只剩 MJPEG，导致观看端无论选哪种传输拿到的都是 MJPEG（1080p/10 FPS、55–60 Mbps），四种传输的对比数据因此完全无效。逐级死因：
+
+1. Intel QSV（GPU DXGI 直连）：未暴露有效 adapter LUID，按 §6.1 拒绝——设计行为，正确。
+2. Intel QSV（系统内存）：自检 24 ms 后 `ProcessOutput` 返回 `0xC00D6D61`。
+3. `H264 Encoder MFT`（软件）：`MFT_MESSAGE_COMMAND_FLUSH` 返回 `E_FAIL (0x80004005)`。
+4. `Microsoft software encoder`：同上。
+
+**缺陷一**：`0xC00D6D61` 是 `MF_E_TRANSFORM_STREAM_CHANGE`，属于 MFT 的正常协议事件（要求重新协商输出类型后继续产出），硬件编码器在起始若干帧后常触发。原实现只处理 `MF_E_TRANSFORM_NEED_MORE_INPUT`，其余一律当硬失败，把可用编码器整体否掉；同一文件的独立解码器路径此前已正确处理该事件。现按协议 `GetOutputAvailableType` → `SetOutputType` 重新协商并重试一次，仍变化才判失败。重新协商后复用 `b_frame_configuration_confirmed` 重新校验 §2.2 的时间线前提，不满足仍然拒绝，避免协商到带 B 帧的 profile 破坏 DTS=PTS 假设。
+
+**缺陷二**：初始化时在 `MFT_MESSAGE_NOTIFY_BEGIN_STREAMING` 之前发送了 `MFT_MESSAGE_COMMAND_FLUSH`。刚激活并完成类型协商的 MFT 没有可丢弃的缓冲数据，该调用本身多余，而 Microsoft 软件 H.264 MFT 对未开始流传输的 FLUSH 返回 `E_FAIL`，把最后一级保底也打掉。已删除该调用。
+
+新增真机门禁 `windows_software_h264_encoder_passes_startup_self_test`：以 `hardware_allowed=false` 强制走软件 MFT，在任何 Windows 上可执行。在本机验证过它确实能捕获缺陷二——临时恢复那行 FLUSH 后，该测试以与目标机逐字相同的 `Encoder failed MFT_MESSAGE_COMMAND_FLUSH message (0x80004005)` 失败；删除后自检通过（8 个访问单元、SPS/PPS/IDR、时间线单调、Baseline profile 确认、0 B-slice、独立解码 8 帧）。
+
+缺陷一只能在带 Intel 核显的目标机复验：本开发机为 i5-10400F + GTX 1660，没有触发 `STREAM_CHANGE` 的硬件路径，因此修复的有效性尚待该机型确认。
 
 ## 6. M3：WGC GPU 管线
 
@@ -178,6 +195,7 @@ WebRTC 在开发机 Chrome 的普通页面以及 Chrome/Edge 150 的独立 headl
 - `pnpm check:screen-share-web`：通过。
 - `cargo check --bin app`：通过。
 - `cargo check --features screen-share-webrtc-prototype --bin app`：通过。
+- Rust `cargo test --bin app` 全量：611 passed、3 ignored、0 failed（三个 ignored 均为需目标硬件显式执行的真机门禁：system-memory MF、软件 MFT、GPU DXGI surface）。
 - Rust `cargo test --bin app screenshare`：139 passed、2 ignored；两个显式真机门禁分别覆盖 system-memory Media Foundation 编码→独立解码，以及 `BGRA -> VideoProcessor NV12 -> DXGI surface -> MFT`。前者已在当前开发机 1/1 通过，后者在 GTX 1660/NVIDIA MFT 上按预期记录为未通过并触发 CPU/SIMD 回退；普通测试覆盖 LUID blob 解析、精确匹配、畸形长度拒绝，以及新增的 1–60 FPS 范围与微秒采集节拍。
 - Rust WebCodecs wire/hello 测试包含在上述套件；WebRTC feature 定向测试：13/13 通过，包括 TWCC/RTP 时间轴、Absolute Capture Time 编码/解析和真实 MediaEngine offer/answer 协商门禁。
 - `cargo test --bin app --features screen-share-webrtc-prototype screenshare` 合并门禁：152 passed、2 ignored；两个 ignored 项均为上述必须按目标 GPU/驱动矩阵显式执行的真机门禁。
@@ -192,7 +210,7 @@ WebRTC 在开发机 Chrome 的普通页面以及 Chrome/Edge 150 的独立 headl
 - `pnpm benchmark:screen-share:qualification`：已提供目标编码主机的一键资格验证入口，固定执行环境采集、Web 产物构建、system-memory MF、GPU DXGI surface 和浏览器 probe；各步骤独立日志并受进程级超时保护。schema v3 保留旧 candidate reports，并增加输入 DXGI adapter identity、规范化 activation LUID/`luid_match`、candidate parse 计数、artifact hashes 和仅在集成自检观察到三槽全部回收后才为 true 的 `pool_recycled` 断言。当前开发机实跑得到 `qualification_status=failed`：同一个 `NVIDIA H.264 Encoder MFT` 的 system-memory report 为 admitted，GPU report 在 `adapter_match` 因 LUID 缺失被拒绝，其余步骤通过；严格模式返回 1，`-CollectOnly` 返回 0 但不篡改 JSON，主动跳过步骤的验证返回 2。
 - `pnpm benchmark:screen-share:resource-sample`：本机以 explorer 进程实跑 12 秒验证，得到 12 个 CPU/内存样本、2 个 GPU 样本、`status=passed`、退出码 0；目标进程不存在时报错并返回 1。该产物只描述被采样进程，不代表任何目标硬件矩阵项通过。
 - `pnpm test:share-web`：33/33 通过。
-- Rust 全量默认门禁 `cargo test --bin app`：611 passed、2 ignored；两个 ignored 仍是上述真机 MF/DXGI 门禁。
+- 新增真机门禁 `windows_software_h264_encoder_passes_startup_self_test`（软件 MFT，任何 Windows 可执行）：本机 1/1 通过；临时恢复缺陷二的 FLUSH 调用后可稳定复现目标机的失败信息，证明该门禁确实能捕获它。
 - 全仓 ESLint 与 `git diff --check`：通过；后者只有 CRLF 工作树提示。`cargo fmt --check` 在本轮改动的文件上无差异，但工作树中未涉及本任务的 `device_simulator/preflight.rs` 与 `ums_init_password.rs` 仍有待格式化的差异，属于其他改动的范围。
 
 合并后的 `pnpm check`、`pnpm check:screen-share-web`、`pnpm lint`、`pnpm build`、`cargo check --bin app` 与 WebRTC feature check 均已通过。涉及目标硬件和真实浏览器的门禁仍必须按 §10 单独执行。
