@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pageSource = readFileSync(join(__dirname, 'UmsInitialPasswordPage.vue'), 'utf8');
+const formStoreSource = readFileSync(
+  join(__dirname, '..', 'lib', 'umsInitialPasswordForm.ts'),
+  'utf8',
+);
 
 test('result table keeps each flow status on one line and lets long detail wrap', () => {
   assert.match(pageSource, /const umsResultStatusWrapClass = 'flex items-center gap-1\.5 whitespace-nowrap';/);
@@ -16,31 +20,86 @@ test('result table keeps each flow status on one line and lets long detail wrap'
 
 test('all three flows are selected by default and carry their own factory old password', () => {
   assert.match(
-    pageSource,
-    /enabledFlows = ref<Record<UmsInitPasswordKind, boolean>>\(\{\s*framework: true,\s*ums: true,\s*cdm: true,\s*\}\)/,
+    formStoreSource,
+    /enabledFlows: \{ framework: true, ums: true, cdm: true \}/,
   );
   assert.match(
-    pageSource,
-    /oldPasswords = ref<Record<UmsInitPasswordKind, string>>\(\{\s*framework: '123456',\s*ums: 'admin_123',\s*cdm: 'admin',\s*\}\)/,
+    formStoreSource,
+    /DEFAULT_OLD_PASSWORDS: Record<UmsInitPasswordKind, string> = \{\s*framework: '123456',\s*ums: 'admin_123',\s*cdm: 'admin',\s*\}/,
   );
 });
 
 test('same-password conflict is evaluated per selected flow, not globally', () => {
-  // UMS ships with admin_123, which is exactly what most people type as the new
-  // password for the other two flows, so the check must name the offending flow.
   assert.match(
     pageSource,
-    /conflictingFlows = computed\(\(\) =>\s*FLOWS\.filter\(flow => enabledFlows\.value\[flow\.kind\] && oldPasswords\.value\[flow\.kind\] === newPassword\.value\)/,
+    /const isSameAsNew = \(kind: UmsInitPasswordKind\) =>\s*form\.enabledFlows\[kind\] && form\.oldPasswords\[kind\] === form\.newPassword;/,
   );
   assert.match(pageSource, /samePasswordFor/);
   assert.ok(!pageSource.includes('samePasswordError'), 'the old global conflict message must be gone');
 });
 
+test('identical UMS passwords set the init flag instead of blocking', () => {
+  // UMS ships with admin_123, the very value most people type as the new password.
+  // That case means "already at target" and must stay runnable; framework and CDM
+  // have no pwdIsInit equivalent, so for them it remains a hard conflict.
+  assert.match(
+    pageSource,
+    /conflictingFlows = computed\(\(\) =>\s*FLOWS\.filter\(flow => flow\.kind !== 'ums' && isSameAsNew\(flow\.kind\)\),?\s*\);/,
+  );
+  assert.match(
+    pageSource,
+    /initFlagOnlyFlows = computed\(\(\) => FLOWS\.filter\(flow => flow\.kind === 'ums' && isSameAsNew\(flow\.kind\)\)\);/,
+  );
+  assert.match(pageSource, /initFlagOnlyHint/);
+});
+
 test('execution is blocked unless a flow, an IP and a new password are all present', () => {
   assert.match(pageSource, /allSelectedIps\.value\.length > 0 &&/);
   assert.match(pageSource, /selectedFlowCount\.value > 0 &&/);
-  assert.match(pageSource, /newPassword\.value\.length > 0 &&/);
+  assert.match(pageSource, /form\.newPassword\.length > 0 &&/);
   assert.match(pageSource, /conflictingFlows\.value\.length === 0 &&/);
+});
+
+test('form fields survive a tab switch by living in a module-scoped store', () => {
+  // Every user-editable field must read/write the shared store, never a local
+  // ref, otherwise unmounting the page on tab switch drops what was typed.
+  assert.match(pageSource, /umsInitialPasswordFormState as form/);
+  for (const binding of [
+    'v-model="form.manualIpInput"',
+    'v-model="form.newPassword"',
+    'v-model="form.oldPasswords[flow.kind]"',
+    ':checked="form.enabledFlows[flow.kind]"',
+  ]) {
+    assert.ok(pageSource.includes(binding), `template must bind ${binding}`);
+  }
+  assert.ok(
+    !/const (newPassword|oldPasswords|enabledFlows|manualIpInput) = ref/.test(pageSource),
+    'form fields must not be re-declared as local refs',
+  );
+});
+
+test('passwords are kept out of localStorage', () => {
+  // PersistedShape has no nested braces, so a non-greedy body match is exact.
+  // Match field names only — the value types mention UmsInitPasswordKind, which
+  // would trip a naive "contains Password" check.
+  const persisted = formStoreSource.match(/interface PersistedShape \{([^}]*)\}/)[1];
+  const fields = persisted
+    .split('\n')
+    .map(line => line.trim().split(':')[0])
+    .filter(Boolean);
+  assert.deepEqual(fields, ['selectedIps', 'manualIpTags', 'manualIpInput', 'enabledFlows']);
+  assert.ok(
+    !fields.some(field => /password/i.test(field)),
+    'PersistedShape must not carry password fields',
+  );
+});
+
+test('the 1 second API timeout option is gone and out-of-range values fall back to 5', () => {
+  // 1s was too tight for the UMS public-key and password-change calls.
+  assert.match(pageSource, /const API_TIMEOUT_OPTIONS = \[3, 5, 10, 30\] as const;/);
+  assert.match(pageSource, /const DEFAULT_API_TIMEOUT_SECS = 5;/);
+  assert.match(pageSource, /normalizeApiTimeout/);
+  assert.ok(!pageSource.includes(':value="1"'), 'the 1 second option must be removed');
 });
 
 test('recent IPs migrate from the pre-rename storage key', () => {

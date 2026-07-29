@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { invoke } from '@tauri-apps/api/core';
-import { ref, computed, onMounted, nextTick } from 'vue';
+import { ref, computed, onMounted, nextTick, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import {
   AlertCircle,
@@ -24,15 +24,19 @@ import {
   type UmsInitPasswordResult,
 } from '../lib/tauri';
 import { configStore } from '../lib/configStore';
+import {
+  persistUmsInitialPasswordForm,
+  umsInitialPasswordFormState as form,
+} from '../lib/umsInitialPasswordForm';
 import { mergeRecentItems, normalizeRecentItems, removeRecentItems } from '../lib/recentHistory';
 import Empty from '../components/Empty.vue';
 import { pushToast } from '../composables/useToast';
 
 const { t } = useI18n();
 
-const selectedIps = ref<string[]>([]);
-const manualIpTags = ref<string[]>([]);
-const manualIpInput = ref<string>('');
+// Form fields live in a module-scoped store so switching tabs (which unmounts
+// this page) keeps everything the user already filled in.
+const manualIpTags = computed(() => form.manualIpTags);
 const fpIpInputRef = ref<HTMLInputElement | null>(null);
 const recentIps = ref<string[]>([]);
 const apiTimeoutSecs = ref<number>(5);
@@ -43,9 +47,6 @@ const RECENT_IPS_KEY = 'umsInitialPassword.recentIps';
 const LEGACY_RECENT_IPS_KEY = 'frameworkPassword.recentIps';
 const RECENT_IPS_LIMIT = 10;
 
-// Shared new password plus one editable old password per flow. Each appliance ships
-// with a different factory default, so the old passwords cannot be collapsed into one.
-const newPassword = ref<string>('admin_123');
 const showNewPassword = ref(false);
 
 interface FlowDefinition {
@@ -62,18 +63,6 @@ const FLOWS: FlowDefinition[] = [
   { kind: 'cdm', icon: Database, labelKey: 'tools.umsInitialPassword.scope.cdm', account: 'admin', port: 25011 },
 ];
 
-const enabledFlows = ref<Record<UmsInitPasswordKind, boolean>>({
-  framework: true,
-  ums: true,
-  cdm: true,
-});
-
-const oldPasswords = ref<Record<UmsInitPasswordKind, string>>({
-  framework: '123456',
-  ums: 'admin_123',
-  cdm: 'admin',
-});
-
 const showOldPassword = ref<Record<UmsInitPasswordKind, boolean>>({
   framework: false,
   ums: false,
@@ -81,20 +70,29 @@ const showOldPassword = ref<Record<UmsInitPasswordKind, boolean>>({
 });
 
 const toggleFlow = (kind: UmsInitPasswordKind) => {
-  enabledFlows.value[kind] = !enabledFlows.value[kind];
+  form.enabledFlows[kind] = !form.enabledFlows[kind];
 };
 
-const selectedFlowCount = computed(() => FLOWS.filter(flow => enabledFlows.value[flow.kind]).length);
+const selectedFlowCount = computed(() => FLOWS.filter(flow => form.enabledFlows[flow.kind]).length);
 
-// A flow only conflicts when it is actually selected. UMS ships with `admin_123`,
-// which is the very value most people type as the new password, so this check has to
-// name the offending flow instead of showing one generic warning.
+const isSameAsNew = (kind: UmsInitPasswordKind) =>
+  form.enabledFlows[kind] && form.oldPasswords[kind] === form.newPassword;
+
+// UMS ships with `admin_123`, which is the very value most people type as the new
+// password. Rather than blocking, identical passwords mean "already at the target
+// value" — the backend then skips the change call and only sets the pwdIsInit flag.
+// Framework and CDM have no such flag, so for them it stays a hard conflict.
+const initFlagOnlyFlows = computed(() => FLOWS.filter(flow => flow.kind === 'ums' && isSameAsNew(flow.kind)));
+
 const conflictingFlows = computed(() =>
-  FLOWS.filter(flow => enabledFlows.value[flow.kind] && oldPasswords.value[flow.kind] === newPassword.value),
+  FLOWS.filter(flow => flow.kind !== 'ums' && isSameAsNew(flow.kind)),
 );
 
 const hasFlowConflict = (kind: UmsInitPasswordKind) =>
   conflictingFlows.value.some(flow => flow.kind === kind);
+
+const isInitFlagOnly = (kind: UmsInitPasswordKind) =>
+  initFlagOnlyFlows.value.some(flow => flow.kind === kind);
 
 const SEPARATORS = /[\s,，、;；\n\r]+/;
 
@@ -119,49 +117,49 @@ const serverOptions = computed(() => {
 const addManualIpTag = (raw: string) => {
   const parts = raw.split(SEPARATORS).map(s => s.trim()).filter(Boolean);
   for (const ip of parts) {
-    if (!manualIpTags.value.includes(ip)) {
-      manualIpTags.value.push(ip);
+    if (!form.manualIpTags.includes(ip)) {
+      form.manualIpTags.push(ip);
     }
   }
 };
 
 const removeManualIpTag = (ip: string) => {
-  const idx = manualIpTags.value.indexOf(ip);
-  if (idx > -1) manualIpTags.value.splice(idx, 1);
+  const idx = form.manualIpTags.indexOf(ip);
+  if (idx > -1) form.manualIpTags.splice(idx, 1);
 };
 
 // Clicking a tag's text moves it back into the input so a single character can
 // be edited (e.g. 192.115.2.30 → 192.115.2.130) instead of deleting it whole.
 const editManualIpTag = (ip: string) => {
-  if (manualIpInput.value.trim()) {
-    addManualIpTag(manualIpInput.value);
+  if (form.manualIpInput.trim()) {
+    addManualIpTag(form.manualIpInput);
   }
   removeManualIpTag(ip);
-  manualIpInput.value = ip;
+  form.manualIpInput = ip;
   nextTick(() => fpIpInputRef.value?.focus());
 };
 
 const handleIpKeydown = (e: KeyboardEvent) => {
-  const raw = manualIpInput.value.trim();
+  const raw = form.manualIpInput.trim();
   if (['Enter', 'Tab', ' '].includes(e.key)) {
     if (raw) {
       e.preventDefault();
       addManualIpTag(raw);
-      manualIpInput.value = '';
+      form.manualIpInput = '';
     }
-  } else if (e.key === 'Backspace' && !raw && manualIpTags.value.length > 0) {
+  } else if (e.key === 'Backspace' && !raw && form.manualIpTags.length > 0) {
     // Move the last tag back into the input for editing rather than deleting it.
-    const last = manualIpTags.value.pop();
+    const last = form.manualIpTags.pop();
     if (last !== undefined) {
-      manualIpInput.value = last;
+      form.manualIpInput = last;
     }
   }
 };
 
 const handleIpInputChange = () => {
-  if (SEPARATORS.test(manualIpInput.value)) {
-    addManualIpTag(manualIpInput.value);
-    manualIpInput.value = '';
+  if (SEPARATORS.test(form.manualIpInput)) {
+    addManualIpTag(form.manualIpInput);
+    form.manualIpInput = '';
   }
 };
 
@@ -169,20 +167,20 @@ const handleIpPaste = (e: ClipboardEvent) => {
   e.preventDefault();
   const text = e.clipboardData?.getData('text') ?? '';
   addManualIpTag(text);
-  manualIpInput.value = '';
+  form.manualIpInput = '';
 };
 
 const handleIpBlur = () => {
-  if (manualIpInput.value.trim()) {
-    addManualIpTag(manualIpInput.value);
-    manualIpInput.value = '';
+  if (form.manualIpInput.trim()) {
+    addManualIpTag(form.manualIpInput);
+    form.manualIpInput = '';
   }
 };
 
 const allSelectedIps = computed(() => {
-  const ips = new Set<string>([...selectedIps.value, ...manualIpTags.value]);
-  if (manualIpInput.value.trim()) {
-    ips.add(manualIpInput.value.trim());
+  const ips = new Set<string>([...form.selectedIps, ...form.manualIpTags]);
+  if (form.manualIpInput.trim()) {
+    ips.add(form.manualIpInput.trim());
   }
   return Array.from(ips);
 });
@@ -193,7 +191,7 @@ const applyRecentIp = (ip: string) => {
   if (isLoading.value || isRecentIpSelected(ip)) {
     return;
   }
-  manualIpInput.value = '';
+  form.manualIpInput = '';
   addManualIpTag(ip);
   nextTick(() => fpIpInputRef.value?.focus());
 };
@@ -230,15 +228,39 @@ const isFormValid = computed(
   () =>
     allSelectedIps.value.length > 0 &&
     selectedFlowCount.value > 0 &&
-    newPassword.value.length > 0 &&
+    form.newPassword.length > 0 &&
     conflictingFlows.value.length === 0 &&
     !isLoading.value,
 );
 
+// Carry the target selection across app restarts too. Passwords stay in memory
+// only — see the note in umsInitialPasswordForm.ts.
+watch(
+  () => [form.selectedIps, form.manualIpTags, form.manualIpInput, form.enabledFlows],
+  () => persistUmsInitialPasswordForm(),
+  { deep: true },
+);
+
+// 1 second was too tight for the UMS public-key and password-change calls, so the
+// shortest option is now 3s. Anything outside the list (e.g. a previously saved 1)
+// falls back to the 5s default instead of leaving the select blank.
+const API_TIMEOUT_OPTIONS = [3, 5, 10, 30] as const;
+const DEFAULT_API_TIMEOUT_SECS = 5;
+
+const normalizeApiTimeout = (value: number | undefined): number =>
+  API_TIMEOUT_OPTIONS.includes(value as (typeof API_TIMEOUT_OPTIONS)[number])
+    ? (value as number)
+    : DEFAULT_API_TIMEOUT_SECS;
+
 onMounted(async () => {
   try {
     await configStore.ensureLoaded();
-    apiTimeoutSecs.value = configStore.config?.framework_password_api_timeout_secs ?? 5;
+    const stored = configStore.config?.framework_password_api_timeout_secs;
+    apiTimeoutSecs.value = normalizeApiTimeout(stored);
+    if (stored !== undefined && stored !== apiTimeoutSecs.value) {
+      // Persist the clamp so the stale 1s value does not come back next visit.
+      await saveApiTimeout();
+    }
   } catch (e) {
     console.error('Failed to load config:', e);
   }
@@ -302,11 +324,11 @@ const handleExecute = async () => {
 
     const response = await changeUmsInitPassword({
       ips: ipList,
-      targets: { ...enabledFlows.value },
-      newPassword: newPassword.value,
-      frameworkOldPassword: oldPasswords.value.framework,
-      umsOldPassword: oldPasswords.value.ums,
-      cdmOldPassword: oldPasswords.value.cdm,
+      targets: { ...form.enabledFlows },
+      newPassword: form.newPassword,
+      frameworkOldPassword: form.oldPasswords.framework,
+      umsOldPassword: form.oldPasswords.ums,
+      cdmOldPassword: form.oldPasswords.cdm,
     });
     results.value = response;
     pushToast(
@@ -323,7 +345,7 @@ const handleExecute = async () => {
     results.value = allSelectedIps.value.map(ip => ({
       ip,
       success: false,
-      targets: FLOWS.filter(flow => enabledFlows.value[flow.kind]).map(flow => ({
+      targets: FLOWS.filter(flow => form.enabledFlows[flow.kind]).map(flow => ({
         kind: flow.kind,
         success: false,
         message: `Error: ${errorMessage}`,
@@ -338,15 +360,15 @@ const handleExecute = async () => {
 };
 
 const toggleServerIp = (ip: string) => {
-  const idx = selectedIps.value.indexOf(ip);
+  const idx = form.selectedIps.indexOf(ip);
   if (idx > -1) {
-    selectedIps.value.splice(idx, 1);
+    form.selectedIps.splice(idx, 1);
   } else {
-    selectedIps.value.push(ip);
+    form.selectedIps.push(ip);
   }
 };
 
-const isServerSelected = (ip: string) => selectedIps.value.includes(ip);
+const isServerSelected = (ip: string) => form.selectedIps.includes(ip);
 
 const successCount = computed(() => results.value.filter(r => r.success).length);
 const failureCount = computed(() => results.value.filter(r => !r.success).length);
@@ -447,7 +469,7 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
             <label class="block text-xs font-medium text-slate-600">{{ t('tools.umsInitialPassword.newPassword') }}</label>
             <div class="flex items-center gap-2">
               <input
-                v-model="newPassword"
+                v-model="form.newPassword"
                 :type="showNewPassword ? 'text' : 'password'"
                 autocomplete="new-password"
                 :placeholder="t('tools.umsInitialPassword.newPasswordPlaceholder')"
@@ -474,7 +496,7 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
               v-for="flow in FLOWS"
               :key="flow.kind"
               class="rounded-lg border px-3 py-2.5 transition-colors"
-              :class="enabledFlows[flow.kind] ? 'border-blue-200 bg-blue-50/50' : 'border-slate-200 bg-slate-50/60'"
+              :class="form.enabledFlows[flow.kind] ? 'border-blue-200 bg-blue-50/50' : 'border-slate-200 bg-slate-50/60'"
             >
               <label
                 :for="`ums-init-password-flow-${flow.kind}`"
@@ -483,7 +505,7 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
                 <input
                   type="checkbox"
                   :id="`ums-init-password-flow-${flow.kind}`"
-                  :checked="enabledFlows[flow.kind]"
+                  :checked="form.enabledFlows[flow.kind]"
                   @change="toggleFlow(flow.kind)"
                   :disabled="isLoading"
                   class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -493,13 +515,13 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
                 <span class="text-xs text-slate-400 font-mono">:{{ flow.port }} · {{ flow.account }}</span>
               </label>
 
-              <div v-if="enabledFlows[flow.kind]" class="mt-2.5 pl-7 flex items-center gap-2">
+              <div v-if="form.enabledFlows[flow.kind]" class="mt-2.5 pl-7 flex items-center gap-2">
                 <label class="text-xs text-slate-500 shrink-0" :for="`ums-init-password-old-${flow.kind}`">
                   {{ t('tools.umsInitialPassword.oldPasswordFor') }}
                 </label>
                 <input
                   :id="`ums-init-password-old-${flow.kind}`"
-                  v-model="oldPasswords[flow.kind]"
+                  v-model="form.oldPasswords[flow.kind]"
                   :type="showOldPassword[flow.kind] ? 'text' : 'password'"
                   autocomplete="new-password"
                   :disabled="isLoading"
@@ -517,6 +539,9 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
               </div>
               <p v-if="hasFlowConflict(flow.kind)" class="mt-1.5 pl-7 text-xs font-medium text-amber-700">
                 {{ t('tools.umsInitialPassword.samePasswordFor', { target: t(flow.labelKey) }) }}
+              </p>
+              <p v-else-if="isInitFlagOnly(flow.kind)" class="mt-1.5 pl-7 text-xs text-slate-500">
+                {{ t('tools.umsInitialPassword.initFlagOnlyHint') }}
               </p>
             </div>
             <p v-if="selectedFlowCount === 0" class="text-xs font-medium text-amber-700">
@@ -566,10 +591,10 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
               </span>
               <input
                 ref="fpIpInputRef"
-                v-model="manualIpInput"
+                v-model="form.manualIpInput"
                 type="text"
                 list="ums-init-password-recent-ips"
-                :placeholder="manualIpTags.length === 0 ? t('tools.umsInitialPassword.manualIpPlaceholder') : ''"
+                :placeholder="form.manualIpTags.length === 0 ? t('tools.umsInitialPassword.manualIpPlaceholder') : ''"
                 :disabled="isLoading"
                 class="flex-1 min-w-[120px] text-sm bg-transparent outline-none disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 py-0.5"
                 @keydown="handleIpKeydown"
@@ -645,11 +670,9 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
           </div>
           <select v-model.number="apiTimeoutSecs" @change="saveApiTimeout"
             class="shrink-0 p-1.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-xs text-slate-700">
-            <option :value="1">1 {{ t('settings.seconds') }}</option>
-            <option :value="3">3 {{ t('settings.seconds') }}</option>
-            <option :value="5">5 {{ t('settings.seconds') }}</option>
-            <option :value="10">10 {{ t('settings.seconds') }}</option>
-            <option :value="30">30 {{ t('settings.seconds') }}</option>
+            <option v-for="secs in API_TIMEOUT_OPTIONS" :key="secs" :value="secs">
+              {{ secs }} {{ t('settings.seconds') }}
+            </option>
           </select>
         </div>
 

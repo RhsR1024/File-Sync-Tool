@@ -77,10 +77,12 @@ main.rs
 
 ④ PUT  http://{ip}/sw/user/update/passwd         header: Authorization: <AccessToken>
    body: { userCode, userName,
-           newUserPasswd:   RSA(new),
-           userPasswd:      RSA(old),
-           NewEncPassword:  RSA(new) }
+           newUserPasswd:   RSA(MD5(new)),
+           userPasswd:      RSA(MD5(old)),
+           NewEncPassword:  RSA(MD5(new)) }
    ← { errCode: 0, errMsg: "成功" }
+
+   ⚠ RSA 信封里装的是 MD5 摘要，不是密码原文（已实机验证，见 §7.1）
 
 ⑤ POST http://{ip}/sw/switch/value/dictionary/set
    body: { createTime, description: "loadmin密码初始化开关",
@@ -424,14 +426,19 @@ completed（"完成：{success}/{total} 台全部成功"）
 
 ### 7.1 需实机验证的次要问题
 
-| # | 问题 | 建议默认处理 |
+| # | 问题 | 结论 / 处理 |
 | --- | --- | --- |
-| 1 | RSA 加密的明文是密码原文还是 `MD5(密码)`？示例密文无私钥无法反推 | 按原文实现（字段名 `NewEncPassword` 及 2048 位可容纳 245 字节都支持这个判断），实机验证 |
-| 2 | `LoginExtInfo.IpAddress` 服务端是否强校验？填错/填空会不会拒登？ | 探测失败时填 `""` 并继续 |
-| 3 | 字典开关的 `createTime: 1716258652000` 是固定值还是要先 GET 原记录？ | 先按示例固定值发送；若服务端报错，改为先查询再回填 |
-| 4 | 字典开关 `updateTime` 用当前时间戳（毫秒）？ | 用 `chrono::Utc::now().timestamp_millis()` |
-| 5 | CDM 改密/登出响应体为空，成功判据是否就是 HTTP 2xx？ | 按 2xx 判成功，非 2xx 时把状态码和响应文本一起写进 message |
+| 1 | RSA 加密的明文是密码原文还是 `MD5(密码)`？ | **已实机确认 = `MD5(密码)` 小写十六进制。** 原文被回 `errCode=94438 Usercode or passwd is invalid`（解密成功但比对失败 → 反证 PKCS#1 v1.5 填充正确），换 MD5 后 `errCode=0`。已钉死并加测试防回退 |
+| 2 | `LoginExtInfo.IpAddress` 服务端是否强校验？ | 已实机验证：填本机可达 IP（192.115.1.15）可正常登录。探测失败时填 `""` 并继续 |
+| 3 | 字典开关的 `createTime: 1716258652000` 是固定值还是要先 GET 原记录？ | **已实机确认：固定值可用**，返回 `errCode=0` |
+| 4 | 字典开关 `updateTime` 用当前时间戳（毫秒）？ | 已实机确认可用，`chrono::Utc::now().timestamp_millis()` |
+| 5 | CDM 改密/登出响应体为空，成功判据是否就是 HTTP 2xx？ | 待验证（CDM 登录尚未打通）。按 2xx 判成功，非 2xx 时把状态码和响应文本一起写进 message |
 | 6 | UMS 的 80 端口、CDM 的 25011 端口是否所有现场都一致？ | 先写成常量；若现场有差异，后续加配置项 |
+| 7 | 登录失败响应的错误码字段大小写 | **已实机确认为 PascalCase `ErrCode`/`ErrMsg`**（业务接口是 camelCase）。两种都认，否则真实原因会被兜底信息盖掉 |
+
+### 7.1.1 UMS 全流程已跑通（192.115.1.17，2026-07-29）
+
+`loadmin` 实际旧密码为 `admin_1234`。五步全部 `errCode=0`，`pwdIsInit` 开关置位成功。
 
 ### 7.2 真空 body 的实现注意
 

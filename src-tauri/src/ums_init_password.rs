@@ -145,10 +145,14 @@ fn rsa_pkcs1v15_encrypt_base64(public_key_b64: &str, plaintext: &str) -> Result<
     let der = BASE64
         .decode(public_key_b64.trim())
         .map_err(|e| format!("公钥 base64 解码失败: {}", e))?;
-    let key = RsaPublicKey::from_public_key_der(&der)
-        .map_err(|e| format!("公钥 DER 解析失败: {}", e))?;
+    let key =
+        RsaPublicKey::from_public_key_der(&der).map_err(|e| format!("公钥 DER 解析失败: {}", e))?;
     let ciphertext = key
-        .encrypt(&mut rand::thread_rng(), Pkcs1v15Encrypt, plaintext.as_bytes())
+        .encrypt(
+            &mut rand::thread_rng(),
+            Pkcs1v15Encrypt,
+            plaintext.as_bytes(),
+        )
         .map_err(|e| format!("RSA 加密失败: {}", e))?;
     Ok(BASE64.encode(ciphertext))
 }
@@ -307,22 +311,52 @@ impl<'a> FlowLogger<'a> {
 
 /// 把响应文本解析成 JSON，解析失败时带上原文，便于定位返回 HTML 错误页的情况。
 fn parse_json(text: &str, step: &str) -> Result<serde_json::Value, String> {
-    serde_json::from_str::<serde_json::Value>(text)
-        .map_err(|e| format!("{} 响应解析失败: {} (原文: {})", step, e, truncate_for_log(text)))
+    serde_json::from_str::<serde_json::Value>(text).map_err(|e| {
+        format!(
+            "{} 响应解析失败: {} (原文: {})",
+            step,
+            e,
+            truncate_for_log(text)
+        )
+    })
 }
 
 fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(|v| v.as_str())
 }
 
+/// 同时读 camelCase 和 PascalCase 两种键名。
+///
+/// 这些设备在业务接口的响应里用 `errCode`/`errMsg`，但登录失败响应用的是
+/// `ErrCode`/`ErrMsg`。只认一种会把服务端真正的失败原因（账号锁定、密码错误）
+/// 埋掉，只剩下「缺少 token」这类毫无价值的兜底信息。
+fn json_field<'a>(
+    value: &'a serde_json::Value,
+    camel: &str,
+    pascal: &str,
+) -> Option<&'a serde_json::Value> {
+    value.get(camel).or_else(|| value.get(pascal))
+}
+
+/// 若响应携带非 0 的错误码，返回可直接展示的描述。
+fn extract_error(value: &serde_json::Value) -> Option<String> {
+    let code = json_field(value, "errCode", "ErrCode")?.as_i64()?;
+    if code == 0 {
+        return None;
+    }
+    let msg = json_field(value, "errMsg", "ErrMsg")
+        .and_then(|v| v.as_str())
+        .unwrap_or("未知错误");
+    Some(format!("errCode={} {}", code, msg))
+}
+
 /// UMS 侧统一的 `{errCode, errMsg}` 判据。
 fn check_err_code(value: &serde_json::Value, step: &str) -> Result<(), String> {
-    match value.get("errCode").and_then(|v| v.as_i64()) {
-        Some(0) => Ok(()),
-        Some(code) => {
-            let msg = json_str(value, "errMsg").unwrap_or("未知错误");
-            Err(format!("{} 返回 errCode={}: {}", step, code, msg))
-        }
+    if let Some(detail) = extract_error(value) {
+        return Err(format!("{} 返回 {}", step, detail));
+    }
+    match json_field(value, "errCode", "ErrCode").and_then(|v| v.as_i64()) {
+        Some(_) => Ok(()),
         None => Err(format!(
             "{} 响应缺少 errCode 字段: {}",
             step,
@@ -543,11 +577,21 @@ async fn run_ums_flow(
     };
 
     let token = match parse_json(&text, step).and_then(|value| {
-        if let Some(code) = value.get("errCode").and_then(|v| v.as_i64()) {
-            if code != 0 {
-                let msg = json_str(&value, "errMsg").unwrap_or("未知错误");
-                return Err(format!("登录失败: errCode={} {}", code, msg));
+        if let Some(detail) = extract_error(&value) {
+            // 锁定倒计时只出现在失败响应里，必须原样带出来 ——
+            // 这是决定「还能不能再试一次」的唯一依据。
+            let mut message = format!("登录失败: {}", detail);
+            if let Some(residue) = value.get("ResidueDegree").and_then(|v| v.as_i64()) {
+                message.push_str(&format!("（剩余尝试次数 {}）", residue));
             }
+            if let Some(remain) = value
+                .get("RemainMinutes")
+                .and_then(|v| v.as_i64())
+                .filter(|value| *value > 0)
+            {
+                message.push_str(&format!("（锁定剩余 {} 分钟）", remain));
+            }
+            return Err(message);
         }
         json_str(&value, "AccessToken")
             .map(|t| t.to_string())
@@ -561,99 +605,118 @@ async fn run_ums_flow(
         Ok(token) => token,
         Err(e) => {
             logger.error(&format!("{} ✗ {}", step, e));
+            if e.contains("lock") || e.contains("锁定") {
+                logger
+                    .error("账号已进入锁定计数，请先用浏览器确认 loadmin 的真实密码，不要继续重试");
+            }
             return fail_result(kind, e, "login");
         }
     };
     logger.info(&format!("{} ✓ AccessToken={}", step, token));
 
+    // 新旧密码相同意味着密码已经是目标值，没有什么可改的 —— 但 pwdIsInit 开关
+    // 可能还没置位。这种情况下跳过取公钥和改密，直接走 ⑤ 把初始化标识补上。
+    let password_change_skipped = old_password == new_password;
+    if password_change_skipped {
+        logger.info("③④ 跳过：新旧密码相同，密码无需修改，仅补置 pwdIsInit 开关");
+    }
+
     // ③ 取公钥
-    let step = "③ 取公钥";
-    let (_, text) = match logger
-        .send(
-            client,
-            reqwest::Method::GET,
-            &format!("{}/servers/public/key", base),
-            Some(&token),
-            "Authorization",
-            None,
+    if !password_change_skipped {
+        let step = "③ 取公钥";
+        let (_, text) = match logger
+            .send(
+                client,
+                reqwest::Method::GET,
+                &format!("{}/servers/public/key", base),
+                Some(&token),
+                "Authorization",
+                None,
+                step,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(e) => return fail_result(kind, e, "publicKey"),
+        };
+
+        let public_key = match parse_json(&text, step).and_then(|value| {
+            check_err_code(&value, step)?;
+            value
+                .get("result")
+                .and_then(|r| r.get("publicKey"))
+                .and_then(|k| k.as_str())
+                .map(|k| k.to_string())
+                .ok_or_else(|| "公钥响应缺少 result.publicKey".to_string())
+        }) {
+            Ok(key) => key,
+            Err(e) => {
+                logger.error(&format!("{} ✗ {}", step, e));
+                return fail_result(kind, e, "publicKey");
+            }
+        };
+
+        // ④ 修改密码
+        //
+        // RSA 信封里装的是 `MD5(密码)` 的小写十六进制，不是密码原文 —— 服务端存的就是
+        // MD5，与登录签名口径一致。实机验证过：原文会被回成 errCode=94438
+        // "Usercode or passwd is invalid"（即解密成功但比对失败，说明 PKCS#1 v1.5
+        // 填充本身是对的），换成 MD5 后 errCode=0。不要改回原文。
+        let step = "④ 修改密码";
+        let encrypted = (|| -> Result<(String, String, String), String> {
+            let old_digest = md5_hex(old_password);
+            let new_digest = md5_hex(new_password);
+            Ok((
+                rsa_pkcs1v15_encrypt_base64(&public_key, &new_digest)?,
+                rsa_pkcs1v15_encrypt_base64(&public_key, &old_digest)?,
+                rsa_pkcs1v15_encrypt_base64(&public_key, &new_digest)?,
+            ))
+        })();
+        let (new_enc, old_enc, new_enc_2) = match encrypted {
+            Ok(values) => values,
+            Err(e) => {
+                logger.error(&format!("{} ✗ {}", step, e));
+                return fail_result(kind, e, "changePasswd");
+            }
+        };
+        logger.info(&format!(
+            "{} 明文 = MD5(密码)，RSA 密文长度 {}/{}/{}",
             step,
-        )
-        .await
-    {
-        Ok(value) => value,
-        Err(e) => return fail_result(kind, e, "publicKey"),
-    };
+            new_enc.len(),
+            old_enc.len(),
+            new_enc_2.len()
+        ));
 
-    let public_key = match parse_json(&text, step).and_then(|value| {
-        check_err_code(&value, step)?;
-        value
-            .get("result")
-            .and_then(|r| r.get("publicKey"))
-            .and_then(|k| k.as_str())
-            .map(|k| k.to_string())
-            .ok_or_else(|| "公钥响应缺少 result.publicKey".to_string())
-    }) {
-        Ok(key) => key,
-        Err(e) => {
-            logger.error(&format!("{} ✗ {}", step, e));
-            return fail_result(kind, e, "publicKey");
-        }
-    };
+        let change_body = json!({
+            "userCode": UMS_USER,
+            "userName": UMS_USER,
+            "newUserPasswd": new_enc,
+            "userPasswd": old_enc,
+            "NewEncPassword": new_enc_2,
+        });
+        let (_, text) = match logger
+            .send(
+                client,
+                reqwest::Method::PUT,
+                &format!("{}/user/update/passwd", base),
+                Some(&token),
+                "Authorization",
+                Some(&change_body),
+                step,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(e) => return fail_result(kind, e, "changePasswd"),
+        };
 
-    // ④ 修改密码
-    let step = "④ 修改密码";
-    let encrypted = (|| -> Result<(String, String, String), String> {
-        Ok((
-            rsa_pkcs1v15_encrypt_base64(&public_key, new_password)?,
-            rsa_pkcs1v15_encrypt_base64(&public_key, old_password)?,
-            rsa_pkcs1v15_encrypt_base64(&public_key, new_password)?,
-        ))
-    })();
-    let (new_enc, old_enc, new_enc_2) = match encrypted {
-        Ok(values) => values,
-        Err(e) => {
+        if let Err(e) = parse_json(&text, step).and_then(|value| check_err_code(&value, step)) {
             logger.error(&format!("{} ✗ {}", step, e));
             return fail_result(kind, e, "changePasswd");
         }
-    };
-    logger.info(&format!(
-        "{} RSA 加密完成，密文长度 newUserPasswd={} userPasswd={} NewEncPassword={}",
-        step,
-        new_enc.len(),
-        old_enc.len(),
-        new_enc_2.len()
-    ));
-
-    let change_body = json!({
-        "userCode": UMS_USER,
-        "userName": UMS_USER,
-        "newUserPasswd": new_enc,
-        "userPasswd": old_enc,
-        "NewEncPassword": new_enc_2,
-    });
-    let (_, text) = match logger
-        .send(
-            client,
-            reqwest::Method::PUT,
-            &format!("{}/user/update/passwd", base),
-            Some(&token),
-            "Authorization",
-            Some(&change_body),
-            step,
-        )
-        .await
-    {
-        Ok(value) => value,
-        Err(e) => return fail_result(kind, e, "changePasswd"),
-    };
-
-    if let Err(e) = parse_json(&text, step).and_then(|value| check_err_code(&value, step)) {
-        logger.error(&format!("{} ✗ {}", step, e));
-        return fail_result(kind, e, "changePasswd");
     }
 
-    // ⑤ 置密码初始化开关。密码已经改成功了，这一步失败不该把整条流程判成失败，
-    //    但必须让使用者看到 —— 因此计入成功，同时在 message 里标注。
+    // ⑤ 置密码初始化开关。
     let step = "⑤ 置 pwdIsInit 开关";
     let now_ms = chrono::Utc::now().timestamp_millis();
     let dictionary_body = json!({
@@ -683,15 +746,32 @@ async fn run_ums_flow(
     match dictionary_outcome {
         Ok(()) => {
             logger.success("完成");
-            ok_result(kind)
+            if password_change_skipped {
+                UmsInitPasswordTargetResult {
+                    kind,
+                    success: true,
+                    message: "新旧密码相同，已跳过改密，仅置 pwdIsInit 开关".to_string(),
+                    failed_at: None,
+                }
+            } else {
+                ok_result(kind)
+            }
         }
         Err(e) => {
-            logger.error(&format!("{} ✗ {}（密码已修改成功）", step, e));
-            UmsInitPasswordTargetResult {
-                kind,
-                success: true,
-                message: format!("密码已修改，但 pwdIsInit 开关设置失败: {}", e),
-                failed_at: None,
+            if password_change_skipped {
+                // 开关是本次唯一的操作，它失败就等于整条流程什么都没做成。
+                logger.error(&format!("{} ✗ {}", step, e));
+                fail_result(kind, e, "dictionary")
+            } else {
+                // 密码已经改成功了，开关失败不该把整条流程判成失败，
+                // 但必须让使用者看到 —— 因此计入成功并在 message 里标注。
+                logger.error(&format!("{} ✗ {}（密码已修改成功）", step, e));
+                UmsInitPasswordTargetResult {
+                    kind,
+                    success: true,
+                    message: format!("密码已修改，但 pwdIsInit 开关设置失败: {}", e),
+                    failed_at: None,
+                }
             }
         }
     }
@@ -759,7 +839,7 @@ async fn run_cdm_flow(
         "LoginSignature": signature,
     });
     let step = "② 登录";
-    let (_, text) = match logger
+    let (status, text) = match logger
         .send(
             client,
             reqwest::Method::POST,
@@ -776,11 +856,17 @@ async fn run_cdm_flow(
     };
 
     let token = match parse_json(&text, step).and_then(|value| {
+        // CDM 登录失败走 HTTP 4xx + PascalCase 的 {ErrCode, ErrMsg}，
+        // 先判错误码再找令牌，否则真实原因会被「缺少 Authorization」盖掉。
+        if let Some(detail) = extract_error(&value) {
+            return Err(format!("登录失败: {}", detail));
+        }
         json_str(&value, "Authorization")
             .map(|t| t.to_string())
             .ok_or_else(|| {
                 format!(
-                    "登录响应缺少 Authorization: {}",
+                    "登录失败: HTTP {} {}",
+                    status.as_u16(),
                     truncate_for_log(&value.to_string())
                 )
             })
@@ -1002,7 +1088,8 @@ pub async fn change_ums_init_password(
         ),
     );
 
-    let client = crate::build_device_http_client_with_timeout(Duration::from_secs(api_timeout_secs))?;
+    let client =
+        crate::build_device_http_client_with_timeout(Duration::from_secs(api_timeout_secs))?;
 
     let results = crate::async_utils::run_ordered_with_limit(
         request.ips.clone(),
@@ -1104,11 +1191,60 @@ mod tests {
     #[test]
     fn err_code_check_reports_message_from_response() {
         assert!(check_err_code(&json!({ "errCode": 0, "errMsg": "成功" }), "步骤").is_ok());
-        let err = check_err_code(&json!({ "errCode": 5, "errMsg": "旧密码错误" }), "步骤")
-            .unwrap_err();
+        let err =
+            check_err_code(&json!({ "errCode": 5, "errMsg": "旧密码错误" }), "步骤").unwrap_err();
         assert!(err.contains("errCode=5"));
         assert!(err.contains("旧密码错误"));
         assert!(check_err_code(&json!({ "foo": 1 }), "步骤").is_err());
+    }
+
+    #[test]
+    fn pascal_case_error_envelopes_are_recognized() {
+        // 业务接口返回 camelCase 的 errCode，但登录失败返回 PascalCase 的 ErrCode ——
+        // 只认一种会把「账号锁定」「密码错误」埋成「缺少 token」。
+        let ums_locked = json!({
+            "ErrCode": 94464,
+            "ErrMsg": "Usercode or passwd is invalid, locked after multiple times.",
+            "AccessCode": "",
+            "ResidueDegree": 4,
+        });
+        let detail = extract_error(&ums_locked).expect("PascalCase 错误必须被识别");
+        assert!(detail.contains("94464"));
+        assert!(detail.contains("locked after multiple times"));
+
+        let cdm_failed = json!({ "ErrCode": 320038, "ErrMsg": "用户登录失败" });
+        let detail = extract_error(&cdm_failed).expect("CDM 错误必须被识别");
+        assert!(detail.contains("320038"));
+        assert!(detail.contains("用户登录失败"));
+
+        assert!(extract_error(&json!({ "errCode": 0, "errMsg": "成功" })).is_none());
+        assert!(extract_error(&json!({ "AccessToken": "abc" })).is_none());
+    }
+
+    #[test]
+    fn ums_skips_the_change_call_when_old_and_new_passwords_match() {
+        // 源码级断言：跳过条件必须是「新旧密码相同」，且 ③④ 被同一个开关包住，
+        // ⑤ 始终执行 —— 这正是「密码已是目标值、只补初始化标识」的语义。
+        let source = include_str!("ums_init_password.rs");
+        assert!(source.contains("let password_change_skipped = old_password == new_password;"));
+        assert!(source.contains("if !password_change_skipped {"));
+        // 跳过时开关是唯一操作，失败即整体失败；未跳过时开关失败只降级为备注。
+        assert!(source.contains("fail_result(kind, e, \"dictionary\")"));
+        assert!(source.contains("新旧密码相同，已跳过改密，仅置 pwdIsInit 开关"));
+    }
+
+    #[test]
+    fn ums_password_change_encrypts_the_md5_digest_not_the_plaintext() {
+        // 实机验证：原文被回 errCode=94438，MD5 才是 errCode=0。
+        // 这里锁住摘要口径（小写十六进制、32 字符），防止有人改回原文。
+        let digest = md5_hex("admin_1234");
+        assert_eq!(digest, "defca3e3fee3d112b9275896d086883f");
+        assert_eq!(digest.len(), 32);
+        assert_eq!(digest, digest.to_lowercase());
+
+        // 摘要进 RSA 信封后仍是标准 2048 位密文。
+        let ciphertext = rsa_pkcs1v15_encrypt_base64(SAMPLE_PUBLIC_KEY, &digest).unwrap();
+        assert_eq!(BASE64.decode(&ciphertext).unwrap().len(), 256);
     }
 
     #[test]
