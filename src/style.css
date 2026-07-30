@@ -20,11 +20,29 @@ body,
   width: 100%;
   height: 100%;
   overflow: hidden;
+  background: transparent;
 }
 
 body {
   margin: 0;
   overscroll-behavior-y: none;
+}
+
+/*
+ * The native shadow of an undecorated Windows window is still rectangular.
+ * Keep the HWND fully transparent at its corners and draw the subtle outline
+ * inside the clipped webview surface so no square edge can remain visible.
+ */
+.app-window-shell {
+  border-radius: 12px;
+  clip-path: inset(0 round 12px);
+  box-shadow: inset 0 0 0 1px rgb(203 213 225 / 70%);
+}
+
+.app-window-shell--maximized {
+  border-radius: 0;
+  clip-path: none;
+  box-shadow: none;
 }
 
 html.clipboard-panel-window,

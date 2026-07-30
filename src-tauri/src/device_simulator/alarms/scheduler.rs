@@ -541,6 +541,7 @@ impl AlarmScheduler {
             job.targets,
             job.mode,
             Some(1),
+            job.mode == AlarmDispatchMode::Sequential,
             None,
             job.recovery_delay_ms,
             job.random_seed,
@@ -581,6 +582,7 @@ impl AlarmScheduler {
                     job.targets,
                     job.mode,
                     job.send_count,
+                    false,
                     Some(job.interval_ms),
                     job.recovery_delay_ms,
                     job.random_seed,
@@ -604,6 +606,7 @@ impl AlarmScheduler {
         targets: Vec<AlarmDeviceTarget>,
         mode: AlarmDispatchMode,
         send_count: Option<u64>,
+        send_each_invocation_once: bool,
         interval_ms: Option<u64>,
         recovery_delay_ms: Option<u64>,
         random_seed: u64,
@@ -616,12 +619,17 @@ impl AlarmScheduler {
             let scheduler = self.clone();
             let tracker = tracker.clone();
             let cancellation = cancellation.clone();
+            let target_send_count = if send_each_invocation_once {
+                Some(target.invocations.len() as u64)
+            } else {
+                send_count
+            };
             tasks.spawn(async move {
                 scheduler
                     .run_device(
                         target,
                         mode,
-                        send_count,
+                        target_send_count,
                         interval_ms,
                         recovery_delay_ms,
                         random_seed ^ index as u64,
@@ -682,7 +690,6 @@ impl AlarmScheduler {
                     AlarmDeliveryPhase::Alarm,
                     &legacy_values,
                     event_id,
-                    interval_ms,
                     &tracker,
                     &cancellation,
                 )
@@ -692,24 +699,6 @@ impl AlarmScheduler {
                 && recovery_delay_ms.is_some()
                 && !matches!(invocation.definition.recovery, RecoveryDefinition::None)
             {
-                // ACSControlAlarm.py waits for its ordinary send interval
-                // before beginning the configured recovery delay.
-                if invocation.definition.profile_id
-                    == crate::device_simulator::profiles::scope::FirstReleaseProfileId::IpcFaceAccess
-                    && !invocation.definition.transport.path.ends_with("/PersonVerification")
-                {
-                    if let Some(interval_ms) = interval_ms {
-                        if !sleep_or_cancel(
-                            self.clock.as_ref(),
-                            Duration::from_millis(interval_ms),
-                            &cancellation,
-                        )
-                        .await
-                        {
-                            break;
-                        }
-                    }
-                }
                 if !sleep_or_cancel(
                     self.clock.as_ref(),
                     Duration::from_millis(recovery_delay_ms.unwrap_or_default()),
@@ -724,14 +713,7 @@ impl AlarmScheduler {
                     invocation,
                     AlarmDeliveryPhase::Recovery,
                     &legacy_values,
-                    if invocation.definition.profile_id
-                        == crate::device_simulator::profiles::scope::FirstReleaseProfileId::IpcFaceAccess
-                    {
-                        self.next_event_id()
-                    } else {
-                        event_id
-                    },
-                    None,
+                    event_id,
                     &tracker,
                     &cancellation,
                 )
@@ -763,24 +745,12 @@ impl AlarmScheduler {
         phase: AlarmDeliveryPhase,
         legacy_values: &LegacyAlarmValues,
         event_id: u64,
-        inter_request_interval_ms: Option<u64>,
         tracker: &AlarmJobTracker,
         cancellation: &AlarmCancellation,
     ) -> bool {
         let mut context = invocation.context.clone();
         let now = chrono::Local::now();
-        let timestamp = if phase == AlarmDeliveryPhase::Alarm
-            && invocation.definition.profile_id
-                == crate::device_simulator::profiles::scope::FirstReleaseProfileId::IpcSmart
-            && matches!(
-                invocation.definition.transport.body_encoding,
-                super::BodyEncoding::Multipart { .. }
-            ) {
-            let millis = now.timestamp_subsec_millis();
-            format!("{}.{millis:03}", now.timestamp())
-        } else {
-            now.timestamp().to_string()
-        };
+        let timestamp = now.timestamp().to_string();
         context.fields.insert(
             crate::device_simulator::alarms::DynamicField::Timestamp,
             timestamp,
@@ -822,8 +792,7 @@ impl AlarmScheduler {
             }
         };
 
-        let request_count = requests.len();
-        for (request_index, request) in requests.into_iter().enumerate() {
+        for request in requests {
             for attempt in 1..=self.limits.retry.max_attempts {
                 let outcome = self
                     .attempt(
@@ -859,22 +828,6 @@ impl AlarmScheduler {
                         {
                             return false;
                         }
-                    }
-                }
-            }
-            if request_index + 1 < request_count
-                && invocation.definition.profile_id
-                    == crate::device_simulator::profiles::scope::FirstReleaseProfileId::NvrVehicle
-            {
-                if let Some(delay_ms) = inter_request_interval_ms {
-                    if !sleep_or_cancel(
-                        self.clock.as_ref(),
-                        Duration::from_millis(delay_ms),
-                        cancellation,
-                    )
-                    .await
-                    {
-                        return false;
                     }
                 }
             }
@@ -1381,8 +1334,10 @@ mod tests {
             handler_id: handler,
             alarm_type_id: AlarmTypeId::new("fixture").unwrap(),
             profile_id: handler.profile_id(),
+            // Structured alarms are rendered through the structured legacy path,
+            // which requires a StructureInfo.ImageInfoList array to normalize.
             template: CompiledTemplate::compile(
-                br#"{"device":"{{device_id}}","timestamp":{{timestamp}},"eventId":{{event_id}}}"#,
+                br#"{"device":"{{device_id}}","timestamp":{{timestamp}},"eventId":{{event_id}},"StructureInfo":{"ImageInfoList":[]}}"#,
             )
             .unwrap(),
             image_policy: ImagePolicy::Forbidden,
@@ -1482,7 +1437,7 @@ mod tests {
         let sender = Arc::new(ScriptedSender::successful(clock.clone()));
         let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1525,12 +1480,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_shot_sequential_sends_each_registered_invocation_once() {
+        let clock: Arc<dyn AlarmClock> = Arc::new(TestClock::default());
+        let sender = Arc::new(ScriptedSender::successful(clock.clone()));
+        let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
+        let first = definition(
+            AlarmHandlerId::StructuredV1,
+            ResponseSuccessRule::StatusRange {
+                minimum: 200,
+                maximum: 299,
+            },
+            true,
+            false,
+        );
+        let mut second_value = (*first).clone();
+        second_value.alarm_type_id = AlarmTypeId::new("fixture-second").unwrap();
+        second_value.transport.path = "/fixture/second".into();
+        let second = Arc::new(second_value);
+
+        let snapshot = scheduler
+            .trigger_once(OneShotAlarmJob {
+                job_id: "once-all".into(),
+                targets: vec![target("one", vec![first, second])],
+                mode: AlarmDispatchMode::Sequential,
+                recovery_delay_ms: None,
+                random_seed: 1,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.attempted, 2);
+        let requests = sender.requests.lock().await;
+        assert_eq!(requests[0].request.path, "/fixture/alarm");
+        assert_eq!(requests[1].request.path, "/fixture/second");
+    }
+
+    #[tokio::test]
     async fn periodic_fixed_count_is_independent_per_device_and_sends_recovery() {
         let clock: Arc<dyn AlarmClock> = Arc::new(TestClock::default());
         let sender = Arc::new(ScriptedSender::successful(clock.clone()));
         let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1572,7 +1563,7 @@ mod tests {
         let sender = Arc::new(ScriptedSender::successful(clock.clone()));
         let scheduler = AlarmScheduler::new(sender, clock, limits()).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1646,7 +1637,7 @@ mod tests {
         ]);
         let scheduler = AlarmScheduler::new(sender, clock, limits()).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1683,7 +1674,7 @@ mod tests {
         let sender = Arc::new(ScriptedSender::successful(clock.clone()));
         let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
         let mut handler = (*definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::Unverified,
             false,
             true,
@@ -1738,7 +1729,7 @@ mod tests {
         ]);
         let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1767,7 +1758,7 @@ mod tests {
         let sender = Arc::new(PendingSender::default());
         let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1805,7 +1796,7 @@ mod tests {
         ]);
         let scheduler = AlarmScheduler::new(sender, clock, limits()).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1837,7 +1828,7 @@ mod tests {
     #[tokio::test]
     async fn last_http_status_follows_attempt_completion_order_across_devices() {
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1869,7 +1860,7 @@ mod tests {
         let sender = Arc::new(PendingSender::default());
         let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1906,7 +1897,7 @@ mod tests {
         limits.per_destination_rate_per_second = 2;
         let scheduler = AlarmScheduler::new(sender.clone(), clock, limits).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1939,7 +1930,7 @@ mod tests {
         let sender = Arc::new(ScriptedSender::successful(clock.clone()));
         let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
         let first = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,
@@ -1998,7 +1989,7 @@ mod tests {
 
         let scheduler = AlarmScheduler::new(sender, clock, limits()).unwrap();
         let handler = definition(
-            AlarmHandlerId::SmartV1,
+            AlarmHandlerId::StructuredV1,
             ResponseSuccessRule::StatusRange {
                 minimum: 200,
                 maximum: 299,

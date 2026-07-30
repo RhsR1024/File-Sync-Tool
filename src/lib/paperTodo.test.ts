@@ -51,6 +51,13 @@ describe('paper todo core data', () => {
     expect(settings.hotkeys.toggleAll).toBe('Ctrl+Shift+Space');
     expect(settings.launcherEnabled).toBe(true);
     expect(settings.launcherEdge).toBe('right');
+    expect(settings.paperSkin).toBe('classic');
+  });
+
+  it('defaults old and invalid skin settings to classic', () => {
+    expect(normalizePaperTodoState({ papers: [], settings: {} }).settings.paperSkin).toBe('classic');
+    expect(normalizePaperTodoState({ papers: [], settings: { paperSkin: 'unknown' } }).settings.paperSkin).toBe('classic');
+    expect(normalizePaperTodoState({ papers: [], settings: { paperSkin: 'quiet' } }).settings.paperSkin).toBe('quiet');
   });
 
   it('starts a fresh profile with one todo and one note paper', () => {

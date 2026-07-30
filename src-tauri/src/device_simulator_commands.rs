@@ -797,6 +797,14 @@ pub async fn device_simulator_recover(
     simulator_state: State<'_, DeviceSimulatorCommandState>,
     session_id: String,
 ) -> Result<RecoveryResult, SimulatorErrorBody> {
+    recover_session(&app_handle, simulator_state.inner(), session_id).await
+}
+
+async fn recover_session(
+    app_handle: &AppHandle,
+    simulator_state: &DeviceSimulatorCommandState,
+    session_id: String,
+) -> Result<RecoveryResult, SimulatorErrorBody> {
     let app_data_dir = app_data_dir(&app_handle)?;
     // A recovery Worker is always launched elevated. It owns process identity
     // verification and all resource mutations, so cleanup still works after a
@@ -856,7 +864,7 @@ pub async fn device_simulator_recover(
         .manager
         .record_recovery_outcome(&session_id, outcome.recovered, outcome.error.clone())
         .map_err(manager_error)?;
-    emit_manager_status(&app_handle, status);
+    emit_manager_status(app_handle, status);
     Ok(outcome)
 }
 
@@ -870,16 +878,28 @@ pub async fn shutdown_for_exit(
             state.manager.shutdown_worker().await.map_err(manager_error)
         }
         SessionState::RecoveryRequired | SessionState::Recovering => {
-            // A residual/recovery journal must not trap the user inside the app.
-            // The journal is durable on disk and is reconciled idempotently on
-            // the next launch (foreign or stale resources are simply released),
-            // so exiting now leaks nothing. Blocking exit here previously left
-            // "cleanup failed" as the only outcome and forced users to kill the
-            // process, which orphaned a hung instance holding the single-instance
-            // guard and made the app impossible to relaunch. Let exit proceed and
-            // shut down any connected worker best-effort.
-            let _ = state.manager.shutdown_worker().await;
-            Ok(())
+            let session_id = status
+                .recovery_session_id
+                .or(status.session_id)
+                .ok_or_else(|| {
+                    runtime_error(
+                        "device_simulator.recovery.session_missing",
+                        "deviceSimulator.errors.recoveryRequired",
+                        "recovery status did not include a session id",
+                    )
+                })?;
+            let outcome = recover_session(app_handle, state, session_id).await?;
+            if outcome.recovered {
+                Ok(())
+            } else {
+                Err(outcome.error.unwrap_or_else(|| {
+                    runtime_error(
+                        "device_simulator.recovery.incomplete",
+                        "deviceSimulator.errors.recoveryFailed",
+                        "virtual device recovery left owned resources behind",
+                    )
+                }))
+            }
         }
         _ => stop_active_session(app_handle, &state.manager).await,
     }

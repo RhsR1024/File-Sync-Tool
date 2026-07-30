@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "screen-share-annotation-bar",
+  "description": "Permissions for the host annotation action bar shown on the shared monitor.",
+  "windows": [
+    "screen-share-annotation-bar-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:window:allow-close"
+  ]
+}

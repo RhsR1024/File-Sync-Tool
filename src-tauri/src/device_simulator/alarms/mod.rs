@@ -57,34 +57,19 @@ pub type AlarmResult<T> = Result<T, AlarmError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlarmHandlerId {
-    CustomV1,
-    SmartV1,
     StructuredV1,
-    FaceAccessV1,
-    NvrCommonV1,
-    NvrVehicleV1,
 }
 
 impl AlarmHandlerId {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::CustomV1 => "alarm.custom.v1",
-            Self::SmartV1 => "alarm.smart.v1",
             Self::StructuredV1 => "alarm.structured.v1",
-            Self::FaceAccessV1 => "alarm.face_access.v1",
-            Self::NvrCommonV1 => "alarm.nvr_common.v1",
-            Self::NvrVehicleV1 => "alarm.nvr_vehicle.v1",
         }
     }
 
     pub const fn profile_id(self) -> FirstReleaseProfileId {
         match self {
-            Self::CustomV1 => FirstReleaseProfileId::IpcCustom,
-            Self::SmartV1 => FirstReleaseProfileId::IpcSmart,
             Self::StructuredV1 => FirstReleaseProfileId::IpcStructured,
-            Self::FaceAccessV1 => FirstReleaseProfileId::IpcFaceAccess,
-            Self::NvrCommonV1 => FirstReleaseProfileId::NvrCommon,
-            Self::NvrVehicleV1 => FirstReleaseProfileId::NvrVehicle,
         }
     }
 }
@@ -94,12 +79,7 @@ impl FromStr for AlarmHandlerId {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "alarm.custom.v1" => Ok(Self::CustomV1),
-            "alarm.smart.v1" => Ok(Self::SmartV1),
             "alarm.structured.v1" => Ok(Self::StructuredV1),
-            "alarm.face_access.v1" => Ok(Self::FaceAccessV1),
-            "alarm.nvr_common.v1" => Ok(Self::NvrCommonV1),
-            "alarm.nvr_vehicle.v1" => Ok(Self::NvrVehicleV1),
             _ => Err(AlarmError::new(
                 "device_simulator.alarm.handler_unknown",
                 format!("unknown compiled alarm handler '{value}'"),
@@ -805,18 +785,6 @@ impl LegacyAlarmValues {
         minimum + value % (maximum - minimum + 1)
     }
 
-    fn primary_subscription_id(&self) -> u16 {
-        self.bounded(1, 1, 1_000) as u16
-    }
-
-    fn follow_up_subscription_id(&self) -> u16 {
-        self.bounded(2, 1, 1_000) as u16
-    }
-
-    fn recovery_subscription_id(&self) -> u16 {
-        self.bounded(3, 1, 1_000) as u16
-    }
-
     pub fn related_id(&self) -> String {
         format!("16ID{}", self.bounded(4, 10_000_000_000, 99_999_999_999))
     }
@@ -947,13 +915,7 @@ fn build_request_from_parts(
     context: &AlarmBuildContext,
     image_cache: &ImageCache,
 ) -> AlarmResult<HttpAlarmRequest> {
-    validate_request_definition(
-        definition.profile_id,
-        template,
-        image_policy,
-        images,
-        transport,
-    )?;
+    validate_request_definition(template, image_policy, images, transport)?;
     let source_ip = context.source_ip.ok_or_else(|| {
         AlarmError::new(
             "device_simulator.alarm.source_ip_missing",
@@ -1008,17 +970,8 @@ fn build_request_from_parts(
                 &metadata,
                 images,
                 image_cache,
-                definition.profile_id,
             )?;
-            let separator = if definition.profile_id == FirstReleaseProfileId::IpcSmart {
-                ","
-            } else {
-                ";"
-            };
-            (
-                body,
-                format!("multipart/form-data{separator} boundary={boundary}"),
-            )
+            (body, format!("multipart/form-data; boundary={boundary}"))
         }
     };
     if body.len() > MAX_RENDERED_ALARM_BYTES {
@@ -1037,33 +990,8 @@ fn build_request_from_parts(
             headers.insert("Connection".into(), "keep-alive".into());
         }
         BodyEncoding::Raw { .. } => {
-            if definition.profile_id == FirstReleaseProfileId::IpcSmart {
-                headers.insert("Accept".into(), "*/*".into());
-                if role == AlarmRequestRole::Primary
-                    && !definition.follow_up_requests.is_empty()
-                    && !images.is_empty()
-                {
-                    // SmartAlarm.py hand-writes the pictured V1.0 structure
-                    // request with an Expect handshake.
-                    headers.insert("Expect".into(), "100-continue".into());
-                }
-            } else if matches!(
-                definition.profile_id,
-                FirstReleaseProfileId::NvrCommon | FirstReleaseProfileId::NvrVehicle
-            ) || (definition.profile_id == FirstReleaseProfileId::IpcFaceAccess
-                && !transport.path.ends_with("/PersonVerification"))
-            {
-                headers.insert("Accept".into(), "*/*".into());
-            }
-            if definition.profile_id == FirstReleaseProfileId::IpcStructured
-                || (definition.profile_id == FirstReleaseProfileId::NvrVehicle
-                    && role == AlarmRequestRole::Primary)
-                || (definition.profile_id == FirstReleaseProfileId::IpcFaceAccess
-                    && transport.path.ends_with("/PersonVerification")
-                    && role == AlarmRequestRole::Primary)
-            {
-                headers.insert("Connection".into(), "close".into());
-            }
+            // StructureAlarm.py closes the connection after each raw request.
+            headers.insert("Connection".into(), "close".into());
         }
     }
     Ok(HttpAlarmRequest {
@@ -1103,74 +1031,9 @@ fn apply_legacy_runtime_values(
         .get(&DynamicField::CaptureTime)
         .cloned()
         .unwrap_or_default();
-    let reference = legacy_reference(definition, role, context, values);
-    let related_id = values.related_id();
+    let reference = legacy_reference(context);
 
     match definition.profile_id {
-        FirstReleaseProfileId::IpcCustom if role == AlarmRequestRole::Primary => {
-            set_string(&mut document, "/EventInfo/Reference", &reference);
-            set_value(&mut document, "/EventInfo/TimeStamp", timestamp.clone());
-            set_number(&mut document, "/EventInfo/Seq", event_id);
-            if document.pointer("/EventInfo/DeviceCode").is_some() {
-                set_string(
-                    &mut document,
-                    "/EventInfo/DeviceCode",
-                    context_string(context, DynamicField::DeviceId),
-                );
-            }
-            set_string(&mut document, "/ImageList/0/CaptureTime", &capture_time);
-        }
-        FirstReleaseProfileId::IpcSmart => {
-            if matches!(
-                definition.transport.body_encoding,
-                BodyEncoding::Multipart { .. }
-            ) {
-                if role == AlarmRequestRole::Primary {
-                    set_string(&mut document, "/EventInfo/Reference", &reference);
-                    set_number(&mut document, "/EventInfo/SrcID", 1);
-                    set_value(&mut document, "/EventInfo/TimeStamp", timestamp.clone());
-                    set_value(&mut document, "/ImageList/0/CaptureTime", timestamp.clone());
-                    set_string(
-                        &mut document,
-                        "/ImageList/0/CaptureTimeStr",
-                        context_string(context, DynamicField::CaptureTimeText),
-                    );
-                }
-            } else if definition.follow_up_requests.is_empty() || role != AlarmRequestRole::Primary
-            {
-                set_string(&mut document, "/Reference", &reference);
-                set_value(&mut document, "/AlarmInfo/TimeStamp", timestamp);
-                set_number(&mut document, "/AlarmInfo/AlarmSeq", event_id);
-                if role != AlarmRequestRole::Recovery {
-                    set_string(&mut document, "/AlarmInfo/RelatedID", &related_id);
-                }
-            } else if role == AlarmRequestRole::Primary {
-                set_string(&mut document, "/Reference", &reference);
-                set_value(&mut document, "/TimeStamp", timestamp);
-                set_number(&mut document, "/Seq", event_id);
-                set_string(&mut document, "/RelatedID", &related_id);
-                set_smart_v1_image_times(
-                    &mut document,
-                    context_json_number(context, DynamicField::Timestamp),
-                );
-            }
-
-            if role == AlarmRequestRole::Primary {
-                match definition.alarm_type_id.as_str() {
-                    "dog-detection" => insert_json_object_field(
-                        &mut document,
-                        "EventDetail",
-                        serde_json::json!({"UnLeashed": 1}),
-                    ),
-                    "dog-detection-2" => insert_json_object_field(
-                        &mut document,
-                        "EventDetail",
-                        serde_json::json!({"NotAllowed": 1}),
-                    ),
-                    _ => {}
-                }
-            }
-        }
         FirstReleaseProfileId::IpcStructured if role == AlarmRequestRole::Primary => {
             set_string(&mut document, "/Reference", &reference);
             set_value(&mut document, "/TimeStamp", timestamp);
@@ -1184,105 +1047,7 @@ fn apply_legacy_runtime_values(
                 event_id,
             );
         }
-        FirstReleaseProfileId::IpcFaceAccess => {
-            let person_verification = definition.transport.path.ends_with("/PersonVerification");
-            if person_verification && role == AlarmRequestRole::Primary {
-                set_string(&mut document, "/Reference", &reference);
-                set_number(&mut document, "/Seq", event_id);
-                set_string(
-                    &mut document,
-                    "/DeviceCode",
-                    context_string(context, DynamicField::DeviceId),
-                );
-                set_value(&mut document, "/Timestamp", timestamp.clone());
-                set_number(&mut document, "/FaceInfoList/0/ID", event_id);
-                set_value(&mut document, "/FaceInfoList/0/Timestamp", timestamp);
-                set_number(&mut document, "/LibMatInfoList/0/ID", event_id);
-                if definition.alarm_type_id.as_str() == "inlib" {
-                    set_number_or_string(
-                        &mut document,
-                        "/LibMatInfoList/0/MatchPersonID",
-                        context_string(context, DynamicField::PersonId),
-                    );
-                }
-                apply_face_access_values(
-                    &mut document,
-                    definition.alarm_type_id.as_str(),
-                    values,
-                    context,
-                );
-            } else {
-                set_string(&mut document, "/Reference", &reference);
-                set_value(&mut document, "/AlarmInfo/TimeStamp", timestamp);
-                set_number(&mut document, "/AlarmInfo/AlarmSeq", event_id);
-            }
-        }
-        FirstReleaseProfileId::NvrCommon => {
-            if definition.alarm_type_id.as_str() != "channel-deleted" {
-                set_string(&mut document, "/Reference", &reference);
-                set_value(&mut document, "/AlarmInfo/TimeStamp", timestamp);
-            }
-        }
-        FirstReleaseProfileId::NvrVehicle => match definition.alarm_type_id.as_str() {
-            "match" | "nomatch" if role == AlarmRequestRole::Primary => {
-                set_string(&mut document, "/Reference", &reference);
-                set_number(&mut document, "/VehicleEventInfo/ID", event_id);
-                set_value(
-                    &mut document,
-                    "/VehicleEventInfo/Timestamp",
-                    timestamp.clone(),
-                );
-                set_number(
-                    &mut document,
-                    "/VehicleEventInfo/VehicleInfoList/0/RecordID",
-                    event_id,
-                );
-                set_value(
-                    &mut document,
-                    "/VehicleEventInfo/VehicleInfoList/0/PassingTime",
-                    timestamp,
-                );
-                set_string(
-                    &mut document,
-                    "/VehicleEventInfo/VehicleInfoList/0/RelatedID",
-                    &related_id,
-                );
-                let plate = if definition.alarm_type_id.as_str() == "match" {
-                    format!("赣B{}BL", values.bounded(30, 100, 999))
-                } else {
-                    format!("赣A{}U8", values.bounded(31, 100, 999))
-                };
-                set_string(
-                    &mut document,
-                    "/VehicleEventInfo/VehicleInfoList/0/PlateAttr/Plate",
-                    &plate,
-                );
-            }
-            "match" | "nomatch" if role == AlarmRequestRole::FollowUp => {
-                set_string(&mut document, "/Reference", &reference);
-                set_value(&mut document, "/AlarmInfo/TimeStamp", timestamp);
-                set_string(&mut document, "/AlarmInfo/RelatedID", &related_id);
-            }
-            "snap" if role == AlarmRequestRole::Primary => {
-                set_string(&mut document, "/Reference", &reference);
-                set_value(&mut document, "/TimeStamp", timestamp);
-                set_number(
-                    &mut document,
-                    "/StructureInfo/ObjInfo/VehicleInfoList/0/ID",
-                    event_id,
-                );
-                set_capture_times_count(
-                    &mut document,
-                    "/StructureInfo/ImageInfoList",
-                    &capture_time,
-                    2,
-                );
-                rewrite_picture_type(&mut document, "/StructureInfo/ImageInfoList/0/URL", "2");
-                rewrite_picture_type(&mut document, "/StructureInfo/ImageInfoList/1/URL", "1");
-            }
-            _ => {}
-        },
-        _ => {}
+        FirstReleaseProfileId::IpcStructured => {}
     }
 
     serde_json::to_vec(&document).map_err(|source| {
@@ -1293,35 +1058,11 @@ fn apply_legacy_runtime_values(
     })
 }
 
-fn legacy_reference(
-    definition: &AlarmHandlerDefinition,
-    role: AlarmRequestRole,
-    context: &AlarmBuildContext,
-    values: &LegacyAlarmValues,
-) -> String {
-    let base = context_string(context, DynamicField::Reference);
-    let fixed = definition.profile_id == FirstReleaseProfileId::IpcStructured
-        || (definition.profile_id == FirstReleaseProfileId::IpcFaceAccess
-            && role == AlarmRequestRole::Primary
-            && definition.transport.path.ends_with("/PersonVerification"));
-    if fixed {
-        return base.to_owned();
-    }
-    let subscription_id = match role {
-        AlarmRequestRole::Primary => values.primary_subscription_id(),
-        AlarmRequestRole::FollowUp => values.follow_up_subscription_id(),
-        AlarmRequestRole::Recovery => match definition.profile_id {
-            FirstReleaseProfileId::IpcSmart | FirstReleaseProfileId::NvrVehicle => {
-                values.follow_up_subscription_id()
-            }
-            FirstReleaseProfileId::NvrCommon => values.primary_subscription_id(),
-            FirstReleaseProfileId::IpcFaceAccess => values.recovery_subscription_id(),
-            _ => values.primary_subscription_id(),
-        },
-    };
-    base.rsplit_once("/Subscribers/")
-        .map(|(prefix, _)| format!("{prefix}/Subscribers/{subscription_id}"))
-        .unwrap_or_else(|| base.to_owned())
+/// The structured camera uses the subscription reference exactly as the platform
+/// handed it back. The profiles that rewrote the trailing `/Subscribers/<id>` per
+/// request role were removed along with their handlers.
+fn legacy_reference(context: &AlarmBuildContext) -> String {
+    context_string(context, DynamicField::Reference).to_owned()
 }
 
 fn context_string(context: &AlarmBuildContext, field: DynamicField) -> &str {
@@ -1353,45 +1094,6 @@ fn set_string(document: &mut serde_json::Value, pointer: &str, value: &str) {
         pointer,
         serde_json::Value::String(value.to_owned()),
     );
-}
-
-fn set_number_or_string(document: &mut serde_json::Value, pointer: &str, value: &str) {
-    if let Ok(number) = value.parse::<u64>() {
-        set_number(document, pointer, number);
-    } else {
-        set_string(document, pointer, value);
-    }
-}
-
-fn rewrite_picture_type(document: &mut serde_json::Value, pointer: &str, picture_type: &str) {
-    let Some(slot) = document.pointer_mut(pointer) else {
-        return;
-    };
-    let Some(url) = slot.as_str() else {
-        return;
-    };
-    let Some((prefix, query)) = url.split_once("?") else {
-        return;
-    };
-    let mut query_parts = query.split('&').map(str::to_owned).collect::<Vec<_>>();
-    if let Some(type_part) = query_parts
-        .iter_mut()
-        .find(|part| part.starts_with("Type="))
-    {
-        *type_part = format!("Type={picture_type}");
-        *slot = serde_json::Value::String(format!("{prefix}?{}", query_parts.join("&")));
-    }
-}
-
-fn set_smart_v1_image_times(document: &mut serde_json::Value, timestamp: serde_json::Value) {
-    for list in ["/StructureInfo/ImageInfoList", "/AlarmPicture/ImageList"] {
-        for index in 0..8 {
-            let pointer = format!("{list}/{index}/CaptureTime");
-            if document.pointer(&pointer).is_some() {
-                set_value(document, &pointer, timestamp.clone());
-            }
-        }
-    }
 }
 
 fn set_capture_times(document: &mut serde_json::Value, list: &str, capture_time: &str) {
@@ -1595,56 +1297,6 @@ fn apply_structured_camera_values(
     }
 }
 
-fn apply_face_access_values(
-    document: &mut serde_json::Value,
-    alarm_type_id: &str,
-    values: &LegacyAlarmValues,
-    context: &AlarmBuildContext,
-) {
-    if !matches!(alarm_type_id, "inlib" | "notinlib") {
-        return;
-    }
-    let temperature_tenths = values.bounded(40, 300, 450);
-    set_json_pointer(
-        document,
-        "/FaceInfoList/0/Temperature",
-        serde_json::Value::String(format!(
-            "{}.{:01}",
-            temperature_tenths / 10,
-            temperature_tenths % 10
-        )),
-    );
-    set_number(
-        document,
-        "/FaceInfoList/0/MaskFlag",
-        values.bounded(41, 0, 2),
-    );
-    let timestamp = context
-        .fields
-        .get(&DynamicField::Timestamp)
-        .and_then(|value| value.split('.').next())
-        .unwrap_or("0");
-    let nonce = values.bounded(42, 1, 30_000);
-    if alarm_type_id == "inlib" {
-        set_json_pointer(
-            document,
-            "/FaceInfoList/0/PanoImage/Name",
-            serde_json::Value::String(format!("{timestamp}_1_{nonce}.jpg")),
-        );
-        set_json_pointer(
-            document,
-            "/FaceInfoList/0/FaceImage/Name",
-            serde_json::Value::String(format!("{timestamp}_2_{nonce}.jpg")),
-        );
-    } else {
-        set_json_pointer(
-            document,
-            "/FaceInfoList/0/FaceImage/Name",
-            serde_json::Value::String(format!("{timestamp}_1_{nonce}.jpg")),
-        );
-    }
-}
-
 fn set_number(document: &mut serde_json::Value, pointer: &str, value: u64) {
     set_json_pointer(document, pointer, serde_json::Value::from(value));
 }
@@ -1668,12 +1320,6 @@ fn set_number_create(document: &mut serde_json::Value, pointer: &str, value: u64
 fn set_json_pointer(document: &mut serde_json::Value, pointer: &str, value: serde_json::Value) {
     if let Some(slot) = document.pointer_mut(pointer) {
         *slot = value;
-    }
-}
-
-fn insert_json_object_field(document: &mut serde_json::Value, key: &str, value: serde_json::Value) {
-    if let Some(object) = document.as_object_mut() {
-        object.insert(key.to_owned(), value);
     }
 }
 
@@ -1714,7 +1360,6 @@ fn build_multipart_body(
     metadata: &[u8],
     images: &[ImageAttachmentDefinition],
     cache: &ImageCache,
-    profile_id: FirstReleaseProfileId,
 ) -> AlarmResult<Vec<u8>> {
     validate_multipart_token(metadata_name, "metadata name")?;
     validate_header_value(metadata_content_type, "metadata content type")?;
@@ -1726,7 +1371,6 @@ fn build_multipart_body(
         None,
         None,
         metadata_content_type,
-        profile_id,
         metadata.len(),
     );
     body.extend_from_slice(metadata);
@@ -1742,7 +1386,6 @@ fn build_multipart_body(
             Some(&attachment.file_name),
             attachment.image_index,
             image.content_type,
-            profile_id,
             image.bytes.len(),
         );
         body.extend_from_slice(&image.bytes);
@@ -1759,38 +1402,19 @@ fn append_part_prefix(
     file_name: Option<&str>,
     image_index: Option<u16>,
     content_type: &str,
-    profile_id: FirstReleaseProfileId,
     part_length: usize,
 ) {
     output.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    if profile_id == FirstReleaseProfileId::IpcSmart && file_name.is_none() {
-        // SmartAlarm.py keeps the semicolon inside the metadata field name.
-        output.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{name};\"\r\n").as_bytes(),
-        );
-    } else if profile_id == FirstReleaseProfileId::IpcCustom && file_name.is_some() {
-        // Preserve CustomAlarm.py's historical parameter order and spacing.
-        output.extend_from_slice(
-            format!(
-                "Content-Disposition: form-data;imageindex=1;name=\"{name}\";filename=\"{}\"\r\n",
-                file_name.unwrap_or("picture.jpg")
-            )
-            .as_bytes(),
-        );
-    } else {
-        output.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{name}\"").as_bytes(),
-        );
-        if let Some(image_index) = image_index {
-            output.extend_from_slice(format!("; imageindex={image_index}").as_bytes());
-        }
-        if let Some(file_name) = file_name {
-            output.extend_from_slice(format!("; filename=\"{file_name}\"").as_bytes());
-        }
-        output.extend_from_slice(b"\r\n");
+    output.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"").as_bytes());
+    if let Some(image_index) = image_index {
+        output.extend_from_slice(format!("; imageindex={image_index}").as_bytes());
     }
+    if let Some(file_name) = file_name {
+        output.extend_from_slice(format!("; filename=\"{file_name}\"").as_bytes());
+    }
+    output.extend_from_slice(b"\r\n");
     output.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
-    // All six legacy senders declared each multipart part length explicitly.
+    // StructureAlarm.py declares each multipart part length explicitly.
     output.extend_from_slice(format!("Content-Length: {part_length}\r\n").as_bytes());
     output.extend_from_slice(b"\r\n");
 }
@@ -1807,7 +1431,6 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
         ));
     }
     validate_request_definition(
-        definition.profile_id,
         &definition.template,
         definition.image_policy,
         &definition.images,
@@ -1815,7 +1438,6 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
     )?;
     for follow_up in &definition.follow_up_requests {
         validate_request_definition(
-            definition.profile_id,
             &follow_up.template,
             follow_up.image_policy,
             &follow_up.images,
@@ -1830,7 +1452,6 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
     } = &definition.recovery
     {
         validate_request_definition(
-            definition.profile_id,
             template,
             if *include_images {
                 definition.image_policy
@@ -1870,21 +1491,12 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
 }
 
 fn validate_request_definition(
-    profile_id: FirstReleaseProfileId,
     template: &CompiledTemplate,
     image_policy: ImagePolicy,
     images: &[ImageAttachmentDefinition],
     transport: &TransportDefinition,
 ) -> AlarmResult<()> {
     validate_http_path(&transport.path)?;
-    if profile_id == FirstReleaseProfileId::NvrCommon
-        && (image_policy != ImagePolicy::Forbidden || !images.is_empty())
-    {
-        return Err(AlarmError::new(
-            "device_simulator.alarm.nvr_common_image_forbidden",
-            "ordinary NVR alarms cannot acquire image behavior without approved evidence",
-        ));
-    }
     if image_policy == ImagePolicy::Forbidden && !images.is_empty() {
         return Err(AlarmError::new(
             "device_simulator.alarm.image_policy_invalid",
@@ -1947,22 +1559,11 @@ fn validate_request_definition(
 /// These definitions must not be presented as platform-compatible.
 pub fn synthetic_unverified_first_release_registry() -> AlarmResult<AlarmHandlerRegistry> {
     let mut registry = AlarmHandlerRegistry::default();
-    for handler_id in [
-        AlarmHandlerId::CustomV1,
-        AlarmHandlerId::SmartV1,
-        AlarmHandlerId::StructuredV1,
-        AlarmHandlerId::FaceAccessV1,
-        AlarmHandlerId::NvrCommonV1,
-        AlarmHandlerId::NvrVehicleV1,
-    ] {
+    for handler_id in [AlarmHandlerId::StructuredV1] {
         let profile_id = handler_id.profile_id();
-        let image_policy = if profile_id == FirstReleaseProfileId::NvrCommon {
-            ImagePolicy::Forbidden
-        } else {
-            // Real mappings are intentionally absent until legacy-derived
-            // fixtures and pack manifests pass review.
-            ImagePolicy::Optional
-        };
+        // Real mappings are intentionally absent until legacy-derived
+        // fixtures and pack manifests pass review.
+        let image_policy = ImagePolicy::Optional;
         registry.register(AlarmHandlerDefinition {
             handler_id,
             alarm_type_id: AlarmTypeId::new("synthetic-fixture")?,
@@ -2008,40 +1609,11 @@ pub fn synthetic_unverified_first_release_registry() -> AlarmResult<AlarmHandler
 
 fn legacy_alarm_sources(profile_id: FirstReleaseProfileId) -> Vec<&'static str> {
     match profile_id {
-        FirstReleaseProfileId::IpcCustom => vec![
-            "data/alarms_info.yml",
-            "script/CustomAlarm.py",
-            "object/CustomStruct/",
-            "pic/CUSTOM/",
-        ],
-        FirstReleaseProfileId::IpcSmart => vec![
-            "data/alarms_info.yml",
-            "script/SmartAlarm.py",
-            "object/SmartStruct/",
-            "pic/SMART/",
-        ],
         FirstReleaseProfileId::IpcStructured => vec![
             "data/alarms_info.yml",
             "script/StructureAlarm.py",
             "object/StructStruct/",
             "pic/STRUCT/",
-        ],
-        FirstReleaseProfileId::IpcFaceAccess => vec![
-            "data/alarms_info.yml",
-            "script/ACSAlarm.py",
-            "object/ACSStruct/",
-            "pic/ACS/",
-        ],
-        FirstReleaseProfileId::NvrCommon => vec![
-            "data/alarms_info.yml",
-            "script/NormalAlarm.py",
-            "object/NormalStruct/",
-        ],
-        FirstReleaseProfileId::NvrVehicle => vec![
-            "data/alarms_info.yml",
-            "script/VehicleAlarm.py",
-            "object/VehicleStruct/",
-            "pic/VEHICLE/",
         ],
     }
 }
@@ -2265,19 +1837,11 @@ mod tests {
         }
     }
 
-    fn raw_definition(profile_id: FirstReleaseProfileId) -> AlarmHandlerDefinition {
-        let handler_id = match profile_id {
-            FirstReleaseProfileId::IpcCustom => AlarmHandlerId::CustomV1,
-            FirstReleaseProfileId::IpcSmart => AlarmHandlerId::SmartV1,
-            FirstReleaseProfileId::IpcStructured => AlarmHandlerId::StructuredV1,
-            FirstReleaseProfileId::IpcFaceAccess => AlarmHandlerId::FaceAccessV1,
-            FirstReleaseProfileId::NvrCommon => AlarmHandlerId::NvrCommonV1,
-            FirstReleaseProfileId::NvrVehicle => AlarmHandlerId::NvrVehicleV1,
-        };
+    fn raw_definition() -> AlarmHandlerDefinition {
         AlarmHandlerDefinition {
-            handler_id,
+            handler_id: AlarmHandlerId::StructuredV1,
             alarm_type_id: AlarmTypeId::new("fixture-motion").unwrap(),
-            profile_id,
+            profile_id: FirstReleaseProfileId::IpcStructured,
             template: CompiledTemplate::compile(
                 br#"{"device":"{{device_id}}","time":"{{timestamp}}"}"#,
             )
@@ -2349,45 +1913,19 @@ mod tests {
     #[test]
     fn registry_uses_compiled_handler_ids_and_exact_profile_binding() {
         let mut registry = AlarmHandlerRegistry::default();
-        registry
-            .register(raw_definition(FirstReleaseProfileId::IpcSmart))
-            .unwrap();
+        registry.register(raw_definition()).unwrap();
         assert!(registry
             .resolve(
-                FirstReleaseProfileId::IpcSmart,
-                "alarm.smart.v1",
+                FirstReleaseProfileId::IpcStructured,
+                "alarm.structured.v1",
                 "fixture-motion"
             )
             .is_ok());
-        assert_eq!(
-            registry
-                .resolve(
-                    FirstReleaseProfileId::IpcCustom,
-                    "alarm.smart.v1",
-                    "fixture-motion"
-                )
-                .unwrap_err()
-                .code,
-            "device_simulator.alarm.handler_profile_mismatch"
-        );
         assert_eq!(
             AlarmHandlerId::from_str("alarm.downloaded.script")
                 .unwrap_err()
                 .code,
             "device_simulator.alarm.handler_unknown"
-        );
-    }
-
-    #[test]
-    fn ordinary_nvr_cannot_register_an_image_alarm() {
-        let mut definition = raw_definition(FirstReleaseProfileId::NvrCommon);
-        definition.image_policy = ImagePolicy::Optional;
-        assert_eq!(
-            AlarmHandlerRegistry::default()
-                .register(definition)
-                .unwrap_err()
-                .code,
-            "device_simulator.alarm.nvr_common_image_forbidden"
         );
     }
 
@@ -2400,13 +1938,15 @@ mod tests {
         let root = TempDir::new().unwrap();
         let bytes = b"synthetic-image-bytes".to_vec();
         let hash = format!("{:x}", Sha256::digest(&bytes));
-        let image_path = root.path().join("packs/ipc-smart/1.0.0/images/alarm.jpg");
+        let image_path = root
+            .path()
+            .join("packs/ipc-structured/1.0.0/images/alarm.jpg");
         fs::create_dir_all(image_path.parent().unwrap()).unwrap();
         fs::write(&image_path, &bytes).unwrap();
         fs::create_dir_all(root.path().join("user-assets")).unwrap();
         let manifest = PackManifest {
             schema_version: 1,
-            id: "ipc-smart".into(),
+            id: "ipc-structured".into(),
             version: Version::new(1, 0, 0),
             engine_api: 1,
             usage: non_commercial_usage(),
@@ -2417,7 +1957,7 @@ mod tests {
             }],
         };
         let identity = PackIdentity {
-            id: "ipc-smart".into(),
+            id: "ipc-structured".into(),
             version: "1.0.0".into(),
         };
         let reference = ImageAssetRef::Pack {
@@ -2446,7 +1986,11 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.total_bytes(), bytes.len() as u64);
         let first = cache.get(&reference).unwrap().bytes.clone();
-        fs::remove_file(root.path().join("packs/ipc-smart/1.0.0/images/alarm.jpg")).unwrap();
+        fs::remove_file(
+            root.path()
+                .join("packs/ipc-structured/1.0.0/images/alarm.jpg"),
+        )
+        .unwrap();
         let second = cache.get(&reference).unwrap().bytes.clone();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(&*second, bytes);
@@ -2503,7 +2047,7 @@ mod tests {
     fn image_cache_rejects_undeclared_paths_and_size_limits() {
         let (root, manifests, _, _) = pack_fixture();
         let undeclared = ImageAssetRef::Pack {
-            pack_id: "ipc-smart".into(),
+            pack_id: "ipc-structured".into(),
             version: "1.0.0".into(),
             path: "images/other.jpg".into(),
         };
@@ -2540,7 +2084,7 @@ mod tests {
 
     #[test]
     fn raw_http_request_uses_injected_fields_source_ip_and_unverified_success() {
-        let definition = raw_definition(FirstReleaseProfileId::IpcSmart);
+        let definition = raw_definition();
         let context = AlarmBuildContext {
             source_ip: Some(Ipv4Addr::new(10, 0, 0, 8)),
             fields: BTreeMap::from([
@@ -2571,7 +2115,7 @@ mod tests {
             &manifests,
         )
         .unwrap();
-        let mut definition = raw_definition(FirstReleaseProfileId::IpcSmart);
+        let mut definition = raw_definition();
         definition.image_policy = ImagePolicy::Required;
         definition.images.push(ImageAttachmentDefinition {
             reference,
@@ -2604,13 +2148,13 @@ mod tests {
         assert!(body.ends_with(b"--fixture-boundary--\r\n"));
         assert_eq!(
             request.headers["Content-Type"],
-            "multipart/form-data, boundary=fixture-boundary"
+            "multipart/form-data; boundary=fixture-boundary"
         );
     }
 
     #[test]
     fn missing_dynamic_field_and_invalid_boundary_are_rejected() {
-        let mut definition = raw_definition(FirstReleaseProfileId::IpcSmart);
+        let mut definition = raw_definition();
         let mut context = AlarmBuildContext {
             source_ip: Some(Ipv4Addr::LOCALHOST),
             fields: BTreeMap::new(),
@@ -2640,7 +2184,7 @@ mod tests {
 
     #[test]
     fn recovery_template_is_explicit_and_optional() {
-        let mut definition = raw_definition(FirstReleaseProfileId::IpcSmart);
+        let mut definition = raw_definition();
         let context = AlarmBuildContext {
             source_ip: Some(Ipv4Addr::LOCALHOST),
             fields: BTreeMap::from([
@@ -2671,7 +2215,7 @@ mod tests {
     #[test]
     fn first_release_scaffolds_are_explicitly_unverified_for_ums() {
         let registry = synthetic_unverified_first_release_registry().unwrap();
-        assert_eq!(registry.len(), 6);
+        assert_eq!(registry.len(), 1);
         for definition in registry.definitions() {
             assert_eq!(
                 definition.evidence.fixture_provenance,
@@ -2682,14 +2226,14 @@ mod tests {
                 .is_platform_verified(TargetPlatform::Ums));
             assert_eq!(definition.transport.success_rule.evaluate(200), None);
         }
-        let ordinary = registry
+        let structured = registry
             .resolve(
-                FirstReleaseProfileId::NvrCommon,
-                "alarm.nvr_common.v1",
+                FirstReleaseProfileId::IpcStructured,
+                "alarm.structured.v1",
                 "synthetic-fixture",
             )
             .unwrap();
-        assert_eq!(ordinary.image_policy, ImagePolicy::Forbidden);
-        assert!(ordinary.images.is_empty());
+        assert_eq!(structured.image_policy, ImagePolicy::Optional);
+        assert!(structured.images.is_empty());
     }
 }

@@ -10,6 +10,7 @@ import { ensureUpdaterInitialized } from '@/composables/useUpdater';
 import { configStore } from '@/lib/configStore';
 import {
   DEVICE_SIMULATOR_EVENTS,
+  describeSimulatorError,
   deviceSimulatorApi,
   isDeviceSimulatorRuntimeActive,
   type SimulatorStatus,
@@ -44,6 +45,7 @@ import {
 // The application chrome belongs to the main window. Loading it lazily keeps it
 // out of the entry chunk that borderless helper windows have to parse.
 const Sidebar = defineAsyncComponent(() => import('@/components/Sidebar.vue'));
+const AppTitleBar = defineAsyncComponent(() => import('@/components/AppTitleBar.vue'));
 const ToastContainer = defineAsyncComponent(() => import('@/components/ToastContainer.vue'));
 const UpdateDialog = defineAsyncComponent(() => import('@/components/UpdateDialog.vue'));
 const ScreenShareControlRequestDialog = defineAsyncComponent(
@@ -63,6 +65,7 @@ let unlistenScreenShareControlRequest: (() => void) | null = null;
 let unlistenFileShareStatus: (() => void) | null = null;
 let unlistenDeviceSimulatorStatus: (() => void) | null = null;
 let unlistenOpenClipboardSettings: (() => void) | null = null;
+let unlistenMainWindowResize: (() => void) | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let notificationPermissionPromise: Promise<boolean> | null = null;
 let initialSyncTaskNotificationsEnabled = true;
@@ -74,8 +77,12 @@ const pendingScreenShareControlRequest = ref<ScreenShareControlRequest | null>(n
 const respondingToScreenShareControlRequest = ref(false);
 const screenShareControlRequestError = ref('');
 const quitConfirmOpen = ref(false);
+const isMaximized = ref(false);
 const quitConfirmTaskNames = ref<string[]>([]);
-let resolveQuitConfirm: ((confirmed: boolean) => void) | null = null;
+const quitConfirmSimulatorCleanup = ref(false);
+const quitConfirmBusy = ref(false);
+const quitConfirmError = ref('');
+let quitFlowActive = false;
 
 interface ScanQueuedEvent {
   folder: string;
@@ -129,22 +136,61 @@ function activeCopyTaskNames(groups: Awaited<ReturnType<typeof listTaskGroups>>)
     .map((group) => group.display_name || group.folder_name);
 }
 
-/// Ask inside the app instead of through `window.confirm`, which the webview renders
-/// as an OS strip pinned to the top of the window with no context around it.
-function askQuitConfirmation(taskNames: string[]): Promise<boolean> {
-  resolveQuitConfirm?.(false);
-  quitConfirmTaskNames.value = taskNames;
-  quitConfirmOpen.value = true;
-  return new Promise<boolean>((resolve) => {
-    resolveQuitConfirm = resolve;
-  });
+async function revealMainWindowForPrompt() {
+  try {
+    const mainWindow = getCurrentWindow();
+    await mainWindow.show();
+    await mainWindow.unminimize();
+    await mainWindow.setFocus();
+  } catch {
+    // The Rust tray handler also restores and foregrounds the main window.
+  }
 }
 
-function settleQuitConfirmation(confirmed: boolean) {
+async function cancelQuitConfirmation() {
+  if (quitConfirmBusy.value) return;
   quitConfirmOpen.value = false;
-  const resolve = resolveQuitConfirm;
-  resolveQuitConfirm = null;
-  resolve?.(confirmed);
+  quitConfirmTaskNames.value = [];
+  quitConfirmSimulatorCleanup.value = false;
+  quitConfirmError.value = '';
+  quitFlowActive = false;
+  try {
+    await cancelQuit();
+  } catch (error) {
+    addLog(`Cancel quit failed: ${error}`, 'error');
+  }
+}
+
+async function persistAndConfirmQuit() {
+  if (quitConfirmBusy.value) return;
+  quitConfirmBusy.value = true;
+  quitConfirmError.value = '';
+
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  try {
+    await saveUiState([...appStore.logs]);
+  } catch {
+    // UI state persistence must not strand the process during exit.
+  }
+
+  try {
+    await confirmQuit();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    addLog(`Simulator cleanup blocked exit: ${message}`, 'error');
+    quitConfirmSimulatorCleanup.value = true;
+    quitConfirmError.value = message;
+    quitConfirmOpen.value = true;
+    await revealMainWindowForPrompt();
+  } finally {
+    // On success the process exits. On failure the same dialog stays open and
+    // becomes the retry/cleanup entry instead of delegating to window.alert.
+    quitConfirmBusy.value = false;
+    quitFlowActive = false;
+  }
 }
 
 function applyScreenShareStatus(status: ScreenShareStatus) {
@@ -181,21 +227,38 @@ async function respondToScreenShareControlRequest(allow: boolean) {
 
 watch(() => appStore.logs.length, scheduleSave);
 
+// One failing tool must not blank out the runtime flags of the others, so each
+// query is settled on its own.
 async function hydrateToolRuntime() {
-  try {
-    const [screenShareStatus, fileShareStatus, deviceSimulatorStatus] = await Promise.all([
-      screenShareGetStatus(),
-      fileShareGetStatus(),
-      deviceSimulatorApi.getStatus(),
-    ]);
-    setToolRuntime('screenShare', screenShareStatus.is_active);
-    setToolRuntime('fileShare', fileShareStatus.is_active);
+  const [screenShareResult, fileShareResult, deviceSimulatorResult] = await Promise.allSettled([
+    screenShareGetStatus(),
+    fileShareGetStatus(),
+    deviceSimulatorApi.getStatus(),
+  ]);
+  if (screenShareResult.status === 'fulfilled') {
+    setToolRuntime('screenShare', screenShareResult.value.is_active);
+  }
+  if (fileShareResult.status === 'fulfilled') {
+    setToolRuntime('fileShare', fileShareResult.value.is_active);
+  }
+  if (deviceSimulatorResult.status === 'fulfilled') {
     setToolRuntime(
       'deviceSimulator',
-      isDeviceSimulatorRuntimeActive(deviceSimulatorStatus.state),
+      isDeviceSimulatorRuntimeActive(deviceSimulatorResult.value.state),
     );
-  } catch (error) {
-    addLog(`Tool runtime status load failed: ${error}`, 'error');
+  }
+  const failures: string[] = [];
+  if (screenShareResult.status === 'rejected') {
+    failures.push(`screenShare: ${describeSimulatorError(screenShareResult.reason)}`);
+  }
+  if (fileShareResult.status === 'rejected') {
+    failures.push(`fileShare: ${describeSimulatorError(fileShareResult.reason)}`);
+  }
+  if (deviceSimulatorResult.status === 'rejected') {
+    failures.push(`deviceSimulator: ${describeSimulatorError(deviceSimulatorResult.reason)}`);
+  }
+  if (failures.length > 0) {
+    addLog(`Tool runtime status load failed: ${failures.join('; ')}`, 'error');
   }
 }
 
@@ -205,6 +268,15 @@ onMounted(async () => {
   // listeners, scheduler auto-start, or before-quit handling.
   const label = getCurrentWindow().label;
   if (label !== 'main') return;
+
+  const mainWindow = getCurrentWindow();
+  const syncMaximizedState = async () => {
+    isMaximized.value = await mainWindow.isMaximized();
+  };
+  await syncMaximizedState();
+  unlistenMainWindowResize = await mainWindow.onResized(() => {
+    void syncMaximizedState();
+  });
 
   // Register these listeners before slower app hydration so a control request
   // can never depend on the screen-share page being mounted.
@@ -320,61 +392,56 @@ onMounted(async () => {
   });
 
   unlistenBeforeQuit = await listen('before-quit', async () => {
+    if (quitFlowActive || quitConfirmOpen.value || quitConfirmBusy.value) {
+      await revealMainWindowForPrompt();
+      return;
+    }
+    quitFlowActive = true;
+
     let runningCopyTasks = activeCopyTaskNames(taskStateStore.groups);
-    try {
+    let simulatorCleanupRequired = false;
+    const [taskGroupsResult, simulatorStatusResult] = await Promise.allSettled([
+      listTaskGroups(),
+      deviceSimulatorApi.getStatus(),
+    ]);
+
+    if (taskGroupsResult.status === 'fulfilled') {
       // Refresh from Rust so a close request cannot race a task snapshot event.
-      runningCopyTasks = activeCopyTaskNames(await listTaskGroups());
-    } catch {
-      // Keep the last event-backed state if the refresh fails during shutdown.
+      runningCopyTasks = activeCopyTaskNames(taskGroupsResult.value);
+    }
+    if (simulatorStatusResult.status === 'fulfilled') {
+      simulatorCleanupRequired = isDeviceSimulatorRuntimeActive(simulatorStatusResult.value.state);
+    } else {
+      // An unreadable residual journal is itself a cleanup blocker. Surface an
+      // actionable in-app confirmation; confirm_quit will retry the real cleanup.
+      simulatorCleanupRequired = true;
+      addLog(
+        `Simulator exit status check failed: ${describeSimulatorError(simulatorStatusResult.reason)}`,
+        'error',
+      );
     }
 
-    if (runningCopyTasks.length > 0) {
-      // A tray exit can arrive while the main window is hidden. Restore it so
-      // the confirmation is visible and can be answered.
-      try {
-        const mainWindow = getCurrentWindow();
-        await mainWindow.show();
-        await mainWindow.setFocus();
-      } catch {
-        // The confirmation still falls back to the current window state.
-      }
+    if (runningCopyTasks.length > 0 || simulatorCleanupRequired) {
+      await revealMainWindowForPrompt();
 
       // Surface the task list behind the dialog so the runs being abandoned are
       // visible while the decision is made.
-      if (router.currentRoute.value.path !== '/sync') {
+      if (runningCopyTasks.length > 0 && router.currentRoute.value.path !== '/sync') {
         try {
           await router.push('/sync');
         } catch {
           // Navigation is context, not a precondition for the confirmation.
         }
       }
-
-      if (!await askQuitConfirmation(runningCopyTasks)) {
-        try {
-          await cancelQuit();
-        } catch (error) {
-          addLog(`Cancel quit failed: ${error}`, 'error');
-        }
-        return;
-      }
+      quitConfirmTaskNames.value = runningCopyTasks;
+      quitConfirmSimulatorCleanup.value = simulatorCleanupRequired;
+      quitConfirmError.value = '';
+      quitConfirmOpen.value = true;
+      quitFlowActive = false;
+      return;
     }
 
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      saveTimer = null;
-    }
-    try {
-      await saveUiState([...appStore.logs]);
-    } catch {
-      // silent
-    }
-    try {
-      await confirmQuit();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      addLog(`Simulator cleanup blocked exit: ${message}`, 'error');
-      window.alert(t('deviceSimulator.exit.blocked', { error: message }));
-    }
+    await persistAndConfirmQuit();
   });
 
   await hydrateToolRuntime();
@@ -434,25 +501,32 @@ onUnmounted(() => {
   if (unlistenFileShareStatus) unlistenFileShareStatus();
   if (unlistenDeviceSimulatorStatus) unlistenDeviceSimulatorStatus();
   if (unlistenOpenClipboardSettings) unlistenOpenClipboardSettings();
+  if (unlistenMainWindowResize) unlistenMainWindowResize();
 });
 </script>
 
 <template>
   <router-view v-if="$route.meta?.noLayout" />
-  <div v-else class="flex h-screen bg-slate-50 font-sans text-slate-900">
+  <div
+    v-else
+    class="app-window-shell relative flex h-screen flex-col overflow-hidden bg-slate-50 font-sans text-slate-900"
+    :class="{ 'app-window-shell--maximized': isMaximized }"
+  >
     <a
       href="#main-content"
       class="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:bg-white focus:px-3 focus:py-1 focus:rounded-md focus:shadow-lg focus:text-slate-900 focus:outline focus:outline-2 focus:outline-sky-500"
     >
       {{ $t('common.skipToMain') }}
     </a>
-    <Sidebar />
-    <main
-      id="main-content"
-      role="main"
-      class="flex flex-1 flex-col overflow-hidden"
-    >
-      <router-view v-slot="{ Component }">
+    <AppTitleBar />
+    <div class="flex min-h-0 flex-1">
+      <Sidebar />
+      <main
+        id="main-content"
+        role="main"
+        class="flex flex-1 flex-col overflow-hidden"
+      >
+        <router-view v-slot="{ Component }">
         <!--
           Keep-alive list intentionally narrow:
           - SyncConsolePage: owns the nested sync tabs and keeps their forms,
@@ -468,8 +542,9 @@ onUnmounted(() => {
         <keep-alive include="SyncConsolePage,CodeStatisticsPage,NetworkToolsPage,RemotePackagePatchPage,SettingsPage">
           <component :is="Component" />
         </keep-alive>
-      </router-view>
-    </main>
+        </router-view>
+      </main>
+    </div>
     <UpdateDialog />
     <ToastContainer />
   </div>
@@ -485,7 +560,10 @@ onUnmounted(() => {
     v-if="quitConfirmOpen"
     :open="quitConfirmOpen"
     :task-names="quitConfirmTaskNames"
-    @confirm="settleQuitConfirmation(true)"
-    @cancel="settleQuitConfirmation(false)"
+    :simulator-cleanup-required="quitConfirmSimulatorCleanup"
+    :busy="quitConfirmBusy"
+    :error="quitConfirmError"
+    @confirm="persistAndConfirmQuit"
+    @cancel="cancelQuitConfirmation"
   />
 </template>

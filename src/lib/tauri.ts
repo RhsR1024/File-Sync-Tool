@@ -1678,14 +1678,6 @@ export async function screenShareRevokeControl(): Promise<void> {
   await invoke('screen_share_revoke_control');
 }
 
-export async function screenShareOpenLocalPreview(): Promise<void> {
-  await invoke('screen_share_open_local_preview');
-}
-
-export async function screenShareCloseLocalPreview(): Promise<void> {
-  await invoke('screen_share_close_local_preview');
-}
-
 export async function screenShareOpenDesktopOverlay(): Promise<void> {
   await invoke('screen_share_open_desktop_overlay');
 }
@@ -1696,6 +1688,14 @@ export async function screenShareDesktopOverlayReady(): Promise<void> {
 
 export async function screenShareCloseDesktopOverlay(): Promise<void> {
   await invoke('screen_share_close_desktop_overlay');
+}
+
+export async function screenShareAnnotationBarReady(): Promise<void> {
+  await invoke('screen_share_annotation_bar_ready');
+}
+
+export async function screenShareSetAnnotationBarVisible(visible: boolean): Promise<void> {
+  await invoke('screen_share_set_annotation_bar_visible', { visible });
 }
 
 // ─── File Share ───────────────────────────────────────────

@@ -657,8 +657,10 @@ fn select_decoder_nv12_output(
             .unwrap_or(width as usize);
         let info = unsafe { transform.GetOutputStreamInfo(0) }
             .map_err(|error| format!("H.264 decoder output stream info failed: {error}"))?;
+        // The decoder writes an alignment-padded luma plane, so the fallback
+        // size has to cover that padding when the MFT reports no size at all.
         let fallback = stride
-            .saturating_mul(height as usize)
+            .saturating_mul((height as usize).div_ceil(64) * 64)
             .saturating_mul(3)
             .saturating_div(2)
             .min(u32::MAX as usize) as u32;
@@ -1388,17 +1390,46 @@ fn copy_media_buffer(
     Ok(bytes)
 }
 
+/// The decoder allocates its NV12 output on a macroblock-aligned luma height,
+/// so a 1920x1080 stream comes back as a 1920x1088 luma plane and a 640x360
+/// stream as a 640x368 one. The chroma plane therefore starts at
+/// `stride * plane_height`, not at `stride * height`: reading it at the display
+/// height takes the zeroed padding rows as the first chroma rows, which paints
+/// a green band across the top of every frame and shifts the colors of the rest
+/// of the picture up by the same amount. The real plane height is derived from
+/// the buffer the MFT produced so any alignment it picks stays correct.
+fn decoded_luma_plane_height(length: usize, stride: usize, height: usize) -> Result<usize, String> {
+    let derived = length
+        .checked_mul(2)
+        .and_then(|value| stride.checked_mul(3).map(|divisor| value / divisor.max(1)))
+        .ok_or_else(|| "decoded NV12 size overflow".to_string())?;
+    if derived < height {
+        return Err(format!(
+            "decoded NV12 buffer is shorter than one frame ({length} bytes, stride {stride}, {height} rows)"
+        ));
+    }
+    // Padding never exceeds one 64-row alignment, so clamping keeps a buffer
+    // that carries trailing bytes from pushing the chroma plane out of place.
+    Ok(derived.min(height.div_ceil(64) * 64))
+}
+
 fn normalize_nv12(
     bytes: &[u8],
     width: usize,
     height: usize,
     stride: usize,
 ) -> Result<Vec<u8>, String> {
+    if stride < width || width == 0 || height == 0 {
+        return Err(format!(
+            "decoded NV12 geometry is invalid (stride {stride}, {width}x{height})"
+        ));
+    }
+    let plane_height = decoded_luma_plane_height(bytes.len(), stride, height)?;
     let source_required = stride
-        .checked_mul(height)
+        .checked_mul(plane_height)
         .and_then(|luma| luma.checked_add(stride.checked_mul(height / 2)?))
         .ok_or_else(|| "decoded NV12 size overflow".to_string())?;
-    if stride < width || bytes.len() < source_required {
+    if bytes.len() < source_required {
         return Err(format!(
             "decoded NV12 buffer is invalid ({} bytes, stride {stride}, {width}x{height})",
             bytes.len()
@@ -1410,7 +1441,7 @@ fn normalize_nv12(
         let target = row * width;
         output[target..target + width].copy_from_slice(&bytes[source..source + width]);
     }
-    let source_chroma = stride * height;
+    let source_chroma = stride * plane_height;
     let target_chroma = width * height;
     for row in 0..height / 2 {
         let source = source_chroma + row * stride;
@@ -1451,6 +1482,44 @@ mod tests {
         assert_eq!(&output[12..16], &[4; 4]);
         assert_eq!(&output[16..20], &[9; 4]);
         assert_eq!(&output[20..24], &[10; 4]);
+    }
+
+    /// 解码器按宏块对齐分配亮度平面（1080 行的画面实际是 1088 行），色度平面因此
+    /// 从 `stride * 对齐高度` 开始。按显示高度取色度会把补齐行当成前几行色度，
+    /// 画面顶部就出现一条绿色长条。
+    #[test]
+    fn reads_chroma_after_the_aligned_luma_plane() {
+        let (width, height, stride, plane_height) = (4usize, 4usize, 8usize, 8usize);
+        let mut source = vec![0u8; stride * plane_height * 3 / 2];
+        for row in 0..height {
+            source[row * stride..row * stride + width].fill((row + 1) as u8);
+        }
+        let chroma = stride * plane_height;
+        source[chroma..chroma + width].fill(9);
+        source[chroma + stride..chroma + stride + width].fill(10);
+
+        let output = normalize_nv12(&source, width, height, stride).unwrap();
+        assert_eq!(&output[0..4], &[1; 4]);
+        assert_eq!(&output[12..16], &[4; 4]);
+        assert_eq!(&output[16..20], &[9; 4]);
+        assert_eq!(&output[20..24], &[10; 4]);
+    }
+
+    #[test]
+    fn derives_the_aligned_luma_plane_height() {
+        assert_eq!(
+            decoded_luma_plane_height(1920 * 1088 * 3 / 2, 1920, 1080).unwrap(),
+            1088
+        );
+        assert_eq!(
+            decoded_luma_plane_height(640 * 368 * 3 / 2, 640, 360).unwrap(),
+            368
+        );
+        assert_eq!(
+            decoded_luma_plane_height(1280 * 720 * 3 / 2, 1280, 720).unwrap(),
+            720
+        );
+        assert!(decoded_luma_plane_height(1920 * 1000, 1920, 1080).is_err());
     }
 
     /// 在真实编码器上跑完一段帧序列。硬件 MFT（Intel Quick Sync 等）常在首帧输入
@@ -1501,6 +1570,56 @@ mod tests {
                 .sum::<usize>();
             assert!(after > 0, "{width}x{height}: no output after renegotiation");
             eprintln!("{width}x{height}: {before} frames before, {after} frames after");
+        }
+    }
+
+    /// 端到端确认色度平面偏移：编码一段带明确色度的画面，解码回来后首行的 U/V
+    /// 必须还是原值。偏移错了这里会读到亮度补齐行（U=V=0，画面顶部发绿）。
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires a Windows Media Foundation H.264 encoder and decoder"]
+    fn transcode_round_trip_keeps_the_chroma_plane_aligned() {
+        let _runtime = MediaFoundationRuntime::startup().unwrap();
+        for (width, height) in [(1920u32, 1080u32), (640, 360)] {
+            let luma_len = (width * height) as usize;
+            let mut encoder = MfH264Encoder::new(width, height, 25, 1, 4_000_000).unwrap();
+            let mut nv12 = vec![0u8; luma_len * 3 / 2];
+            // 暗亮度配上远离 128 的 U/V：色度平面一旦读到亮度补齐行，取样值会从
+            // 200 掉到 16 附近。
+            nv12[..luma_len].fill(16);
+            nv12[luma_len..].fill(200);
+
+            let mut stream = Vec::new();
+            for index in 0..30i64 {
+                for output in encoder
+                    .encode(&nv12, index * encoder.frame_duration_100ns)
+                    .unwrap()
+                {
+                    stream.push(output.bytes);
+                }
+            }
+            assert!(
+                !stream.is_empty(),
+                "{width}x{height}: encoder produced nothing"
+            );
+
+            let mut decoder = MfH264Decoder::new(width, height, 25, 1).unwrap();
+            let mut decoded = Vec::new();
+            for (index, access_unit) in stream.iter().enumerate() {
+                decoded.extend(
+                    decoder
+                        .decode(access_unit, index as i64 * encoder.frame_duration_100ns)
+                        .unwrap(),
+                );
+            }
+            let frame = decoded.last().expect("decoder produced no frame");
+            // 首行色度正是错位时被亮度补齐行顶掉的那几行。
+            let sample = &frame.nv12[luma_len..luma_len + width as usize];
+            assert!(
+                sample.iter().all(|value| value.abs_diff(200) <= 24),
+                "{width}x{height}: chroma plane is misaligned, got {:?}",
+                &sample[..8]
+            );
         }
     }
 }

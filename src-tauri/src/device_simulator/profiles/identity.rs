@@ -1,5 +1,4 @@
-use super::scope::{validate_nvr_channel_count, FirstReleaseProfileId};
-use crate::device_simulator::assets::catalog::DeviceKind;
+use super::scope::FirstReleaseProfileId;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,7 +16,6 @@ pub struct IdentityPlan {
     pub device_count: u16,
     pub deterministic_seed: [u8; 32],
     pub http_port: u16,
-    pub nvr_channel_count: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +27,6 @@ pub struct DeviceIdentityPreview {
     pub hardware_id: String,
     pub http_url: String,
     pub streams: Vec<StreamPreview>,
-    pub nvr_channel_count: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,8 +122,7 @@ pub fn generate_device_previews(
             serial_number,
             hardware_id,
             http_url: format!("http://{ip}:{}", plan.http_port),
-            streams: stream_previews(plan.profile_id.device_kind(), ip),
-            nvr_channel_count: plan.nvr_channel_count,
+            streams: stream_previews(ip),
         });
     }
     Ok(result)
@@ -160,26 +156,6 @@ fn validate_plan(plan: &IdentityPlan) -> Result<(), IdentityPlanError> {
             ),
         ));
     }
-    match (plan.profile_id.device_kind(), plan.nvr_channel_count) {
-        (DeviceKind::Nvr, Some(channels)) => {
-            validate_nvr_channel_count(channels).map_err(|code| {
-                IdentityPlanError::new(code, format!("invalid NVR channel count {channels}"))
-            })?
-        }
-        (DeviceKind::Nvr, None) => {
-            return Err(IdentityPlanError::new(
-                "device_simulator.validation.nvr_channel_count_missing",
-                "NVR profile requires a channel count",
-            ));
-        }
-        (DeviceKind::Ipc, Some(_)) => {
-            return Err(IdentityPlanError::new(
-                "device_simulator.validation.ipc_channel_count_invalid",
-                "IPC profile must not declare an NVR channel count",
-            ));
-        }
-        (DeviceKind::Ipc, None) => {}
-    }
     Ok(())
 }
 
@@ -192,21 +168,17 @@ fn identity_digest(plan: &IdentityPlan, ip: Ipv4Addr, ordinal: u16) -> [u8; 32] 
     hasher.finalize().into()
 }
 
-fn stream_previews(kind: DeviceKind, ip: Ipv4Addr) -> Vec<StreamPreview> {
+fn stream_previews(ip: Ipv4Addr) -> Vec<StreamPreview> {
     [
         (StreamName::Main, 554, 1_u8),
         (StreamName::Sub, 555, 2),
         (StreamName::Third, 556, 3),
     ]
     .into_iter()
-    .map(|(name, port, number)| {
-        let url = match kind {
-            DeviceKind::Ipc => format!("rtsp://{ip}:{port}/media/video{number}"),
-            DeviceKind::Nvr => {
-                format!("rtsp://{ip}:{port}/unicast/c1/s{}/live", number - 1)
-            }
-        };
-        StreamPreview { name, port, url }
+    .map(|(name, port, number)| StreamPreview {
+        name,
+        port,
+        url: format!("rtsp://{ip}:{port}/media/video{number}"),
     })
     .collect()
 }
@@ -222,31 +194,20 @@ fn capacity_error(message: impl Into<String>) -> IdentityPlanError {
 mod tests {
     use super::*;
 
-    fn plan(
-        profile_id: FirstReleaseProfileId,
-        network: &str,
-        start: &str,
-        count: u16,
-    ) -> IdentityPlan {
+    fn plan(network: &str, start: &str, count: u16) -> IdentityPlan {
         IdentityPlan {
-            profile_id,
+            profile_id: FirstReleaseProfileId::IpcStructured,
             network: network.parse().unwrap(),
             start_ip: start.parse().unwrap(),
             device_count: count,
             deterministic_seed: [3_u8; 32],
             http_port: DEFAULT_HTTP_PORT,
-            nvr_channel_count: (profile_id.device_kind() == DeviceKind::Nvr).then_some(8),
         }
     }
 
     #[test]
     fn supports_non_24_networks_and_crosses_octet_boundaries() {
-        let plan = plan(
-            FirstReleaseProfileId::IpcSmart,
-            "10.20.0.0/23",
-            "10.20.0.254",
-            3,
-        );
+        let plan = plan("10.20.0.0/23", "10.20.0.254", 3);
         let previews = generate_device_previews(&plan, &HashSet::new()).unwrap();
         assert_eq!(
             previews.iter().map(|item| item.ip).collect::<Vec<_>>(),
@@ -258,86 +219,56 @@ mod tests {
     }
 
     #[test]
-    fn generation_is_deterministic_and_profile_specific() {
-        let smart = plan(
-            FirstReleaseProfileId::IpcSmart,
-            "10.0.0.0/24",
-            "10.0.0.2",
-            2,
-        );
-        let custom = plan(
-            FirstReleaseProfileId::IpcCustom,
-            "10.0.0.0/24",
-            "10.0.0.2",
-            2,
-        );
-        let first = generate_device_previews(&smart, &HashSet::new()).unwrap();
+    fn generation_is_deterministic_and_seed_specific() {
+        let base = plan("10.0.0.0/24", "10.0.0.2", 2);
+        let first = generate_device_previews(&base, &HashSet::new()).unwrap();
         assert_eq!(
             first,
-            generate_device_previews(&smart, &HashSet::new()).unwrap()
+            generate_device_previews(&base, &HashSet::new()).unwrap()
         );
+        let mut reseeded = base.clone();
+        reseeded.deterministic_seed = [7_u8; 32];
         assert_ne!(
             first[0].serial_number,
-            generate_device_previews(&custom, &HashSet::new()).unwrap()[0].serial_number
+            generate_device_previews(&reseeded, &HashSet::new()).unwrap()[0].serial_number
         );
     }
 
     #[test]
-    fn rejects_capacity_conflicts_and_kind_mismatches() {
-        let small = plan(
-            FirstReleaseProfileId::IpcSmart,
-            "192.0.2.0/29",
-            "192.0.2.5",
-            3,
-        );
+    fn rejects_capacity_conflicts_and_address_collisions() {
+        let small = plan("192.0.2.0/29", "192.0.2.5", 3);
         assert_eq!(
             generate_device_previews(&small, &HashSet::new())
                 .unwrap_err()
                 .code,
             "device_simulator.validation.network_capacity_insufficient"
         );
-        let valid = plan(
-            FirstReleaseProfileId::IpcSmart,
-            "192.0.2.0/29",
-            "192.0.2.2",
-            2,
-        );
+        let valid = plan("192.0.2.0/29", "192.0.2.2", 2);
         assert_eq!(
             generate_device_previews(&valid, &HashSet::from(["192.0.2.3".parse().unwrap()]))
                 .unwrap_err()
                 .code,
             "device_simulator.validation.ip_conflict"
         );
-        let mut nvr = plan(
-            FirstReleaseProfileId::NvrCommon,
-            "192.0.2.0/24",
-            "192.0.2.2",
-            1,
-        );
-        nvr.nvr_channel_count = None;
-        assert_eq!(
-            generate_device_previews(&nvr, &HashSet::new())
-                .unwrap_err()
-                .code,
-            "device_simulator.validation.nvr_channel_count_missing"
-        );
     }
 
     #[test]
-    fn nvr_preview_uses_approved_channel_and_stream_summary() {
-        let plan = plan(
-            FirstReleaseProfileId::NvrVehicle,
-            "198.51.100.0/24",
-            "198.51.100.10",
-            1,
-        );
+    fn preview_uses_ipc_stream_urls() {
+        let plan = plan("198.51.100.0/24", "198.51.100.10", 1);
         let preview = generate_device_previews(&plan, &HashSet::new())
             .unwrap()
             .remove(0);
-        assert_eq!(preview.nvr_channel_count, Some(8));
         assert_eq!(
-            preview.streams[0].url,
-            "rtsp://198.51.100.10:554/unicast/c1/s0/live"
+            preview
+                .streams
+                .iter()
+                .map(|stream| stream.url.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "rtsp://198.51.100.10:554/media/video1",
+                "rtsp://198.51.100.10:555/media/video2",
+                "rtsp://198.51.100.10:556/media/video3",
+            ]
         );
     }
 }

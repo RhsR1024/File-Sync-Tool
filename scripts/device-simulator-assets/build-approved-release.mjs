@@ -28,30 +28,6 @@ const APP_VERSION = "1.2.0";
 const DEFAULT_KEY_ID = "device-assets-static-review-2026";
 
 const PROFILE_DEFINITIONS = Object.freeze({
-  "ipc-custom": {
-    deviceKind: "ipc",
-    legacyDeviceType: "自定义报警相机",
-    discovery: "ws_discovery.ipc.v1",
-    http: "http.custom_ipc.v1",
-    alarm: "alarm.custom.v1",
-    sourceCopies: [
-      ["xml/Custom", "xml/Custom"],
-      ["object/CustomStruct", "object/CustomStruct"],
-      ["pic/CUSTOM", "pic/CUSTOM"],
-    ],
-  },
-  "ipc-smart": {
-    deviceKind: "ipc",
-    legacyDeviceType: "智能相机",
-    discovery: "ws_discovery.ipc.v1",
-    http: "http.smart_ipc.v1",
-    alarm: "alarm.smart.v1",
-    sourceCopies: [
-      ["xml/Smart", "xml/Smart"],
-      ["object/SmartStruct", "object/SmartStruct"],
-      ["pic/SMART", "pic/SMART"],
-    ],
-  },
   "ipc-structured": {
     deviceKind: "ipc",
     legacyDeviceType: "结构化相机",
@@ -64,66 +40,18 @@ const PROFILE_DEFINITIONS = Object.freeze({
       ["pic/STRUCT", "pic/STRUCT"],
     ],
   },
-  "ipc-face-access": {
-    deviceKind: "ipc",
-    legacyDeviceType: "人脸门禁相机",
-    discovery: "ws_discovery.face_access.v1",
-    http: "http.face_access_ipc.v1",
-    alarm: "alarm.face_access.v1",
-    alarmScript: "ACSAlarm.py",
-    sourceCopies: [
-      ["object/ACSStruct", "object/ACSStruct"],
-      ["pic/ACS", "pic/ACS"],
-    ],
-  },
-  "nvr-common": {
-    deviceKind: "nvr",
-    legacyDeviceType: "普通NVR",
-    discovery: "ws_discovery.nvr.v1",
-    http: "http.nvr_common.v1",
-    alarm: "alarm.nvr_common.v1",
-    sourceCopies: [
-      ["object/NormalStruct", "object/NormalStruct"],
-    ],
-  },
-  "nvr-vehicle": {
-    deviceKind: "nvr",
-    legacyDeviceType: "车辆识别NVR",
-    discovery: "ws_discovery.nvr.v1",
-    http: "http.nvr_vehicle.v1",
-    alarm: "alarm.nvr_vehicle.v1",
-    sourceCopies: [
-      ["xml/Vehicle", "xml/Vehicle"],
-      ["object/VehicleStruct", "object/VehicleStruct"],
-      ["pic/VEHICLE", "pic/VEHICLE", "images-only"],
-    ],
-  },
 });
 
 const SECTION_BY_PROFILE = Object.freeze({
-  "ipc-custom": "自定义报警相机",
-  "ipc-smart": "智能相机",
   "ipc-structured": "结构化相机",
-  "ipc-face-access": "人脸门禁相机",
-  "nvr-common": "普通NVR",
-  "nvr-vehicle": "车辆识别NVR",
 });
 
 const IMAGE_FOLDER_BY_PROFILE = Object.freeze({
-  "ipc-custom": "CUSTOM",
-  "ipc-smart": "SMART",
   "ipc-structured": "STRUCT",
-  "ipc-face-access": "ACS",
-  "nvr-vehicle": "VEHICLE",
 });
 
 const OBJECT_FOLDER_BY_PROFILE = Object.freeze({
-  "ipc-custom": "CustomStruct",
-  "ipc-smart": "SmartStruct",
   "ipc-structured": "StructStruct",
-  "ipc-face-access": "ACSStruct",
-  "nvr-common": "NormalStruct",
-  "nvr-vehicle": "VehicleStruct",
 });
 
 function fail(message) {
@@ -314,19 +242,12 @@ function profileDocument(profileId, definition, identity) {
     },
     evidence: [
       source("identity", ["data/dev_type.yml", "script/VSITool.py"]),
-      source("discovery", [
-        "script/Vsocket_ip.py",
-        definition.discovery === "ws_discovery.face_access.v1"
-          ? "xml/Common/search-acs.xml"
-          : definition.deviceKind === "ipc"
-            ? "xml/Common/search.xml"
-            : "xml/Common/search-aibox.xml",
-      ]),
+      source("discovery", ["script/Vsocket_ip.py", "xml/Common/search.xml"]),
       source("http", ["script/HTTPServer.py"], ["Static review permits local implementation; platform compatibility remains unverified"]),
       source("rtsp", ["script/IPCRtspLib.py", "mediafile/mainstream.pcap", "mediafile/substream.pcap", "mediafile/thirdstream.pcap"], ["Third-stream capture duplicates substream bytes; /media/video3 is the user-approved static selection"]),
       source("alarm", [
         "data/alarms_info.yml",
-        `script/${definition.alarmScript ?? (profileId === "ipc-custom" ? "CustomAlarm.py" : profileId === "ipc-smart" ? "SmartAlarm.py" : profileId === "nvr-common" ? "NormalAlarm.py" : "VehicleAlarm.py")}`,
+        `script/${definition.alarmScript}`,
       ], ["HTTP response success semantics remain real-platform gated"]),
     ],
   };

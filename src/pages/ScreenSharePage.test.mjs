@@ -61,3 +61,15 @@ test('screen share exposes explicit capture backend modes with explanatory helpe
   assert.match(pageSource, /tools\.screenShare\.backendModeWgcDesc/);
   assert.match(pageSource, /tools\.screenShare\.backendModeDxgiDesc/);
 });
+
+test('screen share no longer offers the host local preview', () => {
+  // 预览窗口显示的就是被捕获的那块屏幕，必然无限嵌套；排除捕获会让 WGC/DXGI
+  // 返回黑帧（见 screen_share_desktop_overlay_ready 的注释），所以该功能已删除。
+  assert.doesNotMatch(pageSource, /screenShareOpenLocalPreview/);
+  assert.doesNotMatch(pageSource, /openLocalPreview/);
+  assert.doesNotMatch(pageSource, /isOpeningPreview/);
+  assert.doesNotMatch(pageSource, /tools\.screenShare\.openLocalPreview/);
+  assert.doesNotMatch(pageSource, /tools\.screenShare\.errPreviewFailed/);
+  const tauriSource = readFileSync(join(__dirname, '..', 'lib', 'tauri.ts'), 'utf8');
+  assert.doesNotMatch(tauriSource, /screen_share_(open|close)_local_preview/);
+});

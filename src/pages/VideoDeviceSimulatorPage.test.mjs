@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 const page = readFileSync(new URL('./VideoDeviceSimulatorPage.vue', import.meta.url), 'utf8');
 const composable = readFileSync(new URL('../composables/useDeviceSimulator.ts', import.meta.url), 'utf8');
 const deviceSimulatorTypes = readFileSync(new URL('../lib/deviceSimulator.ts', import.meta.url), 'utf8');
+const platformRegistration = readFileSync(new URL('../../src-tauri/src/device_simulator/platform_registration.rs', import.meta.url), 'utf8');
+const platformReplaceDialog = readFileSync(new URL('../components/DevicePlatformReplaceConfirmDialog.vue', import.meta.url), 'utf8');
 const router = readFileSync(new URL('../router/index.ts', import.meta.url), 'utf8');
 const sidebar = readFileSync(new URL('../lib/sidebarNavigation.ts', import.meta.url), 'utf8');
 const messages = readFileSync(new URL('../locales/messages.ts', import.meta.url), 'utf8');
@@ -13,6 +15,8 @@ const applyStatusAction = composable.match(/function applyStatus\(next: Simulato
 const simulatorStopAction = composable.match(/async function stop\(\)[\s\S]*?(?=\r?\n\s*async function recover)/)?.[0] ?? '';
 const startAlarmAction = composable.match(/async function startAlarm[\s\S]*?(?=\r?\n\s*async function stopAlarm)/)?.[0] ?? '';
 const stopAlarmAction = composable.match(/async function stopAlarm[\s\S]*?(?=\r?\n\s*function addGroup)/)?.[0] ?? '';
+const platformAddAction = composable.match(/async function addDevicesToPlatform[\s\S]*?(?=\r?\n\s*async function stop)/)?.[0] ?? '';
+const settingsProjection = composable.match(/function settingsFromRequest\(\)[\s\S]*?(?=\r?\n\s*function errorText)/)?.[0] ?? '';
 
 assert.match(router, /path: '\/tools\/video-device-simulator'/);
 assert.match(sidebar, /labelKey: 'sidebar\.videoDeviceSimulator'/);
@@ -35,12 +39,17 @@ for (const legacyLabel of ['服务器配置', '虚拟设备起始 IP', '虚拟�
 assert.match(page, /min-h-11/, 'primary controls should meet the 44px target');
 assert.match(page, /focus-visible:ring-2/, 'keyboard focus must remain visible');
 assert.match(page, /prefers-reduced-motion: reduce/, 'reduced motion must be respected');
+assert.match(page, /configSection = ref<'server' \| 'network' \| 'media' \| 'devices'>\('network'\)/, 'network must be the default compact configuration section');
+assert.match(page, /<HintTip/, 'dense configuration guidance must remain keyboard-accessible on demand');
+assert.match(page, /min-h-\[68px\][^>]*border-t/, 'launch controls must stay in the fixed bottom action bar');
+assert.doesNotMatch(page, /xl:sticky xl:top-5/, 'the duplicated launch summary card must be removed');
 assert.match(page, /:disabled="simulator\.topologyLocked\.value"/, 'topology fields must lock while active');
 assert.match(page, /simulator\.recoverySessionId\.value/, 'residual sessions must be presented before normal work');
 assert.match(page, /const recoveryRequired = computed/, 'recovery must be distinct from a running session');
 assert.match(header, /v-if="stoppable"/, 'runtime stop must remain available in the page header on every tab');
 assert.match(header, /@click="simulator\.stop"/, 'the persistent header stop must invoke the simulator stop action');
-assert.match(header, /busyAction\.value === 'stop'[\s\S]*<Square[\s\S]*deviceSimulator\.actions\.stop/, 'the header stop must reuse the existing loading, icon, and label');
+assert.match(header, /busyAction\.value === 'stop'[\s\S]*<Power[\s\S]*deviceSimulator\.actions\.stop/, 'the header stop must use a recognizable power icon with its loading state and label');
+assert.equal((page.match(/<Power v-else/g) ?? []).length, 2, 'both simulator shutdown actions must use the power icon');
 assert.match(page, /deviceSimulator\.actions\.recovering/, 'recovery must expose visible in-progress feedback');
 assert.match(page, /simulator\.runPreflight/, 'structured preflight must be available');
 assert.match(page, /address_assessments/, 'address checks must expose per-address evidence');
@@ -61,8 +70,14 @@ assert.match(page, /requiredFileLabel/, 'internal file identifiers must use fami
 assert.doesNotMatch(messages, /告警类型 ID/, 'internal alarm IDs must not be shown to users');
 assert.doesNotMatch(page, /<option value="normal">/, 'picture sizes must keep the legacy three-choice UI');
 assert.doesNotMatch(page, /value="vms"|>VMS</i, 'the simulator must expose UMS only');
-assert.match(page, /ipc-structured/, 'structured camera must be available');
-assert.match(page, /ipc-face-access/, 'face access camera must be available');
+assert.match(composable, /STRUCTURED_PROFILE_ID = 'ipc-structured'/, 'the structured camera must be the configured profile');
+for (const [name, source] of [['page', page], ['composable', composable], ['types', deviceSimulatorTypes], ['messages', messages]]) {
+  assert.doesNotMatch(
+    source,
+    /ipc-custom|ipc-smart|ipc-face-access|nvr-common|nvr-vehicle/,
+    `only the structured camera is simulated, but ${name} still names another profile`,
+  );
+}
 assert.match(page, /send_count: continuousAlarm\.value \? null/, 'continuous alarm mode must cross the API as null, never a magic zero');
 assert.match(page, /v-model="selectedAlarmTypeId"[^>]*:disabled="availableAlarmTypes\.length === 0"/, 'the alarm type picker must only wait on prepared files, never on the dispatch mode');
 assert.match(page, /!alarmTypeId && alarm\.mode === 'configured'/, 'clearing the alarm type must leave configured mode, which requires exactly one type');
@@ -72,7 +87,7 @@ assert.match(composable, /DEVICE_SIMULATOR_EVENTS\.status/);
 assert.match(composable, /DEVICE_SIMULATOR_EVENTS\.cleanupProgress/);
 assert.match(composable, /hasBlockingPreflightFailure/);
 assert.match(composable, /payload\.state === 'ready'[\s\S]*refreshAlarmTypes\(\)/, 'alarm names must refresh when required files finish preparing');
-assert.match(composable, /result\.state === 'ready' \|\| result\.state === 'update_available'/, 'installed alarm names must remain available when a newer file set exists');
+assert.match(composable, /status\.state === 'ready' \|\| status\.state === 'update_available'/, 'installed alarm names must remain available when a newer file set exists');
 assert.match(composable, /last_platform_servers[\s\S]*\[\{ id: newId\('server'\), host: '', port: 80 \}\]/, 'saved servers must be restored with a visible empty fallback');
 assert.match(simulatorStopAction, /if \(stopped === null\) return;[\s\S]*activeAlarmJobId\.value = null;[\s\S]*deviceSimulatorApi\.getStatus\(\)/, 'a successful simulator stop must clear the active alarm before refreshing status');
 assert.match(composable, /last_alarm_receiver_port: 22_815/, 'the observed UMS receiver port 22815 must be the fallback default');
@@ -93,7 +108,43 @@ assert.match(messages, /assetServer: 'Asset pack download URL \(advanced\)'/, 'E
 assert.match(messages, /assetServer: '资源包下载地址（高级）'/, 'Chinese asset source copy must name asset packs, not generic files');
 assert.match(messages, /assetServerHint: '设备类型资源包的下载来源，与告警投递无关。/, 'the asset source hint must state that it is unrelated to alarm delivery');
 assert.match(page, /deviceSimulator\.configuration\.serversHint/, 'the server list must explain that alarms are distributed, not broadcast');
-assert.match(messages, /serversHint: '这里的服务器是告警投递目标。[^']*按顺序分摊/, 'Chinese server copy must state that devices are distributed one by one');
+assert.match(messages, /serversHint: '这里的服务器是告警投递目标[^']*告警按顺序分摊/, 'Chinese server copy must state that alarm delivery is distributed');
+assert.match(page, /v-model="simulator\.settings\.value\.platform_username"/, 'the current server panel must expose the UMS username');
+assert.match(page, /v-model="simulator\.settings\.value\.platform_password"/, 'the current server panel must expose the UMS password');
+assert.match(page, /platformPasswordVisible \? 'text' : 'password'/, 'the UMS password must support explicit reveal and conceal');
+assert.match(page, /v-model="simulator\.settings\.value\.platform_auto_add_devices"/, 'the current server panel must expose automatic registration');
+assert.match(composable, /platform_auto_add_devices: true/, 'automatic registration must be checked by default');
+assert.match(page, /v-model="simulator\.settings\.value\.platform_replace_existing_devices"/, 'the server panel must expose the replace-existing preference');
+assert.match(composable, /platform_replace_existing_devices: false/, 'destructive replacement must be unchecked by default');
+assert.match(settingsProjection, /\.\.\.settings\.value/, 'the automatic-registration preference must survive the settings projection');
+assert.match(composable, /deviceSimulatorApi\.saveSettings\(next\)/, 'the projected preference must be written through the persistent settings command');
+assert.match(page, /platformAutoAddNeedsConfig/, 'automatic registration must surface incomplete configuration before start');
+assert.match(page, /simulator\.platformAddReport\.value/, 'registration outcomes must be visible on the runtime tab');
+assert.match(page, /simulator\.addDevicesToPlatform/, 'partial or failed registration must be retryable without restarting devices');
+assert.match(page, /action === 'add-to-platform'[\s\S]*activeTab\.value = 'runtime'/, 'registration progress and results must move into view on the runtime tab');
+assert.match(platformAddAction, /preview\.value\?\.devices[\s\S]*address: device\.ip[\s\S]*port: request\.device_http_port/, 'registration must use every previewed device and its active HTTP port');
+assert.match(platformAddAction, /run\('add-to-platform'[\s\S]*deviceSimulatorApi\.addDevicesToPlatform\(devices, replaceExisting\)/, 'platform registration must have a busy/error boundary separate from start');
+assert.match(composable, /applyStatus\(result\);[\s\S]*platform_auto_add_devices[\s\S]*addDevicesToPlatform\(replaceExisting\)/, 'automatic registration must run only after the simulator status is applied');
+assert.match(composable, /failedAt === 'add'[\s\S]*platformReplacePromptOpen\.value = true/, 'an automatic add failure must open the replacement confirmation only after an add-stage failure');
+assert.match(composable, /confirmPlatformReplaceRetry[\s\S]*addDevicesToPlatform\(true\)/, 'confirming replacement must force query-delete-add mode');
+assert.match(platformReplaceDialog, /role="alertdialog"[\s\S]*aria-modal="true"/, 'the retry question must use a centered application modal');
+assert.match(platformReplaceDialog, /cancelButton\.value\?\.focus\(\)/, 'the safe cancel action must receive initial focus');
+assert.match(platformReplaceDialog, /currentWindow\.show\(\)[\s\S]*currentWindow\.unminimize\(\)[\s\S]*currentWindow\.setFocus\(\)/, 'the main window must be restored before asking the user');
+assert.match(platformReplaceDialog, /@keydown\.tab\.stop="keepFocusInside"/, 'keyboard focus must stay inside the confirmation dialog');
+assert.match(platformRegistration, /PLATFORM_QUERY_DEVICE_PATH[\s\S]*\/xapi\/uap\/v1\/resource\/query/, 'replacement must use the platform resource query endpoint');
+assert.match(platformRegistration, /RESOURCE_QUERY_PAGE_SIZE: u32 = 200[\s\S]*checked_add\(1\)/, 'resource queries must continue page by page beyond 200 results');
+assert.match(platformRegistration, /query_existing_device_ids[\s\S]*\.post\(url\.clone\(\)\)[\s\S]*\.header\("authorization", token\)/, 'device queries must be authenticated POST requests');
+assert.match(platformRegistration, /delete_existing_devices[\s\S]*\.post\(url\)[\s\S]*\.header\("authorization", token\)/, 'device deletion must be an authenticated POST request');
+assert.match(platformRegistration, /HTTP request: POST \{url_for_log\}/, 'the RSA public-key POST request URL must reach the run log');
+assert.match(platformRegistration, /let response = client\s*\.post\(url\)/, 'the UMS RSA public-key endpoint must be called with POST');
+assert.doesNotMatch(platformRegistration, /let response = client\s*\.get\(url\)/, 'the UMS RSA public-key endpoint rejects GET');
+assert.match(platformRegistration, /HTTP response: \{method\} \{url\}[\s\S]*body=\{\}/, 'HTTP status and response bodies must reach the run log');
+assert.match(platformRegistration, /authorization=<redacted>/, 'authorization values must be redacted in diagnostics');
+assert.match(page, /whitespace-pre-wrap break-all[^>]*>\{\{ entry\.message \}\}/, 'long JSON response logs must wrap instead of being visually truncated');
+assert.match(page, /downloadJson\('device-simulator-logs\.json'[\s\S]*whitespace-nowrap[\s\S]*common\.export/, 'the log export label must stay on one line');
+assert.match(page, /function formatLogTimestamp\(timestamp: string\)[\s\S]*getFullYear\(\)[\s\S]*getHours\(\)[\s\S]*getMilliseconds\(\)/, 'log timestamps must be formatted in the current computer local time');
+assert.match(page, /lg:grid-cols-\[190px_76px_190px_minmax\(0,1fr\)\]/, 'the local timestamp column must have a fixed width');
+assert.match(page, /w-\[190px\] whitespace-nowrap[\s\S]*formatLogTimestamp\(entry\.timestamp\)/, 'the complete millisecond timestamp must remain on one line');
 
 // A learned subscription is the difference between alarms reaching the platform
 // and silently going to a port nobody listens on, so it must be visible.
@@ -133,8 +184,10 @@ assert.match(alarmStatsListener, /activeAlarmJobId\.value === payload\.job_id/, 
 assert.match(alarmStatsListener, /payload\.state === 'completed'/, 'completed alarm stats must clear active state');
 assert.match(alarmStatsListener, /payload\.state === 'failed'/, 'failed alarm stats must clear active state');
 assert.match(alarmStatsListener, /activeAlarmJobId\.value = null/, 'terminal stats must release the active job without discarding stats');
-assert.match(page, /:disabled="simulator\.busyAction\.value !== null \|\| !running \|\| simulator\.activeAlarmJobId\.value !== null \|\| simulator\.alarmStopPending\.value" @click="startAlarm"/, 'alarm start must be disabled while an alarm is active or stopping');
-assert.match(page, /:disabled="simulator\.busyAction\.value !== null \|\| !simulator\.activeAlarmJobId\.value \|\| simulator\.alarmStopPending\.value" @click="simulator\.stopAlarm"/, 'alarm stop must only be enabled for an active job and latch after its first click');
+assert.match(page, /const alarmSending = computed\(\(\) => simulator\.activeAlarmJobId\.value !== null\)/, 'alarm sending must expose one source of truth for the toggle state');
+assert.match(page, /async function toggleAlarmSending\(\)[\s\S]*if \(alarmSending\.value\)[\s\S]*simulator\.stopAlarm\(\)[\s\S]*startAlarm\(\)/, 'the alarm control must toggle between starting and stopping one job');
+assert.match(page, /:aria-pressed="alarmSending"[\s\S]*@click="toggleAlarmSending"/, 'send and stop must share one accessible toggle button');
+assert.equal((page.match(/@click="toggleAlarmSending"/g) ?? []).length, 1, 'the send/stop toggle must be rendered once');
 assert.match(page, /assetDownloadActive[\s\S]*role="progressbar"/, 'file preparation must expose visible progress');
 assert.match(page, /simulator\.request\.device_ips/, 'non-contiguous device addresses must cross the API boundary');
 assert.match(page, /openPingScanner/, 'the network ping scanner must be reachable from device IP configuration');
@@ -142,6 +195,7 @@ assert.match(page, /simulator\.selectedInterface\.value/, 'the selected adapter 
 assert.match(page, /interfaceSelectionDescription/, 'automatic adapter selection must explain its subnet decision');
 assert.match(composable, /recommendSimulatorInterface/, 'adapter selection must use target-IP subnet matching');
 assert.doesNotMatch(page, /simulator\.blockingPreflight\.value" @click="simulator\.start"/, 'start must run its own preflight instead of silently remaining disabled');
-assert.doesNotMatch(composable, /password|access_token|worker_process_id/i);
+assert.doesNotMatch(composable, /access_token|worker_process_id/i);
+assert.doesNotMatch(composable, /request\.[a-zA-Z0-9_]*password|password.*InitializeSessionPayload/i, 'platform credentials must not enter the Worker start request');
 
 console.log('VideoDeviceSimulatorPage contract tests PASSED');

@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 export type DeviceSimulatorPlatform = 'ums';
-export type DeviceSimulatorDeviceKind = 'ipc' | 'nvr';
+export type DeviceSimulatorDeviceKind = 'ipc';
 export type DeviceSimulatorStreamKind = 'main' | 'sub' | 'third';
 
 export type SimulatorSessionState =
@@ -65,10 +65,9 @@ export interface DeviceGroupDraft {
   id: string;
   profile_id: string;
   count: number;
-  nvr_channel_count: number | null;
 }
 
-/** Persisted application-domain settings. Runtime credentials never belong here. */
+/** Persisted application-domain settings. Worker/session credentials never belong here. */
 export interface DeviceSimulatorSettings {
   asset_server_url_override: string | null;
   selected_interface_id: string | null;
@@ -87,6 +86,11 @@ export interface DeviceSimulatorSettings {
   last_time_watermark_enabled: boolean;
   auto_check_asset_updates: boolean;
   manage_firewall: boolean;
+  /** UMS login credentials stay in the main process and are never sent to the Worker. */
+  platform_username: string;
+  platform_password: string;
+  platform_auto_add_devices: boolean;
+  platform_replace_existing_devices: boolean;
 }
 
 export interface TargetPlatformServer {
@@ -202,7 +206,6 @@ export interface DeviceIdentityPreview {
   mac: string;
   serial_number: string;
   hardware_id: string;
-  channel_count: number | null;
   streams: DeviceStreamAddress[];
 }
 
@@ -399,6 +402,34 @@ export interface SimulatorLogEvent {
   message: string;
 }
 
+export interface PlatformDeviceEntry {
+  address: string;
+  port: number;
+}
+
+export interface PlatformAddDeviceOutcome {
+  address: string;
+  added: boolean;
+  deviceId: string | null;
+  message: string | null;
+}
+
+export interface PlatformServerAddResult {
+  serverId: string;
+  host: string;
+  port: number;
+  success: boolean;
+  failedAt: 'login' | 'query' | 'delete' | 'public_key' | 'add' | null;
+  message: string | null;
+  devices: PlatformAddDeviceOutcome[];
+}
+
+export interface PlatformAddDevicesReport {
+  servers: PlatformServerAddResult[];
+  totalDevices: number;
+  addedDevices: number;
+}
+
 export const DEVICE_SIMULATOR_COMMANDS = {
   getSettings: 'device_simulator_get_settings',
   saveSettings: 'device_simulator_save_settings',
@@ -419,6 +450,7 @@ export const DEVICE_SIMULATOR_COMMANDS = {
   triggerAlarmOnce: 'device_simulator_trigger_alarm_once',
   stopAlarm: 'device_simulator_stop_alarm',
   recover: 'device_simulator_recover',
+  addDevicesToPlatform: 'device_simulator_add_devices_to_platform',
 } as const;
 
 export const DEVICE_SIMULATOR_EVENTS = {
@@ -468,6 +500,10 @@ export interface DeviceSimulatorApi {
   triggerAlarmOnce(request: AlarmJobRequest): Promise<AlarmTriggerResult>;
   stopAlarm(jobId: string): Promise<void>;
   recover(sessionId: string): Promise<RecoveryResult>;
+  addDevicesToPlatform(
+    devices: PlatformDeviceEntry[],
+    replaceExisting: boolean,
+  ): Promise<PlatformAddDevicesReport>;
 }
 
 export function createDeviceSimulatorApi(invokeCommand: DeviceSimulatorInvoke): DeviceSimulatorApi {
@@ -491,6 +527,10 @@ export function createDeviceSimulatorApi(invokeCommand: DeviceSimulatorInvoke): 
     triggerAlarmOnce: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.triggerAlarmOnce, { request }),
     stopAlarm: (jobId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.stopAlarm, { jobId }),
     recover: (sessionId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.recover, { sessionId }),
+    addDevicesToPlatform: (devices, replaceExisting) => invokeCommand(
+      DEVICE_SIMULATOR_COMMANDS.addDevicesToPlatform,
+      { devices, replaceExisting },
+    ),
   };
 }
 
@@ -525,6 +565,31 @@ export function isDeviceSimulatorRuntimeActive(state: SimulatorSessionState): bo
 /** Topology edits are unsafe during validation, downloads, startup, cleanup, or recovery. */
 export function isDeviceSimulatorTopologyLocked(state: SimulatorSessionState): boolean {
   return !TOPOLOGY_EDITABLE_STATES.has(state);
+}
+
+/**
+ * Single-line description of a rejected simulator command, for log sinks.
+ *
+ * Simulator commands reject with a serialized `SimulatorErrorBody`, so plain
+ * string interpolation would collapse the whole diagnosis into
+ * `[object Object]`. The code and details are what identify the failure, so they
+ * must survive into the log.
+ */
+export function describeSimulatorError(error: unknown): string {
+  if (error && typeof error === 'object') {
+    const candidate = error as { code?: unknown; message_key?: unknown; details?: unknown };
+    const parts = [candidate.code, candidate.message_key, candidate.details]
+      .filter((part): part is string => typeof part === 'string' && part.length > 0);
+    if (parts.length > 0) return parts.join(' | ');
+    if (!(error instanceof Error)) {
+      try {
+        return JSON.stringify(error);
+      } catch {
+        // Circular or otherwise unserializable: fall through to String().
+      }
+    }
+  }
+  return String(error);
 }
 
 export function hasBlockingPreflightFailure(report: PreflightReport): boolean {

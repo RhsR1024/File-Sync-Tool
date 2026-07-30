@@ -7,6 +7,8 @@ mod code_count;
 mod config;
 mod deploy;
 mod device_simulator_commands;
+#[path = "device_simulator/platform_registration.rs"]
+mod device_simulator_platform_registration;
 mod disk_cleanup;
 mod display_control;
 mod download_verify;
@@ -1189,8 +1191,11 @@ async fn confirm_quit(
     state: State<'_, AppState>,
     simulator_state: State<'_, device_simulator_commands::DeviceSimulatorCommandState>,
 ) -> Result<(), String> {
+    // Residual sessions launch an elevated recovery worker whose bounded request
+    // timeout is 120 seconds. Keep the application-owned dialog responsive while
+    // allowing that cleanup to finish instead of aborting it after 20 seconds.
     let cleanup = tokio::time::timeout(
-        Duration::from_secs(20),
+        Duration::from_secs(130),
         device_simulator_commands::shutdown_for_exit(&app_handle, simulator_state.inner()),
     )
     .await;
@@ -1216,7 +1221,7 @@ async fn confirm_quit(
         }
         Err(_) => {
             state.is_quitting.store(false, Ordering::SeqCst);
-            Err("device_simulator.exit.cleanup_timeout: simulator cleanup did not finish within 20 seconds".into())
+            Err("device_simulator.exit.cleanup_timeout: simulator cleanup did not finish within 130 seconds".into())
         }
     }
 }
@@ -4350,6 +4355,10 @@ fn main() {
                                 return;
                             }
                         }
+                        // A blocker is discovered by the frontend immediately after this
+                        // event. Restore and foreground the main window first so the
+                        // application-owned confirmation can never open behind other apps.
+                        show_main_window(app, "托盘菜单“退出”");
                         // Notify frontend to save state before exiting
                         let _ = app.emit("before-quit", ());
                     }
@@ -4444,6 +4453,7 @@ fn main() {
             device_simulator_commands::device_simulator_trigger_alarm_once,
             device_simulator_commands::device_simulator_stop_alarm,
             device_simulator_commands::device_simulator_recover,
+            device_simulator_platform_registration::device_simulator_add_devices_to_platform,
             get_config,
             mark_frontend_ready,
             save_config_cmd,
@@ -4559,11 +4569,11 @@ fn main() {
             screenshare::screen_share_get_annotation_state,
             screenshare::screen_share_respond_control_request,
             screenshare::screen_share_revoke_control,
-            screenshare::screen_share_open_local_preview,
-            screenshare::screen_share_close_local_preview,
             screenshare::screen_share_open_desktop_overlay,
             screenshare::screen_share_desktop_overlay_ready,
             screenshare::screen_share_close_desktop_overlay,
+            screenshare::screen_share_annotation_bar_ready,
+            screenshare::screen_share_set_annotation_bar_visible,
             display_control::monitor_control_list,
             display_control::monitor_control_set,
             fileshare::file_share_pick_directory,

@@ -155,6 +155,12 @@ describe('paper todo standalone window lifecycle', () => {
     expect(launcherSource).toContain("@click=\"createPaper('note')\"");
     expect(launcherSource).toContain('ListPlus');
     expect(launcherSource).toContain('FilePlus2');
+    expect(paperSource).toMatch(
+      /newTodoPaper[\s\S]*?createSiblingPaper\('todo'\)[\s\S]*?<ListPlus class="h-4 w-4"/,
+    );
+    expect(paperSource).toMatch(
+      /newNotePaper[\s\S]*?createSiblingPaper\('note'\)[\s\S]*?<FilePlus2 class="h-4 w-4"/,
+    );
     expect(launcherSource).toContain('@contextmenu.prevent');
     expect(paperSource).toContain('@contextmenu.prevent');
   });

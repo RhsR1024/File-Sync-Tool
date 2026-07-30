@@ -83,7 +83,6 @@ const NUMERIC_IMAGE_SIZE_2_SENTINEL: &str = "__FST_NUMERIC_IMAGE_SIZE_2__";
 const NUMERIC_IMAGE_SIZE_3_SENTINEL: &str = "__FST_NUMERIC_IMAGE_SIZE_3__";
 const NUMERIC_IMAGE_SIZE_4_SENTINEL: &str = "__FST_NUMERIC_IMAGE_SIZE_4__";
 const NUMERIC_IMAGE_SIZE_5_SENTINEL: &str = "__FST_NUMERIC_IMAGE_SIZE_5__";
-const LEGACY_CUSTOM_MULTIPART_BOUNDARY: &str = "------------------------e7a8348a9833c6f5";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlarmRuntimeError {
@@ -384,7 +383,7 @@ impl AlarmRuntime {
             .trigger_once(OneShotAlarmJob {
                 job_id,
                 targets,
-                mode: scheduled_mode(request.mode, request.alarm_type_ids.len())?,
+                mode: one_shot_mode(request.mode, request.alarm_type_ids.len())?,
                 recovery_delay_ms: request
                     .recovery_delay_secs
                     .map(|seconds| seconds.saturating_mul(1_000)),
@@ -570,19 +569,14 @@ impl AlarmRuntime {
             }
             let subscription_id = stable_numeric_id(job_id, &device_id);
             let destination_id = self.destination_ids[index % self.destination_ids.len()].clone();
-            let base_destination = self.destinations.get(&destination_id).ok_or_else(|| {
-                runtime_error(
+            // Fail here rather than at dispatch time if the job names a
+            // destination that was never configured.
+            if !self.destinations.contains_key(&destination_id) {
+                return Err(runtime_error(
                     "device_simulator.alarm.destination_missing",
                     format!("alarm destination '{destination_id}' is not configured"),
-                )
-            })?;
-            // Resolve the effective endpoint once so the rendered Reference
-            // matches where the request is actually dispatched.
-            let destination = apply_learned_endpoint(
-                base_destination,
-                &self.learned_endpoint,
-                self.allow_learned_endpoint,
-            );
+                ));
+            }
             let mut invocations = Vec::with_capacity(definitions.len());
             for mut definition in definitions {
                 if let Some(user_image) = &user_image {
@@ -592,13 +586,7 @@ impl AlarmRuntime {
                 } else {
                     apply_image_variant(&mut definition, image_variant, &self.assets)?;
                 }
-                let context = build_context(
-                    device,
-                    &definition,
-                    &subscription_id,
-                    &destination,
-                    self.device_http_port,
-                )?;
+                let context = build_context(device, &subscription_id, self.device_http_port)?;
                 invocations.push(AlarmInvocation {
                     definition: Arc::new(definition),
                     context,
@@ -993,10 +981,7 @@ fn compile_runtime_definition(
         .as_ref()
         .is_some_and(|path| path == selected_template);
     let embedded_image_limit = if definition.supports_pictures && !multipart {
-        match (profile_id, definition.id.as_str()) {
-            (FirstReleaseProfileId::NvrVehicle, "snap") => 2,
-            _ => usize::MAX,
-        }
+        usize::MAX
     } else {
         0
     };
@@ -1006,20 +991,14 @@ fn compile_runtime_definition(
             &normalize_runtime_path(selected_template),
         )
         .map_err(|source| runtime_error(source.code, source.message))?;
-    let template_bytes = normalize_alarm_source_type(
-        &template_bytes,
-        profile_id,
-        definition.source_type.as_deref(),
-        &definition.event_type,
-    )?;
     let event_type_override =
         (definition.event_type != definition.id).then_some(definition.event_type.as_str());
     let template = compile_json_template_with_options(
         &template_bytes,
         event_type_override,
         embedded_image_limit,
-        profile_id == FirstReleaseProfileId::IpcFaceAccess && definition.id == "inlib",
-        profile_id == FirstReleaseProfileId::NvrCommon && definition.id == "channel-deleted",
+        false,
+        false,
     )?;
     let image_count = if !definition.supports_pictures {
         0
@@ -1039,11 +1018,7 @@ fn compile_runtime_definition(
         .into_iter()
         .enumerate()
         .map(|(index, selected)| ImageAttachmentDefinition {
-            file_name: if multipart && profile_id == FirstReleaseProfileId::IpcCustom {
-                "picture.jpg".into()
-            } else {
-                image_reference_file_name(&selected.reference)
-            },
+            file_name: image_reference_file_name(&selected.reference),
             reference: selected.reference,
             url_reference: selected.url_reference,
             field_name: if multipart {
@@ -1056,26 +1031,18 @@ fn compile_runtime_definition(
             image_index: multipart.then_some((index + 1) as u16),
         })
         .collect::<Vec<_>>();
-    let image_policy = match (profile_id, images.is_empty()) {
-        (FirstReleaseProfileId::NvrCommon, _) => ImagePolicy::Forbidden,
-        (_, false) => ImagePolicy::Required,
-        (_, true) => ImagePolicy::Forbidden,
+    let image_policy = if images.is_empty() {
+        ImagePolicy::Forbidden
+    } else {
+        ImagePolicy::Required
     };
     let path = if multipart {
         "/LAPI/V1.1/System/Event/Notification".to_owned()
     } else if selected_is_structure {
-        if profile_id == FirstReleaseProfileId::IpcFaceAccess {
-            "/LAPI/V1.0/System/Event/Notification/PersonVerification".to_owned()
-        } else if profile_id == FirstReleaseProfileId::NvrVehicle
-            && definition.alarm_template.is_some()
-        {
-            "/LAPI/V1.0/System/Event/Notification/VehicleEventInfo".to_owned()
-        } else {
-            definition
-                .structure_path
-                .clone()
-                .unwrap_or_else(|| "/LAPI/V1.0/System/Event/Notification/Structure".to_owned())
-        }
+        definition
+            .structure_path
+            .clone()
+            .unwrap_or_else(|| "/LAPI/V1.0/System/Event/Notification/Structure".to_owned())
     } else {
         "/LAPI/V1.0/System/Event/Notification/Alarm".to_owned()
     };
@@ -1086,14 +1053,8 @@ fn compile_runtime_definition(
         let bytes = assets
             .read_from_pack(profile_id.as_str(), &normalize_runtime_path(alarm_template))
             .map_err(|source| runtime_error(source.code, source.message))?;
-        let bytes = normalize_alarm_source_type(
-            &bytes,
-            profile_id,
-            definition.source_type.as_deref(),
-            &definition.event_type,
-        )?;
         RecoveryDefinition::RenderWith {
-            template: compile_recovery_json_template(&bytes, recovery_event, profile_id)?,
+            template: compile_json_template(&bytes, Some(recovery_event), 0)?,
             transport: TransportDefinition {
                 method: HttpMethod::Post,
                 path: "/LAPI/V1.0/System/Event/Notification/Alarm".into(),
@@ -1247,72 +1208,6 @@ fn compile_json_template_with_options(
     }
     CompiledTemplate::compile(rendered.as_bytes())
         .map_err(|source| runtime_error(source.code, source.message))
-}
-
-fn compile_recovery_json_template(
-    bytes: &[u8],
-    recovery_event: &str,
-    profile_id: FirstReleaseProfileId,
-) -> Result<CompiledTemplate, AlarmRuntimeError> {
-    if profile_id != FirstReleaseProfileId::IpcSmart {
-        return compile_json_template(bytes, Some(recovery_event), 0);
-    }
-    let mut value: Value = serde_json::from_slice(bytes).map_err(|source| {
-        runtime_error(
-            "device_simulator.alarm.template_json_invalid",
-            format!("approved recovery template is not valid JSON: {source}"),
-        )
-    })?;
-    if let Some(root) = value.as_object_mut() {
-        root.remove("RelatedObjects");
-        if let Some(alarm_info) = root.get_mut("AlarmInfo").and_then(Value::as_object_mut) {
-            alarm_info.remove("RelatedID");
-        }
-    }
-    let normalized = serde_json::to_vec(&value).map_err(|source| {
-        runtime_error(
-            "device_simulator.alarm.template_serialize_failed",
-            format!("approved recovery template could not be normalized: {source}"),
-        )
-    })?;
-    compile_json_template(&normalized, Some(recovery_event), 0)
-}
-
-fn normalize_alarm_source_type(
-    bytes: &[u8],
-    profile_id: FirstReleaseProfileId,
-    source_type: Option<&str>,
-    event_type: &str,
-) -> Result<Vec<u8>, AlarmRuntimeError> {
-    if profile_id != FirstReleaseProfileId::NvrCommon {
-        return Ok(bytes.to_vec());
-    }
-    let mut value: Value = serde_json::from_slice(bytes).map_err(|source| {
-        runtime_error(
-            "device_simulator.alarm.template_json_invalid",
-            format!("approved NVR alarm template is not valid JSON: {source}"),
-        )
-    })?;
-    let alarm_source_type = if source_type == Some("device") {
-        0
-    } else if event_type == "InputAlarmOn" {
-        9
-    } else {
-        8
-    };
-    if let Some(alarm_info) = value
-        .as_object_mut()
-        .and_then(|root| root.get_mut("AlarmInfo"))
-        .and_then(Value::as_object_mut)
-    {
-        alarm_info.insert("AlarmSrcType".into(), Value::from(alarm_source_type));
-    }
-    serde_json::to_vec(&value).map_err(|source| {
-        runtime_error(
-            "device_simulator.alarm.template_serialize_failed",
-            format!("approved NVR alarm template could not be normalized: {source}"),
-        )
-    })
 }
 
 #[derive(Debug, Default)]
@@ -1544,22 +1439,9 @@ fn select_pack_images(
         })
         .collect::<Vec<_>>();
     paths.sort();
-    let (data_indexes, url_indexes) = match (profile_id, alarm_type_id, count) {
-        // VehicleAlarm.py embeds files 0 and 2, but the second URL points at
-        // file 1. Preserve that observable behavior without exposing a local
-        // filesystem path in the URL.
-        (FirstReleaseProfileId::NvrVehicle, "snap", 2) => (vec![0, 2], vec![0, 1]),
-        (FirstReleaseProfileId::IpcSmart, "falling", 1) => (vec![1], vec![1]),
-        (FirstReleaseProfileId::IpcSmart, "peoplegathering", 2)
-        | (FirstReleaseProfileId::IpcSmart, "peopledispersing", 2) => (vec![0, 1], vec![0, 1]),
-        // Most two-picture V1.0 branches embed big then small ([1, 0]) while
-        // retaining URL indexes in directory order ([0, 1]).
-        (FirstReleaseProfileId::IpcSmart, _, 2) => (vec![1, 0], vec![0, 1]),
-        _ => {
-            let indexes = (0..count).collect::<Vec<_>>();
-            (indexes.clone(), indexes)
-        }
-    };
+    // StructureAlarm.py embeds and links its pictures in directory order.
+    let indexes = (0..count).collect::<Vec<_>>();
+    let (data_indexes, url_indexes) = (indexes.clone(), indexes);
     if data_indexes
         .iter()
         .chain(&url_indexes)
@@ -1946,73 +1828,20 @@ fn normalize_destination_url(value: &str) -> Result<reqwest::Url, AlarmRuntimeEr
 
 fn build_context(
     device: &RuntimeAlarmDevice,
-    definition: &AlarmHandlerDefinition,
     subscription_id: &str,
-    destination: &reqwest::Url,
     device_http_port: u16,
 ) -> Result<AlarmBuildContext, AlarmRuntimeError> {
-    let channel = device
-        .preview
-        .channel_count
-        .map(|_| DEFAULT_CHANNEL_ID)
-        .unwrap_or(DEFAULT_CHANNEL_ID);
-    // Preserve the legacy fixed ports for profiles whose Reference is not used
-    // to retrieve structured alarm pictures. Structured alarms must advertise
-    // the port where this runtime actually serves /System/Picture; otherwise a
-    // non-80 listener produces accepted alarms whose pictures cannot be fetched.
-    let legacy_reference_port = if definition.profile_id == FirstReleaseProfileId::IpcCustom {
-        81
-    } else {
-        80
-    };
-    let legacy_device_authority = format!("{}:{legacy_reference_port}", device.preview.ip);
-    let runtime_device_authority = format!("{}:{device_http_port}", device.preview.ip);
-    let destination_authority = destination_reference_authority(destination)?;
-    let reference = match definition.profile_id {
-        FirstReleaseProfileId::IpcCustom => {
-            format!("{legacy_device_authority}/Subscription/Subscribers/{subscription_id}")
-        }
-        FirstReleaseProfileId::IpcSmart
-            if matches!(
-                &definition.transport.body_encoding,
-                BodyEncoding::Multipart { .. }
-            ) =>
-        {
-            format!("{legacy_device_authority}/Subscription/Subscribers/{subscription_id}")
-        }
-        FirstReleaseProfileId::IpcSmart => {
-            format!("{destination_authority}/Subscription/Subscribers/{subscription_id}")
-        }
-        FirstReleaseProfileId::IpcStructured => {
-            format!("{runtime_device_authority}/Subscription/Subscribers/1")
-        }
-        FirstReleaseProfileId::IpcFaceAccess
-            if definition.transport.path.ends_with("/PersonVerification") =>
-        {
-            format!("{legacy_device_authority}/Subscription/Subscribers/1000")
-        }
-        FirstReleaseProfileId::IpcFaceAccess => {
-            format!("{destination_authority}/Subscription/Subscribers/{subscription_id}")
-        }
-        FirstReleaseProfileId::NvrCommon => format!(
-            "{destination_authority}/{}/Subscription/Subscribers/{subscription_id}",
-            device.preview.hardware_id
-        ),
-        FirstReleaseProfileId::NvrVehicle if definition.alarm_type_id.as_str() == "snap" => {
-            format!(
-                "{legacy_device_authority}/{}/Subscription/Subscribers/{subscription_id}",
-                device.preview.hardware_id
-            )
-        }
-        FirstReleaseProfileId::NvrVehicle => format!(
-            "{destination_authority}/{}/Subscription/Subscribers/{subscription_id}",
-            device.preview.hardware_id
-        ),
-    };
+    // The structured alarm Reference must advertise the port where this runtime
+    // actually serves /System/Picture; otherwise a non-80 listener produces
+    // accepted alarms whose pictures cannot be fetched.
+    let reference = format!(
+        "{}:{device_http_port}/Subscription/Subscribers/1",
+        device.preview.ip
+    );
     let mut fields = BTreeMap::new();
     fields.insert(DynamicField::DeviceId, device.preview.hardware_id.clone());
     fields.insert(DynamicField::DeviceIp, device.preview.ip.to_string());
-    fields.insert(DynamicField::ChannelId, channel.into());
+    fields.insert(DynamicField::ChannelId, DEFAULT_CHANNEL_ID.into());
     fields.insert(DynamicField::Timestamp, "0".into());
     fields.insert(DynamicField::CaptureTime, "19700101000000000".into());
     fields.insert(
@@ -2028,38 +1857,9 @@ fn build_context(
     Ok(AlarmBuildContext {
         source_ip: Some(device.preview.ip),
         fields,
-        multipart_boundary: Some(match device.profile_id {
-            FirstReleaseProfileId::IpcCustom => LEGACY_CUSTOM_MULTIPART_BOUNDARY.to_owned(),
-            // SmartAlarm.py's helper returns a boundary with the leading two
-            // hyphens; its hand-written body prepends another two.
-            FirstReleaseProfileId::IpcSmart => format!("--{}", uuid::Uuid::new_v4().simple()),
-            _ => format!("fst-simulator-{}", uuid::Uuid::new_v4().simple()),
-        }),
+        multipart_boundary: Some(format!("fst-simulator-{}", uuid::Uuid::new_v4().simple())),
         legacy_values: None,
     })
-}
-
-fn destination_reference_authority(
-    destination: &reqwest::Url,
-) -> Result<String, AlarmRuntimeError> {
-    let host = destination.host_str().ok_or_else(|| {
-        runtime_error(
-            "device_simulator.alarm.destination_invalid",
-            "alarm destination has no host for legacy Reference rendering",
-        )
-    })?;
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_owned()
-    };
-    let port = destination.port_or_known_default().ok_or_else(|| {
-        runtime_error(
-            "device_simulator.alarm.destination_invalid",
-            "alarm destination has no port for legacy Reference rendering",
-        )
-    })?;
-    Ok(format!("{host}:{port}"))
 }
 
 fn scheduled_mode(
@@ -2079,6 +1879,16 @@ fn scheduled_mode(
         AlarmDispatchMode::Random => ScheduledDispatchMode::Random,
         AlarmDispatchMode::Sequential => ScheduledDispatchMode::Sequential,
     })
+}
+
+fn one_shot_mode(
+    mode: AlarmDispatchMode,
+    requested_type_count: usize,
+) -> Result<ScheduledDispatchMode, AlarmRuntimeError> {
+    if requested_type_count == 0 {
+        return Ok(ScheduledDispatchMode::Sequential);
+    }
+    scheduled_mode(mode, requested_type_count)
 }
 
 /// Build the operator-facing error body for a failed alarm attempt.
@@ -2176,12 +1986,7 @@ fn random_seed() -> u64 {
 
 fn parse_profile_id(value: &str) -> Result<FirstReleaseProfileId, AlarmRuntimeError> {
     match value {
-        "ipc-custom" => Ok(FirstReleaseProfileId::IpcCustom),
-        "ipc-smart" => Ok(FirstReleaseProfileId::IpcSmart),
         "ipc-structured" => Ok(FirstReleaseProfileId::IpcStructured),
-        "ipc-face-access" => Ok(FirstReleaseProfileId::IpcFaceAccess),
-        "nvr-common" => Ok(FirstReleaseProfileId::NvrCommon),
-        "nvr-vehicle" => Ok(FirstReleaseProfileId::NvrVehicle),
         _ => Err(runtime_error(
             "device_simulator.alarm.profile_unknown",
             format!("unknown first-release profile '{value}'"),
@@ -2484,6 +2289,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn one_shot_all_types_always_uses_sequential_dispatch() {
+        assert_eq!(
+            one_shot_mode(AlarmDispatchMode::Random, 0).unwrap(),
+            ScheduledDispatchMode::Sequential
+        );
+        assert_eq!(
+            one_shot_mode(AlarmDispatchMode::Sequential, 1).unwrap(),
+            ScheduledDispatchMode::Sequential
+        );
+    }
+
     #[tokio::test]
     async fn approved_release_alarm_registry_loads_when_explicitly_configured() {
         let (root, explicitly_configured) = match std::env::var("FST_APPROVED_PACK_ROOT") {
@@ -2509,32 +2326,15 @@ mod tests {
             return;
         }
         let version = std::env::var("FST_APPROVED_PACK_VERSION").unwrap_or_else(|_| "1.0.3".into());
-        let pins = [
-            "protocol-core",
-            "media-h264-live",
-            "ipc-custom",
-            "ipc-smart",
-            "ipc-structured",
-            "ipc-face-access",
-            "nvr-common",
-            "nvr-vehicle",
-        ]
-        .into_iter()
-        .map(|id| PinnedPackDirectory {
-            id: id.into(),
-            version: version.clone(),
-            directory: root.join(id).join(&version),
-        })
-        .collect::<Vec<_>>();
-        let profile_ids = [
-            "ipc-custom",
-            "ipc-smart",
-            "ipc-structured",
-            "ipc-face-access",
-            "nvr-common",
-            "nvr-vehicle",
-        ]
-        .map(str::to_owned);
+        let pins = ["protocol-core", "media-h264-live", "ipc-structured"]
+            .into_iter()
+            .map(|id| PinnedPackDirectory {
+                id: id.into(),
+                version: version.clone(),
+                directory: root.join(id).join(&version),
+            })
+            .collect::<Vec<_>>();
+        let profile_ids = ["ipc-structured"].map(str::to_owned);
         let assets = Arc::new(RuntimeAssetLayout::load(&pins, &profile_ids).unwrap());
         let request = SimulatorStartRequest {
             platform: TargetPlatformConfig {
@@ -2560,44 +2360,11 @@ mod tests {
             },
             _legacy_allow_local_player_access: true,
             media_theme_id: crate::device_simulator::api::DEFAULT_MEDIA_THEME_ID.into(),
-            groups: vec![
-                DeviceGroupDraft {
-                    id: "custom".into(),
-                    profile_id: "ipc-custom".into(),
-                    count: 1,
-                    nvr_channel_count: None,
-                },
-                DeviceGroupDraft {
-                    id: "smart".into(),
-                    profile_id: "ipc-smart".into(),
-                    count: 1,
-                    nvr_channel_count: None,
-                },
-                DeviceGroupDraft {
-                    id: "structured".into(),
-                    profile_id: "ipc-structured".into(),
-                    count: 1,
-                    nvr_channel_count: None,
-                },
-                DeviceGroupDraft {
-                    id: "face-access".into(),
-                    profile_id: "ipc-face-access".into(),
-                    count: 1,
-                    nvr_channel_count: None,
-                },
-                DeviceGroupDraft {
-                    id: "common".into(),
-                    profile_id: "nvr-common".into(),
-                    count: 1,
-                    nvr_channel_count: Some(8),
-                },
-                DeviceGroupDraft {
-                    id: "vehicle".into(),
-                    profile_id: "nvr-vehicle".into(),
-                    count: 1,
-                    nvr_channel_count: Some(8),
-                },
-            ],
+            groups: vec![DeviceGroupDraft {
+                id: "structured".into(),
+                profile_id: "ipc-structured".into(),
+                count: 1,
+            }],
             stream: StreamRuntimeConfig {
                 transport: StreamTransport::TcpInterleaved,
                 enabled_streams: vec![
@@ -2620,282 +2387,13 @@ mod tests {
             app_data_dir: app_data.path().to_path_buf(),
         })
         .unwrap();
-        assert_eq!(runtime.registry.len(), 114);
-        for (profile_id, expected) in [
-            (FirstReleaseProfileId::IpcCustom, 2),
-            (FirstReleaseProfileId::IpcSmart, 71),
-            (FirstReleaseProfileId::IpcStructured, 4),
-            (FirstReleaseProfileId::IpcFaceAccess, 9),
-            (FirstReleaseProfileId::NvrCommon, 25),
-            (FirstReleaseProfileId::NvrVehicle, 3),
-        ] {
-            assert_eq!(
-                runtime
-                    .registry
-                    .definitions()
-                    .filter(|definition| definition.profile_id == profile_id)
-                    .count(),
-                expected,
-                "unexpected UMS alarm count for {}",
-                profile_id.as_str()
-            );
-        }
+        assert_eq!(runtime.registry.len(), 4);
+        assert!(runtime
+            .registry
+            .definitions()
+            .all(|definition| definition.profile_id == FirstReleaseProfileId::IpcStructured));
         assert!(!runtime.image_cache.read().is_empty());
-        let smart_motion = runtime
-            .registry
-            .definitions()
-            .find(|definition| {
-                definition.profile_id == FirstReleaseProfileId::IpcSmart
-                    && definition.alarm_type_id.as_str() == "motion"
-            })
-            .unwrap();
-        assert_eq!(
-            smart_motion.transport.path,
-            "/LAPI/V1.0/System/Event/Notification/Structure"
-        );
-        assert_eq!(smart_motion.follow_up_requests.len(), 1);
-        assert_eq!(smart_motion.images.len(), 2);
-        assert_ne!(
-            smart_motion.images[0].reference,
-            smart_motion.images[1].reference
-        );
-        assert!(matches!(
-            &smart_motion.images[0].reference,
-            ImageAssetRef::Pack { path, .. } if path.ends_with("/1-2.jpg")
-        ));
-        assert!(matches!(
-            &smart_motion.images[1].reference,
-            ImageAssetRef::Pack { path, .. } if path.ends_with("/1-1.jpg")
-        ));
-        assert!(matches!(
-            &smart_motion.images[0].url_reference,
-            Some(ImageAssetRef::Pack { path, .. }) if path.ends_with("/1-1.jpg")
-        ));
-        assert!(matches!(
-            &smart_motion.images[1].url_reference,
-            Some(ImageAssetRef::Pack { path, .. }) if path.ends_with("/1-2.jpg")
-        ));
-        assert_eq!(
-            smart_motion.follow_up_requests[0].transport.path,
-            "/LAPI/V1.0/System/Event/Notification/Alarm"
-        );
-        let smart_device = runtime
-            .devices
-            .values()
-            .find(|device| device.profile_id == FirstReleaseProfileId::IpcSmart)
-            .unwrap();
-        let smart_requests = crate::device_simulator::alarms::build_alarm_requests(
-            smart_motion,
-            &{
-                let mut context = build_context(
-                    smart_device,
-                    smart_motion,
-                    "123",
-                    runtime.destinations.get("receiver").unwrap(),
-                    runtime.device_http_port,
-                )
-                .unwrap();
-                context
-                    .fields
-                    .insert(DynamicField::Timestamp, "1710000000".into());
-                context.fields.insert(DynamicField::EventId, "123".into());
-                context.legacy_values = Some(
-                    crate::device_simulator::alarms::LegacyAlarmValues::new(0x1234_5678),
-                );
-                context
-            },
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        assert_eq!(smart_requests.len(), 2);
-        assert_eq!(smart_requests[0].path, smart_motion.transport.path);
-        assert_eq!(
-            smart_requests[1].path,
-            smart_motion.follow_up_requests[0].transport.path
-        );
-        let smart_alarm_body = String::from_utf8_lossy(&smart_requests[1].body);
-        let smart_structure_body = String::from_utf8_lossy(&smart_requests[0].body);
-        assert!(smart_structure_body.contains("127.0.0.1:55025/Subscription/Subscribers/"));
-        assert!(!smart_structure_body.contains("206.2.18.166"));
-        assert!(smart_alarm_body.contains("SmartMotionDetectOn"));
-        assert!(!smart_alarm_body.contains("\"AlarmType\":\"motion\""));
-        let smart_recovery = runtime
-            .registry
-            .definitions()
-            .find(|definition| {
-                definition.profile_id == FirstReleaseProfileId::IpcSmart
-                    && definition.alarm_type_id.as_str() == "accesselevator"
-            })
-            .unwrap();
-        let smart_recovery_request = crate::device_simulator::alarms::build_recovery_request(
-            smart_recovery,
-            &build_context(
-                smart_device,
-                smart_recovery,
-                "124",
-                runtime.destinations.get("receiver").unwrap(),
-                runtime.device_http_port,
-            )
-            .unwrap(),
-            &runtime.image_cache.read(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            smart_recovery_request.path,
-            "/LAPI/V1.0/System/Event/Notification/Alarm"
-        );
-        let smart_recovery_body = String::from_utf8_lossy(&smart_recovery_request.body);
-        assert!(smart_recovery_body.contains("AccessElevatorAlarmCleared"));
-        assert!(!smart_recovery_body.contains("RelatedID"));
-        assert!(!smart_recovery_body.contains("RelatedObjects"));
-        let smart_falling = runtime
-            .registry
-            .definitions()
-            .find(|definition| {
-                definition.profile_id == FirstReleaseProfileId::IpcSmart
-                    && definition.alarm_type_id.as_str() == "falling"
-            })
-            .unwrap();
-        assert!(matches!(
-            &smart_falling.images[0].reference,
-            ImageAssetRef::Pack { path, .. } if path.ends_with("/1-2.jpg")
-        ));
-        let vehicle_match = runtime
-            .registry
-            .definitions()
-            .find(|definition| {
-                definition.profile_id == FirstReleaseProfileId::NvrVehicle
-                    && definition.alarm_type_id.as_str() == "match"
-            })
-            .unwrap();
-        assert_eq!(
-            vehicle_match.transport.path,
-            "/LAPI/V1.0/System/Event/Notification/VehicleEventInfo"
-        );
-        assert_eq!(vehicle_match.follow_up_requests.len(), 1);
-        assert_eq!(vehicle_match.images.len(), 2);
-        assert_ne!(
-            vehicle_match.images[0].reference,
-            vehicle_match.images[1].reference
-        );
-        assert!(vehicle_match
-            .evidence
-            .legacy_sources
-            .iter()
-            .any(|source| source.ends_with("MatchAlarm.json")));
-        let vehicle_device = runtime
-            .devices
-            .values()
-            .find(|device| device.profile_id == FirstReleaseProfileId::NvrVehicle)
-            .unwrap();
-        let vehicle_requests = crate::device_simulator::alarms::build_alarm_requests(
-            vehicle_match,
-            &{
-                let mut context = build_context(
-                    vehicle_device,
-                    vehicle_match,
-                    "456",
-                    runtime.destinations.get("receiver").unwrap(),
-                    runtime.device_http_port,
-                )
-                .unwrap();
-                context
-                    .fields
-                    .insert(DynamicField::Timestamp, "1710000000".into());
-                context.fields.insert(DynamicField::EventId, "456".into());
-                context.legacy_values = Some(
-                    crate::device_simulator::alarms::LegacyAlarmValues::new(0x8765_4321),
-                );
-                context
-            },
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        assert_eq!(vehicle_requests.len(), 2);
-        let vehicle_structure_body = String::from_utf8_lossy(&vehicle_requests[0].body);
-        assert!(vehicle_structure_body.contains(&format!(
-            "127.0.0.1:55025/{}/Subscription/Subscribers/",
-            vehicle_device.preview.hardware_id
-        )));
-        assert_eq!(
-            vehicle_requests
-                .iter()
-                .map(|request| request.path.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "/LAPI/V1.0/System/Event/Notification/VehicleEventInfo",
-                "/LAPI/V1.0/System/Event/Notification/Alarm",
-            ]
-        );
-        let vehicle_snap = runtime
-            .registry
-            .definitions()
-            .find(|definition| {
-                definition.profile_id == FirstReleaseProfileId::NvrVehicle
-                    && definition.alarm_type_id.as_str() == "snap"
-            })
-            .unwrap();
-        let snap_paths = vehicle_snap
-            .images
-            .iter()
-            .filter_map(|image| match &image.reference {
-                ImageAssetRef::Pack { path, .. } => Some(path.as_str()),
-                ImageAssetRef::UserAsset { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(snap_paths[0].ends_with("/1-1.jpg"));
-        assert!(snap_paths[1].ends_with("/1-3.jpg"));
-        assert!(vehicle_snap.images[0].url_reference.is_none());
-        assert!(matches!(
-            &vehicle_snap.images[1].url_reference,
-            Some(ImageAssetRef::Pack { path, .. }) if path.ends_with("/1-2.jpg")
-        ));
-        let mut snap_context = build_context(
-            vehicle_device,
-            vehicle_snap,
-            "457",
-            runtime.destinations.get("receiver").unwrap(),
-            runtime.device_http_port,
-        )
-        .unwrap();
-        snap_context.legacy_values = Some(crate::device_simulator::alarms::LegacyAlarmValues::new(
-            0x7654_3210,
-        ));
-        let snap_request = crate::device_simulator::alarms::build_alarm_request(
-            vehicle_snap,
-            &snap_context,
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        let snap_body: Value = serde_json::from_slice(&snap_request.body).unwrap();
-        let snap_reference_prefix = format!(
-            "{}:80/{}/Subscription/Subscribers/",
-            vehicle_device.preview.ip, vehicle_device.preview.hardware_id
-        );
-        assert!(snap_body["Reference"]
-            .as_str()
-            .is_some_and(|reference| reference.starts_with(&snap_reference_prefix)));
-        assert_eq!(
-            snap_body["StructureInfo"]["ImageInfoList"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
-        );
-        let custom_picture = runtime
-            .registry
-            .definitions()
-            .find(|definition| {
-                definition.profile_id == FirstReleaseProfileId::IpcCustom
-                    && !definition.images.is_empty()
-            })
-            .unwrap();
-        assert_eq!(custom_picture.images.len(), 1);
-        assert_eq!(
-            custom_picture.transport.path,
-            "/LAPI/V1.1/System/Event/Notification"
-        );
+        let legacy_values = crate::device_simulator::alarms::LegacyAlarmValues::new(0x0f0f_0f0f);
         let structured_device = runtime
             .devices
             .values()
@@ -2920,14 +2418,8 @@ mod tests {
                 definition.transport.path,
                 "/LAPI/V1.0/System/Event/Notification/Structure"
             );
-            let mut context = build_context(
-                structured_device,
-                definition,
-                "321",
-                runtime.destinations.get("receiver").unwrap(),
-                runtime.device_http_port,
-            )
-            .unwrap();
+            let mut context =
+                build_context(structured_device, "321", runtime.device_http_port).unwrap();
             context
                 .fields
                 .insert(DynamicField::Timestamp, "1710000000".into());
@@ -2978,283 +2470,6 @@ mod tests {
                 assert!(index.bytes().all(|byte| byte.is_ascii_hexdigit()));
             }
         }
-        let face_access_definitions = runtime
-            .registry
-            .definitions()
-            .filter(|definition| definition.profile_id == FirstReleaseProfileId::IpcFaceAccess)
-            .collect::<Vec<_>>();
-        assert_eq!(face_access_definitions.len(), 9);
-        assert!(!face_access_definitions
-            .iter()
-            .any(|definition| definition.alarm_type_id.as_str().contains("un-initial")));
-        let face_access_device = runtime
-            .devices
-            .values()
-            .find(|device| device.profile_id == FirstReleaseProfileId::IpcFaceAccess)
-            .unwrap();
-        let in_library = face_access_definitions
-            .iter()
-            .copied()
-            .find(|definition| definition.alarm_type_id.as_str() == "inlib")
-            .unwrap();
-        let stranger = face_access_definitions
-            .iter()
-            .copied()
-            .find(|definition| definition.alarm_type_id.as_str() == "notinlib")
-            .unwrap();
-        assert_eq!(in_library.images.len(), 2);
-        assert_eq!(stranger.images.len(), 1);
-        assert_eq!(
-            in_library.transport.path,
-            "/LAPI/V1.0/System/Event/Notification/PersonVerification"
-        );
-        for definition in [in_library, stranger] {
-            let mut context = build_context(
-                face_access_device,
-                definition,
-                "654",
-                runtime.destinations.get("receiver").unwrap(),
-                runtime.device_http_port,
-            )
-            .unwrap();
-            context
-                .fields
-                .insert(DynamicField::Timestamp, "1710000000".into());
-            context.fields.insert(DynamicField::EventId, "654".into());
-            context.legacy_values = Some(crate::device_simulator::alarms::LegacyAlarmValues::new(
-                0x6540_6540,
-            ));
-            let request = crate::device_simulator::alarms::build_alarm_request(
-                definition,
-                &context,
-                &runtime.image_cache.read(),
-            )
-            .unwrap();
-            let body: Value = serde_json::from_slice(&request.body).unwrap();
-            let expected_reference = format!(
-                "{}:{}/Subscription/Subscribers/1000",
-                face_access_device.preview.ip, 80
-            );
-            assert_eq!(
-                body["Reference"].as_str(),
-                Some(expected_reference.as_str())
-            );
-            assert!(!body["FaceInfoList"][0]["FaceImage"]["Data"]
-                .as_str()
-                .unwrap()
-                .is_empty());
-        }
-        let in_library_request = crate::device_simulator::alarms::build_alarm_request(
-            in_library,
-            &{
-                let mut context = build_context(
-                    face_access_device,
-                    in_library,
-                    "654",
-                    runtime.destinations.get("receiver").unwrap(),
-                    runtime.device_http_port,
-                )
-                .unwrap();
-                context.legacy_values = Some(
-                    crate::device_simulator::alarms::LegacyAlarmValues::new(0x1234_5678),
-                );
-                context
-            },
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        let in_library_body: Value = serde_json::from_slice(&in_library_request.body).unwrap();
-        assert_eq!(
-            in_library_body["LibMatInfoList"][0]["MatchPersonID"].as_i64(),
-            Some(1)
-        );
-        assert!(!in_library_body["FaceInfoList"][0]["PanoImage"]["Data"]
-            .as_str()
-            .unwrap()
-            .is_empty());
-        let stranger_request = crate::device_simulator::alarms::build_alarm_request(
-            stranger,
-            &build_context(
-                face_access_device,
-                stranger,
-                "655",
-                runtime.destinations.get("receiver").unwrap(),
-                runtime.device_http_port,
-            )
-            .unwrap(),
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        let stranger_body: Value = serde_json::from_slice(&stranger_request.body).unwrap();
-        assert_eq!(
-            stranger_body["FaceInfoList"][0]["PanoImage"]["Size"].as_u64(),
-            Some(0)
-        );
-        assert_eq!(
-            stranger_body["FaceInfoList"][0]["PanoImage"]["Data"].as_str(),
-            Some("")
-        );
-        let pick_alarm = face_access_definitions
-            .iter()
-            .copied()
-            .find(|definition| definition.alarm_type_id.as_str().contains("pick-alarm"))
-            .unwrap();
-        assert_eq!(
-            pick_alarm.transport.path,
-            "/LAPI/V1.0/System/Event/Notification/Alarm"
-        );
-        assert!(matches!(
-            &pick_alarm.recovery,
-            RecoveryDefinition::RenderWith { .. }
-        ));
-        let common_device = runtime
-            .devices
-            .values()
-            .find(|device| device.profile_id == FirstReleaseProfileId::NvrCommon)
-            .unwrap();
-        let common_definitions = runtime
-            .registry
-            .definitions()
-            .filter(|definition| definition.profile_id == FirstReleaseProfileId::NvrCommon)
-            .collect::<Vec<_>>();
-        assert_eq!(common_definitions.len(), 25);
-        assert_eq!(
-            common_definitions
-                .iter()
-                .filter(|definition| { !matches!(definition.recovery, RecoveryDefinition::None) })
-                .count(),
-            8
-        );
-        let channel_deleted = common_definitions
-            .iter()
-            .copied()
-            .find(|definition| definition.alarm_type_id.as_str() == "channel-deleted")
-            .unwrap();
-        let channel_deleted_request = crate::device_simulator::alarms::build_alarm_request(
-            channel_deleted,
-            &build_context(
-                common_device,
-                channel_deleted,
-                "788",
-                runtime.destinations.get("receiver").unwrap(),
-                runtime.device_http_port,
-            )
-            .unwrap(),
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        let channel_deleted_body: Value =
-            serde_json::from_slice(&channel_deleted_request.body).unwrap();
-        assert_eq!(channel_deleted_body["Type"].as_u64(), Some(3));
-        assert_eq!(channel_deleted_body["ChannelNum"].as_u64(), Some(1));
-        assert!(channel_deleted_body.get("Reference").is_none());
-        for (alarm_type_id, expected_source_type) in [
-            ("motion-alarm-on", 8),
-            ("input-alarm-on", 9),
-            ("disk-abnormal", 0),
-        ] {
-            let definition = runtime
-                .registry
-                .definitions()
-                .find(|definition| {
-                    definition.profile_id == FirstReleaseProfileId::NvrCommon
-                        && definition.alarm_type_id.as_str() == alarm_type_id
-                })
-                .unwrap();
-            let request = crate::device_simulator::alarms::build_alarm_request(
-                definition,
-                &build_context(
-                    common_device,
-                    definition,
-                    "789",
-                    runtime.destinations.get("receiver").unwrap(),
-                    runtime.device_http_port,
-                )
-                .unwrap(),
-                &runtime.image_cache.read(),
-            )
-            .unwrap();
-            let body: Value = serde_json::from_slice(&request.body).unwrap();
-            assert_eq!(
-                body["AlarmInfo"]["AlarmSrcType"].as_i64(),
-                Some(expected_source_type)
-            );
-        }
-        let mut ums_custom_registry = AlarmHandlerRegistry::default();
-        register_profile_definitions(
-            &mut ums_custom_registry,
-            &runtime.assets,
-            FirstReleaseProfileId::IpcCustom,
-            TargetPlatform::Ums,
-        )
-        .unwrap();
-        let ums_custom_picture = ums_custom_registry
-            .definitions()
-            .find(|definition| !definition.images.is_empty())
-            .unwrap();
-        assert_eq!(ums_custom_picture.images.len(), 1);
-        assert_eq!(
-            ums_custom_picture.transport.path,
-            "/LAPI/V1.1/System/Event/Notification"
-        );
-        let mut pictured = runtime
-            .registry
-            .definitions()
-            .find(|definition| !definition.images.is_empty())
-            .cloned()
-            .unwrap();
-        apply_image_variant(&mut pictured, Some("small"), &runtime.assets).unwrap();
-        let selected = &pictured.images[0].reference;
-        assert!(matches!(
-            selected,
-            ImageAssetRef::Pack { path, .. } if path.contains("/small/")
-        ));
-        runtime.image_cache.read().get(selected).unwrap();
-
-        let legacy_values = crate::device_simulator::alarms::LegacyAlarmValues::new(0x1234_5678);
-        let mut vehicle_context = build_context(
-            vehicle_device,
-            vehicle_match,
-            "456",
-            runtime.destinations.get("receiver").unwrap(),
-            runtime.device_http_port,
-        )
-        .unwrap();
-        vehicle_context
-            .fields
-            .insert(DynamicField::EventId, "9001".into());
-        vehicle_context
-            .fields
-            .insert(DynamicField::RelatedId, legacy_values.related_id());
-        vehicle_context.legacy_values = Some(legacy_values.clone());
-        let vehicle_requests = crate::device_simulator::alarms::build_alarm_requests(
-            vehicle_match,
-            &vehicle_context,
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        let vehicle_event: Value = serde_json::from_slice(&vehicle_requests[0].body).unwrap();
-        let vehicle_alarm: Value = serde_json::from_slice(&vehicle_requests[1].body).unwrap();
-        assert_eq!(vehicle_event["VehicleEventInfo"]["ID"].as_u64(), Some(9001));
-        assert_eq!(
-            vehicle_event["VehicleEventInfo"]["VehicleInfoList"][0]["RecordID"].as_u64(),
-            Some(9001)
-        );
-        assert!(
-            vehicle_event["VehicleEventInfo"]["VehicleInfoList"][0]["PlateAttr"]["Plate"]
-                .as_str()
-                .unwrap()
-                .starts_with("赣B")
-        );
-        assert_eq!(
-            vehicle_event["VehicleEventInfo"]["VehicleInfoList"][0]["RelatedID"],
-            vehicle_alarm["AlarmInfo"]["RelatedID"]
-        );
-        assert_ne!(
-            vehicle_event["Reference"].as_str(),
-            vehicle_alarm["Reference"].as_str()
-        );
-
         let structured_car = runtime
             .registry
             .definitions()
@@ -3263,14 +2478,8 @@ mod tests {
                     && definition.alarm_type_id.as_str() == "car"
             })
             .unwrap();
-        let mut structured_context = build_context(
-            structured_device,
-            structured_car,
-            "457",
-            runtime.destinations.get("receiver").unwrap(),
-            runtime.device_http_port,
-        )
-        .unwrap();
+        let mut structured_context =
+            build_context(structured_device, "457", runtime.device_http_port).unwrap();
         structured_context.legacy_values = Some(legacy_values.clone());
         let structured_request = crate::device_simulator::alarms::build_alarm_request(
             structured_car,
@@ -3286,96 +2495,6 @@ mod tests {
         assert!(vehicle_attributes["PlateAttributeInfo"]["PlateNo"]
             .as_str()
             .is_some_and(|value| value.starts_with("UV") && value.len() == 5));
-
-        let mut face_context = build_context(
-            face_access_device,
-            in_library,
-            "458",
-            runtime.destinations.get("receiver").unwrap(),
-            runtime.device_http_port,
-        )
-        .unwrap();
-        face_context
-            .fields
-            .insert(DynamicField::Timestamp, "1710000000".into());
-        face_context.legacy_values = Some(legacy_values.clone());
-        let face_request = crate::device_simulator::alarms::build_alarm_request(
-            in_library,
-            &face_context,
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        let face_body: Value = serde_json::from_slice(&face_request.body).unwrap();
-        assert!(face_body["FaceInfoList"][0]["Temperature"]
-            .as_str()
-            .and_then(|value| value.parse::<f32>().ok())
-            .is_some_and(|value| (30.0..=45.0).contains(&value)));
-        assert!(face_body["FaceInfoList"][0]["MaskFlag"]
-            .as_u64()
-            .is_some_and(|value| value <= 2));
-        assert!(face_body["FaceInfoList"][0]["PanoImage"]["Name"]
-            .as_str()
-            .unwrap()
-            .starts_with("1710000000_1_"));
-
-        let smart_dog = runtime
-            .registry
-            .definitions()
-            .find(|definition| {
-                definition.profile_id == FirstReleaseProfileId::IpcSmart
-                    && definition.alarm_type_id.as_str() == "dog-detection"
-            })
-            .unwrap();
-        let mut dog_context = build_context(
-            smart_device,
-            smart_dog,
-            "459",
-            runtime.destinations.get("receiver").unwrap(),
-            runtime.device_http_port,
-        )
-        .unwrap();
-        dog_context.legacy_values = Some(legacy_values.clone());
-        let dog_request = crate::device_simulator::alarms::build_alarm_request(
-            smart_dog,
-            &dog_context,
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        let dog_body = String::from_utf8_lossy(&dog_request.body);
-        assert!(dog_body.contains("\"UnLeashed\":1"));
-        assert!(dog_body.contains(&format!(
-            "{}:80/Subscription/Subscribers/",
-            smart_device.preview.ip
-        )));
-
-        let custom_device = runtime
-            .devices
-            .values()
-            .find(|device| device.profile_id == FirstReleaseProfileId::IpcCustom)
-            .unwrap();
-        let mut custom_context = build_context(
-            custom_device,
-            ums_custom_picture,
-            "460",
-            runtime.destinations.get("receiver").unwrap(),
-            runtime.device_http_port,
-        )
-        .unwrap();
-        custom_context.legacy_values = Some(legacy_values);
-        let custom_request = crate::device_simulator::alarms::build_alarm_request(
-            ums_custom_picture,
-            &custom_context,
-            &runtime.image_cache.read(),
-        )
-        .unwrap();
-        let custom_body = String::from_utf8_lossy(&custom_request.body);
-        assert!(
-            custom_body.contains("form-data;imageindex=1;name=\"image\";filename=\"picture.jpg\"")
-        );
-        assert!(custom_body.contains(&format!(
-            "{}:81/Subscription/Subscribers/",
-            custom_device.preview.ip
-        )));
 
         use sha2::{Digest, Sha256};
         let user_root = app_data

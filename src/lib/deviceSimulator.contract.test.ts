@@ -21,9 +21,8 @@ export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
   last_alarm_receiver_port: 55025,
   last_device_groups: [{
     id: 'group-1',
-    profile_id: 'ipc-custom',
+    profile_id: 'ipc-structured',
     count: 10,
-    nvr_channel_count: null,
   }],
   last_http_port: 81,
   last_rtsp_ports: { main: 554, sub: 555, third: 556 },
@@ -31,6 +30,10 @@ export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
   last_time_watermark_enabled: true,
   auto_check_asset_updates: true,
   manage_firewall: true,
+  platform_username: 'loadmin',
+  platform_password: 'admin_123',
+  platform_auto_add_devices: true,
+  platform_replace_existing_devices: false,
 };
 
 export const simulatorStartRequestContract: SimulatorStartRequest = {
@@ -50,9 +53,8 @@ export const simulatorStartRequestContract: SimulatorStartRequest = {
   media_theme_id: 'classic',
   groups: [{
     id: 'group-1',
-    profile_id: 'ipc-custom',
+    profile_id: 'ipc-structured',
     count: 10,
-    nvr_channel_count: null,
   }],
   stream: {
     transport: 'tcp_interleaved',
@@ -64,8 +66,8 @@ export const simulatorStartRequestContract: SimulatorStartRequest = {
 
 export const alarmJobRequestContract: AlarmJobRequest = {
   target_device_ids: ['device-1'],
-  alarm_profile_id: 'ipc-custom',
-  alarm_type_ids: ['custom-alarm'],
+  alarm_profile_id: 'ipc-structured',
+  alarm_type_ids: ['car'],
   mode: 'configured',
   interval_ms: 1000,
   send_count: null,

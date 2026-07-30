@@ -169,6 +169,11 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../pages/ScreenShareOverlayPage.vue'),
     meta: { noLayout: true },
   },
+  {
+    path: '/screen-share-annotation-bar',
+    component: () => import('../pages/ScreenShareAnnotationBarPage.vue'),
+    meta: { noLayout: true },
+  },
 ]
 
 const router = createRouter({

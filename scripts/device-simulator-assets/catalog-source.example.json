@@ -4,7 +4,7 @@
   "engine_api": 1,
   "packs": [
     {
-      "id": "ipc-custom",
+      "id": "ipc-structured",
       "version": "1.0.0",
       "kind": "device-profile",
       "dependencies": [],
@@ -13,10 +13,10 @@
   ],
   "profiles": [
     {
-      "id": "ipc-custom",
+      "id": "ipc-structured",
       "device_kind": "ipc",
       "required_packs": [
-        "ipc-custom@1.0.0"
+        "ipc-structured@1.0.0"
       ]
     }
   ]

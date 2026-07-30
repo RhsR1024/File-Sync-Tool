@@ -94,7 +94,7 @@ const latestVersion = computed(() => updaterState.value?.manifest?.latest ?? nul
 </script>
 
 <template>
-  <div class="flex h-screen w-72 flex-col border-r border-slate-800 bg-[#0b1220] text-white shadow-[14px_0_40px_rgba(2,6,23,0.34)] z-10 xl:w-80">
+  <div class="z-10 flex h-full w-72 flex-col border-r border-slate-800 bg-[#0b1220] text-white shadow-[14px_0_40px_rgba(2,6,23,0.34)] xl:w-80">
     <div class="border-b border-slate-800/90 bg-slate-950/40 px-5 py-5">
       <h1 class="flex items-center gap-3 text-lg font-bold tracking-tight">
         <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-cyan-500 shadow-lg shadow-blue-500/20">

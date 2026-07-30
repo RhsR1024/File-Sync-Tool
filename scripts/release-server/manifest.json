@@ -3,9 +3,9 @@
   "versions": [
     {
       "version": "1.2.0",
-      "url": "file-sync-tool-1.2.0-202607291400.exe",
-      "sha256": "78d8200af3827b3bd2216d6188660c2e99425c9472be79a2526aa1f37043e5ba",
-      "released_at": "2026-07-29",
+      "url": "file-sync-tool-1.2.0-202607301806.exe",
+      "sha256": "b8f89ca3ea1c5bc6d52d3fb998567593ecb43d59e8c3b5c1153fda4bad06bed3",
+      "released_at": "2026-07-30",
       "changelog": [
         "新增视频设备模拟器首版本地基础设施与完整页面，覆盖签名素材链、Worker/恢复、Windows 原生资源后端、HTTP/RTSP/RTP/告警通用引擎，并对未发布素材和未验证平台组合保持 fail-closed。",
         "剪贴板工具增强图片写入、资源管理器操作、来源识别、分组去重、快捷键和设置能力，改善面板与管理页交互。",

@@ -992,7 +992,10 @@ mod tests {
     #[test]
     fn profile_route_overrides_common_route_and_listener_ip_is_enforced() {
         let mut common = route("common.device_info", vec![]);
-        let mut profile = route("smart.device_info", vec![FirstReleaseProfileId::IpcSmart]);
+        let mut profile = route(
+            "structured.device_info",
+            vec![FirstReleaseProfileId::IpcStructured],
+        );
         profile.target = RouteTarget::StrongHandler(StrongHandlerId::SmartCapabilities);
         profile.response_content_type = "application/json; charset=utf-8".into();
         // Same matcher is intentional at different specificity.
@@ -1000,7 +1003,7 @@ mod tests {
         profile.matcher.body_contains = None;
         let router = CompiledHttpRouter::compile(
             "192.0.2.2".parse().unwrap(),
-            FirstReleaseProfileId::IpcSmart,
+            FirstReleaseProfileId::IpcStructured,
             TargetPlatform::Ums,
             vec![common, profile],
             BTreeMap::from([("common.device_info".into(), template())]),
@@ -1014,7 +1017,7 @@ mod tests {
                 .resolve("192.0.2.2".parse().unwrap(), &parsed)
                 .unwrap(),
             RouteResolution::StrongHandler {
-                route_id: "smart.device_info",
+                route_id: "structured.device_info",
                 handler: StrongHandlerId::SmartCapabilities,
             }
         );
@@ -1032,7 +1035,7 @@ mod tests {
         let spec = route("common.device_info", vec![]);
         let router = CompiledHttpRouter::compile(
             "192.0.2.2".parse().unwrap(),
-            FirstReleaseProfileId::IpcCustom,
+            FirstReleaseProfileId::IpcStructured,
             TargetPlatform::Ums,
             vec![spec],
             BTreeMap::from([("common.device_info".into(), template())]),
@@ -1071,7 +1074,7 @@ mod tests {
         assert_eq!(
             CompiledHttpRouter::compile(
                 "192.0.2.2".parse().unwrap(),
-                FirstReleaseProfileId::IpcSmart,
+                FirstReleaseProfileId::IpcStructured,
                 TargetPlatform::Ums,
                 vec![route("common.device_info", vec![])],
                 BTreeMap::new(),
@@ -1084,7 +1087,7 @@ mod tests {
         assert_eq!(
             CompiledHttpRouter::compile(
                 "192.0.2.2".parse().unwrap(),
-                FirstReleaseProfileId::IpcSmart,
+                FirstReleaseProfileId::IpcStructured,
                 TargetPlatform::Ums,
                 routes,
                 BTreeMap::from([("common.device_info".into(), template())]),

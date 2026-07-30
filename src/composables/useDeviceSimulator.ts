@@ -15,7 +15,6 @@ import {
   type AssetProgress,
   type AssetStatus,
   type CleanupProgress,
-  type DeviceGroupDraft,
   type DevicePreview,
   type DeviceProfileSummary,
   type DeviceSimulatorSettings,
@@ -23,6 +22,7 @@ import {
   type ImportedAlarmImage,
   type MediaThemeSummary,
   type PreflightReport,
+  type PlatformAddDevicesReport,
   type RtspStats,
   type SimulatorLogEvent,
   type SimulatorNetworkInterfaceInfo,
@@ -30,6 +30,9 @@ import {
   type SimulatorStatus,
 } from '@/lib/deviceSimulator';
 import { recommendSimulatorInterface } from '@/lib/deviceSimulatorInterfaceSelection';
+
+/** The only simulated device type; the other five profiles were removed. */
+export const STRUCTURED_PROFILE_ID = 'ipc-structured';
 
 function newId(prefix: string) {
   const suffix = typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -69,9 +72,8 @@ const defaultSettings = (): DeviceSimulatorSettings => ({
   last_alarm_receiver_port: 22_815,
   last_device_groups: [{
     id: newId('group'),
-    profile_id: 'ipc-custom',
+    profile_id: STRUCTURED_PROFILE_ID,
     count: 1,
-    nvr_channel_count: null,
   }],
   last_http_port: 81,
   last_rtsp_ports: { main: 554, sub: 555, third: 556 },
@@ -79,6 +81,10 @@ const defaultSettings = (): DeviceSimulatorSettings => ({
   last_time_watermark_enabled: true,
   auto_check_asset_updates: true,
   manage_firewall: true,
+  platform_username: 'loadmin',
+  platform_password: 'admin_123',
+  platform_auto_add_devices: true,
+  platform_replace_existing_devices: false,
 });
 
 function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartRequest {
@@ -137,6 +143,9 @@ function createDeviceSimulator() {
   const cleanupProgress = ref<CleanupProgress | null>(null);
   const lastAlarmResult = ref<AlarmTriggerResult | null>(null);
   const importedAlarmImage = ref<ImportedAlarmImage | null>(null);
+  const platformAddReport = ref<PlatformAddDevicesReport | null>(null);
+  const platformReplacePromptOpen = ref(false);
+  const platformReplaceRetryError = ref('');
   const logs = ref<SimulatorLogEvent[]>([]);
   const busyAction = ref<string | null>(null);
   const errorMessage = ref('');
@@ -534,7 +543,7 @@ function createDeviceSimulator() {
       request.device_ips.join('|'),
       request.subnet_prefix,
       request.device_http_port,
-      request.groups.map((group) => `${group.id}:${group.profile_id}:${group.count}:${group.nvr_channel_count}`).join('|'),
+      request.groups.map((group) => `${group.id}:${group.profile_id}:${group.count}`).join('|'),
     ],
     () => {
       if (!initialized.value || topologyLocked.value) return;
@@ -572,6 +581,9 @@ function createDeviceSimulator() {
   }
 
   async function start() {
+    platformAddReport.value = null;
+    platformReplacePromptOpen.value = false;
+    platformReplaceRetryError.value = '';
     const result = await run('start', async () => {
       const report = await deviceSimulatorApi.preflight(request);
       preflight.value = report;
@@ -581,7 +593,53 @@ function createDeviceSimulator() {
       settings.value = saved;
       return deviceSimulatorApi.start(request);
     });
-    if (result) applyStatus(result);
+    if (!result) return;
+    applyStatus(result);
+    if (settings.value.platform_auto_add_devices) {
+      const replaceExisting = settings.value.platform_replace_existing_devices;
+      const report = await addDevicesToPlatform(replaceExisting);
+      if (!replaceExisting && report?.servers.some((server) => (
+        !server.success && server.failedAt === 'add'
+      ))) {
+        platformReplacePromptOpen.value = true;
+      }
+    }
+  }
+
+  async function addDevicesToPlatform(
+    replaceExisting = settings.value.platform_replace_existing_devices,
+  ): Promise<PlatformAddDevicesReport | null> {
+    const devices = (preview.value?.devices ?? []).map((device) => ({
+      address: device.ip,
+      port: request.device_http_port,
+    }));
+    if (devices.length === 0) return null;
+    const report = await run('add-to-platform', () => (
+      deviceSimulatorApi.addDevicesToPlatform(devices, replaceExisting)
+    ));
+    if (report) platformAddReport.value = report;
+    return report;
+  }
+
+  function cancelPlatformReplaceRetry() {
+    if (busyAction.value !== null) return;
+    platformReplacePromptOpen.value = false;
+    platformReplaceRetryError.value = '';
+  }
+
+  async function confirmPlatformReplaceRetry() {
+    platformReplaceRetryError.value = '';
+    const report = await addDevicesToPlatform(true);
+    if (report && report.addedDevices === report.totalDevices) {
+      platformReplacePromptOpen.value = false;
+      return;
+    }
+    const details = report?.servers
+      .filter((server) => !server.success)
+      .map((server) => `${server.host}:${server.port} ${server.message ?? ''}`.trim())
+      .filter(Boolean)
+      .join('\n');
+    platformReplaceRetryError.value = details || errorMessage.value;
   }
 
   async function stop() {
@@ -589,6 +647,9 @@ function createDeviceSimulator() {
     if (stopped === null) return;
     activeAlarmJobId.value = null;
     alarmSubscription.value = null;
+    platformAddReport.value = null;
+    platformReplacePromptOpen.value = false;
+    platformReplaceRetryError.value = '';
     lastLoggedAlarmError = '';
     const next = await run('status', () => deviceSimulatorApi.getStatus());
     if (next) applyStatus(next);
@@ -666,24 +727,18 @@ function createDeviceSimulator() {
     }
   }
 
-  function addGroup(profileId = 'ipc-custom') {
+  function addGroup(profileId = STRUCTURED_PROFILE_ID) {
     if (topologyLocked.value) return;
     request.groups.push({
       id: newId('group'),
       profile_id: profileId,
       count: 1,
-      nvr_channel_count: profileId.startsWith('nvr-') ? 8 : null,
     });
   }
 
   function removeGroup(groupId: string) {
     if (topologyLocked.value || request.groups.length <= 1) return;
     request.groups = request.groups.filter((group) => group.id !== groupId);
-  }
-
-  function updateGroupProfile(group: DeviceGroupDraft, profileId: string) {
-    group.profile_id = profileId;
-    group.nvr_channel_count = profileId.startsWith('nvr-') ? (group.nvr_channel_count ?? 8) : null;
   }
 
   return {
@@ -707,6 +762,9 @@ function createDeviceSimulator() {
     cleanupProgress,
     lastAlarmResult,
     importedAlarmImage,
+    platformAddReport,
+    platformReplacePromptOpen,
+    platformReplaceRetryError,
     logs,
     busyAction,
     errorMessage,
@@ -729,6 +787,9 @@ function createDeviceSimulator() {
     refreshPreview,
     runPreflight,
     start,
+    addDevicesToPlatform,
+    cancelPlatformReplaceRetry,
+    confirmPlatformReplaceRetry,
     stop,
     recover,
     importAlarmImage,
@@ -738,7 +799,6 @@ function createDeviceSimulator() {
     stopAlarm,
     addGroup,
     removeGroup,
-    updateGroupProfile,
     selectInterfaceManually,
     applyAutomaticInterfaceSelection,
   };

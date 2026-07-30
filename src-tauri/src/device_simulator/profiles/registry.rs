@@ -86,7 +86,6 @@ fn error(code: &'static str, message: impl Into<String>) -> ProfileSchemaError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device_simulator::assets::catalog::DeviceKind;
     use crate::device_simulator::profiles::schema::ProfileIdentityFacts;
     use crate::device_simulator::profiles::schema::{
         EvidenceStatus, EvidenceTopic, ProfileEvidence, ProfileHandlerBindings,
@@ -104,16 +103,12 @@ mod tests {
                 model: "MODEL-STATIC-REVIEW".into(),
                 firmware_version: "VERSION-STATIC-REVIEW".into(),
                 nickname: "STATIC".into(),
-                device_type_enum: matches!(id.device_kind(), DeviceKind::Nvr) as u16,
+                device_type_enum: 0,
             },
             supported_platforms: vec![TargetPlatform::Ums],
             handlers: ProfileHandlerBindings {
                 identity: "legacy.identity.v1".into(),
-                discovery: match id.device_kind() {
-                    DeviceKind::Ipc => "ws_discovery.ipc.v1",
-                    DeviceKind::Nvr => "ws_discovery.nvr.v1",
-                }
-                .into(),
+                discovery: "ws_discovery.ipc.v1".into(),
                 http: "http.profile.v1".into(),
                 rtsp: "rtsp.tcp_interleaved.v1".into(),
                 alarms: vec![format!("alarm.{}.v1", id.as_str().replace('-', "_"))],
@@ -142,25 +137,27 @@ mod tests {
         let profiles = FIRST_RELEASE_PROFILES.map(profile).into_iter().collect();
         let registry = ProfileRegistry::from_profiles(profiles).unwrap();
         registry.validate_first_release_coverage().unwrap();
-        assert_eq!(registry.list().count(), 6);
-        assert!(registry.get("ipc-smart").is_some());
+        assert_eq!(registry.list().count(), 1);
+        assert!(registry.get("ipc-structured").is_some());
     }
 
     #[test]
     fn registry_rejects_duplicates_missing_and_metadata_drift() {
         let duplicate = vec![
-            profile(FirstReleaseProfileId::IpcSmart),
-            profile(FirstReleaseProfileId::IpcSmart),
+            profile(FirstReleaseProfileId::IpcStructured),
+            profile(FirstReleaseProfileId::IpcStructured),
         ];
         assert_eq!(
             ProfileRegistry::from_profiles(duplicate).unwrap_err().code,
             "device_simulator.validation.profile_duplicate"
         );
 
-        let registry =
-            ProfileRegistry::from_profiles(vec![profile(FirstReleaseProfileId::IpcSmart)]).unwrap();
         assert_eq!(
-            registry.validate_first_release_coverage().unwrap_err().code,
+            ProfileRegistry::from_profiles(vec![])
+                .unwrap()
+                .validate_first_release_coverage()
+                .unwrap_err()
+                .code,
             "device_simulator.validation.profile_scope_incomplete"
         );
 

@@ -45,13 +45,16 @@ impl Default for RtspPorts {
     }
 }
 
+/// Unlike its sibling request types this one does not set `deny_unknown_fields`.
+/// Configs saved before the NVR profiles were removed still carry an
+/// `nvr_channel_count` key, and `load_config` discards the entire config file on
+/// any parse error -- rejecting the key would silently reset every unrelated
+/// setting. The group is fully validated after deserialization instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DeviceGroupDraft {
     pub id: String,
     pub profile_id: String,
     pub count: u32,
-    pub nvr_channel_count: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,7 +255,6 @@ pub struct DeviceIdentityPreviewDto {
     pub mac: String,
     pub serial_number: String,
     pub hardware_id: String,
-    pub channel_count: Option<u16>,
     pub streams: Vec<DeviceStreamAddress>,
 }
 
@@ -634,21 +636,14 @@ pub fn preview_devices(
                 device_count: 1,
                 deterministic_seed: deterministic_seed(request, group),
                 http_port: request.device_http_port,
-                nvr_channel_count: group.nvr_channel_count,
             };
             let identity = generate_device_previews(&identity_plan, &occupied)
                 .map_err(|source| validation_error(source.code, source.message))?
                 .remove(0);
             occupied.insert(identity.ip);
             let device_id = format!("{}-{:04}", group.id, group_index + 1);
-            let channel_count = identity.nvr_channel_count;
-            total_channels = total_channels.saturating_add(u32::from(channel_count.unwrap_or(1)));
-            let streams = stream_addresses(
-                &device_id,
-                profile_id.device_kind(),
-                identity.ip,
-                request.rtsp_ports,
-            );
+            total_channels = total_channels.saturating_add(1);
+            let streams = stream_addresses(&device_id, identity.ip, request.rtsp_ports);
             devices.push(DeviceIdentityPreviewDto {
                 device_id,
                 group_id: group.id.clone(),
@@ -658,7 +653,6 @@ pub fn preview_devices(
                 mac: identity.mac_compact,
                 serial_number: identity.serial_number,
                 hardware_id: identity.hardware_id,
-                channel_count,
                 streams,
             });
         }
@@ -779,26 +773,7 @@ fn validate_start_request(request: &SimulatorStartRequest) -> Result<(), Simulat
                 format!("device group '{}' is invalid or duplicated", group.id),
             ));
         }
-        let profile = parse_profile_id(&group.profile_id)?;
-        match (profile.device_kind(), group.nvr_channel_count) {
-            (DeviceKind::Ipc, None) => {}
-            (DeviceKind::Nvr, Some(channels)) => {
-                crate::device_simulator::profiles::scope::validate_nvr_channel_count(channels)
-                    .map_err(|code| validation_error(code, "invalid NVR channel count"))?;
-            }
-            (DeviceKind::Ipc, Some(_)) => {
-                return Err(validation_error(
-                    "device_simulator.validation.ipc_channel_count_invalid",
-                    "IPC group must not declare an NVR channel count",
-                ));
-            }
-            (DeviceKind::Nvr, None) => {
-                return Err(validation_error(
-                    "device_simulator.validation.nvr_channel_count_missing",
-                    "NVR group requires a channel count",
-                ));
-            }
-        }
+        parse_profile_id(&group.profile_id)?;
     }
     Ok(())
 }
@@ -824,12 +799,7 @@ fn validate_ports(http: u16, rtsp: RtspPorts) -> Result<(), SimulatorErrorBody> 
 
 fn parse_profile_id(value: &str) -> Result<FirstReleaseProfileId, SimulatorErrorBody> {
     match value {
-        "ipc-custom" => Ok(FirstReleaseProfileId::IpcCustom),
-        "ipc-smart" => Ok(FirstReleaseProfileId::IpcSmart),
         "ipc-structured" => Ok(FirstReleaseProfileId::IpcStructured),
-        "ipc-face-access" => Ok(FirstReleaseProfileId::IpcFaceAccess),
-        "nvr-common" => Ok(FirstReleaseProfileId::NvrCommon),
-        "nvr-vehicle" => Ok(FirstReleaseProfileId::NvrVehicle),
         _ => Err(validation_error(
             "device_simulator.validation.profile_unknown",
             format!("unknown first-release profile '{value}'"),
@@ -848,34 +818,18 @@ fn deterministic_seed(request: &SimulatorStartRequest, group: &DeviceGroupDraft)
     hasher.finalize().into()
 }
 
-fn stream_addresses(
-    device_id: &str,
-    kind: DeviceKind,
-    ip: Ipv4Addr,
-    ports: RtspPorts,
-) -> Vec<DeviceStreamAddress> {
+fn stream_addresses(device_id: &str, ip: Ipv4Addr, ports: RtspPorts) -> Vec<DeviceStreamAddress> {
     [
         (DeviceSimulatorStreamKind::Main, ports.main, 1_u8),
         (DeviceSimulatorStreamKind::Sub, ports.sub, 2),
         (DeviceSimulatorStreamKind::Third, ports.third, 3),
     ]
     .into_iter()
-    .map(|(stream, port, number)| {
-        let (channel_id, url) = match kind {
-            DeviceKind::Ipc => (None, format!("rtsp://{ip}:{port}/media/video{number}")),
-            // Legacy parity: NVR channel metadata is configurable, while the
-            // old runtime only advertises c1 for its three actual RTSP streams.
-            DeviceKind::Nvr => (
-                Some("1".to_owned()),
-                format!("rtsp://{ip}:{port}/unicast/c1/s{}/live", number - 1),
-            ),
-        };
-        DeviceStreamAddress {
-            device_id: device_id.to_owned(),
-            channel_id,
-            stream,
-            url,
-        }
+    .map(|(stream, port, number)| DeviceStreamAddress {
+        device_id: device_id.to_owned(),
+        channel_id: None,
+        stream,
+        url: format!("rtsp://{ip}:{port}/media/video{number}"),
     })
     .collect()
 }
@@ -916,20 +870,11 @@ mod tests {
             rtsp_ports: RtspPorts::default(),
             _legacy_allow_local_player_access: true,
             media_theme_id: DEFAULT_MEDIA_THEME_ID.into(),
-            groups: vec![
-                DeviceGroupDraft {
-                    id: "smart".into(),
-                    profile_id: "ipc-smart".into(),
-                    count: 2,
-                    nvr_channel_count: None,
-                },
-                DeviceGroupDraft {
-                    id: "nvr".into(),
-                    profile_id: "nvr-common".into(),
-                    count: 1,
-                    nvr_channel_count: Some(8),
-                },
-            ],
+            groups: vec![DeviceGroupDraft {
+                id: "structured".into(),
+                profile_id: "ipc-structured".into(),
+                count: 3,
+            }],
             stream: StreamRuntimeConfig {
                 transport: StreamTransport::TcpInterleaved,
                 enabled_streams: vec![
@@ -982,17 +927,18 @@ mod tests {
     }
 
     #[test]
-    fn preview_is_deterministic_crosses_octet_boundary_and_keeps_nvr_url_evidence_boundary() {
+    fn preview_is_deterministic_and_crosses_octet_boundary() {
         let request = start_request();
         let first = preview_devices(&request).unwrap();
         assert_eq!(first, preview_devices(&request).unwrap());
         assert_eq!(first.total_devices, 3);
-        assert_eq!(first.total_channels, 10);
+        // One channel per structured camera.
+        assert_eq!(first.total_channels, 3);
         assert_eq!(first.devices[1].ip.to_string(), "10.20.0.255");
         assert_eq!(first.devices[2].ip.to_string(), "10.20.1.0");
         assert_eq!(
             first.devices[2].streams[0].url,
-            "rtsp://10.20.1.0:554/unicast/c1/s0/live"
+            "rtsp://10.20.1.0:554/media/video1"
         );
     }
 
@@ -1084,8 +1030,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             request.device_ips
         );
-        assert_eq!(preview.devices[0].device_id, "smart-0001");
-        assert_eq!(preview.devices[2].device_id, "nvr-0001");
+        assert_eq!(preview.devices[0].device_id, "structured-0001");
+        assert_eq!(preview.devices[2].device_id, "structured-0003");
 
         request.device_ips.pop();
         assert_eq!(
@@ -1112,7 +1058,7 @@ mod tests {
     #[test]
     fn first_release_profiles_never_claim_platform_verification_or_local_assets() {
         let profiles = list_first_release_profiles();
-        assert_eq!(profiles.len(), 6);
+        assert_eq!(profiles.len(), 1);
         assert!(profiles.iter().all(|profile| {
             profile.verified_platforms.is_empty()
                 && profile.availability == DeviceProfileAvailability::Unavailable

@@ -232,13 +232,8 @@ impl ProtocolRuntime {
                 sub: config.request.rtsp_ports.sub,
                 third: config.request.rtsp_ports.third,
             };
-            let plans = plan_rtsp_routes(
-                device.device_kind,
-                device.ip,
-                rtsp_ports,
-                device.channel_count,
-            )
-            .map_err(|source| runtime_error(source.code, source.message))?;
+            let plans = plan_rtsp_routes(device.ip, rtsp_ports)
+                .map_err(|source| runtime_error(source.code, source.message))?;
             for plan in plans {
                 let media_kind = match plan.stream {
                     RtspStreamKind::Main => RuntimeMediaKind::Main,
@@ -557,37 +552,21 @@ async fn serve_http_connection(
     // Learn the platform's alarm receiver endpoint from subscription requests so
     // alarm dispatch and the rendered subscription Reference follow it, exactly
     // as the legacy tool wrote picconfig/sendport from the subscription Port.
-    let subscription_port = learn_subscription_endpoint(&request, &learned_endpoint);
+    learn_subscription_endpoint(&request, &learned_endpoint);
     let response =
         if request.method == HttpMethod::Get && request.path == "/LAPI/V1.0/System/Picture" {
             picture_response(&request, &picture_cache.read())
         } else {
-            match resolve_http_template(profile_id, &request) {
+            match resolve_http_template(&request) {
                 Some(selection) => {
                     let bytes = assets
                         .read_profile_or_core(profile_id, &selection.path)
                         .map_err(|source| runtime_error(source.code, source.message))?;
                     let body = render_legacy_template(
-                        &bytes,
-                        &request,
-                        peer,
-                        platform,
-                        http_port,
-                        &device,
-                        &profile,
-                        subscription_port,
+                        &bytes, &request, peer, platform, http_port, &device, &profile,
                     )?;
                     HttpResponse {
-                        status: if matches!(
-                            profile_id,
-                            FirstReleaseProfileId::NvrCommon | FirstReleaseProfileId::NvrVehicle
-                        ) && request.method == HttpMethod::Get
-                            && request.path.contains("/Channels/0/Smart/Capabilities")
-                        {
-                            599
-                        } else {
-                            200
-                        },
+                        status: 200,
                         content_type: response_content_type(&request, &body),
                         body,
                     }
@@ -600,7 +579,7 @@ async fn serve_http_connection(
                         status: 200,
                         content_type: "application/json; charset=utf-8".into(),
                         body: render_legacy_template(
-                            &bytes, &request, peer, platform, http_port, &device, &profile, None,
+                            &bytes, &request, peer, platform, http_port, &device, &profile,
                         )?,
                     }
                 }
@@ -640,13 +619,7 @@ async fn start_discovery_task(
         ));
     }
     let template_path = match profile_id {
-        FirstReleaseProfileId::NvrCommon | FirstReleaseProfileId::NvrVehicle => {
-            "xml/Common/search-aibox.xml"
-        }
-        FirstReleaseProfileId::IpcFaceAccess => "xml/Common/search-acs.xml",
-        FirstReleaseProfileId::IpcCustom
-        | FirstReleaseProfileId::IpcSmart
-        | FirstReleaseProfileId::IpcStructured => "xml/Common/search.xml",
+        FirstReleaseProfileId::IpcStructured => "xml/Common/search.xml",
     };
     let template = assets
         .read_from_pack("protocol-core", template_path)
@@ -844,125 +817,36 @@ fn extract_subscription_number(body: &[u8], key: &str) -> Option<String> {
     .filter(|value| !value.is_empty())
 }
 
-/// Subscription renew/keepalive URLs end in the numeric subscription ID, e.g.
-/// `/LAPI/V1.0/System/Event/Subscription/178`.
-fn subscription_id_from_path(path: &str) -> Option<String> {
-    let last = path.rsplit('/').next()?;
-    (!last.is_empty() && last.bytes().all(|byte| byte.is_ascii_digit())).then(|| last.to_owned())
-}
-
-/// Random subscription ID in the legacy `100..=200` range.
-fn random_subscription_id() -> u16 {
-    100 + u16::from(uuid::Uuid::new_v4().as_bytes()[0]) % 101
-}
-
-fn resolve_http_template(
-    profile: FirstReleaseProfileId,
-    request: &HttpRequest,
-) -> Option<HttpTemplateSelection> {
-    let nvr = matches!(
-        profile,
-        FirstReleaseProfileId::NvrCommon | FirstReleaseProfileId::NvrVehicle
-    );
+fn resolve_http_template(request: &HttpRequest) -> Option<HttpTemplateSelection> {
     match request.method {
         HttpMethod::Post if request.path.starts_with("/onvif/") => {
             let operation = soap_operation(request)?;
-            if profile == FirstReleaseProfileId::IpcFaceAccess && operation == "GetScopes" {
-                return Some(HttpTemplateSelection {
-                    path: "xml/Common/GetScopes-ACS.xml".into(),
-                });
-            }
-            let name = if nvr && operation == "GetVideoSources" {
-                "wsdlGetVideoSources"
-            } else {
-                operation.as_str()
-            };
             Some(HttpTemplateSelection {
-                path: format!("xml/{}/{}.xml", if nvr { "AIBOX" } else { "Common" }, name),
+                path: format!("xml/Common/{operation}.xml"),
             })
         }
         HttpMethod::Post if request.path.contains("Event/Subscription") => {
-            let path = match profile {
-                FirstReleaseProfileId::IpcCustom => "xml/Custom/Event-Subscription.xml",
-                FirstReleaseProfileId::NvrCommon | FirstReleaseProfileId::NvrVehicle => {
-                    "xml/AIBOX/Event-Subscription.xml"
-                }
-                FirstReleaseProfileId::IpcSmart
-                | FirstReleaseProfileId::IpcStructured
-                | FirstReleaseProfileId::IpcFaceAccess => "xml/Common/Event-Subscription.xml",
-            };
-            Some(HttpTemplateSelection { path: path.into() })
+            Some(HttpTemplateSelection {
+                path: "xml/Common/Event-Subscription.xml".into(),
+            })
         }
         HttpMethod::Post => body_operation(request).map(|operation| HttpTemplateSelection {
-            path: format!(
-                "xml/{}/{}.xml",
-                if nvr { "AIBOX" } else { "Common" },
-                operation
-            ),
+            path: format!("xml/Common/{operation}.xml"),
         }),
         HttpMethod::Get => {
-            if profile == FirstReleaseProfileId::IpcFaceAccess
-                && request.path == "/LAPI/V1.0/Smart/FaceRecognition/Feature/Version"
-            {
-                return Some(HttpTemplateSelection {
-                    path: "xml/Common/Smart-FaceRecognition-Feature-Version.xml".into(),
-                });
-            }
-            if profile == FirstReleaseProfileId::IpcFaceAccess
-                && request.path.contains("/Door/System/ChannelDetailInfos")
-            {
-                return Some(HttpTemplateSelection {
-                    path: "xml/Common/Door-System-ChannelDetailInfos.xml".into(),
-                });
-            }
-            if profile == FirstReleaseProfileId::IpcCustom
-                && request.path.contains("Event/Subscription/Capabilities")
-            {
-                return Some(HttpTemplateSelection {
-                    path: "xml/Custom/Subscription-Capabilities.xml".into(),
-                });
-            }
-            if profile == FirstReleaseProfileId::IpcSmart
-                && request.path.contains("Smart/Capabilities")
-            {
-                return Some(HttpTemplateSelection {
-                    path: "xml/Smart/Smart-Capabilities.xml".into(),
-                });
-            }
             let name = last_two_path_segments(&request.path)?;
-            if profile == FirstReleaseProfileId::NvrVehicle
-                && (request.path.contains("Event/Subscription/Capabilities")
-                    || request
-                        .path
-                        .contains("Smart/Management/AlarmRelatedDataCapabilities")
-                    || request.path.contains("Smart/Management/Capabilities"))
-            {
-                return Some(HttpTemplateSelection {
-                    path: format!("xml/Vehicle/{name}.xml"),
-                });
-            }
-            if nvr && request.path.contains("Channels/0/Smart/Capabilities") {
-                return Some(HttpTemplateSelection {
-                    path: "xml/AIBOX/Smart-Capabilities-0.xml".into(),
-                });
-            }
             Some(HttpTemplateSelection {
-                path: format!("xml/{}/{}.xml", if nvr { "AIBOX" } else { "Common" }, name),
+                path: format!("xml/Common/{name}.xml"),
             })
         }
         HttpMethod::Put => {
-            let base = if nvr { "AIBOX" } else { "Common" };
             let name = if request.path.contains("KeepAlive") {
                 last_two_path_segments(&request.path)?
-            } else if nvr && request.path.contains("Event/Subscription") {
-                "Event-Subscription-1".into()
-            } else if nvr && request.path.contains("System/Time") {
-                "System-Time".into()
             } else {
                 "PUT".into()
             };
             Some(HttpTemplateSelection {
-                path: format!("xml/{base}/{name}.xml"),
+                path: format!("xml/Common/{name}.xml"),
             })
         }
     }
@@ -1073,7 +957,6 @@ fn render_legacy_template(
     http_port: u16,
     device: &DeviceIdentityPreviewDto,
     profile: &DeviceProfileV1,
-    subscription_port: Option<u16>,
 ) -> Result<Vec<u8>, ProtocolRuntimeError> {
     let mut text = std::str::from_utf8(bytes)
         .map_err(|source| {
@@ -1083,21 +966,6 @@ fn render_legacy_template(
             )
         })?
         .to_owned();
-    // NVR subscription responses carry a fixed ID (178) and receiver port
-    // (55000) in the approved templates. HTTPServer.py rewrote both at runtime:
-    // POST assigns a random ID and echoes the platform's port; PUT echoes the
-    // subscription ID from the request URL. Apply the same on the raw template
-    // (before other placeholders) so a real hardware_id can never collide.
-    if device.device_kind == crate::device_simulator::assets::catalog::DeviceKind::Nvr
-        && request.path.contains("Event/Subscription")
-    {
-        if let Some(port) = subscription_port {
-            text = text.replace("55000", &port.to_string());
-        }
-        let subscription_id = subscription_id_from_path(&request.path)
-            .unwrap_or_else(|| random_subscription_id().to_string());
-        text = text.replace("178", &subscription_id);
-    }
     let compact_mac = device.mac.replace(':', "").to_ascii_lowercase();
     let colon_mac = compact_mac
         .as_bytes()
@@ -1124,10 +992,7 @@ fn render_legacy_template(
     } else {
         replace_stream_uri(&mut text, device, DeviceSimulatorStreamKind::Main);
     }
-    let subscription_lifetime_seconds = match device.device_kind {
-        crate::device_simulator::assets::catalog::DeviceKind::Ipc => 3_600,
-        crate::device_simulator::assets::catalog::DeviceKind::Nvr => 60,
-    };
+    let subscription_lifetime_seconds = 3_600;
     for (from, to) in [
         (
             "206.2.18.165:80".to_owned(),
@@ -1176,12 +1041,6 @@ fn render_legacy_template(
     ] {
         text = text.replace(&from, &to);
     }
-    if let Some(channels) = device.channel_count {
-        text = text.replace(
-            "VideoSourceNumber/8",
-            &format!("VideoSourceNumber/{channels}"),
-        );
-    }
     if request.path.contains("/LAPI/V1.0/System/DeviceInfo") {
         let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|source| {
             runtime_error(
@@ -1214,9 +1073,6 @@ fn render_legacy_template(
             )
         })?;
     }
-    if device.device_kind == crate::device_simulator::assets::catalog::DeviceKind::Nvr {
-        render_nvr_channel_metadata(&mut text, request, device)?;
-    }
     if text.len() > crate::device_simulator::http::MAX_HTTP_RESPONSE_BYTES {
         return Err(runtime_error(
             "device_simulator.protocol.response_size_exceeded",
@@ -1224,161 +1080,6 @@ fn render_legacy_template(
         ));
     }
     Ok(text.into_bytes())
-}
-
-fn render_nvr_channel_metadata(
-    text: &mut String,
-    request: &HttpRequest,
-    device: &DeviceIdentityPreviewDto,
-) -> Result<(), ProtocolRuntimeError> {
-    let channel_count = device.channel_count.unwrap_or(0);
-    if request.path.contains("System/ChannelDetailInfos") {
-        let mut value: serde_json::Value = serde_json::from_str(text).map_err(|source| {
-            runtime_error(
-                "device_simulator.protocol.channel_details_template_invalid",
-                format!("NVR channel details template is invalid: {source}"),
-            )
-        })?;
-        let data = value
-            .pointer_mut("/Response/Data")
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or_else(|| {
-                runtime_error(
-                    "device_simulator.protocol.channel_details_template_invalid",
-                    "NVR channel details template has no Response.Data object",
-                )
-            })?;
-        let base = data
-            .get("DetailInfos")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|items| items.first())
-            .cloned()
-            .ok_or_else(|| {
-                runtime_error(
-                    "device_simulator.protocol.channel_details_template_invalid",
-                    "NVR channel details template has no base channel",
-                )
-            })?;
-        let channels = (1..=channel_count)
-            .map(|channel_id| {
-                let mut channel = base.clone();
-                if let Some(map) = channel.as_object_mut() {
-                    map.insert("ID".into(), serde_json::Value::from(channel_id));
-                    map.insert(
-                        "Name".into(),
-                        serde_json::Value::String(format!("{}_V_{channel_id}", device.ip)),
-                    );
-                }
-                channel
-            })
-            .collect::<Vec<_>>();
-        data.insert("Nums".into(), serde_json::Value::from(channel_count));
-        data.insert("DetailInfos".into(), serde_json::Value::Array(channels));
-        *text = serde_json::to_string(&value).map_err(|source| {
-            runtime_error(
-                "device_simulator.protocol.channel_details_render_failed",
-                format!("NVR channel details could not be rendered: {source}"),
-            )
-        })?;
-    }
-    if request
-        .body
-        .windows(b"GetVideoSources".len())
-        .any(|part| part == b"GetVideoSources")
-    {
-        resize_onvif_sources(text, "trt:VideoSources", channel_count, false)?;
-    }
-    if request
-        .body
-        .windows(b"GetAudioSources".len())
-        .any(|part| part == b"GetAudioSources")
-    {
-        resize_onvif_sources(text, "trt:AudioSources", channel_count, true)?;
-    }
-    Ok(())
-}
-
-fn resize_onvif_sources(
-    document: &mut String,
-    element: &str,
-    channel_count: u16,
-    includes_device_source: bool,
-) -> Result<(), ProtocolRuntimeError> {
-    let blocks = xml_element_blocks(document, element);
-    if blocks.is_empty() {
-        return Err(runtime_error(
-            "device_simulator.protocol.onvif_sources_template_invalid",
-            format!("ONVIF response has no {element} elements"),
-        ));
-    }
-    let desired = usize::from(channel_count) + usize::from(includes_device_source);
-    let templates = blocks
-        .iter()
-        .map(|(start, end)| document[*start..*end].to_owned())
-        .collect::<Vec<_>>();
-    let mut rendered = String::new();
-    for index in 0..desired {
-        if let Some(existing) = templates.get(index) {
-            rendered.push_str(existing);
-            continue;
-        }
-        let template_index = usize::from(includes_device_source).min(templates.len() - 1);
-        let channel_number = if includes_device_source {
-            index
-        } else {
-            index + 1
-        };
-        rendered.push_str(&replace_xml_token(
-            &templates[template_index],
-            &format!("{channel_number:03}00"),
-        )?);
-    }
-    let start = blocks[0].0;
-    let end = blocks[blocks.len() - 1].1;
-    document.replace_range(start..end, &rendered);
-    Ok(())
-}
-
-fn xml_element_blocks(document: &str, element: &str) -> Vec<(usize, usize)> {
-    let open = format!("<{element}");
-    let close = format!("</{element}>");
-    let mut blocks = Vec::new();
-    let mut offset = 0;
-    while let Some(relative_start) = document[offset..].find(&open) {
-        let start = offset + relative_start;
-        let Some(relative_end) = document[start..].find(&close) else {
-            break;
-        };
-        let end = start + relative_end + close.len();
-        blocks.push((start, end));
-        offset = end;
-    }
-    blocks
-}
-
-fn replace_xml_token(block: &str, token: &str) -> Result<String, ProtocolRuntimeError> {
-    let marker = "token=\"";
-    let start = block
-        .find(marker)
-        .map(|index| index + marker.len())
-        .ok_or_else(|| {
-            runtime_error(
-                "device_simulator.protocol.onvif_sources_template_invalid",
-                "ONVIF source element has no token attribute",
-            )
-        })?;
-    let end = block[start..]
-        .find('"')
-        .map(|index| start + index)
-        .ok_or_else(|| {
-            runtime_error(
-                "device_simulator.protocol.onvif_sources_template_invalid",
-                "ONVIF source token attribute is not closed",
-            )
-        })?;
-    let mut rendered = block.to_owned();
-    rendered.replace_range(start..end, token);
-    Ok(rendered)
 }
 
 fn replace_stream_uri(
@@ -1440,7 +1141,6 @@ fn render_discovery_template(
         http_port,
         device,
         profile,
-        None,
     )?)
     .map_err(|source| {
         runtime_error(
@@ -1570,12 +1270,7 @@ fn gateway_candidate(address: Ipv4Addr) -> Ipv4Addr {
 
 fn parse_profile_id(value: &str) -> Result<FirstReleaseProfileId, ProtocolRuntimeError> {
     match value {
-        "ipc-custom" => Ok(FirstReleaseProfileId::IpcCustom),
-        "ipc-smart" => Ok(FirstReleaseProfileId::IpcSmart),
         "ipc-structured" => Ok(FirstReleaseProfileId::IpcStructured),
-        "ipc-face-access" => Ok(FirstReleaseProfileId::IpcFaceAccess),
-        "nvr-common" => Ok(FirstReleaseProfileId::NvrCommon),
-        "nvr-vehicle" => Ok(FirstReleaseProfileId::NvrVehicle),
         _ => Err(runtime_error(
             "device_simulator.protocol.profile_unknown",
             format!("unknown first-release profile '{value}'"),
@@ -1659,28 +1354,18 @@ mod tests {
             device_kind: id.device_kind(),
             legacy_device_type: id.legacy_device_type().into(),
             identity: ProfileIdentityFacts {
-                model: if id.device_kind() == DeviceKind::Nvr {
-                    "NVR302-09E2-IQ"
-                } else {
-                    "IPC3615SB-ADF28KM-I0"
-                }
-                .into(),
+                model: "HIC6881-IR@X38-L-WSGB-VC".into(),
                 firmware_version: "STATIC-REVIEW-1".into(),
                 nickname: "STATIC".into(),
-                device_type_enum: (id.device_kind() == DeviceKind::Nvr) as u16,
+                device_type_enum: 0,
             },
             supported_platforms: vec![TargetPlatform::Ums],
             handlers: ProfileHandlerBindings {
                 identity: "legacy.identity.v1".into(),
-                discovery: if id.device_kind() == DeviceKind::Nvr {
-                    "ws_discovery.nvr.v1"
-                } else {
-                    "ws_discovery.ipc.v1"
-                }
-                .into(),
+                discovery: "ws_discovery.ipc.v1".into(),
                 http: "http.profile.v1".into(),
                 rtsp: "rtsp.tcp_interleaved.v1".into(),
-                alarms: vec!["alarm.smart.v1".into()],
+                alarms: vec!["alarm.structured.v1".into()],
             },
             evidence: [
                 EvidenceTopic::Identity,
@@ -1706,16 +1391,11 @@ mod tests {
             device_id: "group-0001".into(),
             group_id: "group".into(),
             profile_id: profile_id.into(),
-            device_kind: if profile_id.starts_with("nvr") {
-                DeviceKind::Nvr
-            } else {
-                DeviceKind::Ipc
-            },
+            device_kind: DeviceKind::Ipc,
             ip: "192.0.2.10".parse().unwrap(),
             mac: "48ea6324780c".into(),
             serial_number: "SIM123".into(),
             hardware_id: "210235SIM0001".into(),
-            channel_count: profile_id.starts_with("nvr").then_some(8),
             streams: vec![crate::device_simulator::api::DeviceStreamAddress {
                 device_id: "group-0001".into(),
                 channel_id: None,
@@ -1768,73 +1448,41 @@ mod tests {
     }
 
     #[test]
-    fn routes_source_confirmed_common_and_aibox_requests_without_guessing_file_paths() {
-        let ipc = request(
+    fn routes_source_confirmed_common_requests_without_guessing_file_paths() {
+        let onvif = request(
             HttpMethod::Post,
             "/onvif/device_service",
             Some("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\""),
             b"<GetDeviceInformation/>",
         );
         assert_eq!(
-            resolve_http_template(FirstReleaseProfileId::IpcSmart, &ipc)
-                .unwrap()
-                .path,
+            resolve_http_template(&onvif).unwrap().path,
             "xml/Common/GetDeviceInformation.xml"
         );
-        let nvr = request(HttpMethod::Get, "/LAPI/V1.0/System/DeviceInfo", None, b"");
+        let device_info = request(HttpMethod::Get, "/LAPI/V1.0/System/DeviceInfo", None, b"");
         assert_eq!(
-            resolve_http_template(FirstReleaseProfileId::NvrCommon, &nvr)
-                .unwrap()
-                .path,
-            "xml/AIBOX/System-DeviceInfo.xml"
+            resolve_http_template(&device_info).unwrap().path,
+            "xml/Common/System-DeviceInfo.xml"
         );
-        let vehicle = request(
-            HttpMethod::Get,
-            "/LAPI/V1.0/Smart/Management/Capabilities",
-            None,
-            b"",
-        );
-        assert_eq!(
-            resolve_http_template(FirstReleaseProfileId::NvrVehicle, &vehicle)
-                .unwrap()
-                .path,
-            "xml/Vehicle/Management-Capabilities.xml"
-        );
-        let face_scopes = request(
+        let subscription = request(
             HttpMethod::Post,
-            "/onvif/device_service",
-            Some("\"http://www.onvif.org/ver10/device/wsdl/GetScopes\""),
-            b"<GetScopes/>",
-        );
-        assert_eq!(
-            resolve_http_template(FirstReleaseProfileId::IpcFaceAccess, &face_scopes)
-                .unwrap()
-                .path,
-            "xml/Common/GetScopes-ACS.xml"
-        );
-        let feature = request(
-            HttpMethod::Get,
-            "/LAPI/V1.0/Smart/FaceRecognition/Feature/Version",
+            "/LAPI/V1.0/System/Event/Subscription",
             None,
-            b"",
+            b"{}",
         );
         assert_eq!(
-            resolve_http_template(FirstReleaseProfileId::IpcFaceAccess, &feature)
-                .unwrap()
-                .path,
-            "xml/Common/Smart-FaceRecognition-Feature-Version.xml"
+            resolve_http_template(&subscription).unwrap().path,
+            "xml/Common/Event-Subscription.xml"
         );
-        let door = request(
-            HttpMethod::Get,
-            "/LAPI/V1.0/Channels/1/Door/System/ChannelDetailInfos",
+        let keep_alive = request(
+            HttpMethod::Put,
+            "/LAPI/V1.0/System/Event/Subscription/1/KeepAlive",
             None,
-            b"",
+            b"{}",
         );
         assert_eq!(
-            resolve_http_template(FirstReleaseProfileId::IpcFaceAccess, &door)
-                .unwrap()
-                .path,
-            "xml/Common/Door-System-ChannelDetailInfos.xml"
+            resolve_http_template(&keep_alive).unwrap().path,
+            "xml/Common/1-KeepAlive.xml"
         );
     }
 
@@ -1875,105 +1523,41 @@ mod tests {
     }
 
     #[test]
-    fn renders_ums_device_type_and_profile_specific_subscription_lifetime() {
+    fn renders_ums_device_type_and_subscription_lifetime() {
         let template = br#"{
             "Response":{"Data":{"DeviceType":0,"DeviceModel":"IPC244S-IR9-PF80-DT"}},
             "CurrentTime":1618228378,
             "TerminationTime":1618228438
         }"#;
         let request = request(HttpMethod::Get, "/LAPI/V1.0/System/DeviceInfo", None, b"");
-        let mut face_profile = profile(FirstReleaseProfileId::IpcFaceAccess);
-        face_profile.identity.model = "ET-S51H@B".into();
-        face_profile.identity.device_type_enum = 10;
-        let ipc_body = render_legacy_template(
+        let structured_profile = profile(FirstReleaseProfileId::IpcStructured);
+        let body = render_legacy_template(
             template,
             &request,
             "192.0.2.20:50000".parse().unwrap(),
             TargetPlatform::Ums,
             80,
-            &device("ipc-face-access"),
-            &face_profile,
-            None,
+            &device("ipc-structured"),
+            &structured_profile,
         )
         .unwrap();
-        let ipc: serde_json::Value = serde_json::from_slice(&ipc_body).unwrap();
-        assert_eq!(ipc["Response"]["Data"]["DeviceType"].as_u64(), Some(10));
+        let rendered: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rendered["Response"]["Data"]["DeviceType"].as_u64(), Some(0));
         assert_eq!(
-            ipc["Response"]["Data"]["DeviceModel"].as_str(),
-            Some("ET-S51H@B")
+            rendered["Response"]["Data"]["DeviceModel"].as_str(),
+            Some("HIC6881-IR@X38-L-WSGB-VC")
         );
         assert_eq!(
-            ipc["TerminationTime"].as_i64().unwrap() - ipc["CurrentTime"].as_i64().unwrap(),
+            rendered["TerminationTime"].as_i64().unwrap()
+                - rendered["CurrentTime"].as_i64().unwrap(),
             3_600
         );
-
-        let nvr_body = render_legacy_template(
-            template,
-            &request,
-            "192.0.2.20:50000".parse().unwrap(),
-            TargetPlatform::Ums,
-            80,
-            &device("nvr-common"),
-            &profile(FirstReleaseProfileId::NvrCommon),
-            None,
-        )
-        .unwrap();
-        let nvr: serde_json::Value = serde_json::from_slice(&nvr_body).unwrap();
-        assert_eq!(
-            nvr["TerminationTime"].as_i64().unwrap() - nvr["CurrentTime"].as_i64().unwrap(),
-            60
-        );
-    }
-
-    #[test]
-    fn nvr_subscription_response_echoes_platform_port_and_reassigns_id() {
-        let learned: SharedLearnedAlarmEndpoint =
-            std::sync::Arc::new(parking_lot::RwLock::new(None));
-        // POST subscription carrying the platform's alarm receiver port.
-        let post = request(
-            HttpMethod::Post,
-            "/LAPI/V1.0/System/Event/Subscription",
-            None,
-            b"{\n\t\"Duration\":\t60,\n\t\"Port\":\t55321\n}",
-        );
-        let subscription_port = learn_subscription_endpoint(&post, &learned);
-        assert_eq!(subscription_port, Some(55321));
-        assert_eq!(learned.read().as_ref().unwrap().port, 55321);
-
-        let template = br#"{"Data":{"ID":178,"Reference":"206.2.18.166:55000/210235C1XMA161000144/Subscription/Subscribers/178"}}"#;
-        let rendered = render_legacy_template(
-            template,
-            &post,
-            "198.51.100.7:40000".parse().unwrap(),
-            TargetPlatform::Ums,
-            81,
-            &device("nvr-common"),
-            &profile(FirstReleaseProfileId::NvrCommon),
-            subscription_port,
-        )
-        .unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
-        let id = value["Data"]["ID"].as_u64().unwrap();
-        assert!((100..=200).contains(&id) && id != 178);
-        let reference = value["Data"]["Reference"].as_str().unwrap();
-        assert!(reference.contains(":55321/"));
-        assert!(!reference.contains(":55000/"));
-        assert!(reference.ends_with(&format!("/Subscribers/{id}")));
     }
 
     #[test]
     fn subscription_learning_accepts_any_advertised_port_and_captures_the_endpoint() {
         let learned: SharedLearnedAlarmEndpoint =
             std::sync::Arc::new(parking_lot::RwLock::new(None));
-        // PUT renew echoes the subscription ID from the URL, not a random one.
-        let put = request(
-            HttpMethod::Put,
-            "/LAPI/V1.0/System/Event/Subscription/142",
-            None,
-            b"{\n\t\"Duration\":\t60\n}",
-        );
-        assert_eq!(subscription_id_from_path(&put.path).as_deref(), Some("142"));
-
         // Captured from a real UMS deployment: the receiver port sits far
         // outside the legacy 55000..55999 range, and the platform names the
         // receiver host explicitly.
@@ -2029,55 +1613,6 @@ mod tests {
         assert_eq!(endpoint.duration_secs, None);
     }
 
-    #[test]
-    fn expands_nvr_channel_details_and_onvif_sources_to_the_configured_count() {
-        let mut nvr = device("nvr-common");
-        nvr.channel_count = Some(4);
-        let channel_request = request(
-            HttpMethod::Get,
-            "/LAPI/V1.0/Channels/System/ChannelDetailInfos",
-            None,
-            b"",
-        );
-        let mut channel_json =
-            r#"{"Response":{"Data":{"Nums":1,"DetailInfos":[{"ID":1,"Name":"base","Status":1}]}}}"#
-                .to_owned();
-        render_nvr_channel_metadata(&mut channel_json, &channel_request, &nvr).unwrap();
-        let rendered: serde_json::Value = serde_json::from_str(&channel_json).unwrap();
-        let channels = rendered["Response"]["Data"]["DetailInfos"]
-            .as_array()
-            .unwrap();
-        assert_eq!(rendered["Response"]["Data"]["Nums"].as_u64(), Some(4));
-        assert_eq!(channels.len(), 4);
-        assert_eq!(channels[0]["ID"].as_u64(), Some(1));
-        assert_eq!(channels[3]["ID"].as_u64(), Some(4));
-        assert_eq!(channels[3]["Name"].as_str(), Some("192.0.2.10_V_4"));
-
-        let video_request = request(
-            HttpMethod::Post,
-            "/onvif/media_service",
-            None,
-            b"<trt:GetVideoSources/>",
-        );
-        let mut video = "<r><trt:VideoSources token=\"00100\"><x>1</x></trt:VideoSources><trt:VideoSources token=\"00200\"><x>2</x></trt:VideoSources></r>".to_owned();
-        render_nvr_channel_metadata(&mut video, &video_request, &nvr).unwrap();
-        assert_eq!(xml_element_blocks(&video, "trt:VideoSources").len(), 4);
-        for token in ["00100", "00200", "00300", "00400"] {
-            assert!(video.contains(&format!("token=\"{token}\"")));
-        }
-
-        let audio_request = request(
-            HttpMethod::Post,
-            "/onvif/media_service",
-            None,
-            b"<trt:GetAudioSources/>",
-        );
-        let mut audio = "<r><trt:AudioSources token=\"00001\"></trt:AudioSources><trt:AudioSources token=\"00100\"></trt:AudioSources><trt:AudioSources token=\"00200\"></trt:AudioSources></r>".to_owned();
-        render_nvr_channel_metadata(&mut audio, &audio_request, &nvr).unwrap();
-        assert_eq!(xml_element_blocks(&audio, "trt:AudioSources").len(), 5);
-        assert!(audio.contains("token=\"00400\""));
-    }
-
     #[tokio::test]
     async fn approved_release_serves_reviewed_http_and_rtsp_fixtures_when_configured() {
         let Ok(root) = std::env::var("FST_APPROVED_PACK_ROOT") else {
@@ -2085,22 +1620,15 @@ mod tests {
         };
         let version = std::env::var("FST_APPROVED_PACK_VERSION").unwrap_or_else(|_| "1.0.3".into());
         let root = PathBuf::from(root);
-        let pins = [
-            "protocol-core",
-            "media-h264-live",
-            "ipc-custom",
-            "ipc-smart",
-            "nvr-common",
-            "nvr-vehicle",
-        ]
-        .into_iter()
-        .map(|id| PinnedPackDirectory {
-            id: id.into(),
-            version: version.clone(),
-            directory: root.join(id).join(&version),
-        })
-        .collect::<Vec<_>>();
-        let assets = Arc::new(RuntimeAssetLayout::load(&pins, &["ipc-smart".into()]).unwrap());
+        let pins = ["protocol-core", "media-h264-live", "ipc-structured"]
+            .into_iter()
+            .map(|id| PinnedPackDirectory {
+                id: id.into(),
+                version: version.clone(),
+                directory: root.join(id).join(&version),
+            })
+            .collect::<Vec<_>>();
+        let assets = Arc::new(RuntimeAssetLayout::load(&pins, &["ipc-structured".into()]).unwrap());
         let ports = reserve_tcp_ports(4);
         let request = SimulatorStartRequest {
             platform: TargetPlatformConfig {
@@ -2128,9 +1656,8 @@ mod tests {
             media_theme_id: crate::device_simulator::api::DEFAULT_MEDIA_THEME_ID.into(),
             groups: vec![DeviceGroupDraft {
                 id: "smart".into(),
-                profile_id: "ipc-smart".into(),
+                profile_id: "ipc-structured".into(),
                 count: 1,
-                nvr_channel_count: None,
             }],
             stream: StreamRuntimeConfig {
                 transport: StreamTransport::TcpInterleaved,
@@ -2254,16 +1781,15 @@ mod tests {
             "198.51.100.2:50000".parse().unwrap(),
             TargetPlatform::Ums,
             81,
-            &device("ipc-smart"),
-            &profile(FirstReleaseProfileId::IpcSmart),
-            None,
+            &device("ipc-structured"),
+            &profile(FirstReleaseProfileId::IpcStructured),
         )
         .unwrap();
         let rendered = String::from_utf8(rendered).unwrap();
         assert!(rendered.contains("192.0.2.10:81"));
         assert!(rendered.contains("48:ea:63:24:78:0c"));
         assert!(rendered.contains("210235SIM0001"));
-        assert!(rendered.contains("IPC3615SB-ADF28KM-I0"));
+        assert!(rendered.contains("HIC6881-IR@X38-L-WSGB-VC"));
         assert!(rendered.contains("rtsp://192.0.2.10:554/media/video1"));
         assert!(!rendered.contains("206.2.18.165"));
     }
@@ -2304,8 +1830,8 @@ mod tests {
             b"<wsa:RelatesTo>uuid:old</wsa:RelatesTo><XAddr>http://206.2.18.165:80</XAddr>",
             "uuid:a&b",
             81,
-            &device("ipc-smart"),
-            &profile(FirstReleaseProfileId::IpcSmart),
+            &device("ipc-structured"),
+            &profile(FirstReleaseProfileId::IpcStructured),
         )
         .unwrap();
         let rendered = String::from_utf8(rendered).unwrap();
@@ -2315,22 +1841,23 @@ mod tests {
 
     #[test]
     fn legacy_discovery_batches_once_per_profile_and_preserves_device_order() {
+        // Every device now shares the single structured profile, so the whole
+        // fleet forms one batch in the order the devices were planned.
         let devices = vec![
-            device_at("ipc-smart", "smart-a", "smart-a-0001", "192.0.2.10"),
-            device_at("nvr-common", "nvr", "nvr-0001", "192.0.2.20"),
-            device_at("ipc-smart", "smart-b", "smart-b-0001", "192.0.2.30"),
+            device_at("ipc-structured", "group-a", "group-a-0001", "192.0.2.10"),
+            device_at("ipc-structured", "group-b", "group-b-0001", "192.0.2.20"),
+            device_at("ipc-structured", "group-a", "group-a-0002", "192.0.2.30"),
         ];
 
         let batches = legacy_discovery_batches(&devices);
-        assert_eq!(batches.len(), 2);
+        assert_eq!(batches.len(), 1);
         assert_eq!(
             batches[0]
                 .iter()
                 .map(|device| device.device_id.as_str())
                 .collect::<Vec<_>>(),
-            ["smart-a-0001", "smart-b-0001"]
+            ["group-a-0001", "group-b-0001", "group-a-0002"]
         );
         assert_eq!(batches[0][0].ip, "192.0.2.10".parse::<Ipv4Addr>().unwrap());
-        assert_eq!(batches[1][0].device_id, "nvr-0001");
     }
 }

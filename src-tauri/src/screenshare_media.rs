@@ -4451,9 +4451,14 @@ impl WindowsH264Encoder {
     /// 在起始若干帧后经常触发它，早期实现把它当硬错误，导致这些编码器被整体否掉
     /// 并一路回退到 MJPEG。
     ///
-    /// 异步 MFT 的格式变更会消耗掉本次 `METransformHaveOutput`：协商完成后必须
-    /// 等待下一个事件，立即重调 `ProcessOutput` 会得到 `E_UNEXPECTED`。同步 MFT
-    /// 没有事件模型，协商后直接重试。
+    /// 协商后必须**立即重试** `ProcessOutput`（MSDN 对该事件的规定处理），并且
+    /// 重试前必须已经刷新输出流信息。这两点缺一不可，实测可证：
+    /// 只重试不刷新会得到 `E_UNEXPECTED`（用旧的缓冲大小/样本归属调用）；
+    /// 只刷新不重试则会等事件超时——格式变更已经消耗掉本次 `METransformHaveOutput`，
+    /// 异步 MFT 不会再为同一帧补发事件。
+    ///
+    /// 重试若返回"需要更多输入"，说明该 MFT 要求先补一帧再出码流，这不是协议
+    /// 违规，按 `Renegotiated` 返回让调用方继续等下一个事件即可。
     fn process_one_output(
         &mut self,
         fallback_sample_time_100ns: i64,
@@ -4464,12 +4469,9 @@ impl WindowsH264Encoder {
             Err(H264ProcessOutputError::Failed(message)) => Err(message),
             Err(H264ProcessOutputError::StreamChange) => {
                 self.renegotiate_output_type()?;
-                if self.async_adapter.is_some() {
-                    return Ok(H264OutputOutcome::Renegotiated);
-                }
                 match self.try_process_one_output(fallback_sample_time_100ns) {
                     Ok(Some(output)) => Ok(H264OutputOutcome::Produced(output)),
-                    Ok(None) => Ok(H264OutputOutcome::NeedMoreInput),
+                    Ok(None) => Ok(H264OutputOutcome::Renegotiated),
                     Err(H264ProcessOutputError::Failed(message)) => Err(message),
                     Err(H264ProcessOutputError::StreamChange) => Err(
                         "H.264 encoder requested another output type change immediately after renegotiation"

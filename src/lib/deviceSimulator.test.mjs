@@ -5,6 +5,7 @@ import {
   DEVICE_SIMULATOR_COMMANDS,
   DEVICE_SIMULATOR_EVENTS,
   createDeviceSimulatorApi,
+  describeSimulatorError,
   hasBlockingPreflightFailure,
   isDeviceSimulatorRuntimeActive,
   isDeviceSimulatorTopologyLocked,
@@ -31,6 +32,7 @@ test('command and event names match the approved Tauri contract', () => {
     'device_simulator_trigger_alarm_once',
     'device_simulator_stop_alarm',
     'device_simulator_recover',
+    'device_simulator_add_devices_to_platform',
   ]);
 
   assert.deepEqual(Object.values(DEVICE_SIMULATOR_EVENTS), [
@@ -60,8 +62,8 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
   await api.listProfiles();
   await api.listAlarmTypes();
   await api.listMediaThemes();
-  await api.getAssetStatus(['ipc-custom']);
-  await api.prepareAssets(['ipc-custom']);
+  await api.getAssetStatus(['ipc-structured']);
+  await api.prepareAssets(['ipc-structured']);
   await api.cancelAssetDownload('download-1');
   await api.previewDevices(request);
   await api.preflight(request);
@@ -73,6 +75,8 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
   await api.triggerAlarmOnce(alarmRequest);
   await api.stopAlarm('alarm-1');
   await api.recover('session-1');
+  const devices = [{ address: '192.115.1.69', port: 80 }];
+  await api.addDevicesToPlatform(devices, true);
 
   assert.deepEqual(calls, [
     [DEVICE_SIMULATOR_COMMANDS.getSettings, undefined],
@@ -81,8 +85,8 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
     [DEVICE_SIMULATOR_COMMANDS.listProfiles, undefined],
     [DEVICE_SIMULATOR_COMMANDS.listAlarmTypes, undefined],
     [DEVICE_SIMULATOR_COMMANDS.listMediaThemes, undefined],
-    [DEVICE_SIMULATOR_COMMANDS.getAssetStatus, { profileIds: ['ipc-custom'] }],
-    [DEVICE_SIMULATOR_COMMANDS.prepareAssets, { profileIds: ['ipc-custom'] }],
+    [DEVICE_SIMULATOR_COMMANDS.getAssetStatus, { profileIds: ['ipc-structured'] }],
+    [DEVICE_SIMULATOR_COMMANDS.prepareAssets, { profileIds: ['ipc-structured'] }],
     [DEVICE_SIMULATOR_COMMANDS.cancelAssetDownload, { jobId: 'download-1' }],
     [DEVICE_SIMULATOR_COMMANDS.previewDevices, { request }],
     [DEVICE_SIMULATOR_COMMANDS.preflight, { request }],
@@ -94,6 +98,7 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
     [DEVICE_SIMULATOR_COMMANDS.triggerAlarmOnce, { request: alarmRequest }],
     [DEVICE_SIMULATOR_COMMANDS.stopAlarm, { jobId: 'alarm-1' }],
     [DEVICE_SIMULATOR_COMMANDS.recover, { sessionId: 'session-1' }],
+    [DEVICE_SIMULATOR_COMMANDS.addDevicesToPlatform, { devices, replaceExisting: true }],
   ]);
 });
 
@@ -111,6 +116,21 @@ test('topology stays locked for every non-terminal operation and residual recove
   assert.equal(isDeviceSimulatorTopologyLocked('downloading_assets'), true);
   assert.equal(isDeviceSimulatorTopologyLocked('running'), true);
   assert.equal(isDeviceSimulatorTopologyLocked('recovery_required'), true);
+});
+
+test('rejected simulator commands keep their code and details in one log line', () => {
+  assert.equal(
+    describeSimulatorError({
+      code: 'device_simulator.recovery.journal_invalid',
+      message_key: 'deviceSimulator.errors.sessionJournalInvalid',
+      details: 'decode session journal',
+      retryable: false,
+    }),
+    'device_simulator.recovery.journal_invalid | deviceSimulator.errors.sessionJournalInvalid | decode session journal',
+  );
+  assert.equal(describeSimulatorError({ unexpected: 1 }), '{"unexpected":1}');
+  assert.equal(describeSimulatorError(new Error('boom')), 'Error: boom');
+  assert.equal(describeSimulatorError('command not found'), 'command not found');
 });
 
 test('preflight warnings are non-blocking but failed errors remain blocking', () => {

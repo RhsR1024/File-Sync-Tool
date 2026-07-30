@@ -33,6 +33,18 @@ describe('screen share viewer media visibility', () => {
     expect(appSource).not.toContain("sessionClient.send('view.resume')");
   });
 
+  it('aborts the MJPEG request when a primary player takes over', () => {
+    // Dropping the <img> via v-if does not cancel a multipart response, so the
+    // host would keep a phantom MJPEG consumer and run the JPEG encoder for the
+    // whole session on top of H.264. Clearing `src` is the actual abort.
+    expect(appSource).toMatch(/function stopMjpegStream\(\)\s*\{[\s\S]*?mjpegConnected\.value = false;[\s\S]*?imageReady\.value = false;[\s\S]*?screenImage\.value\?\.removeAttribute\('src'\);/);
+    for (const handler of ['handleH264PlayerState', 'handleWebCodecsPlayerState', 'handleWebRtcPlayerState']) {
+      const body = appSource.slice(appSource.indexOf(`function ${handler}(`));
+      const readyBranch = body.slice(0, body.indexOf('nextTick(updateGeometry);'));
+      expect(readyBranch, handler).toContain('stopMjpegStream();');
+    }
+  });
+
   it('forwards DOM pointer timestamps to the session transport', () => {
     expect(appSource).toContain("sessionClient.send('input.pointer_move', point, eventOccurredAtMs)");
     expect(appSource).toContain("sessionClient.send('input.pointer_button', payload, eventOccurredAtMs)");

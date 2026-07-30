@@ -451,10 +451,9 @@ mod tests {
             _legacy_allow_local_player_access: true,
             media_theme_id: crate::device_simulator::api::DEFAULT_MEDIA_THEME_ID.into(),
             groups: vec![DeviceGroupDraft {
-                id: "ipc".into(),
-                profile_id: "ipc-custom".into(),
+                id: "structured".into(),
+                profile_id: "ipc-structured".into(),
                 count: 1,
-                nvr_channel_count: None,
             }],
             stream: StreamRuntimeConfig {
                 transport: StreamTransport::TcpInterleaved,

@@ -1,3 +1,19 @@
+//! Crash-recovery record for a simulator session.
+//!
+//! None of the journal's own types set `#[serde(deny_unknown_fields)]`, and new
+//! ones must not either. A journal is read precisely when it was written by
+//! *another* build -- that is what recovery is for -- so a key this build no
+//! longer knows is an expected input, not corruption. Rejecting it makes the
+//! journal undecodable, which surfaces as `journal_invalid`, blocks the whole
+//! simulator through `list_non_terminal`, and strands the IP aliases and
+//! firewall rules the journal was the only record of. (Removing
+//! `total_nvr_channels` with the NVR profiles did exactly this on 2026-07-30.)
+//!
+//! Strictness that matters is kept elsewhere: every load-bearing field is
+//! required, so a foreign or truncated file still fails to parse, and
+//! [`validate_journal_structure`] then rejects bad schema versions, identities,
+//! and interface bindings. Unknown keys are dropped on the next write.
+
 use crate::device_simulator::errors::{SimulatorError, SimulatorErrorBody, SimulatorResult};
 use crate::device_simulator::models::SessionState;
 use serde::{Deserialize, Serialize};
@@ -12,16 +28,16 @@ pub const JOURNAL_IO_ERROR: &str = "device_simulator.recovery.journal_io";
 pub const JOURNAL_INVALID: &str = "device_simulator.recovery.journal_invalid";
 pub const JOURNAL_NOT_FOUND: &str = "device_simulator.recovery.journal_not_found";
 
+/// Descriptive only -- recovery never reads it. Journals written before the NVR
+/// profiles were removed still carry a `total_nvr_channels` key here; see the
+/// module docs for why that must stay decodable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DeviceRequestSummary {
     pub profile_ids: Vec<String>,
     pub total_devices: u32,
-    pub total_nvr_channels: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WorkerProcessIdentity {
     pub pid: u32,
     /// Windows process creation time. It prevents a recycled PID from being
@@ -40,7 +56,6 @@ pub enum ResourceOwnershipState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OwnedIpAddress {
     pub interface_id: String,
     pub address: Ipv4Addr,
@@ -51,14 +66,12 @@ pub struct OwnedIpAddress {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OwnedFirewallRule {
     pub rule_name: String,
     pub state: ResourceOwnershipState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OwnedPack {
     pub id: String,
     pub version: String,
@@ -66,7 +79,6 @@ pub struct OwnedPack {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct OwnedResources {
     #[serde(default)]
     pub ip_addresses: Vec<OwnedIpAddress>,
@@ -134,7 +146,6 @@ pub enum JournalCleanupStage {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CleanupProgress {
     pub stage: JournalCleanupStage,
     #[serde(default)]
@@ -146,7 +157,6 @@ pub struct CleanupProgress {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionJournalV1 {
     pub schema_version: u32,
     pub session_id: String,
@@ -758,7 +768,6 @@ mod tests {
             device_summary: DeviceRequestSummary {
                 profile_ids: vec!["camera".to_owned()],
                 total_devices: 2,
-                total_nvr_channels: 0,
             },
             worker_process: Some(WorkerProcessIdentity {
                 pid: 42,
@@ -831,6 +840,68 @@ mod tests {
 
         assert_eq!(
             store.load("session-4").unwrap_err().body().code,
+            JOURNAL_INVALID
+        );
+    }
+
+    #[test]
+    fn journal_written_before_the_nvr_profiles_were_removed_still_loads() {
+        let temp = TempDir::new().unwrap();
+        let store = SessionJournalStore::new(temp.path());
+        let mut value = journal("legacy-nvr");
+        value.resources.ip_addresses.push(OwnedIpAddress {
+            interface_id: "if-guid".to_owned(),
+            address: Ipv4Addr::new(10, 0, 0, 2),
+            prefix_len: 24,
+            state: ResourceOwnershipState::Owned,
+        });
+        let mut legacy = serde_json::to_value(value).unwrap();
+        legacy["device_summary"]["profile_ids"] = serde_json::json!(["ipc-structured", "nvr-8ch"]);
+        legacy["device_summary"]["total_nvr_channels"] = serde_json::json!(8);
+        // Unknown keys are tolerated at every depth, not just in the summary.
+        legacy["retired_top_level_key"] = serde_json::json!("dropped by a later build");
+        legacy["resources"]["ip_addresses"][0]["retired_nested_key"] = serde_json::json!(true);
+        fs::create_dir_all(temp.path()).unwrap();
+        let paths = JournalPaths::new(temp.path(), "legacy-nvr");
+        fs::write(&paths.primary, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        // The residual stays decodable, so its owned IP can still be released.
+        let loaded = store.load("legacy-nvr").unwrap();
+        assert_eq!(loaded.device_summary.total_devices, 2);
+        assert_eq!(loaded.remaining_resources().len(), 1);
+        let recovery_candidates = store.list_non_terminal().unwrap();
+        assert_eq!(recovery_candidates.len(), 1);
+        assert_eq!(recovery_candidates[0].session_id, "legacy-nvr");
+
+        // Dropped keys must not survive into anything the desktop writes back.
+        store.save(&loaded).unwrap();
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.primary).unwrap()).unwrap();
+        assert!(rewritten.get("retired_top_level_key").is_none());
+        assert!(rewritten["device_summary"]
+            .get("total_nvr_channels")
+            .is_none());
+        assert!(rewritten["resources"]["ip_addresses"][0]
+            .get("retired_nested_key")
+            .is_none());
+    }
+
+    #[test]
+    fn tolerating_unknown_keys_does_not_accept_a_journal_missing_required_fields() {
+        let temp = TempDir::new().unwrap();
+        let store = SessionJournalStore::new(temp.path());
+        let mut incomplete = serde_json::to_value(journal("session-6")).unwrap();
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("interface_id")
+            .unwrap();
+        fs::create_dir_all(temp.path()).unwrap();
+        let paths = JournalPaths::new(temp.path(), "session-6");
+        fs::write(&paths.primary, serde_json::to_vec(&incomplete).unwrap()).unwrap();
+
+        assert_eq!(
+            store.load("session-6").unwrap_err().body().code,
             JOURNAL_INVALID
         );
     }

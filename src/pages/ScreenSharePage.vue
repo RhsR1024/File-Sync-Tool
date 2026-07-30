@@ -16,7 +16,6 @@ import {
   ExternalLink,
   RefreshCw,
   MonitorOff,
-  Eye,
   Eraser,
   Undo2,
   PencilRuler,
@@ -48,7 +47,6 @@ import {
   screenShareUpdateAnnotation,
   screenShareRespondControlRequest,
   screenShareRevokeControl,
-  screenShareOpenLocalPreview,
   screenShareOpenDesktopOverlay,
   screenShareCloseDesktopOverlay,
   type MonitorInfo,
@@ -106,7 +104,6 @@ const setQrCanvas = (url: string, el: unknown) => {
 };
 const errorMsg = ref('');
 const isRefreshingStatus = ref(false);
-const isOpeningPreview = ref(false);
 const isTogglingDesktopOverlay = ref(false);
 const isClearingAnnotations = ref(false);
 const annotationActionId = ref<string | null>(null);
@@ -557,18 +554,6 @@ async function revokeControl() {
     errorMsg.value = t('tools.screenShare.errRevokeControlFailed', { error: String(error) });
   } finally {
     isRevokingControl.value = false;
-  }
-}
-
-async function openLocalPreview() {
-  isOpeningPreview.value = true;
-  errorMsg.value = '';
-  try {
-    await screenShareOpenLocalPreview();
-  } catch (error) {
-    errorMsg.value = t('tools.screenShare.errPreviewFailed', { error: String(error) });
-  } finally {
-    isOpeningPreview.value = false;
   }
 }
 
@@ -1214,10 +1199,6 @@ onUnmounted(() => {
             <div class="ss-card">
               <p class="ss-section-label">{{ t('tools.screenShare.accessUrl') }}</p>
               <div class="mb-3 flex flex-wrap gap-2">
-                <button type="button" class="ss-detail-button" :disabled="isOpeningPreview" @click="openLocalPreview">
-                  <Eye class="h-3.5 w-3.5" />
-                  {{ isOpeningPreview ? t('tools.screenShare.openingPreview') : t('tools.screenShare.openLocalPreview') }}
-                </button>
                 <button
                   type="button"
                   class="ss-detail-button"

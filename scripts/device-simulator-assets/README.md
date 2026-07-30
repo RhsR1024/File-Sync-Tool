@@ -32,7 +32,7 @@ openssl pkey -in D:\SecureKeys\device-assets-2026.key -pubout -out D:\SecureKeys
 2. 为每个新版本生成不可变 Pack：
 
    ```powershell
-   node scripts/device-simulator-assets/asset-release.mjs pack --definition D:\ReleaseWork\ipc-custom.pack.json --release-root D:\ReleaseWork\virtual-device-assets
+   node scripts/device-simulator-assets/asset-release.mjs pack --definition D:\ReleaseWork\ipc-structured.pack.json --release-root D:\ReleaseWork\virtual-device-assets
    ```
 
 3. 复制并修改 [`catalog-source.example.json`](./catalog-source.example.json)。`generated_at` 必须显式填写 RFC 3339 时间；`min_app_version` 必须使用当次批准的真实应用版本。

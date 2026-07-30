@@ -19,7 +19,8 @@
 
 | 阶段 | 代码状态 | 规格完成状态 | 尚缺证据 |
 |---|---|---|---|
-| 产品清理 | `code-done` | 完成 | 刷新频率、共享冻结、本地暂停及 snapshot/single-frame 路径已删除 |
+| 产品清理 | `code-done` | 完成 | 刷新频率、共享冻结、本地暂停及 snapshot/single-frame 路径已删除；共享者本机预览于 2026-07-30 删除，见 §2.1 |
+| 共享者批注操作栏 | `code-done` | 完成 | 有批注时在共享屏幕右下角出现，可清除上一条或全部，见 §2.2 |
 | M0 度量 | `code-done` | `external-hardware-blocked` | 三代 Intel、真实浏览器呈现、受控远控响应和 20–30 独立设备基线；断线重连恢复与共享端资源采样已补齐产出方 |
 | M1 低风险修复 | `code-done` | `external-hardware-blocked` | 30 客户端 30 分钟、慢客户端、锁屏/多屏/控制完整回归 |
 | M2 编码器 | `code-done` | `external-hardware-blocked` | Broadwell、Skylake、10 代 Intel 的 capability/self-test/长稳报告；2026-07-29 已由 Intel 目标机实测发现并修复两个降级链缺陷，见 §5.1 |
@@ -30,6 +31,24 @@
 | 现场证据门禁 | `code-done` | 完成 | 九个门禁全部结构化校验；六类现场报告不能只凭 `status` 关闭 |
 
 因此，本轮可以确认“规格要求的实现骨架与自动化门禁已落地”，不能确认“整个性能规格已验收”或“某传输已经胜出”。
+
+### 2.1 共享者本机预览已删除（2026-07-30）
+
+`2026-07-19-screen-share-collaboration-control-design.md` 把“本机预览客户端”定为 P0，理由是共享者能看到与观看者一致的画面。实机使用后确认该方案对整屏捕获无解：预览窗口渲染的就是它自己所在的那块显示器，必然形成无限嵌套，与共享者自己用浏览器打开观看地址没有区别。
+
+唯一的技术出路是把预览窗口排除出捕获，而这条路已在 `screen_share_desktop_overlay_ready` 的注释中记录为不可用——被排除的窗口会让 WGC 和 DXGI 在受支持的 Windows 版本上返回黑帧。既然桌面批注叠加层已经把批注直接画在共享者桌面上，预览窗口的剩余价值不足以支撑一条独立的鉴权路径。
+
+已删除：`screen_share_open_local_preview`、`screen_share_close_local_preview`、`ScreenShareHandle::preview_token`、`HttpServerState::preview_token`、`/?host_preview=<token>` 一次性能力、`ss_preview` HttpOnly Cookie 及其在六个鉴权点上的旁路，以及界面按钮与中英文文案。共享地址的鉴权现在只有一条路径（`check_auth_cookie`）。回归门禁见 `src/pages/ScreenSharePage.test.mjs` 的 `screen share no longer offers the host local preview`。
+
+### 2.2 共享者批注操作栏（2026-07-30）
+
+桌面批注叠加层是鼠标穿透的，只能画不能操作，因此观看者批注后共享者必须切回工具的屏幕共享界面才能清除。现在共享监视器工作区右下角会出现一个可交互的小操作栏，提供“清除上一条”和“清除全部”，以及一个“隐藏到下次有新批注”的按钮。
+
+- 窗口标签 `screen-share-annotation-bar-<session_id>`，页面 `src/pages/ScreenShareAnnotationBarPage.vue`，能力声明 `src-tauri/capabilities/screen-share-annotation-bar.json`。
+- 与叠加层一同在会话启动时创建（`annotations_enabled` 为真时），初始隐藏；显示与隐藏由 Rust 的 `screen_share_set_annotation_bar_visible` 执行并使用 `SW_SHOWNOACTIVATE`，因此操作栏出现时不会从共享者正在演示的窗口抢走焦点。
+- 判定规则（是否显示、撤销目标、dismiss 的进位与失效）抽到 `src/screen-share-web/lib/annotation-bar.ts`，由 `annotation-bar.test.ts` 的 10 项测试锁定；页面不允许另写一份。激光点会自行过期，因此不计入。
+- 定位使用 `GetMonitorInfoW` 的 `rcWork`（新增 `work_rect_for_monitor`），让操作栏落在任务栏上方而不是压住时钟；`annotation_bar_placement` 的右下锚定、DPI 缩放、副屏原点和窄工作区夹取由 5 项 Rust 测试覆盖。捕获源映射仍然使用 `rcMonitor`，未受影响。
+- 操作栏与叠加层一样无法排除出捕获（同 §2.1），因此观看者也会看到它。
 
 ## 3. M0：度量与基线
 

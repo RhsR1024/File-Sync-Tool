@@ -1,15 +1,8 @@
 <script setup lang="ts">
 import {
-  DatabaseBackup,
-  Download,
-  Eye,
-  EyeOff,
-  Import,
-  RotateCcw,
   Settings2,
-  StickyNote,
 } from 'lucide-vue-next';
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import PaperTodoSettingsPanel from '@/components/paper-todo/PaperTodoSettingsPanel.vue';
@@ -27,6 +20,9 @@ const { t } = useI18n();
 const store = usePaperTodo();
 const status = ref('');
 const busy = ref(false);
+const importConfirmationOpen = ref(false);
+const importDialog = ref<HTMLElement | null>(null);
+const importError = ref('');
 const todoCount = computed(() => store.papers.value.filter((paper) => paper.kind === 'todo').length);
 const noteCount = computed(() => store.papers.value.filter((paper) => paper.kind === 'note').length);
 const openCount = computed(() => store.papers.value.filter((paper) => paper.desktopOpen).length);
@@ -52,19 +48,44 @@ async function exportData(): Promise<void> {
   }
 }
 
+async function requestImport(): Promise<void> {
+  importError.value = '';
+  importConfirmationOpen.value = true;
+  await nextTick();
+  importDialog.value?.focus();
+}
+
 async function importData(): Promise<void> {
-  if (!window.confirm(t('paperTodo.confirmImport'))) return;
   busy.value = true;
   try {
     const imported = await importPaperTodoData();
     if (imported) {
       store.state.value = imported;
       status.value = t('paperTodo.imported');
+      importConfirmationOpen.value = false;
     }
   } catch (reason) {
-    store.error.value = String(reason);
+    importError.value = String(reason);
+    await nextTick();
+    importDialog.value?.focus();
   } finally {
     busy.value = false;
+  }
+}
+
+function onImportDialogKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && !busy.value) {
+    event.preventDefault();
+    importConfirmationOpen.value = false;
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const buttons = [...(importDialog.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
+  if (!buttons.length) return;
+  const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  if ((!event.shiftKey && index === buttons.length - 1) || (event.shiftKey && index <= 0)) {
+    event.preventDefault();
+    buttons[event.shiftKey ? buttons.length - 1 : 0].focus();
   }
 }
 
@@ -85,9 +106,9 @@ onBeforeUnmount(() => void store.flush());
 </script>
 
 <template>
-  <div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50 text-slate-900">
+  <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50 text-slate-900">
     <header class="shrink-0 border-b border-slate-200 bg-white px-6 py-5">
-      <div class="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-4">
+      <div class="mx-auto flex w-full max-w-[1480px] flex-wrap items-center gap-4">
         <div class="flex min-w-0 flex-1 items-center gap-3">
           <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-slate-900 text-amber-300">
             <Settings2 class="h-5 w-5" />
@@ -106,49 +127,43 @@ onBeforeUnmount(() => void store.flush());
       <button type="button" class="ml-2 font-semibold underline" @click="store.error.value = ''">{{ t('common.close') }}</button>
     </div>
 
-    <main class="min-h-0 flex-1 overflow-y-auto px-6">
+    <main class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
       <div v-if="store.loading.value" class="flex h-56 items-center justify-center text-sm text-slate-500">{{ t('common.loading') }}</div>
-      <div v-else class="mx-auto w-full max-w-5xl">
-        <section class="flex flex-wrap items-center gap-4 border-b border-slate-200 py-5">
-          <div class="flex min-w-0 flex-1 items-center gap-3">
-            <StickyNote class="h-5 w-5 shrink-0 text-amber-600" />
-            <div>
-              <h2 class="text-sm font-semibold text-slate-900">{{ t('paperTodo.desktopStatus') }}</h2>
-              <p class="mt-0.5 text-xs text-slate-500">
-                {{ t('paperTodo.desktopStatusSummary', { todos: todoCount, notes: noteCount, open: openCount }) }}
-              </p>
-            </div>
-          </div>
-          <div class="flex items-center gap-2">
-            <button type="button" class="settings-command" :title="t('paperTodo.showAll')" @click="changeAllWindows('show')">
-              <Eye class="h-4 w-4" />{{ t('paperTodo.showAllShort') }}
-            </button>
-            <button type="button" class="settings-command" :title="t('paperTodo.hideAll')" @click="changeAllWindows('hide')">
-              <EyeOff class="h-4 w-4" />{{ t('paperTodo.hideAllShort') }}
-            </button>
-          </div>
-        </section>
-
-        <PaperTodoSettingsPanel />
-
-        <section class="border-t border-slate-200 py-6">
-          <div class="flex flex-wrap items-center gap-4">
-            <div class="flex min-w-0 flex-1 items-center gap-3">
-              <DatabaseBackup class="h-5 w-5 shrink-0 text-slate-500" />
-              <div>
-                <h2 class="text-sm font-semibold text-slate-900">{{ t('paperTodo.dataManagement') }}</h2>
-                <p class="mt-0.5 text-xs text-slate-500">{{ t('paperTodo.dataManagementHint') }}</p>
-              </div>
-            </div>
-            <div class="flex flex-wrap items-center gap-2">
-              <button type="button" class="settings-command" :disabled="busy" @click="importData"><Import class="h-4 w-4" />{{ t('paperTodo.importData') }}</button>
-              <button type="button" class="settings-command" :disabled="busy" @click="exportData"><Download class="h-4 w-4" />{{ t('paperTodo.exportData') }}</button>
-              <button type="button" class="settings-command" :disabled="busy" @click="cleanAssets"><RotateCcw class="h-4 w-4" />{{ t('paperTodo.cleanAssets') }}</button>
-            </div>
-          </div>
-        </section>
+      <div v-else class="mx-auto w-full max-w-[1480px]">
+        <PaperTodoSettingsPanel
+          :todo-count="todoCount"
+          :note-count="noteCount"
+          :open-count="openCount"
+          :busy="busy"
+          @show-all="changeAllWindows('show')"
+          @hide-all="changeAllWindows('hide')"
+          @import-data="requestImport"
+          @export-data="exportData"
+          @clean-assets="cleanAssets"
+        />
       </div>
     </main>
+
+    <div
+      v-if="importConfirmationOpen"
+      ref="importDialog"
+      class="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/35 p-5 backdrop-blur-[1px]"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      :aria-labelledby="'paper-todo-import-dialog-title'"
+      @keydown="onImportDialogKeydown"
+    >
+      <div class="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-5 shadow-2xl">
+        <h2 id="paper-todo-import-dialog-title" class="text-base font-semibold text-slate-900">{{ t('paperTodo.importConfirmTitle') }}</h2>
+        <p class="mt-2 text-sm leading-6 text-slate-600">{{ t('paperTodo.confirmImport') }}</p>
+        <p v-if="importError" class="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">{{ importError }}</p>
+        <div class="mt-5 flex justify-end gap-2">
+          <button type="button" class="settings-command" :disabled="busy" autofocus @click="importConfirmationOpen = false">{{ t('common.cancel') }}</button>
+          <button type="button" class="settings-command border-amber-300 text-amber-800 hover:bg-amber-50" :disabled="busy" @click="importData">{{ busy ? t('common.loading') : t('paperTodo.importData') }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 

@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sidebarSource = readFileSync(join(__dirname, 'Sidebar.vue'), 'utf8');
 
-test('sidebar uses responsive desktop widths', () => {
-  assert.match(sidebarSource, /h-screen w-72[^\"]*xl:w-80/);
+test('sidebar inherits the rounded app shell height and uses responsive desktop widths', () => {
+  assert.match(sidebarSource, /h-full w-72[^\"]*xl:w-80/);
   assert.doesNotMatch(sidebarSource, /h-screen w-64/);
 });
 

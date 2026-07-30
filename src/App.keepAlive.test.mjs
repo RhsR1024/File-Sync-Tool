@@ -20,4 +20,9 @@ assert.doesNotMatch(
   'MainConsole is now kept alive by SyncConsolePage instead of the app shell',
 );
 
+assert.match(appSource, /<AppTitleBar \/>/, 'the main layout must render the custom window title bar');
+assert.match(appSource, /'app-window-shell--maximized': isMaximized/, 'maximized windows must disable custom rounded chrome');
+assert.doesNotMatch(appSource, /shadow-\[0_24px_60px/, 'the app shell must not draw a clipped outer shadow');
+assert.match(appSource, /mainWindow\.onResized/, 'window chrome must track maximize and restore changes');
+
 console.log('App keep-alive tests PASSED');

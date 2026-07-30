@@ -141,7 +141,10 @@ fn cdm_login_signature(user: &str, access_code: &str, password: &str) -> String 
 ///
 /// PKCS#1 v1.5 填充带随机数，同一明文两次调用必然得到不同密文 —— UMS 的
 /// `newUserPasswd` 与 `NewEncPassword` 正是靠这一点分两次加密同一个新密码。
-fn rsa_pkcs1v15_encrypt_base64(public_key_b64: &str, plaintext: &str) -> Result<String, String> {
+pub(crate) fn rsa_pkcs1v15_encrypt_base64(
+    public_key_b64: &str,
+    plaintext: &str,
+) -> Result<String, String> {
     let der = BASE64
         .decode(public_key_b64.trim())
         .map_err(|e| format!("公钥 base64 解码失败: {}", e))?;
@@ -203,6 +206,91 @@ fn detect_local_ip_for(target: Ipv4Addr) -> Option<String> {
         .find(|candidate| same_slash24(candidate, &target))
         .or_else(|| candidates.first())
         .map(|ip| ip.to_string())
+}
+
+/// Complete the two-request UMS challenge login and return its AccessToken.
+///
+/// This intentionally emits no logs: callers must never expose the password,
+/// signature, or returned token in the simulator's user-facing run log.
+pub(crate) async fn ums_acquire_access_token(
+    client: &reqwest::Client,
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+) -> Result<String, String> {
+    let base = format!("http://{}:{}/sw", host.trim(), port);
+    let handshake = client
+        .post(format!("{base}/login"))
+        .send()
+        .await
+        .map_err(|error| format!("获取 AccessCode 请求失败: {error}"))?;
+    let handshake_status = handshake.status();
+    let handshake_text = handshake.text().await.unwrap_or_default();
+    if !handshake_status.is_success() {
+        return Err(format!(
+            "获取 AccessCode 返回 HTTP {}",
+            handshake_status.as_u16()
+        ));
+    }
+    let handshake_json: serde_json::Value = serde_json::from_str(&handshake_text)
+        .map_err(|error| format!("AccessCode 响应不是有效 JSON: {error}"))?;
+    if let Some(detail) = extract_error(&handshake_json) {
+        return Err(format!("获取 AccessCode 失败: {detail}"));
+    }
+    let access_code = json_str(&handshake_json, "AccessCode")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "获取 AccessCode 响应缺少 AccessCode".to_string())?;
+
+    let local_ip = host
+        .parse::<Ipv4Addr>()
+        .ok()
+        .and_then(detect_local_ip_for)
+        .unwrap_or_default();
+    let login_body = json!({
+        "UserName": user,
+        "AccessCode": access_code,
+        "LoginSignature": ums_login_signature(user, access_code, password),
+        "isNewVersion": true,
+        "ip": host,
+        "languageType": "zh_cn",
+        "LoginExtInfo": { "IpAddress": local_ip },
+        "ClientIp": "",
+    });
+    let login = client
+        .post(format!("{base}/login"))
+        .json(&login_body)
+        .send()
+        .await
+        .map_err(|error| format!("UMS 登录请求失败: {error}"))?;
+    let login_status = login.status();
+    let login_text = login.text().await.unwrap_or_default();
+    if !login_status.is_success() {
+        return Err(format!("UMS 登录返回 HTTP {}", login_status.as_u16()));
+    }
+    let login_json: serde_json::Value = serde_json::from_str(&login_text)
+        .map_err(|error| format!("UMS 登录响应不是有效 JSON: {error}"))?;
+    if let Some(detail) = extract_error(&login_json) {
+        let mut message = format!("登录失败: {detail}");
+        if let Some(residue) = login_json
+            .get("ResidueDegree")
+            .and_then(|value| value.as_i64())
+        {
+            message.push_str(&format!("（剩余尝试次数 {residue}）"));
+        }
+        if let Some(remain) = login_json
+            .get("RemainMinutes")
+            .and_then(|value| value.as_i64())
+            .filter(|value| *value > 0)
+        {
+            message.push_str(&format!("（锁定剩余 {remain} 分钟）"));
+        }
+        return Err(message);
+    }
+    json_str(&login_json, "AccessToken")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "UMS 登录响应缺少 AccessToken".to_string())
 }
 
 // ─────────────────────────── 日志 ───────────────────────────

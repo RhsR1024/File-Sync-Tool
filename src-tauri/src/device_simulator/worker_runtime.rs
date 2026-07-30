@@ -445,13 +445,6 @@ impl WorkerRuntime {
         };
         let firewall_rules = plan_session_firewall(&self.session_id, &payload, remote_scope)?;
         let now = now_ms();
-        let total_nvr_channels = payload
-            .preview
-            .devices
-            .iter()
-            .filter_map(|device| device.channel_count)
-            .map(u32::from)
-            .sum();
         let journal = SessionJournalV1 {
             schema_version: SESSION_JOURNAL_SCHEMA_VERSION,
             session_id: self.session_id.clone(),
@@ -463,7 +456,6 @@ impl WorkerRuntime {
             device_summary: DeviceRequestSummary {
                 profile_ids: selected_profiles,
                 total_devices: payload.preview.total_devices,
-                total_nvr_channels,
             },
             worker_process: self.worker_process.clone(),
             resources: OwnedResources {
@@ -1430,9 +1422,8 @@ mod tests {
             media_theme_id: crate::device_simulator::api::DEFAULT_MEDIA_THEME_ID.into(),
             groups: vec![DeviceGroupDraft {
                 id: "group".into(),
-                profile_id: "ipc-smart".into(),
+                profile_id: "ipc-structured".into(),
                 count: 2,
-                nvr_channel_count: None,
             }],
             stream: StreamRuntimeConfig {
                 transport: StreamTransport::TcpInterleaved,
@@ -1477,9 +1468,8 @@ mod tests {
             worker_version: "test".into(),
             interface_id: request.interface_id.clone(),
             device_summary: DeviceRequestSummary {
-                profile_ids: vec!["ipc-smart".into()],
+                profile_ids: vec!["ipc-structured".into()],
                 total_devices: preview.total_devices,
-                total_nvr_channels: 0,
             },
             worker_process: None,
             resources: OwnedResources {

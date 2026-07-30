@@ -10,9 +10,7 @@ use app_lib::device_simulator::api::{
     DEFAULT_ALARM_RECEIVER_PORT, DEFAULT_MEDIA_THEME_ID,
 };
 use app_lib::device_simulator::profiles::identity::MAX_PREVIEW_DEVICES;
-use app_lib::device_simulator::profiles::scope::{
-    validate_nvr_channel_count, TargetPlatform, DEFAULT_NVR_CHANNEL_COUNT,
-};
+use app_lib::device_simulator::profiles::scope::TargetPlatform;
 
 pub const MIN_SCAN_INTERVAL_MINS: u64 = 5;
 pub const MIN_STABILITY_CHECK_SECS: u64 = 60;
@@ -38,6 +36,14 @@ pub struct DeviceSimulatorSettings {
     pub last_time_watermark_enabled: bool,
     pub auto_check_asset_updates: bool,
     pub manage_firewall: bool,
+    /// UMS platform login account used only by the main process when registering devices.
+    pub platform_username: String,
+    /// Intentionally persisted as clear text so the settings UI can reveal it on demand.
+    pub platform_password: String,
+    /// Register all devices with every configured UMS after the simulator reaches Running.
+    pub platform_auto_add_devices: bool,
+    /// Remove UMS resources whose IP matches a virtual device before registering it.
+    pub platform_replace_existing_devices: bool,
 }
 
 impl Default for DeviceSimulatorSettings {
@@ -60,6 +66,10 @@ impl Default for DeviceSimulatorSettings {
             last_time_watermark_enabled: true,
             auto_check_asset_updates: true,
             manage_firewall: true,
+            platform_username: "loadmin".into(),
+            platform_password: "admin_123".into(),
+            platform_auto_add_devices: true,
+            platform_replace_existing_devices: false,
         }
     }
 }
@@ -307,8 +317,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub clipboard: ClipboardSettings,
 
-    /// Video device simulator preferences only. Runtime platform credentials,
-    /// Worker/PID state, session journals, and metrics are deliberately absent.
+    /// Video device simulator preferences, including main-process-only UMS login
+    /// credentials. Worker/PID state, session journals, and metrics are absent.
     #[serde(default)]
     pub device_simulator: DeviceSimulatorSettings,
 
@@ -637,6 +647,7 @@ pub fn normalize_device_simulator_settings(
             && server.host.len() <= 253
             && server.port > 0
     });
+    settings.platform_username = settings.platform_username.trim().to_owned();
     settings.last_alarm_receiver_url = settings
         .last_alarm_receiver_url
         .take()
@@ -661,17 +672,6 @@ pub fn normalize_device_simulator_settings(
         }
         group.count = group.count.min(remaining);
         remaining -= group.count;
-        match group.profile_id.as_str() {
-            "nvr-common" | "nvr-vehicle" => {
-                group.nvr_channel_count = Some(
-                    group
-                        .nvr_channel_count
-                        .filter(|value| validate_nvr_channel_count(*value).is_ok())
-                        .unwrap_or(DEFAULT_NVR_CHANNEL_COUNT),
-                );
-            }
-            _ => group.nvr_channel_count = None,
-        }
         true
     });
 
@@ -709,6 +709,13 @@ pub fn validate_device_simulator_settings(
     if !(1..=30).contains(&settings.last_subnet_prefix) {
         return Err("Device simulator subnet prefix must be between 1 and 30".into());
     }
+    if settings.platform_auto_add_devices && !settings.last_platform_servers.is_empty() {
+        if settings.platform_username.is_empty() || settings.platform_password.is_empty() {
+            return Err(
+                "Automatic platform registration requires a UMS username and password".into(),
+            );
+        }
+    }
     let mut ids = HashSet::new();
     let mut total = 0_u32;
     for group in &settings.last_device_groups {
@@ -730,19 +737,6 @@ pub fn validate_device_simulator_settings(
         total = total
             .checked_add(group.count)
             .ok_or_else(|| "Device simulator group count overflowed".to_string())?;
-        match group.profile_id.as_str() {
-            "nvr-common" | "nvr-vehicle" => {
-                let channels = group.nvr_channel_count.ok_or_else(|| {
-                    "Device simulator NVR group requires a channel count".to_string()
-                })?;
-                validate_nvr_channel_count(channels)
-                    .map_err(|code| format!("Invalid device simulator NVR channels: {code}"))?;
-            }
-            _ if group.nvr_channel_count.is_some() => {
-                return Err("Device simulator IPC group cannot declare NVR channels".into());
-            }
-            _ => {}
-        }
     }
     if total > u32::from(MAX_PREVIEW_DEVICES) {
         return Err(format!(
@@ -800,16 +794,11 @@ fn is_safe_group_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+/// Groups naming any other profile are dropped by `normalize_device_simulator_settings`,
+/// which is how a config saved before the other five device types were removed
+/// migrates itself on load.
 fn is_first_release_profile(value: &str) -> bool {
-    matches!(
-        value,
-        "ipc-custom"
-            | "ipc-smart"
-            | "ipc-structured"
-            | "ipc-face-access"
-            | "nvr-common"
-            | "nvr-vehicle"
-    )
+    value == "ipc-structured"
 }
 
 const PORTAL_PASSWORD_DPAPI_PREFIX: &str = "dpapi:v1:";
@@ -1328,6 +1317,74 @@ mod tests {
         .unwrap();
 
         assert!(settings.last_time_watermark_enabled);
+    }
+
+    #[test]
+    fn device_simulator_legacy_settings_receive_platform_registration_defaults() {
+        let settings: DeviceSimulatorSettings = serde_json::from_value(serde_json::json!({
+            "last_media_theme_id": DEFAULT_MEDIA_THEME_ID
+        }))
+        .unwrap();
+
+        assert_eq!(settings.platform_username, "loadmin");
+        assert_eq!(settings.platform_password, "admin_123");
+        assert!(settings.platform_auto_add_devices);
+        assert!(!settings.platform_replace_existing_devices);
+    }
+
+    #[test]
+    fn platform_auto_add_preference_round_trips_both_states() {
+        for expected in [true, false] {
+            let settings = DeviceSimulatorSettings {
+                platform_auto_add_devices: expected,
+                ..DeviceSimulatorSettings::default()
+            };
+            let restored: DeviceSimulatorSettings =
+                serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+
+            assert_eq!(restored.platform_auto_add_devices, expected);
+        }
+    }
+
+    #[test]
+    fn platform_replace_existing_preference_round_trips_both_states() {
+        for expected in [true, false] {
+            let settings = DeviceSimulatorSettings {
+                platform_replace_existing_devices: expected,
+                ..DeviceSimulatorSettings::default()
+            };
+            let restored: DeviceSimulatorSettings =
+                serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+
+            assert_eq!(restored.platform_replace_existing_devices, expected);
+        }
+    }
+
+    #[test]
+    fn automatic_platform_registration_allows_an_empty_server_draft() {
+        let mut settings = DeviceSimulatorSettings {
+            platform_auto_add_devices: true,
+            ..DeviceSimulatorSettings::default()
+        };
+        assert!(validate_device_simulator_settings(&settings).is_ok());
+
+        settings.last_platform_servers.push(TargetPlatformServer {
+            id: "ums-1".into(),
+            host: "192.115.1.17".into(),
+            port: 80,
+        });
+        assert!(validate_device_simulator_settings(&settings).is_ok());
+
+        settings.platform_password.clear();
+        assert!(validate_device_simulator_settings(&settings).is_err());
+
+        settings.last_platform_servers.clear();
+        assert!(validate_device_simulator_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn default_app_config_remains_valid_with_auto_add_enabled() {
+        assert!(validate_config(&AppConfig::default()).is_ok());
     }
 
     #[test]

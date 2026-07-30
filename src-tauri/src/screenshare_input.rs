@@ -1381,6 +1381,78 @@ fn virtual_desktop_rect() -> ScreenRect {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+struct MonitorGeometry {
+    /// Full monitor bounds; the capture source and every normalized annotation
+    /// or input coordinate is relative to this rectangle.
+    monitor: ScreenRect,
+    /// Monitor bounds minus the taskbar and any docked app bars.
+    work: ScreenRect,
+    primary: bool,
+}
+
+/// Enumerate monitors in the primary-first ordering used by the capture path.
+/// Both rectangles come from a single `GetMonitorInfoW` call so the work area
+/// can never describe a different monitor than the bounds beside it.
+#[cfg(target_os = "windows")]
+fn enumerate_monitor_geometry() -> Vec<MonitorGeometry> {
+    use std::mem;
+    use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+    };
+    const MONITORINFOF_PRIMARY: u32 = 1;
+
+    fn to_screen_rect(rect: RECT) -> ScreenRect {
+        ScreenRect {
+            left: rect.left,
+            top: rect.top,
+            width: rect.right.saturating_sub(rect.left).max(0) as u32,
+            height: rect.bottom.saturating_sub(rect.top).max(0) as u32,
+        }
+    }
+
+    unsafe extern "system" fn callback(
+        monitor: HMONITOR,
+        _dc: HDC,
+        _rect: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
+        let entries = &mut *(data.0 as *mut Vec<MonitorGeometry>);
+        let mut info = MONITORINFO {
+            cbSize: mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            entries.push(MonitorGeometry {
+                monitor: to_screen_rect(info.rcMonitor),
+                work: to_screen_rect(info.rcWork),
+                primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+            });
+        }
+        BOOL(1)
+    }
+
+    let mut entries: Vec<MonitorGeometry> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            HDC::default(),
+            None,
+            Some(callback),
+            LPARAM(&mut entries as *mut Vec<MonitorGeometry> as isize),
+        );
+    }
+    entries.sort_by(|left, right| {
+        right
+            .primary
+            .cmp(&left.primary)
+            .then(left.monitor.left.cmp(&right.monitor.left))
+            .then(left.monitor.top.cmp(&right.monitor.top))
+    });
+    entries
+}
+
 /// Resolve the source monitor in the same primary-first ordering used by the
 /// screen capture path. The fallback dimensions are used only when Windows
 /// reports an empty rectangle for a transient topology change.
@@ -1390,83 +1462,37 @@ pub fn source_rect_for_monitor(
     fallback_width: u32,
     fallback_height: u32,
 ) -> Option<ScreenRect> {
-    use std::mem;
-    use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
-    use windows::Win32::Graphics::Gdi::{
-        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
-    };
-    const MONITORINFOF_PRIMARY: u32 = 1;
+    enumerate_monitor_geometry()
+        .get(monitor_index)
+        .map(|entry| ScreenRect {
+            width: if entry.monitor.width == 0 {
+                fallback_width
+            } else {
+                entry.monitor.width
+            },
+            height: if entry.monitor.height == 0 {
+                fallback_height
+            } else {
+                entry.monitor.height
+            },
+            ..entry.monitor
+        })
+}
 
-    #[derive(Debug)]
-    struct Entry {
-        rect: ScreenRect,
-        primary: bool,
-    }
-
-    unsafe extern "system" fn callback(
-        monitor: HMONITOR,
-        _dc: HDC,
-        _rect: *mut RECT,
-        data: LPARAM,
-    ) -> BOOL {
-        let entries = &mut *(data.0 as *mut Vec<Entry>);
-        let mut info = MONITORINFO {
-            cbSize: mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if GetMonitorInfoW(monitor, &mut info).as_bool() {
-            let width = info
-                .rcMonitor
-                .right
-                .saturating_sub(info.rcMonitor.left)
-                .max(0) as u32;
-            let height = info
-                .rcMonitor
-                .bottom
-                .saturating_sub(info.rcMonitor.top)
-                .max(0) as u32;
-            entries.push(Entry {
-                rect: ScreenRect {
-                    left: info.rcMonitor.left,
-                    top: info.rcMonitor.top,
-                    width,
-                    height,
-                },
-                primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
-            });
-        }
-        BOOL(1)
-    }
-
-    let mut entries: Vec<Entry> = Vec::new();
-    unsafe {
-        let _ = EnumDisplayMonitors(
-            HDC::default(),
-            None,
-            Some(callback),
-            LPARAM(&mut entries as *mut Vec<Entry> as isize),
-        );
-    }
-    entries.sort_by(|left, right| {
-        right
-            .primary
-            .cmp(&left.primary)
-            .then(left.rect.left.cmp(&right.rect.left))
-            .then(left.rect.top.cmp(&right.rect.top))
-    });
-    entries.get(monitor_index).map(|entry| ScreenRect {
-        width: if entry.rect.width == 0 {
-            fallback_width
-        } else {
-            entry.rect.width
-        },
-        height: if entry.rect.height == 0 {
-            fallback_height
-        } else {
-            entry.rect.height
-        },
-        ..entry.rect
-    })
+/// Work area of the source monitor, for host-side chrome that should sit above
+/// the taskbar instead of covering it. Falls back to the full monitor bounds
+/// when Windows reports an empty work area.
+#[cfg(target_os = "windows")]
+pub fn work_rect_for_monitor(monitor_index: usize) -> Option<ScreenRect> {
+    enumerate_monitor_geometry()
+        .get(monitor_index)
+        .map(|entry| {
+            if entry.work.width == 0 || entry.work.height == 0 {
+                entry.monitor
+            } else {
+                entry.work
+            }
+        })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1481,6 +1507,11 @@ pub fn source_rect_for_monitor(
         width: fallback_width,
         height: fallback_height,
     })
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn work_rect_for_monitor(_monitor_index: usize) -> Option<ScreenRect> {
+    None
 }
 
 #[cfg(test)]

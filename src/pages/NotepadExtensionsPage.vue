@@ -56,7 +56,11 @@ const loadingInstances = ref(false);
 const loadingCatalog = ref(false);
 const installingPluginId = ref('');
 const installPhase = ref('');
-const notice = ref<{ kind: 'success' | 'warning' | 'error'; message: string } | null>(null);
+type Notice = { kind: 'success' | 'warning' | 'error'; message: string };
+
+const notice = ref<Notice | null>(null);
+// 底部操作栏离页面顶部的横幅很远，保存和打开目录的结果必须就地反馈，否则点击看起来毫无反应。
+const enhanceNotice = ref<Notice | null>(null);
 const enhanceConfig = ref<EnhanceAnyLexerConfig | null>(null);
 const activeSectionIndex = ref(0);
 const loadingEnhance = ref(false);
@@ -219,6 +223,7 @@ async function openEnhanceConfiguration() {
   tab.value = 'enhance';
   loadingEnhance.value = true;
   notice.value = null;
+  enhanceNotice.value = null;
   try {
     enhanceConfig.value = await notepadExtensionsApi.readEnhanceConfig(
       selectedInstance.value.exe_path,
@@ -420,13 +425,13 @@ function previewSegments(line: string) {
 async function saveEnhance() {
   if (!selectedInstance.value || !enhanceConfig.value) return;
   savingEnhance.value = true;
-  notice.value = null;
+  enhanceNotice.value = null;
   try {
     const result = await notepadExtensionsApi.saveEnhanceConfig(
       selectedInstance.value.exe_path,
       enhanceConfig.value,
     );
-    notice.value = {
+    enhanceNotice.value = {
       kind: result.restart_required ? 'warning' : 'success',
       message: result.restart_required
         ? t('notepadExtensions.enhance.savedRestart')
@@ -434,17 +439,36 @@ async function saveEnhance() {
     };
     await refreshInstances(selectedInstance.value.exe_path);
   } catch (error) {
-    notice.value = { kind: 'error', message: friendlyError(error) };
+    enhanceNotice.value = { kind: 'error', message: friendlyError(error) };
   } finally {
     savingEnhance.value = false;
   }
 }
 
-async function revealPath(path: string) {
+function parentDirectory(path: string) {
+  const index = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+  return index > 0 ? path.slice(0, index) : path;
+}
+
+// 首次保存前 plugins\Config\EnhanceAnyLexer 还不存在，直接打开会失败，退回到 Notepad++ 配置目录。
+async function openEnhanceConfigFolder() {
+  const instance = selectedInstance.value;
+  if (!instance) return;
+  const exists = instance.enhance_any_lexer.config_exists;
+  const target = exists
+    ? parentDirectory(instance.enhance_any_lexer.config_path)
+    : instance.settings_dir;
+  enhanceNotice.value = null;
   try {
-    await openPathParent(path);
+    await openPathParent(target);
+    enhanceNotice.value = exists
+      ? {
+          kind: 'success',
+          message: t('notepadExtensions.enhance.openedConfigFolder', { path: target }),
+        }
+      : { kind: 'warning', message: t('notepadExtensions.enhance.configFolderMissing') };
   } catch (error) {
-    notice.value = { kind: 'error', message: friendlyError(error) };
+    enhanceNotice.value = { kind: 'error', message: friendlyError(error) };
   }
 }
 
@@ -850,16 +874,32 @@ onBeforeUnmount(() => {
                 </div>
               </section>
 
-              <div class="sticky bottom-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-violet-200 bg-white/95 p-4 shadow-xl backdrop-blur">
-                <button type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 text-sm font-semibold text-slate-600 hover:text-violet-700" @click="revealPath(selectedInstance.enhance_any_lexer.config_path)">
-                  <FolderOpen class="h-4 w-4" />
-                  {{ t('notepadExtensions.enhance.openConfigFolder') }}
-                </button>
-                <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-violet-600 px-5 text-sm font-bold text-white transition-colors hover:bg-violet-700 disabled:cursor-not-allowed disabled:bg-slate-300" :disabled="savingEnhance" @click="saveEnhance">
-                  <LoaderCircle v-if="savingEnhance" class="h-4 w-4 animate-spin motion-reduce:animate-none" />
-                  <Save v-else class="h-4 w-4" />
-                  {{ savingEnhance ? t('notepadExtensions.enhance.saving') : t('notepadExtensions.enhance.save') }}
-                </button>
+              <div class="sticky bottom-4 space-y-3 rounded-2xl border border-violet-200 bg-white/95 p-4 shadow-xl backdrop-blur">
+                <div
+                  v-if="enhanceNotice"
+                  class="flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-sm"
+                  :class="{
+                    'border-emerald-200 bg-emerald-50 text-emerald-800': enhanceNotice.kind === 'success',
+                    'border-amber-200 bg-amber-50 text-amber-900': enhanceNotice.kind === 'warning',
+                    'border-rose-200 bg-rose-50 text-rose-800': enhanceNotice.kind === 'error',
+                  }"
+                  role="status"
+                >
+                  <Check v-if="enhanceNotice.kind === 'success'" class="mt-0.5 h-4 w-4 shrink-0" />
+                  <AlertCircle v-else class="mt-0.5 h-4 w-4 shrink-0" />
+                  <span class="min-w-0 break-all">{{ enhanceNotice.message }}</span>
+                </div>
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <button type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 text-sm font-semibold text-slate-600 hover:text-violet-700" @click="openEnhanceConfigFolder">
+                    <FolderOpen class="h-4 w-4" />
+                    {{ t('notepadExtensions.enhance.openConfigFolder') }}
+                  </button>
+                  <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-violet-600 px-5 text-sm font-bold text-white transition-colors hover:bg-violet-700 disabled:cursor-not-allowed disabled:bg-slate-300" :disabled="savingEnhance" @click="saveEnhance">
+                    <LoaderCircle v-if="savingEnhance" class="h-4 w-4 animate-spin motion-reduce:animate-none" />
+                    <Save v-else class="h-4 w-4" />
+                    {{ savingEnhance ? t('notepadExtensions.enhance.saving') : t('notepadExtensions.enhance.save') }}
+                  </button>
+                </div>
               </div>
             </div>
           </div>

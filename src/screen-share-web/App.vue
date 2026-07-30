@@ -310,14 +310,27 @@ function setImageSource(source: string) {
   imageSource.value = source;
 }
 
+// Abort the compatibility MJPEG request once a primary player takes over.
+// Letting `v-if` drop the `<img>` is not enough: a `multipart/x-mixed-replace`
+// response never "completes", so detaching the element leaves the request in
+// flight and the host keeps counting a viewer — it then runs the JPEG encoder on
+// the capture thread and pushes ~10fps of full frames nobody decodes, on top of
+// H.264. Clearing `src` while the element is still mounted is the actual cancel.
+// Every path back to MJPEG re-enters through `setImageSource` with a fresh URL,
+// so the cleared attribute cannot strand a later fallback.
+function stopMjpegStream() {
+  mjpegConnected.value = false;
+  imageReady.value = false;
+  screenImage.value?.removeAttribute('src');
+}
+
 function handleH264PlayerState(state: MsePlayerState) {
   const wasReady = h264PlayerState.value.status === 'ready';
   h264PlayerState.value = state;
   if (state.status === 'ready') {
     naturalWidth.value = state.width;
     naturalHeight.value = state.height;
-    mjpegConnected.value = false;
-    imageReady.value = false;
+    stopMjpegStream();
     if (streamRetryTimer !== null) {
       window.clearTimeout(streamRetryTimer);
       streamRetryTimer = null;
@@ -340,8 +353,7 @@ function handleWebCodecsPlayerState(state: WebCodecsPlayerState) {
   if (state.status === 'ready') {
     naturalWidth.value = state.width;
     naturalHeight.value = state.height;
-    mjpegConnected.value = false;
-    imageReady.value = false;
+    stopMjpegStream();
     nextTick(updateGeometry);
     return;
   }
@@ -362,8 +374,7 @@ function handleWebRtcPlayerState(state: WebRtcPlayerState) {
   const wasReady = webRtcPlayerState.value === 'ready';
   webRtcPlayerState.value = state;
   if (state === 'ready') {
-    mjpegConnected.value = false;
-    imageReady.value = false;
+    stopMjpegStream();
     nextTick(updateGeometry);
     return;
   }

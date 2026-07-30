@@ -91,11 +91,13 @@ pub enum PackKind {
     DeviceProfile,
 }
 
+/// Only IPC devices are simulated. `Nvr` was removed with the two NVR profiles;
+/// a catalog that still advertises an NVR pack now fails to parse, which is the
+/// intended fail-closed behaviour for packs this build cannot run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceKind {
     Ipc,
-    Nvr,
 }
 
 /// An exact pack identity in the catalog dependency graph.

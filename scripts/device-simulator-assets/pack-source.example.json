@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "id": "ipc-custom",
+  "id": "ipc-structured",
   "version": "1.0.0",
   "engine_api": 1,
-  "source_dir": "./authorized-ipc-custom",
+  "source_dir": "./authorized-ipc-structured",
   "usage": {
     "scope": "non-commercial",
     "notice": "Authorized for testing, learning, copying, and packaging; commercial use is prohibited."

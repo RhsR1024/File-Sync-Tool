@@ -1,5 +1,6 @@
 import {
   Anchor,
+  DatabaseBackup,
   Keyboard,
   Palette,
   Pill,
@@ -14,6 +15,7 @@ export const PAPER_TODO_SETTINGS_TABS = [
   { id: 'capsule', labelKey: 'paperTodo.settings.tabs.capsule', icon: Pill },
   { id: 'papers', labelKey: 'paperTodo.settings.tabs.papers', icon: StickyNote },
   { id: 'shortcuts', labelKey: 'paperTodo.settings.tabs.shortcuts', icon: Keyboard },
+  { id: 'data', labelKey: 'paperTodo.settings.tabs.data', icon: DatabaseBackup },
 ] as const;
 
 export type PaperTodoSettingsTabId = typeof PAPER_TODO_SETTINGS_TABS[number]['id'];
@@ -30,7 +32,7 @@ export interface PaperTodoToggleField {
  * single question instead of presenting every switch at once.
  */
 export const PAPER_TODO_TOGGLE_GROUPS: Record<
-  Exclude<PaperTodoSettingsTabId, 'launcher' | 'shortcuts'>,
+  Exclude<PaperTodoSettingsTabId, 'launcher' | 'shortcuts' | 'data'>,
   PaperTodoToggleField[]
 > = {
   appearance: [

@@ -3,6 +3,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 export type PaperKind = 'todo' | 'note';
 export type PaperTheme = 'system' | 'light' | 'dark';
 export type PaperPalette = 'warm' | 'ink' | 'forest' | 'frost';
+export type PaperSkin = 'classic' | 'grain' | 'quiet' | 'desk';
 export type TodoVisualSize = 'small' | 'medium' | 'large' | 'xlarge';
 export type TextRendering = 'standard' | 'soft' | 'sharp';
 export type ImageMarkerVisibility = 'always' | 'editing' | 'hidden';
@@ -53,6 +54,7 @@ export interface PaperTodoSettings {
   launcherOffset: number;
   theme: PaperTheme;
   palette: PaperPalette;
+  paperSkin: PaperSkin;
   todoSize: TodoVisualSize;
   titleMaxLength: number;
   animations: boolean;
@@ -119,6 +121,7 @@ export function createDefaultSettings(): PaperTodoSettings {
     launcherOffset: 35,
     theme: 'system',
     palette: 'warm',
+    paperSkin: 'classic',
     todoSize: 'medium',
     titleMaxLength: 20,
     animations: true,
@@ -235,6 +238,8 @@ export function normalizePaperTodoState(value: unknown): PaperTodoState {
   settings.interfaceScale = Math.min(120, Math.max(80, finiteNumber(settings.interfaceScale, 100)));
   settings.launcherOffset = Math.min(100, Math.max(0, finiteNumber(settings.launcherOffset, 35)));
   settings.launcherEdge = settings.launcherEdge === 'left' ? 'left' : 'right';
+  const skins: PaperSkin[] = ['classic', 'grain', 'quiet', 'desk'];
+  settings.paperSkin = skins.includes(settings.paperSkin) ? settings.paperSkin : 'classic';
 
   const papers = Array.isArray(input.papers)
     ? input.papers.slice(0, MAX_PAPERS).flatMap((candidate) => {

@@ -16,8 +16,9 @@ use crate::screenshare_gpu::{
     GpuFallbackCode, GpuFallbackReason, GpuNv12Surface, GpuPreprocessConfig, GpuVideoPreprocessor,
 };
 use crate::screenshare_input::{
-    parse_input_event, source_rect_for_monitor, AppliedInputSnapshot, InputContext, InputEvent,
-    InputMetricsSnapshot, InputWorkerHandle, QueuePushOutcome, QueuedInput, ScreenRect,
+    parse_input_event, source_rect_for_monitor, work_rect_for_monitor, AppliedInputSnapshot,
+    InputContext, InputEvent, InputMetricsSnapshot, InputWorkerHandle, QueuePushOutcome,
+    QueuedInput, ScreenRect,
 };
 use crate::screenshare_media::{
     H264EncoderWorker, H264MediaEvent, H264MediaMetricsSnapshot, H264MediaSegment, H264MediaState,
@@ -96,8 +97,13 @@ const WEBCODECS_AU_HEADER_BYTES: usize = 40;
 const WEBCODECS_MAX_ACCESS_UNIT_BYTES: usize = 32 * 1024 * 1024;
 #[cfg(feature = "screen-share-webrtc-prototype")]
 const WEBRTC_SIGNALING_MAX_BYTES: usize = 256 * 1024;
-const PREVIEW_WINDOW_LABEL_PREFIX: &str = "screen-share-preview";
 const DESKTOP_OVERLAY_WINDOW_LABEL_PREFIX: &str = "screen-share-desktop-overlay";
+const ANNOTATION_BAR_WINDOW_LABEL_PREFIX: &str = "screen-share-annotation-bar";
+/// Logical size of the host annotation action bar. It is fixed so the Rust side
+/// can place it without waiting for the page to report a measured size.
+const ANNOTATION_BAR_LOGICAL_WIDTH: f64 = 360.0;
+const ANNOTATION_BAR_LOGICAL_HEIGHT: f64 = 60.0;
+const ANNOTATION_BAR_LOGICAL_MARGIN: f64 = 16.0;
 
 /// DXGI DuplicateOutput 偶发瞬时失败，创建时做 3 次短重试；
 /// 长退避由捕获循环的暂停-重试机制负责，此处不需要更长的重试梯子。
@@ -1118,8 +1124,11 @@ pub struct ScreenShareHandle {
     h264_media: Mutex<Option<Arc<H264MediaState>>>,
     input_worker: Mutex<Option<Arc<InputWorkerHandle>>>,
     active_monitor_index: Arc<AtomicUsize>,
-    preview_token: Arc<Mutex<Option<String>>>,
     desktop_overlay_active: Arc<AtomicBool>,
+    /// True while the host annotation action bar is on screen. The bar page
+    /// drives this from the annotation document, so it is not part of the
+    /// session start config.
+    annotation_bar_visible: Arc<AtomicBool>,
     media_metrics: Mutex<Option<Arc<ScreenShareMediaMetrics>>>,
     /// Completed by the server watcher once the HTTP server has fully exited
     /// (port released); screen_share_stop awaits it so "stop returned" means
@@ -1151,8 +1160,8 @@ impl ScreenShareHandle {
             h264_media: Mutex::new(None),
             input_worker: Mutex::new(None),
             active_monitor_index: Arc::new(AtomicUsize::new(0)),
-            preview_token: Arc::new(Mutex::new(None)),
             desktop_overlay_active: Arc::new(AtomicBool::new(false)),
+            annotation_bar_visible: Arc::new(AtomicBool::new(false)),
             media_metrics: Mutex::new(None),
             server_done_rx: Mutex::new(None),
         }
@@ -1252,8 +1261,8 @@ fn clear_runtime_state(handle: &ScreenShareHandle, cancel: bool) {
             worker.shutdown();
         }
     }
-    *handle.preview_token.lock().unwrap() = None;
     handle.desktop_overlay_active.store(false, Ordering::SeqCst);
+    handle.annotation_bar_visible.store(false, Ordering::SeqCst);
     *handle.server_done_rx.lock().unwrap() = None;
     if let Ok(mut ips) = handle.viewer_ips.lock() {
         ips.clear();
@@ -1396,7 +1405,6 @@ struct HttpServerState {
     session_id: u64,
     capture_paused: Arc<AtomicBool>,
     capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
-    preview_token: Arc<Mutex<Option<String>>>,
     transport: Arc<Mutex<ScreenShareMediaTransport>>,
     input_worker: Option<Arc<InputWorkerHandle>>,
     #[cfg(feature = "screen-share-webrtc-prototype")]
@@ -1773,6 +1781,7 @@ pub async fn screen_share_start(
     // from the screen-share page for the remainder of this session.
     if config.annotations_enabled {
         schedule_desktop_overlay_window(app_handle.clone(), handle.clone(), session_id);
+        schedule_annotation_bar_window(app_handle.clone(), handle.clone(), session_id);
     }
 
     let mut annotation_events = interaction.subscribe();
@@ -1837,7 +1846,6 @@ pub async fn screen_share_start(
         session_id,
         capture_paused: handle.capture_paused.clone(),
         capture_issue: handle.capture_issue.clone(),
-        preview_token: handle.preview_token.clone(),
         transport: handle.transport.clone(),
         input_worker: handle.input_worker.lock().unwrap().clone(),
         #[cfg(feature = "screen-share-webrtc-prototype")]
@@ -1876,8 +1884,8 @@ pub async fn screen_share_start(
         if is_current_session(&ss_runtime_handle, ss_session_id)
             && ss_server_active.swap(false, Ordering::SeqCst)
         {
-            close_preview_window(&ss_server_app, ss_session_id);
             close_desktop_overlay_window(&ss_server_app, &ss_runtime_handle, ss_session_id);
+            close_annotation_bar_window(&ss_server_app, &ss_runtime_handle, ss_session_id);
             reset_runtime_state(&ss_runtime_handle);
             crate::scanner::emit_tool_log(&ss_server_app, TOOL_NAME, "已停止", "info");
             let _ = ss_server_app.emit(
@@ -1991,8 +1999,8 @@ pub async fn screen_share_stop(
     let done_rx = handle.server_done_rx.lock().unwrap().take();
 
     let session_id = handle.session_id.load(Ordering::SeqCst);
-    close_preview_window(&app_handle, session_id);
     close_desktop_overlay_window(&app_handle, handle, session_id);
+    close_annotation_bar_window(&app_handle, handle, session_id);
     reset_runtime_state(handle);
 
     crate::scanner::emit_tool_log(&app_handle, TOOL_NAME, "已停止", "info");
@@ -2278,82 +2286,6 @@ pub fn screen_share_revoke_control(state: State<'_, crate::AppState>) -> Result<
     Ok(())
 }
 
-/// Create a short-lived local preview capability. The returned URL contains
-/// only this random capability, never the configured sharing password. The
-/// browser exchanges it for an HttpOnly cookie on the first page load.
-#[tauri::command]
-pub fn screen_share_open_local_preview(
-    app_handle: AppHandle,
-    state: State<'_, crate::AppState>,
-) -> Result<(), String> {
-    let handle = &state.screen_share;
-    if !handle.active.load(Ordering::SeqCst) {
-        return Err("Screen share is not active".into());
-    }
-    let base = handle.server_url.lock().unwrap().clone();
-    if base.is_empty() {
-        return Err("Screen share URL is not ready".into());
-    }
-    let session_id = handle.session_id.load(Ordering::SeqCst);
-    let window_label = preview_window_label(session_id);
-    if let Some(window) = app_handle.get_webview_window(&window_label) {
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
-    }
-    let token = Uuid::new_v4().simple().to_string();
-    *handle.preview_token.lock().unwrap() = Some(token.clone());
-    let preview_url = format!("{base}/?host_preview={token}")
-        .parse()
-        .map_err(|error| format!("Invalid local preview URL: {error}"))?;
-    let preview_handle = state.screen_share.clone();
-    let window = WebviewWindowBuilder::new(
-        &app_handle,
-        &window_label,
-        WebviewUrl::External(preview_url),
-    )
-    .title("Screen Share Preview")
-    .inner_size(1280.0, 800.0)
-    .min_inner_size(640.0, 400.0)
-    .resizable(true)
-    .build()
-    .map_err(|error| {
-        *handle.preview_token.lock().unwrap() = None;
-        format!("Failed to open local preview: {error}")
-    })?;
-    window.on_window_event(move |event| {
-        if matches!(event, WindowEvent::Destroyed)
-            && preview_handle.session_id.load(Ordering::SeqCst) == session_id
-        {
-            *preview_handle.preview_token.lock().unwrap() = None;
-        }
-    });
-    Ok(())
-}
-
-#[tauri::command]
-pub fn screen_share_close_local_preview(
-    app_handle: AppHandle,
-    state: State<'_, crate::AppState>,
-) -> Result<(), String> {
-    let session_id = state.screen_share.session_id.load(Ordering::SeqCst);
-    close_preview_window(&app_handle, session_id);
-    *state.screen_share.preview_token.lock().unwrap() = None;
-    Ok(())
-}
-
-fn preview_window_label(session_id: u64) -> String {
-    format!("{PREVIEW_WINDOW_LABEL_PREFIX}-{session_id}")
-}
-
-fn close_preview_window(app_handle: &AppHandle, session_id: u64) {
-    if let Some(window) = app_handle.get_webview_window(&preview_window_label(session_id)) {
-        if let Err(error) = window.close() {
-            log::warn!("Failed to close screen share preview: {error}");
-        }
-    }
-}
-
 #[tauri::command]
 pub fn screen_share_open_desktop_overlay(
     app_handle: AppHandle,
@@ -2479,7 +2411,7 @@ pub fn screen_share_desktop_overlay_ready(
         let show_result = window
             .set_always_on_top(true)
             .map_err(|error| error.to_string())
-            .and_then(|_| show_desktop_overlay_without_activation(&window));
+            .and_then(|_| show_window_without_activation(&window));
         if let Err(error) = show_result {
             emit_desktop_overlay_error(&app_handle, &error);
             let _ = window.close();
@@ -2556,12 +2488,12 @@ fn configure_desktop_overlay_window(
     // `set_ignore_cursor_events` updates Tao's window flags and can clear the
     // raw WS_VISIBLE bit that was set by SW_SHOWNOACTIVATE. Restore visibility
     // without activating the overlay after every style update.
-    show_desktop_overlay_without_activation(window)?;
+    show_window_without_activation(window)?;
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn show_desktop_overlay_without_activation(window: &WebviewWindow) -> Result<(), String> {
+fn show_window_without_activation(window: &WebviewWindow) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
 
@@ -2576,7 +2508,7 @@ fn show_desktop_overlay_without_activation(window: &WebviewWindow) -> Result<(),
 }
 
 #[cfg(not(target_os = "windows"))]
-fn show_desktop_overlay_without_activation(window: &WebviewWindow) -> Result<(), String> {
+fn show_window_without_activation(window: &WebviewWindow) -> Result<(), String> {
     window.show().map_err(|error| error.to_string())
 }
 
@@ -2604,6 +2536,224 @@ fn sync_desktop_overlay_window(
         return Ok(());
     };
     configure_desktop_overlay_window(&window, handle)
+}
+
+// ─── Host annotation action bar ──────────────────────────────
+//
+// The click-through overlay above can only draw. Clearing a viewer annotation
+// used to mean switching back to the screen-share page, so the host also gets a
+// small interactive bar in the corner of the shared monitor. It is built hidden
+// at session start and shown only while persistent annotations exist, which the
+// bar page decides from the same annotation document the overlay renders.
+//
+// It cannot be excluded from capture for the reason recorded on
+// `screen_share_desktop_overlay_ready`, so viewers see it too.
+
+fn annotation_bar_window_label(session_id: u64) -> String {
+    format!("{ANNOTATION_BAR_WINDOW_LABEL_PREFIX}-{session_id}")
+}
+
+fn schedule_annotation_bar_window(
+    app_handle: AppHandle,
+    handle: Arc<ScreenShareHandle>,
+    session_id: u64,
+) {
+    tauri::async_runtime::spawn(async move {
+        tokio::task::yield_now().await;
+        let build_app = app_handle.clone();
+        if let Err(error) = app_handle.run_on_main_thread(move || {
+            if let Err(error) = ensure_annotation_bar_window(&build_app, &handle, session_id) {
+                // A missing bar only costs the host the shortcut; the overlay,
+                // the capture and the screen-share page all keep working.
+                log::warn!("Host annotation action bar unavailable: {error}");
+            }
+        }) {
+            log::warn!("Failed to schedule host annotation action bar: {error}");
+        }
+    });
+}
+
+fn ensure_annotation_bar_window(
+    app_handle: &AppHandle,
+    handle: &Arc<ScreenShareHandle>,
+    session_id: u64,
+) -> Result<(), String> {
+    if !handle.active.load(Ordering::SeqCst) {
+        return Err("Screen share is not active".into());
+    }
+
+    let window_label = annotation_bar_window_label(session_id);
+    if app_handle.get_webview_window(&window_label).is_some() {
+        return Ok(());
+    }
+
+    let bar_handle = handle.clone();
+    let window = WebviewWindowBuilder::new(
+        app_handle,
+        &window_label,
+        WebviewUrl::App("index.html#/screen-share-annotation-bar".into()),
+    )
+    .title("Screen Share Annotations")
+    .inner_size(ANNOTATION_BAR_LOGICAL_WIDTH, ANNOTATION_BAR_LOGICAL_HEIGHT)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .resizable(false)
+    .skip_taskbar(true)
+    .always_on_top(true)
+    .focused(false)
+    .visible(false)
+    .build()
+    .map_err(|error| format!("Failed to create host annotation action bar: {error}"))?;
+
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed)
+            && bar_handle.session_id.load(Ordering::SeqCst) == session_id
+        {
+            bar_handle
+                .annotation_bar_visible
+                .store(false, Ordering::SeqCst);
+        }
+    });
+    Ok(())
+}
+
+/// Bottom-right corner of the shared monitor's work area, so the bar sits above
+/// the taskbar rather than on top of the clock.
+fn annotation_bar_placement(bounds: ScreenRect, scale_factor: f64) -> PhysicalPosition<i32> {
+    let scale = if scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let width = (ANNOTATION_BAR_LOGICAL_WIDTH * scale).round() as i32;
+    let height = (ANNOTATION_BAR_LOGICAL_HEIGHT * scale).round() as i32;
+    let margin = (ANNOTATION_BAR_LOGICAL_MARGIN * scale).round() as i32;
+
+    // Clamp to the monitor origin so a bar wider than the work area stays
+    // reachable instead of being pushed off the left edge.
+    let x = (bounds.left + bounds.width as i32 - width - margin).max(bounds.left);
+    let y = (bounds.top + bounds.height as i32 - height - margin).max(bounds.top);
+    PhysicalPosition::new(x, y)
+}
+
+fn annotation_bar_position(
+    handle: &ScreenShareHandle,
+    scale_factor: f64,
+) -> Result<PhysicalPosition<i32>, String> {
+    let monitor_index = handle.active_monitor_index.load(Ordering::Relaxed);
+    // The work area keeps the bar above the taskbar; the full monitor bounds are
+    // only a fallback for a transient topology change.
+    let bounds = work_rect_for_monitor(monitor_index)
+        .or_else(|| desktop_overlay_bounds(handle).ok())
+        .filter(|rect| rect.width > 0 && rect.height > 0)
+        .ok_or_else(|| "Active monitor is unavailable".to_string())?;
+    Ok(annotation_bar_placement(bounds, scale_factor))
+}
+
+fn configure_annotation_bar_window(
+    window: &WebviewWindow,
+    handle: &ScreenShareHandle,
+) -> Result<(), String> {
+    let scale_factor = window.scale_factor().unwrap_or(1.0);
+    window
+        .set_position(annotation_bar_position(handle, scale_factor)?)
+        .map_err(|error| format!("Failed to position host annotation action bar: {error}"))?;
+    window
+        .set_always_on_top(true)
+        .map_err(|error| format!("Failed to keep host annotation action bar on top: {error}"))
+}
+
+#[tauri::command]
+pub fn screen_share_annotation_bar_ready(
+    window: WebviewWindow,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let handle = &state.screen_share;
+    if !handle.active.load(Ordering::SeqCst) {
+        return Err("Screen share is not active".into());
+    }
+    let session_id = handle.session_id.load(Ordering::SeqCst);
+    if window.label() != annotation_bar_window_label(session_id) {
+        return Err("Host annotation action bar belongs to a stale session".into());
+    }
+
+    // Place the bar off the page-load path, the same way the overlay does, and
+    // leave it hidden: the page shows it once it sees the first persistent
+    // annotation. `screen_share_set_annotation_bar_visible` re-positions before
+    // showing, so nothing depends on this landing first.
+    let bar_handle = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if bar_handle.session_id.load(Ordering::SeqCst) != session_id
+            || !bar_handle.active.load(Ordering::SeqCst)
+        {
+            let _ = window.close();
+            return;
+        }
+        if let Err(error) = configure_annotation_bar_window(&window, &bar_handle) {
+            log::warn!("Host annotation action bar could not be placed: {error}");
+        }
+    });
+    Ok(())
+}
+
+/// Show or hide the bar without ever taking focus from whatever the host is
+/// presenting. Called by the bar page when the persistent annotation count
+/// crosses zero in either direction.
+#[tauri::command]
+pub fn screen_share_set_annotation_bar_visible(
+    window: WebviewWindow,
+    state: State<'_, crate::AppState>,
+    visible: bool,
+) -> Result<(), String> {
+    let handle = &state.screen_share;
+    let session_id = handle.session_id.load(Ordering::SeqCst);
+    if window.label() != annotation_bar_window_label(session_id) {
+        return Err("Host annotation action bar belongs to a stale session".into());
+    }
+    if visible && !handle.active.load(Ordering::SeqCst) {
+        return Err("Screen share is not active".into());
+    }
+
+    if visible {
+        configure_annotation_bar_window(&window, handle)?;
+        show_window_without_activation(&window)?;
+    } else {
+        window
+            .hide()
+            .map_err(|error| format!("Failed to hide host annotation action bar: {error}"))?;
+    }
+    handle
+        .annotation_bar_visible
+        .store(visible, Ordering::SeqCst);
+    Ok(())
+}
+
+fn close_annotation_bar_window(
+    app_handle: &AppHandle,
+    handle: &ScreenShareHandle,
+    session_id: u64,
+) {
+    handle.annotation_bar_visible.store(false, Ordering::SeqCst);
+    if let Some(window) = app_handle.get_webview_window(&annotation_bar_window_label(session_id)) {
+        if let Err(error) = window.close() {
+            log::warn!("Failed to close host annotation action bar: {error}");
+        }
+    }
+}
+
+fn sync_annotation_bar_window(
+    app_handle: &AppHandle,
+    handle: &ScreenShareHandle,
+    session_id: u64,
+) -> Result<(), String> {
+    let Some(window) = app_handle.get_webview_window(&annotation_bar_window_label(session_id))
+    else {
+        handle.annotation_bar_visible.store(false, Ordering::SeqCst);
+        return Ok(());
+    };
+    configure_annotation_bar_window(&window, handle)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5717,7 +5867,6 @@ async fn handler_time() -> impl IntoResponse {
 #[derive(Deserialize)]
 struct IndexQuery {
     error: Option<u8>,
-    host_preview: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5758,31 +5907,8 @@ async fn handler_index(
     Query(q): Query<IndexQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let preview_query_authorized = q.host_preview.as_deref().is_some_and(|candidate| {
-        state
-            .preview_token
-            .lock()
-            .ok()
-            .and_then(|token| token.clone())
-            .as_deref()
-            == Some(candidate)
-    });
-    if preview_query_authorized {
-        let cookie_token = Uuid::new_v4().simple().to_string();
-        *state.preview_token.lock().unwrap() = Some(cookie_token.clone());
-        return Response::builder()
-            .status(StatusCode::SEE_OTHER)
-            .header("Location", "/")
-            .header(
-                "Set-Cookie",
-                format!("ss_preview={cookie_token}; HttpOnly; SameSite=Strict; Path=/"),
-            )
-            .body(Body::empty())
-            .unwrap();
-    }
-    let preview_authorized = preview_token_matches(&headers, None, &state.preview_token);
     if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash) && !preview_authorized {
+        if !check_auth_cookie(&headers, hash) {
             let has_error = q.error.unwrap_or(0) == 1;
             let need_username = state.auth_username.is_some();
             return Html(login_html(has_error, need_username)).into_response();
@@ -5798,9 +5924,7 @@ async fn handler_web_asset(
     headers: HeaderMap,
 ) -> Response {
     if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash)
-            && !preview_token_matches(&headers, None, &state.preview_token)
-        {
+        if !check_auth_cookie(&headers, hash) {
             return Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Body::from("Unauthorized"))
@@ -5864,9 +5988,7 @@ async fn handler_stream(
 ) -> Response {
     // Auth check
     if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash)
-            && !preview_token_matches(&headers, None, &state.preview_token)
-        {
+        if !check_auth_cookie(&headers, hash) {
             return Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Body::from("Unauthorized"))
@@ -5890,7 +6012,7 @@ async fn handler_stream(
     state.media_metrics.record_stream_open(is_reconnect);
     state.events.emit_tool_log(
         &format!(
-            "Viewer connected: ip={}, viewers={}, user_agent={}",
+            "Viewer connected: ip={}, viewers={}, transport=mjpeg, user_agent={}",
             client_ip,
             viewer_total,
             summarize_user_agent(&headers)
@@ -6055,9 +6177,7 @@ async fn handler_media_ws(
     websocket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
     if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash)
-            && !preview_token_matches(&headers, None, &state.preview_token)
-        {
+        if !check_auth_cookie(&headers, hash) {
             return Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Body::from("Unauthorized"))
@@ -6135,9 +6255,7 @@ async fn handler_webcodecs_ws(
     websocket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
     if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash)
-            && !preview_token_matches(&headers, None, &state.preview_token)
-        {
+        if !check_auth_cookie(&headers, hash) {
             return Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Body::from("Unauthorized"))
@@ -6478,9 +6596,7 @@ async fn handler_webrtc_offer(
     body: Bytes,
 ) -> Response {
     if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash)
-            && !preview_token_matches(&headers, None, &state.preview_token)
-        {
+        if !check_auth_cookie(&headers, hash) {
             return Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .header("Cache-Control", "no-store")
@@ -7059,9 +7175,7 @@ async fn handler_session_ws(
     websocket: WebSocketUpgrade,
 ) -> Response {
     if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash)
-            && !preview_token_matches(&headers, None, &state.preview_token)
-        {
+        if !check_auth_cookie(&headers, hash) {
             return Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Body::from("Unauthorized"))
@@ -7520,6 +7634,13 @@ async fn status_reporter(
             let _ = sync_desktop_overlay_window(&app_handle, &runtime_handle, session_id);
         }
 
+        if runtime_handle
+            .annotation_bar_visible
+            .load(Ordering::Relaxed)
+        {
+            let _ = sync_annotation_bar_window(&app_handle, &runtime_handle, session_id);
+        }
+
         let fps_count = fps_counter.swap(0, Ordering::Relaxed);
         let current_bytes = bytes_sent.load(Ordering::Relaxed);
         let bytes_delta = current_bytes.saturating_sub(last_bytes);
@@ -7609,28 +7730,6 @@ fn check_auth_cookie(headers: &HeaderMap, expected_hash: &str) -> bool {
                 c.strip_prefix("ss_auth=")
                     .is_some_and(|value| value == expected_hash)
             })
-        })
-        .unwrap_or(false)
-}
-
-fn preview_token_matches(
-    headers: &HeaderMap,
-    query_token: Option<&str>,
-    expected_token: &Arc<Mutex<Option<String>>>,
-) -> bool {
-    let Some(expected) = expected_token.lock().ok().and_then(|token| token.clone()) else {
-        return false;
-    };
-    if query_token.is_some_and(|token| token == expected) {
-        return true;
-    }
-    headers
-        .get("cookie")
-        .and_then(|value| value.to_str().ok())
-        .map(|cookies| {
-            cookies
-                .split(';')
-                .any(|cookie| cookie.trim().strip_prefix("ss_preview=") == Some(expected.as_str()))
         })
         .unwrap_or(false)
 }
@@ -7773,6 +7872,73 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    #[test]
+    fn annotation_bar_anchors_to_the_bottom_right_of_the_work_area() {
+        let work_area = ScreenRect {
+            left: 0,
+            top: 0,
+            width: 1920,
+            // 1080 monitor minus a 40 px taskbar: the bar must stay above it.
+            height: 1040,
+        };
+        let position = annotation_bar_placement(work_area, 1.0);
+        assert_eq!(position.x, 1920 - 360 - 16);
+        assert_eq!(position.y, 1040 - 60 - 16);
+    }
+
+    #[test]
+    fn annotation_bar_scales_its_own_size_and_margin_for_dpi() {
+        let work_area = ScreenRect {
+            left: 0,
+            top: 0,
+            width: 3840,
+            height: 2160,
+        };
+        let position = annotation_bar_placement(work_area, 2.0);
+        assert_eq!(position.x, 3840 - 720 - 32);
+        assert_eq!(position.y, 2160 - 120 - 32);
+    }
+
+    #[test]
+    fn annotation_bar_follows_a_secondary_monitor_origin() {
+        let work_area = ScreenRect {
+            left: -1920,
+            top: 120,
+            width: 1920,
+            height: 1000,
+        };
+        let position = annotation_bar_placement(work_area, 1.0);
+        assert_eq!(position.x, -1920 + 1920 - 360 - 16);
+        assert_eq!(position.y, 120 + 1000 - 60 - 16);
+    }
+
+    #[test]
+    fn annotation_bar_stays_reachable_on_a_work_area_narrower_than_itself() {
+        let work_area = ScreenRect {
+            left: 40,
+            top: 60,
+            width: 200,
+            height: 40,
+        };
+        let position = annotation_bar_placement(work_area, 1.0);
+        assert_eq!(position.x, 40);
+        assert_eq!(position.y, 60);
+    }
+
+    #[test]
+    fn annotation_bar_treats_a_missing_scale_factor_as_one() {
+        let work_area = ScreenRect {
+            left: 0,
+            top: 0,
+            width: 1280,
+            height: 720,
+        };
+        assert_eq!(
+            annotation_bar_placement(work_area, 0.0),
+            annotation_bar_placement(work_area, 1.0)
+        );
+    }
 
     #[test]
     fn wgc_gpu_path_avoids_full_frame_readback_without_mjpeg_demand() {
@@ -8163,7 +8329,6 @@ mod tests {
             session_id: 77,
             capture_paused: Arc::new(AtomicBool::new(false)),
             capture_issue: Arc::new(Mutex::new(None)),
-            preview_token: Arc::new(Mutex::new(None)),
             transport: Arc::new(Mutex::new(ScreenShareMediaTransport::Mjpeg)),
             input_worker: None,
             #[cfg(feature = "screen-share-webrtc-prototype")]
@@ -8567,26 +8732,6 @@ mod tests {
     }
 
     #[test]
-    fn host_preview_capability_accepts_only_matching_query_or_cookie() {
-        let token = Arc::new(Mutex::new(Some("preview-token".to_string())));
-        let mut headers = HeaderMap::new();
-        assert!(preview_token_matches(
-            &headers,
-            Some("preview-token"),
-            &token
-        ));
-        assert!(!preview_token_matches(&headers, Some("wrong"), &token));
-
-        headers.insert(
-            "cookie",
-            "other=1; ss_preview=preview-token".parse().unwrap(),
-        );
-        assert!(preview_token_matches(&headers, None, &token));
-        *token.lock().unwrap() = None;
-        assert!(!preview_token_matches(&headers, None, &token));
-    }
-
-    #[test]
     fn prepare_runtime_state_for_start_clears_stale_runtime_state() {
         let handle = ScreenShareHandle::new();
         handle.active.store(true, Ordering::SeqCst);
@@ -8601,7 +8746,6 @@ mod tests {
         *handle.server_done_rx.lock().unwrap() = Some(oneshot::channel::<()>().1);
         *handle.interaction.lock().unwrap() = Some(InteractionState::new(99));
         *handle.media_metrics.lock().unwrap() = Some(Arc::new(ScreenShareMediaMetrics::new()));
-        *handle.preview_token.lock().unwrap() = Some("stale-preview".into());
         handle.desktop_overlay_active.store(true, Ordering::SeqCst);
         record_viewer_connection(&handle.viewer_ips, "10.0.0.1");
 
@@ -8619,7 +8763,6 @@ mod tests {
         assert!(handle.server_done_rx.lock().unwrap().is_none());
         assert!(handle.interaction.lock().unwrap().is_none());
         assert!(handle.media_metrics.lock().unwrap().is_none());
-        assert!(handle.preview_token.lock().unwrap().is_none());
         assert!(!handle.desktop_overlay_active.load(Ordering::SeqCst));
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
     }
@@ -8638,7 +8781,6 @@ mod tests {
         *handle.server_done_rx.lock().unwrap() = Some(oneshot::channel::<()>().1);
         *handle.interaction.lock().unwrap() = Some(InteractionState::new(100));
         *handle.media_metrics.lock().unwrap() = Some(Arc::new(ScreenShareMediaMetrics::new()));
-        *handle.preview_token.lock().unwrap() = Some("active-preview".into());
         handle.desktop_overlay_active.store(true, Ordering::SeqCst);
         record_viewer_connection(&handle.viewer_ips, "10.0.0.2");
 
@@ -8656,7 +8798,6 @@ mod tests {
         assert!(handle.server_done_rx.lock().unwrap().is_none());
         assert!(handle.interaction.lock().unwrap().is_none());
         assert!(handle.media_metrics.lock().unwrap().is_none());
-        assert!(handle.preview_token.lock().unwrap().is_none());
         assert!(!handle.desktop_overlay_active.load(Ordering::SeqCst));
         assert!(handle.viewer_ips.lock().unwrap().is_empty());
     }
