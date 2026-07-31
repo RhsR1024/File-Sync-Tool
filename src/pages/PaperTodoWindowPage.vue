@@ -36,10 +36,6 @@ onMounted(async () => {
     }
     const currentWindow = getCurrentWindow();
     unlisteners.push(await currentWindow.onMoved(async ({ payload }) => {
-      // Docking and edge-peek move the window themselves. Recording those
-      // frames would persist an off-screen origin and restore the paper hidden
-      // at the display edge on the next launch.
-      if (store.geometryTrackingSuspended.value) return;
       const scale = await currentWindow.scaleFactor();
       store.updatePaper(paperId.value, (paper) => {
         paper.geometry.x = payload.x / scale;
@@ -47,8 +43,6 @@ onMounted(async () => {
       });
     }));
     unlisteners.push(await currentWindow.onResized(async ({ payload }) => {
-      const paper = store.state.value.papers.find((candidate) => candidate.id === paperId.value);
-      if (paper?.collapsed) return;
       const scale = await currentWindow.scaleFactor();
       store.updatePaper(paperId.value, (value) => {
         value.geometry.width = payload.width / scale;

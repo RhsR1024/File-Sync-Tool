@@ -125,105 +125,192 @@ pub enum MouseButton {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum KeyboardKey {
-    Letter(u8),
-    Digit(u8),
-    ArrowLeft,
-    ArrowRight,
-    ArrowUp,
-    ArrowDown,
-    Enter,
-    Escape,
-    Backspace,
-    Tab,
-    Space,
-    ControlLeft,
-    ControlRight,
-    ShiftLeft,
-    ShiftRight,
-    AltLeft,
-    AltRight,
+enum KeyboardInjection {
+    ScanCode { value: u16, extended: bool },
+    VirtualKey(u16),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyboardKey {
+    injection: KeyboardInjection,
 }
 
 impl KeyboardKey {
+    const fn scan_code(value: u16, extended: bool) -> Self {
+        Self {
+            injection: KeyboardInjection::ScanCode { value, extended },
+        }
+    }
+
+    const fn virtual_key(value: u16) -> Self {
+        Self {
+            injection: KeyboardInjection::VirtualKey(value),
+        }
+    }
+
+    fn is_modifier(self) -> bool {
+        matches!(
+            self.injection,
+            KeyboardInjection::ScanCode {
+                value: 0x1D | 0x2A | 0x36 | 0x38,
+                ..
+            } | KeyboardInjection::ScanCode {
+                value: 0x5B | 0x5C,
+                extended: true,
+            }
+        )
+    }
+
     pub fn parse(code: &str) -> Result<Self, String> {
-        let key = if let Some(letter) = code.strip_prefix("Key") {
+        if let Some(letter) = code.strip_prefix("Key") {
             let bytes = letter.as_bytes();
             if bytes.len() == 1 && bytes[0].is_ascii_uppercase() {
-                Self::Letter(bytes[0] - b'A')
-            } else {
-                return Err("unsupported keyboard code".to_string());
+                const LETTER_SCAN_CODES: [u16; 26] = [
+                    0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+                    0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
+                ];
+                return Ok(Self::scan_code(
+                    LETTER_SCAN_CODES[usize::from(bytes[0] - b'A')],
+                    false,
+                ));
             }
         } else if let Some(digit) = code.strip_prefix("Digit") {
             let bytes = digit.as_bytes();
             if bytes.len() == 1 && bytes[0].is_ascii_digit() {
-                Self::Digit(bytes[0] - b'0')
-            } else {
-                return Err("unsupported keyboard code".to_string());
+                const DIGIT_SCAN_CODES: [u16; 10] =
+                    [0x0B, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A];
+                return Ok(Self::scan_code(
+                    DIGIT_SCAN_CODES[usize::from(bytes[0] - b'0')],
+                    false,
+                ));
             }
-        } else {
-            match code {
-                "ArrowLeft" => Self::ArrowLeft,
-                "ArrowRight" => Self::ArrowRight,
-                "ArrowUp" => Self::ArrowUp,
-                "ArrowDown" => Self::ArrowDown,
-                "Enter" => Self::Enter,
-                "Escape" => Self::Escape,
-                "Backspace" => Self::Backspace,
-                "Tab" => Self::Tab,
-                "Space" => Self::Space,
-                "ControlLeft" => Self::ControlLeft,
-                "ControlRight" => Self::ControlRight,
-                "ShiftLeft" => Self::ShiftLeft,
-                "ShiftRight" => Self::ShiftRight,
-                "AltLeft" => Self::AltLeft,
-                "AltRight" => Self::AltRight,
-                _ => return Err("unsupported keyboard code".to_string()),
-            }
+        }
+
+        let key = match code {
+            // Printable and editing keys use physical scan codes so modifier
+            // combinations follow the keyboard layout active on the host.
+            "Backquote" => Self::scan_code(0x29, false),
+            "Backslash" => Self::scan_code(0x2B, false),
+            "BracketLeft" => Self::scan_code(0x1A, false),
+            "BracketRight" => Self::scan_code(0x1B, false),
+            "Comma" => Self::scan_code(0x33, false),
+            "Equal" => Self::scan_code(0x0D, false),
+            "IntlBackslash" => Self::scan_code(0x56, false),
+            "IntlRo" => Self::scan_code(0x73, false),
+            "IntlYen" => Self::scan_code(0x7D, false),
+            "Minus" => Self::scan_code(0x0C, false),
+            "Period" => Self::scan_code(0x34, false),
+            "Quote" => Self::scan_code(0x28, false),
+            "Semicolon" => Self::scan_code(0x27, false),
+            "Slash" => Self::scan_code(0x35, false),
+            "Space" => Self::scan_code(0x39, false),
+            "Tab" => Self::scan_code(0x0F, false),
+            "AltLeft" => Self::scan_code(0x38, false),
+            "AltRight" => Self::scan_code(0x38, true),
+            "Backspace" => Self::scan_code(0x0E, false),
+            "CapsLock" => Self::scan_code(0x3A, false),
+            "ContextMenu" => Self::scan_code(0x5D, true),
+            "ControlLeft" => Self::scan_code(0x1D, false),
+            "ControlRight" => Self::scan_code(0x1D, true),
+            "Enter" => Self::scan_code(0x1C, false),
+            "MetaLeft" | "OSLeft" => Self::scan_code(0x5B, true),
+            "MetaRight" | "OSRight" => Self::scan_code(0x5C, true),
+            "ShiftLeft" => Self::scan_code(0x2A, false),
+            "ShiftRight" => Self::scan_code(0x36, false),
+
+            "Convert" => Self::scan_code(0x79, false),
+            "KanaMode" => Self::scan_code(0x70, false),
+            "Lang1" => Self::scan_code(0x72, false),
+            "Lang2" => Self::scan_code(0x71, false),
+            "NonConvert" => Self::scan_code(0x7B, false),
+
+            "Delete" => Self::scan_code(0x53, true),
+            "End" => Self::scan_code(0x4F, true),
+            "Home" => Self::scan_code(0x47, true),
+            "Insert" => Self::scan_code(0x52, true),
+            "PageDown" => Self::scan_code(0x51, true),
+            "PageUp" => Self::scan_code(0x49, true),
+            "ArrowDown" => Self::scan_code(0x50, true),
+            "ArrowLeft" => Self::scan_code(0x4B, true),
+            "ArrowRight" => Self::scan_code(0x4D, true),
+            "ArrowUp" => Self::scan_code(0x48, true),
+
+            "NumLock" => Self::scan_code(0x45, false),
+            "Numpad0" => Self::scan_code(0x52, false),
+            "Numpad1" => Self::scan_code(0x4F, false),
+            "Numpad2" => Self::scan_code(0x50, false),
+            "Numpad3" => Self::scan_code(0x51, false),
+            "Numpad4" => Self::scan_code(0x4B, false),
+            "Numpad5" => Self::scan_code(0x4C, false),
+            "Numpad6" => Self::scan_code(0x4D, false),
+            "Numpad7" => Self::scan_code(0x47, false),
+            "Numpad8" => Self::scan_code(0x48, false),
+            "Numpad9" => Self::scan_code(0x49, false),
+            "NumpadAdd" => Self::scan_code(0x4E, false),
+            "NumpadComma" => Self::scan_code(0x7E, false),
+            "NumpadDecimal" => Self::scan_code(0x53, false),
+            "NumpadDivide" => Self::scan_code(0x35, true),
+            "NumpadEnter" => Self::scan_code(0x1C, true),
+            "NumpadEqual" => Self::scan_code(0x59, false),
+            "NumpadMultiply" => Self::scan_code(0x37, false),
+            "NumpadSubtract" => Self::scan_code(0x4A, false),
+
+            "Escape" => Self::scan_code(0x01, false),
+            "F1" => Self::scan_code(0x3B, false),
+            "F2" => Self::scan_code(0x3C, false),
+            "F3" => Self::scan_code(0x3D, false),
+            "F4" => Self::scan_code(0x3E, false),
+            "F5" => Self::scan_code(0x3F, false),
+            "F6" => Self::scan_code(0x40, false),
+            "F7" => Self::scan_code(0x41, false),
+            "F8" => Self::scan_code(0x42, false),
+            "F9" => Self::scan_code(0x43, false),
+            "F10" => Self::scan_code(0x44, false),
+            "F11" => Self::scan_code(0x57, false),
+            "F12" => Self::scan_code(0x58, false),
+            "F13" => Self::virtual_key(0x7C),
+            "F14" => Self::virtual_key(0x7D),
+            "F15" => Self::virtual_key(0x7E),
+            "F16" => Self::virtual_key(0x7F),
+            "F17" => Self::virtual_key(0x80),
+            "F18" => Self::virtual_key(0x81),
+            "F19" => Self::virtual_key(0x82),
+            "F20" => Self::virtual_key(0x83),
+            "F21" => Self::virtual_key(0x84),
+            "F22" => Self::virtual_key(0x85),
+            "F23" => Self::virtual_key(0x86),
+            "F24" => Self::virtual_key(0x87),
+            "Help" => Self::virtual_key(0x2F),
+            "Pause" => Self::virtual_key(0x13),
+            "PrintScreen" => Self::virtual_key(0x2C),
+            "ScrollLock" => Self::scan_code(0x46, false),
+
+            // Windows exposes browser, media, launch and power keys most
+            // reliably through virtual-key injection rather than OEM scans.
+            "BrowserBack" => Self::virtual_key(0xA6),
+            "BrowserForward" => Self::virtual_key(0xA7),
+            "BrowserRefresh" => Self::virtual_key(0xA8),
+            "BrowserStop" => Self::virtual_key(0xA9),
+            "BrowserSearch" => Self::virtual_key(0xAA),
+            "BrowserFavorites" => Self::virtual_key(0xAB),
+            "BrowserHome" => Self::virtual_key(0xAC),
+            "AudioVolumeMute" => Self::virtual_key(0xAD),
+            "AudioVolumeDown" => Self::virtual_key(0xAE),
+            "AudioVolumeUp" => Self::virtual_key(0xAF),
+            "MediaTrackNext" => Self::virtual_key(0xB0),
+            "MediaTrackPrevious" => Self::virtual_key(0xB1),
+            "MediaStop" => Self::virtual_key(0xB2),
+            "MediaPlayPause" => Self::virtual_key(0xB3),
+            "LaunchMail" => Self::virtual_key(0xB4),
+            "MediaSelect" => Self::virtual_key(0xB5),
+            "LaunchApplication1" => Self::virtual_key(0xB6),
+            "LaunchApplication2" => Self::virtual_key(0xB7),
+            "Power" => Self::scan_code(0x5E, true),
+            "Sleep" => Self::scan_code(0x5F, true),
+            "WakeUp" => Self::scan_code(0x63, true),
+            _ => return Err("unsupported keyboard code".to_string()),
         };
         Ok(key)
-    }
-
-    fn is_control_modifier(self) -> bool {
-        matches!(self, Self::ControlLeft | Self::ControlRight)
-    }
-
-    fn is_alt_modifier(self) -> bool {
-        matches!(self, Self::AltLeft | Self::AltRight)
-    }
-
-    fn is_modifier(self) -> bool {
-        self.is_control_modifier()
-            || self.is_alt_modifier()
-            || matches!(self, Self::ShiftLeft | Self::ShiftRight)
-    }
-
-    fn scan_code(self) -> (u16, bool) {
-        const LETTER_SCAN_CODES: [u16; 26] = [
-            0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31,
-            0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
-        ];
-        const DIGIT_SCAN_CODES: [u16; 10] =
-            [0x0B, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A];
-        match self {
-            Self::Letter(value) => (LETTER_SCAN_CODES[usize::from(value)], false),
-            Self::Digit(value) => (DIGIT_SCAN_CODES[usize::from(value)], false),
-            Self::ArrowLeft => (0x4B, true),
-            Self::ArrowRight => (0x4D, true),
-            Self::ArrowUp => (0x48, true),
-            Self::ArrowDown => (0x50, true),
-            Self::Enter => (0x1C, false),
-            Self::Escape => (0x01, false),
-            Self::Backspace => (0x0E, false),
-            Self::Tab => (0x0F, false),
-            Self::Space => (0x39, false),
-            Self::ControlLeft => (0x1D, false),
-            Self::ControlRight => (0x1D, true),
-            Self::ShiftLeft => (0x2A, false),
-            Self::ShiftRight => (0x36, false),
-            Self::AltLeft => (0x38, false),
-            Self::AltRight => (0x38, true),
-        }
     }
 }
 
@@ -320,24 +407,6 @@ pub fn parse_input_event(
         "input.release_all" => Ok(InputEvent::ReleaseAll),
         _ => Err(format!("unsupported input message: {message_type}")),
     }
-}
-
-fn keyboard_combo_allowed(key: KeyboardKey, pressed: &[KeyboardKey]) -> bool {
-    let has_alt = pressed.iter().copied().any(KeyboardKey::is_alt_modifier);
-    let has_control = pressed
-        .iter()
-        .copied()
-        .any(KeyboardKey::is_control_modifier);
-    // Avoid switching applications or invoking system-level escape paths from
-    // a browser session. The modifier and ordinary key paths remain useful for
-    // common application shortcuts such as Ctrl+C/Ctrl+V.
-    if key == KeyboardKey::Tab && has_alt {
-        return false;
-    }
-    if key == KeyboardKey::Escape && (has_alt || has_control) {
-        return false;
-    }
-    true
 }
 
 #[derive(Debug, Clone)]
@@ -1233,14 +1302,10 @@ impl InputSink {
     }
 
     fn send_key(&mut self, key: KeyboardKey, pressed: bool) -> Result<(), String> {
-        if pressed && !keyboard_combo_allowed(key, &self.keys_down) {
-            return Ok(());
-        }
         if !pressed && !self.keys_down.contains(&key) {
             return Ok(());
         }
-        let (scan_code, extended) = key.scan_code();
-        send_keyboard_input(scan_code, pressed, extended)?;
+        send_keyboard_input(key, pressed)?;
         if pressed {
             if !self.keys_down.contains(&key) {
                 self.keys_down.push(key);
@@ -1313,17 +1378,23 @@ fn send_mouse_input(_point: AbsolutePoint, _data: u32, _flags: u32) -> Result<()
 }
 
 #[cfg(target_os = "windows")]
-fn send_keyboard_input(scan_code: u16, pressed: bool, extended: bool) -> Result<(), String> {
+fn send_keyboard_input(key: KeyboardKey, pressed: bool) -> Result<(), String> {
     use std::mem;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-        KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VIRTUAL_KEY,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VIRTUAL_KEY,
     };
 
-    let mut flags = KEYEVENTF_SCANCODE;
-    if extended {
-        flags |= KEYEVENTF_EXTENDEDKEY;
-    }
+    let (virtual_key, scan_code, mut flags) = match key.injection {
+        KeyboardInjection::ScanCode { value, extended } => {
+            let mut flags = KEYEVENTF_SCANCODE;
+            if extended {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+            (0, value, flags)
+        }
+        KeyboardInjection::VirtualKey(value) => (value, 0, KEYBD_EVENT_FLAGS(0)),
+    };
     if !pressed {
         flags |= KEYEVENTF_KEYUP;
     }
@@ -1331,7 +1402,7 @@ fn send_keyboard_input(scan_code: u16, pressed: bool, extended: bool) -> Result<
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(0),
+                wVk: VIRTUAL_KEY(virtual_key),
                 wScan: scan_code,
                 dwFlags: flags,
                 time: 0,
@@ -1351,7 +1422,7 @@ fn send_keyboard_input(scan_code: u16, pressed: bool, extended: bool) -> Result<
 }
 
 #[cfg(not(target_os = "windows"))]
-fn send_keyboard_input(_scan_code: u16, _pressed: bool, _extended: bool) -> Result<(), String> {
+fn send_keyboard_input(_key: KeyboardKey, _pressed: bool) -> Result<(), String> {
     Err("remote input is only supported on Windows".to_string())
 }
 
@@ -1854,7 +1925,7 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_protocol_accepts_only_the_documented_key_whitelist() {
+    fn keyboard_protocol_accepts_standard_system_and_media_keys() {
         assert_eq!(
             parse_input_event(
                 "input.key",
@@ -1862,7 +1933,7 @@ mod tests {
             )
             .unwrap(),
             InputEvent::Key {
-                key: KeyboardKey::Letter(0),
+                key: KeyboardKey::parse("KeyA").unwrap(),
                 pressed: true,
             }
         );
@@ -1873,7 +1944,7 @@ mod tests {
             )
             .unwrap(),
             InputEvent::Key {
-                key: KeyboardKey::Digit(9),
+                key: KeyboardKey::parse("Digit9").unwrap(),
                 pressed: false,
             }
         );
@@ -1893,6 +1964,44 @@ mod tests {
             "ShiftRight",
             "AltLeft",
             "AltRight",
+            "MetaLeft",
+            "MetaRight",
+            "Semicolon",
+            "Quote",
+            "Backquote",
+            "Backslash",
+            "BracketLeft",
+            "BracketRight",
+            "Comma",
+            "Period",
+            "Slash",
+            "Minus",
+            "Equal",
+            "Delete",
+            "Insert",
+            "Home",
+            "End",
+            "PageUp",
+            "PageDown",
+            "CapsLock",
+            "NumLock",
+            "ScrollLock",
+            "Numpad0",
+            "NumpadEnter",
+            "NumpadDivide",
+            "F1",
+            "F12",
+            "F24",
+            "PrintScreen",
+            "Pause",
+            "ContextMenu",
+            "AudioVolumeUp",
+            "MediaPlayPause",
+            "BrowserBack",
+            "LaunchMail",
+            "Power",
+            "Sleep",
+            "WakeUp",
         ] {
             assert!(parse_input_event(
                 "input.key",
@@ -1900,7 +2009,7 @@ mod tests {
             )
             .is_ok());
         }
-        for code in ["MetaLeft", "F1", "Delete", "Numpad0", "IntlBackslash"] {
+        for code in ["Unidentified", "Fn", "UnknownKey"] {
             assert!(parse_input_event(
                 "input.key",
                 Some(serde_json::json!({ "code": code, "pressed": true })),
@@ -1914,34 +2023,43 @@ mod tests {
     }
 
     #[test]
-    fn restricted_system_shortcuts_are_filtered_without_blocking_common_combinations() {
-        assert!(!keyboard_combo_allowed(
-            KeyboardKey::Tab,
-            &[KeyboardKey::AltLeft]
-        ));
-        assert!(!keyboard_combo_allowed(
-            KeyboardKey::Escape,
-            &[KeyboardKey::ControlLeft]
-        ));
-        assert!(keyboard_combo_allowed(
-            KeyboardKey::Letter(2),
-            &[KeyboardKey::ControlLeft]
-        ));
-        assert!(keyboard_combo_allowed(
-            KeyboardKey::Letter(21),
-            &[KeyboardKey::ControlRight, KeyboardKey::ShiftLeft]
-        ));
-    }
-
-    #[test]
-    fn keyboard_scan_code_mapping_is_stable() {
-        assert_eq!(KeyboardKey::Letter(0).scan_code(), (0x1E, false));
-        assert_eq!(KeyboardKey::Letter(25).scan_code(), (0x2C, false));
-        assert_eq!(KeyboardKey::Digit(9).scan_code(), (0x0A, false));
-        assert_eq!(KeyboardKey::Digit(0).scan_code(), (0x0B, false));
-        assert_eq!(KeyboardKey::ArrowLeft.scan_code(), (0x4B, true));
-        assert_eq!(KeyboardKey::ControlRight.scan_code(), (0x1D, true));
-        assert_eq!(KeyboardKey::AltLeft.scan_code(), (0x38, false));
+    fn keyboard_injection_mapping_is_stable() {
+        assert_eq!(
+            KeyboardKey::parse("KeyA").unwrap().injection,
+            KeyboardInjection::ScanCode {
+                value: 0x1E,
+                extended: false
+            }
+        );
+        assert_eq!(
+            KeyboardKey::parse("Semicolon").unwrap().injection,
+            KeyboardInjection::ScanCode {
+                value: 0x27,
+                extended: false
+            }
+        );
+        assert_eq!(
+            KeyboardKey::parse("ArrowLeft").unwrap().injection,
+            KeyboardInjection::ScanCode {
+                value: 0x4B,
+                extended: true
+            }
+        );
+        assert_eq!(
+            KeyboardKey::parse("MetaLeft").unwrap().injection,
+            KeyboardInjection::ScanCode {
+                value: 0x5B,
+                extended: true
+            }
+        );
+        assert_eq!(
+            KeyboardKey::parse("F24").unwrap().injection,
+            KeyboardInjection::VirtualKey(0x87)
+        );
+        assert_eq!(
+            KeyboardKey::parse("AudioVolumeUp").unwrap().injection,
+            KeyboardInjection::VirtualKey(0xAF)
+        );
     }
 
     #[test]
@@ -1963,7 +2081,7 @@ mod tests {
             .push(QueuedInput::new(
                 context.clone(),
                 InputEvent::Key {
-                    key: KeyboardKey::ControlLeft,
+                    key: KeyboardKey::parse("ControlLeft").unwrap(),
                     pressed: true,
                 },
             ))

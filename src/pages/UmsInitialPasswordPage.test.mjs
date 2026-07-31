@@ -6,10 +6,17 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pageSource = readFileSync(join(__dirname, 'UmsInitialPasswordPage.vue'), 'utf8');
+const messagesSource = readFileSync(join(__dirname, '..', 'locales', 'messages.ts'), 'utf8');
 const formStoreSource = readFileSync(
   join(__dirname, '..', 'lib', 'umsInitialPasswordForm.ts'),
   'utf8',
 );
+
+test('Chinese sidebar and page title use the spaced UMS branding', () => {
+  assert.ok(messagesSource.includes("umsInitialPassword: 'UMS 初始密码修改'"));
+  assert.ok(messagesSource.includes("title: 'UMS 初始密码修改'"));
+  assert.ok(!messagesSource.includes('UMS初始密码修改'));
+});
 
 test('result table keeps each flow status on one line and lets long detail wrap', () => {
   assert.match(pageSource, /const umsResultStatusWrapClass = 'flex items-center gap-1\.5 whitespace-nowrap';/);

@@ -254,6 +254,7 @@ struct AccessUnitCacheEntry {
 
 pub struct WebRtcTransportState {
     media: Arc<H264MediaState>,
+    aggregate_outbound_bytes: Arc<AtomicU64>,
     peers: Mutex<HashMap<u64, PeerRecord>>,
     reserved_peer_slots: AtomicU32,
     next_peer_id: AtomicU64,
@@ -262,15 +263,28 @@ pub struct WebRtcTransportState {
 }
 
 impl WebRtcTransportState {
-    pub fn new(media: Arc<H264MediaState>) -> Arc<Self> {
+    pub fn new(media: Arc<H264MediaState>, aggregate_outbound_bytes: Arc<AtomicU64>) -> Arc<Self> {
         Arc::new(Self {
             media,
+            aggregate_outbound_bytes,
             peers: Mutex::new(HashMap::new()),
             reserved_peer_slots: AtomicU32::new(0),
             next_peer_id: AtomicU64::new(1),
             metrics: WebRtcMetrics::default(),
             access_unit_cache: Mutex::new(VecDeque::new()),
         })
+    }
+
+    fn record_media_sample_sent(&self, payload_bytes: usize) {
+        let payload_bytes = payload_bytes as u64;
+        self.metrics
+            .media_payload_bytes_sent
+            .fetch_add(payload_bytes, Ordering::Relaxed);
+        self.metrics
+            .media_samples_sent
+            .fetch_add(1, Ordering::Relaxed);
+        self.aggregate_outbound_bytes
+            .fetch_add(payload_bytes, Ordering::Relaxed);
     }
 
     pub fn metrics_snapshot(&self) -> WebRtcMetricsSnapshot {
@@ -959,14 +973,7 @@ async fn run_media_peer(
                         };
                         match tokio::time::timeout(MEDIA_SEND_TIMEOUT, write_sample).await {
                             Ok(Ok(())) => {
-                                state
-                                    .metrics
-                                    .media_payload_bytes_sent
-                                    .fetch_add(access_unit.len() as u64, Ordering::Relaxed);
-                                state
-                                    .metrics
-                                    .media_samples_sent
-                                    .fetch_add(1, Ordering::Relaxed);
+                                state.record_media_sample_sent(access_unit.len());
                                 if absolute_capture_time_negotiated {
                                     state
                                         .metrics
@@ -1462,7 +1469,8 @@ mod tests {
 
     #[test]
     fn peer_limit_supports_the_thirty_viewer_comparison_matrix() {
-        let state = WebRtcTransportState::new(Arc::new(H264MediaState::new()));
+        let state =
+            WebRtcTransportState::new(Arc::new(H264MediaState::new()), Arc::new(AtomicU64::new(0)));
         assert!(state.metrics_snapshot().peer_limit >= 30);
         for _ in 0..MAX_WEBRTC_PEERS {
             assert!(state.try_reserve_peer_slot());
@@ -1470,6 +1478,23 @@ mod tests {
         assert!(!state.try_reserve_peer_slot());
         state.release_peer_slot();
         assert!(state.try_reserve_peer_slot());
+    }
+
+    #[test]
+    fn media_payload_accounting_updates_transport_and_shared_outbound_totals() {
+        let aggregate_outbound_bytes = Arc::new(AtomicU64::new(0));
+        let state = WebRtcTransportState::new(
+            Arc::new(H264MediaState::new()),
+            aggregate_outbound_bytes.clone(),
+        );
+
+        state.record_media_sample_sent(270_350);
+        state.record_media_sample_sent(22_018);
+
+        let metrics = state.metrics_snapshot();
+        assert_eq!(metrics.media_payload_bytes_sent, 292_368);
+        assert_eq!(metrics.media_samples_sent, 2);
+        assert_eq!(aggregate_outbound_bytes.load(Ordering::Relaxed), 292_368);
     }
 
     #[test]

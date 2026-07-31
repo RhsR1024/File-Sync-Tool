@@ -511,10 +511,6 @@ impl H264MediaState {
             .unwrap_or(false)
     }
 
-    pub fn error(&self) -> Option<String> {
-        self.inner.lock().ok().and_then(|inner| inner.error.clone())
-    }
-
     pub fn metrics(&self) -> H264MediaMetricsSnapshot {
         let inner = self.inner.lock().ok();
         let descriptor = inner.as_ref().and_then(|inner| inner.descriptor.as_ref());

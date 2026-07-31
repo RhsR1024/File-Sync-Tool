@@ -6,7 +6,7 @@ import {
   FilePlus2,
   ListPlus,
   PencilLine,
-  X,
+  Trash2,
 } from 'lucide-vue-next';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -181,7 +181,7 @@ function toggleFromKeyboard(event: MouseEvent): void {
 }
 
 function scheduleCollapse(): void {
-  if (!expanded.value) return;
+  if (!expanded.value || !store.settings.value.autoCollapseLauncher) return;
   // A leave that lands inside the settle window is the window moving out from
   // under a stationary cursor, not the user pointing away. Swallowing it keeps
   // the pointer marked as present, so a click that expands the launcher can no
@@ -324,6 +324,10 @@ watch([paperCount, locale], () => {
   else void syncCollapsedWidth();
 });
 
+watch(() => store.settings.value.autoCollapseLauncher, (enabled) => {
+  if (!enabled) cancelCollapse();
+});
+
 onMounted(async () => {
   try {
     await store.initialize();
@@ -418,7 +422,7 @@ onBeforeUnmount(() => {
           @mousedown.stop
           @click.stop="deletePaper(paper)"
         >
-          <X aria-hidden="true" />
+          <Trash2 aria-hidden="true" />
         </button>
       </li>
       <li v-if="paperCount === 0" class="launcher-empty">

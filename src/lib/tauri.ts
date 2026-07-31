@@ -1272,7 +1272,7 @@ export const monitorControlApi = {
 // ─── Screen Share ─────────────────────────────────────
 
 export type ScreenShareBackendMode = 'auto' | 'wgc' | 'dxgi';
-export type ScreenShareMediaTransport = 'auto' | 'mjpeg' | 'mse_h264' | 'web_codecs' | 'web_rtc';
+export type ScreenShareMediaTransport = 'auto' | 'mjpeg' | 'mse_h264' | 'web_rtc';
 export type ScreenShareControlState = 'disabled' | 'available' | 'requested' | 'granted' | 'revoked';
 
 export interface ScreenShareControlRequest {

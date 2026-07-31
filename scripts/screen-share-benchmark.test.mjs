@@ -45,7 +45,7 @@ test('parseArgs accepts the required scenario controls and resolves output', () 
 test('parseArgs rejects invalid transport and an empty client population', () => {
   assert.throws(
     () => parseArgs(['--transport', 'webrtc']),
-    /mse-h264, webcodecs-h264, or mjpeg/,
+    /mse-h264 or mjpeg/,
   );
   assert.throws(
     () => parseArgs(['--healthy-clients', '0', '--slow-clients', '0']),
@@ -64,13 +64,10 @@ test('parseArgs returns help without requiring a runnable scenario', () => {
 test('media URLs obey the server deny-unknown-query contract', () => {
   const base = new URL('https://192.0.2.10:9870/view?ignored=base');
   const h264 = mediaUrl(base, 'mse-h264');
-  const webcodecs = mediaUrl(base, 'webcodecs-h264');
   const mjpeg = mediaUrl(base, 'mjpeg');
   assert.equal(h264.toString(), 'wss://192.0.2.10:9870/media/ws');
-  assert.equal(webcodecs.toString(), 'wss://192.0.2.10:9870/media/webcodecs/ws');
   assert.equal(mjpeg.toString(), 'https://192.0.2.10:9870/stream');
   assert.equal(h264.search, '');
-  assert.equal(webcodecs.search, '');
   assert.equal(mjpeg.search, '');
 });
 

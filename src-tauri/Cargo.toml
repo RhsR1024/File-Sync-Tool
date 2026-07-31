@@ -9,7 +9,7 @@ edition = "2021"
 rust-version = "1.77.2"
 
 [features]
-default = []
+default = ["screen-share-webrtc-prototype"]
 screen-share-webrtc-prototype = ["dep:webrtc", "dep:rtcp"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

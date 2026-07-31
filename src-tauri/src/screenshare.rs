@@ -93,15 +93,13 @@ use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 // ─── Public Data Types ──────────────────────────────────────
 
 const TOOL_NAME: &str = "屏幕共享";
-const WEBCODECS_AU_HEADER_BYTES: usize = 40;
-const WEBCODECS_MAX_ACCESS_UNIT_BYTES: usize = 32 * 1024 * 1024;
 #[cfg(feature = "screen-share-webrtc-prototype")]
 const WEBRTC_SIGNALING_MAX_BYTES: usize = 256 * 1024;
 const DESKTOP_OVERLAY_WINDOW_LABEL_PREFIX: &str = "screen-share-desktop-overlay";
 const ANNOTATION_BAR_WINDOW_LABEL_PREFIX: &str = "screen-share-annotation-bar";
 /// Logical size of the host annotation action bar. It is fixed so the Rust side
 /// can place it without waiting for the page to report a measured size.
-const ANNOTATION_BAR_LOGICAL_WIDTH: f64 = 360.0;
+const ANNOTATION_BAR_LOGICAL_WIDTH: f64 = 440.0;
 const ANNOTATION_BAR_LOGICAL_HEIGHT: f64 = 60.0;
 const ANNOTATION_BAR_LOGICAL_MARGIN: f64 = 16.0;
 
@@ -262,7 +260,7 @@ pub struct ScreenShareConfig {
     /// Whether viewers may ask the host for mouse control. Disabled by default.
     #[serde(default)]
     pub control_requests_enabled: bool,
-    /// Whether the approved controller may send the restricted keyboard whitelist.
+    /// Whether the approved controller may send browser-captured keyboard input.
     #[serde(default)]
     pub keyboard_control_enabled: bool,
     /// Media transport selector. P0/P1 currently resolve auto to MJPEG.
@@ -303,7 +301,6 @@ pub enum ScreenShareMediaTransport {
     Auto,
     Mjpeg,
     MseH264,
-    WebCodecs,
     WebRtc,
 }
 
@@ -315,17 +312,13 @@ impl Default for ScreenShareMediaTransport {
 
 impl ScreenShareMediaTransport {
     fn wants_h264(self) -> bool {
-        matches!(
-            self,
-            Self::Auto | Self::MseH264 | Self::WebCodecs | Self::WebRtc
-        )
+        matches!(self, Self::Auto | Self::MseH264 | Self::WebRtc)
     }
 
     fn resolved_label(self) -> &'static str {
         match self {
             Self::Auto | Self::Mjpeg => "mjpeg",
             Self::MseH264 => "mse_h264",
-            Self::WebCodecs => "web_codecs",
             Self::WebRtc => "web_rtc",
         }
     }
@@ -336,6 +329,91 @@ impl ScreenShareMediaTransport {
             other => other,
         }
     }
+}
+
+fn viewer_media_role(
+    requested: ScreenShareMediaTransport,
+    actual: ScreenShareMediaTransport,
+) -> &'static str {
+    if actual == ScreenShareMediaTransport::Mjpeg && requested != ScreenShareMediaTransport::Mjpeg {
+        "compatibility_fallback"
+    } else {
+        "primary"
+    }
+}
+
+fn concise_h264_error(error: &str) -> String {
+    if error.contains("MFT_ENUM_ADAPTER_LUID") {
+        return "硬件编码器未提供可验证的显卡适配器标识，无法安全接收 WGC GPU 纹理".to_string();
+    }
+    const MAX_CHARS: usize = 240;
+    let first_reason = error.split(';').next().unwrap_or(error).trim();
+    if first_reason.chars().count() <= MAX_CHARS {
+        return first_reason.to_string();
+    }
+    format!(
+        "{}…",
+        first_reason.chars().take(MAX_CHARS).collect::<String>()
+    )
+}
+
+fn h264_ready_log_message(
+    transport: ScreenShareMediaTransport,
+    metrics: &H264MediaMetricsSnapshot,
+    recovered: bool,
+) -> String {
+    let encoder = metrics.encoder_name.as_deref().unwrap_or("unknown");
+    let hardware = metrics
+        .encoder_hardware
+        .map(|value| if value { "true" } else { "false" })
+        .unwrap_or("unknown");
+    let input = if metrics.gpu_pipeline_active {
+        "gpu_direct"
+    } else if metrics.gpu_fallback_reason.is_some() {
+        "cpu_fallback"
+    } else {
+        "cpu"
+    };
+    let ready_state = if recovered || metrics.gpu_fallback_reason.is_some() {
+        "已通过兼容路径就绪"
+    } else {
+        "已就绪"
+    };
+    format!(
+        "H.264 媒体流{ready_state}: transport={}, encoder={encoder}, hardware={hardware}, input={input}；观看端将切换到低带宽传输",
+        transport.resolved_label()
+    )
+}
+
+fn h264_retry_log_message(
+    error: &str,
+    metrics: &H264MediaMetricsSnapshot,
+    new_gpu_fallback: bool,
+) -> (&'static str, String) {
+    let detail = concise_h264_error(error);
+    let describes_gpu_fallback = new_gpu_fallback
+        || metrics
+            .gpu_fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains(error) || error.contains(reason));
+    if describes_gpu_fallback {
+        return (
+            "warn",
+            format!(
+                "H.264 GPU 直通不可用，正在切换 CPU 兼容路径；切换期间观看端暂用 MJPEG: {detail}"
+            ),
+        );
+    }
+    if error.contains("encoder worker stopped") {
+        return (
+            "error",
+            format!("H.264 编码器已停止，当前会话继续使用 MJPEG: {detail}"),
+        );
+    }
+    (
+        "warn",
+        format!("H.264 媒体流尚未就绪，观看端暂用 MJPEG，编码器将自动重试: {detail}"),
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1405,6 +1483,7 @@ struct HttpServerState {
     session_id: u64,
     capture_paused: Arc<AtomicBool>,
     capture_issue: Arc<Mutex<Option<ScreenShareCaptureIssue>>>,
+    requested_transport: ScreenShareMediaTransport,
     transport: Arc<Mutex<ScreenShareMediaTransport>>,
     input_worker: Option<Arc<InputWorkerHandle>>,
     #[cfg(feature = "screen-share-webrtc-prototype")]
@@ -1447,6 +1526,8 @@ struct ViewerGuard {
     transport_count: Option<Arc<AtomicU32>>,
     ips: Arc<Mutex<ViewerIpMap>>,
     ip: String,
+    transport: &'static str,
+    role: &'static str,
 }
 
 impl Drop for ViewerGuard {
@@ -1472,8 +1553,8 @@ impl Drop for ViewerGuard {
         decrement_nonzero(&self.active_task_count);
         self.events.emit_tool_log(
             &format!(
-                "Viewer disconnected: ip={}, remaining_viewers={}",
-                self.ip, updated_count
+                "Viewer media closed: ip={}, remaining_media_leases={}, transport={}, role={}",
+                self.ip, updated_count, self.transport, self.role
             ),
             "info",
         );
@@ -1675,8 +1756,12 @@ pub async fn screen_share_start(
         None
     };
     #[cfg(feature = "screen-share-webrtc-prototype")]
-    let webrtc = (config.transport == ScreenShareMediaTransport::WebRtc)
-        .then(|| crate::screenshare_webrtc::WebRtcTransportState::new(h264_media.clone()));
+    let webrtc = (config.transport == ScreenShareMediaTransport::WebRtc).then(|| {
+        crate::screenshare_webrtc::WebRtcTransportState::new(
+            h264_media.clone(),
+            handle.bytes_sent.clone(),
+        )
+    });
     if config.control_requests_enabled {
         let worker = InputWorkerHandle::spawn().map_err(|error| {
             reset_runtime_state(handle);
@@ -1846,6 +1931,7 @@ pub async fn screen_share_start(
         session_id,
         capture_paused: handle.capture_paused.clone(),
         capture_issue: handle.capture_issue.clone(),
+        requested_transport: config.transport,
         transport: handle.transport.clone(),
         input_worker: handle.input_worker.lock().unwrap().clone(),
         #[cfg(feature = "screen-share-webrtc-prototype")]
@@ -2691,8 +2777,10 @@ pub fn screen_share_annotation_bar_ready(
             let _ = window.close();
             return;
         }
-        if let Err(error) = configure_annotation_bar_window(&window, &bar_handle) {
-            log::warn!("Host annotation action bar could not be placed: {error}");
+        if !bar_handle.annotation_bar_visible.load(Ordering::SeqCst) {
+            if let Err(error) = configure_annotation_bar_window(&window, &bar_handle) {
+                log::warn!("Host annotation action bar could not be placed: {error}");
+            }
         }
     });
     Ok(())
@@ -2753,7 +2841,12 @@ fn sync_annotation_bar_window(
         handle.annotation_bar_visible.store(false, Ordering::SeqCst);
         return Ok(());
     };
-    configure_annotation_bar_window(&window, handle)
+    // Do not reset the position while the bar is visible: the host may have
+    // dragged it away from content being presented. A fresh show still uses
+    // `configure_annotation_bar_window` to return it to a reachable default.
+    window
+        .set_always_on_top(true)
+        .map_err(|error| format!("Failed to keep host annotation action bar on top: {error}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3714,8 +3807,10 @@ fn capture_loop(
 ) {
     let mut startup_tx = startup_tx;
     let h264_worker = h264_worker;
-    let mut h264_failure_logged = false;
     let mut h264_ready_logged = false;
+    let mut h264_last_error_logged: Option<String> = None;
+    let mut h264_last_gpu_fallback_count = 0u64;
+    let mut h264_degradation_logged = false;
     let mut last_jpeg_encoded_at: Option<Instant> = None;
     let mut source = match create_capture_source(
         monitor_index,
@@ -4128,36 +4223,46 @@ fn capture_loop(
                 }
 
                 if h264_worker.is_some() {
+                    let h264_metrics = h264_media.metrics();
                     let current_transport = *runtime_handle.transport.lock().unwrap();
-                    if h264_media.is_ready() {
+                    if h264_metrics.ready {
                         let ready_transport = requested_transport.resolved_h264_transport();
                         if current_transport != ready_transport {
                             *runtime_handle.transport.lock().unwrap() = ready_transport;
                         }
                         if !h264_ready_logged {
                             h264_ready_logged = true;
-                            h264_failure_logged = false;
+                            h264_last_error_logged = None;
                             emit_capture_create_diagnostic(
                                 &app_handle,
                                 "success",
-                                "H.264 媒体流已就绪，观看端将优先使用低带宽传输".to_string(),
+                                h264_ready_log_message(
+                                    ready_transport,
+                                    &h264_metrics,
+                                    h264_degradation_logged,
+                                ),
                             );
+                            h264_degradation_logged = false;
                         }
                     } else if current_transport != ScreenShareMediaTransport::Mjpeg {
                         *runtime_handle.transport.lock().unwrap() =
                             ScreenShareMediaTransport::Mjpeg;
                         h264_ready_logged = false;
                     }
-                    if let Some(error) = h264_media.error() {
-                        if !h264_failure_logged {
-                            h264_failure_logged = true;
-                            emit_capture_create_diagnostic(
-                                &app_handle,
-                                "warn",
-                                format!("H.264 媒体流不可用，已回退 MJPEG: {error}"),
-                            );
+                    if let Some(error) = h264_metrics.error.as_deref() {
+                        let new_gpu_fallback =
+                            h264_metrics.gpu_fallback_count > h264_last_gpu_fallback_count;
+                        let error_changed = h264_last_error_logged.as_deref() != Some(error);
+                        if new_gpu_fallback || error_changed {
+                            log::warn!("H.264 encoder degradation: {error}");
+                            let (level, message) =
+                                h264_retry_log_message(error, &h264_metrics, new_gpu_fallback);
+                            emit_capture_create_diagnostic(&app_handle, level, message);
+                            h264_last_error_logged = Some(error.to_string());
+                            h264_degradation_logged = true;
                         }
                     }
+                    h264_last_gpu_fallback_count = h264_metrics.gpu_fallback_count;
                 }
 
                 let mjpeg_consumers = mjpeg_viewer_count.load(Ordering::Relaxed);
@@ -5848,7 +5953,6 @@ fn screen_share_router(state: Arc<HttpServerState>) -> Router {
         .route("/assets/*path", get(handler_web_asset))
         .route("/stream", get(handler_stream))
         .route("/media/ws", get(handler_media_ws))
-        .route("/media/webcodecs/ws", get(handler_webcodecs_ws))
         .route("/auth", post(handler_auth))
         .route("/time", get(handler_time))
         .route("/status", get(handler_status))
@@ -6010,11 +6114,14 @@ async fn handler_stream(
     state.mjpeg_viewer_count.fetch_add(1, Ordering::Relaxed);
     let is_reconnect = query.reconnect == Some(1);
     state.media_metrics.record_stream_open(is_reconnect);
+    let viewer_role =
+        viewer_media_role(state.requested_transport, ScreenShareMediaTransport::Mjpeg);
     state.events.emit_tool_log(
         &format!(
-            "Viewer connected: ip={}, viewers={}, transport=mjpeg, user_agent={}",
+            "Viewer media opened: ip={}, media_leases={}, transport=mjpeg, role={}, user_agent={}",
             client_ip,
             viewer_total,
+            viewer_role,
             summarize_user_agent(&headers)
         ),
         "info",
@@ -6027,6 +6134,8 @@ async fn handler_stream(
         transport_count: Some(state.mjpeg_viewer_count.clone()),
         ips: state.viewer_ips.clone(),
         ip: client_ip,
+        transport: "mjpeg",
+        role: viewer_role,
     };
     let bytes_sent = state.bytes_sent.clone();
     let media_metrics = state.media_metrics.clone();
@@ -6211,7 +6320,7 @@ async fn handler_media_ws(
     state.media_metrics.record_stream_open(is_reconnect);
     state.events.emit_tool_log(
         &format!(
-            "Viewer connected: ip={}, viewers={}, transport=mse_h264, user_agent={}",
+            "Viewer media opened: ip={}, media_leases={}, transport=mse_h264, role=primary, user_agent={}",
             client_ip,
             viewer_total,
             summarize_user_agent(&headers)
@@ -6226,6 +6335,8 @@ async fn handler_media_ws(
         transport_count: None,
         ips: state.viewer_ips.clone(),
         ip: client_ip,
+        transport: "mse_h264",
+        role: "primary",
     };
     let media = state.h264_media.clone();
     let cancel = state.cancel.clone();
@@ -6245,347 +6356,6 @@ async fn handler_media_ws(
             )
         })
         .into_response()
-}
-
-async fn handler_webcodecs_ws(
-    AxumState(state): AxumState<Arc<HttpServerState>>,
-    Query(query): Query<StreamQuery>,
-    headers: HeaderMap,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    websocket: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
-) -> Response {
-    if let Some(hash) = &state.auth_hash {
-        if !check_auth_cookie(&headers, hash) {
-            return Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .body(Body::from("Unauthorized"))
-                .unwrap();
-        }
-    }
-    if *state.transport.lock().unwrap() != ScreenShareMediaTransport::WebCodecs {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .header("Cache-Control", "no-store")
-            .body(Body::from(
-                "WebCodecs experimental transport is not selected for this session",
-            ))
-            .unwrap();
-    }
-    let Some(descriptor) = state.h264_media.descriptor() else {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .header("Cache-Control", "no-store")
-            .body(Body::from("H.264 media stream is not ready"))
-            .unwrap();
-    };
-    if descriptor.decoder_configuration.is_empty() {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .header("Cache-Control", "no-store")
-            .body(Body::from("H.264 decoder configuration is unavailable"))
-            .unwrap();
-    }
-    let websocket = match websocket {
-        Ok(websocket) => websocket,
-        Err(rejection) => return rejection.into_response(),
-    };
-    let Some(viewer_total) = try_reserve_media_viewer(&state.viewer_count) else {
-        return media_viewer_limit_response();
-    };
-    let client_ip = addr.ip().to_string();
-    record_viewer_connection(&state.viewer_ips, &client_ip);
-    state
-        .viewer_ip_reference_count
-        .fetch_add(1, Ordering::Relaxed);
-    state
-        .active_media_task_count
-        .fetch_add(1, Ordering::Relaxed);
-    let is_reconnect = query.reconnect == Some(1);
-    state.media_metrics.record_stream_open(is_reconnect);
-    state.events.emit_tool_log(
-        &format!(
-            "Viewer connected: ip={}, viewers={}, transport=web_codecs, user_agent={}",
-            client_ip,
-            viewer_total,
-            summarize_user_agent(&headers)
-        ),
-        "info",
-    );
-    let viewer_guard = ViewerGuard {
-        events: state.events.clone(),
-        count: state.viewer_count.clone(),
-        ip_reference_count: state.viewer_ip_reference_count.clone(),
-        active_task_count: state.active_media_task_count.clone(),
-        transport_count: None,
-        ips: state.viewer_ips.clone(),
-        ip: client_ip,
-    };
-    let media = state.h264_media.clone();
-    let cancel = state.cancel.clone();
-    let bytes_sent = state.bytes_sent.clone();
-    let media_metrics = state.media_metrics.clone();
-    websocket
-        .max_message_size(64 * 1024)
-        .on_upgrade(move |socket| {
-            run_webcodecs_media_socket(
-                socket,
-                media,
-                cancel,
-                bytes_sent,
-                media_metrics,
-                is_reconnect,
-                viewer_guard,
-            )
-        })
-        .into_response()
-}
-
-async fn run_webcodecs_media_socket(
-    mut socket: WebSocket,
-    media: Arc<H264MediaState>,
-    cancel: Arc<AtomicBool>,
-    bytes_sent: Arc<AtomicU64>,
-    media_metrics: Arc<ScreenShareMediaMetrics>,
-    is_reconnect: bool,
-    viewer_guard: ViewerGuard,
-) {
-    let _viewer_guard = viewer_guard;
-    let started_at = Instant::now();
-    let mut first_frame_sent = false;
-    let mut events = media.subscribe();
-    let Some(initial_descriptor) = media.descriptor() else {
-        media_metrics.record_stream_disconnect();
-        return;
-    };
-    let mut generation = initial_descriptor.generation;
-    let mut sequence = 0u64;
-    let mut waiting_for_keyframe = true;
-    if send_webcodecs_descriptor(
-        &mut socket,
-        &initial_descriptor,
-        &bytes_sent,
-        &media_metrics,
-    )
-    .await
-    .is_err()
-    {
-        media_metrics.record_stream_disconnect();
-        return;
-    }
-    let _ = media.request_keyframe(generation);
-    let mut ticker = tokio::time::interval(Duration::from_millis(250));
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                if cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-            event = events.recv() => match event {
-                Ok(event) => match event.as_ref() {
-                    H264MediaEvent::Reset(descriptor) => {
-                        if send_webcodecs_descriptor(
-                            &mut socket,
-                            descriptor,
-                            &bytes_sent,
-                            &media_metrics,
-                        ).await.is_err() {
-                            break;
-                        }
-                        generation = descriptor.generation;
-                        sequence = 0;
-                        waiting_for_keyframe = true;
-                        first_frame_sent = false;
-                        let _ = media.request_keyframe(generation);
-                    }
-                    H264MediaEvent::Segment(segment) if segment.generation == generation => {
-                        let gap = sequence != 0 && segment.sequence != sequence.saturating_add(1);
-                        if gap {
-                            waiting_for_keyframe = true;
-                            let _ = media.request_keyframe(generation);
-                        }
-                        if waiting_for_keyframe && !segment.keyframe {
-                            continue;
-                        }
-                        let payload = match webcodecs_access_unit_message(segment, waiting_for_keyframe) {
-                            Ok(payload) => payload,
-                            Err(_) => break,
-                        };
-                        let trace = h264_media_trace_message(segment);
-                        let wire_bytes = payload.len().saturating_add(trace.len());
-                        if send_h264_message(
-                            &mut socket,
-                            Message::Text(trace),
-                            &media_metrics,
-                        ).await.is_err() {
-                            break;
-                        }
-                        if send_h264_message(
-                            &mut socket,
-                            Message::Binary(payload.to_vec()),
-                            &media_metrics,
-                        ).await.is_err() {
-                            break;
-                        }
-                        bytes_sent.fetch_add(wire_bytes as u64, Ordering::Relaxed);
-                        sequence = segment.sequence;
-                        waiting_for_keyframe = false;
-                        if !first_frame_sent {
-                            first_frame_sent = true;
-                            media_metrics.record_stream_first_frame(started_at.elapsed(), is_reconnect);
-                        }
-                    }
-                    H264MediaEvent::Segment(_) => {}
-                    H264MediaEvent::Unavailable { generation: next_generation, error } => {
-                        generation = *next_generation;
-                        sequence = 0;
-                        waiting_for_keyframe = true;
-                        first_frame_sent = false;
-                        let message = serde_json::json!({
-                            "v": 1,
-                            "type": "media.unavailable",
-                            "generation": next_generation,
-                            "error": error,
-                        }).to_string();
-                        if send_h264_message(
-                            &mut socket,
-                            Message::Text(message),
-                            &media_metrics,
-                        ).await.is_err() {
-                            break;
-                        }
-                    }
-                },
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    media_metrics.record_lagged_frames(skipped);
-                    sequence = 0;
-                    waiting_for_keyframe = true;
-                    // The one-shot Reset event may itself have been overwritten. Refresh the
-                    // descriptor from authoritative state instead of draining retained events;
-                    // otherwise this socket can wait forever for an IDR from an old generation.
-                    if let Some(descriptor) =
-                        webcodecs_newer_descriptor(generation, media.descriptor())
-                    {
-                        if send_webcodecs_descriptor(
-                            &mut socket,
-                            &descriptor,
-                            &bytes_sent,
-                            &media_metrics,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                        generation = descriptor.generation;
-                        first_frame_sent = false;
-                    }
-                    let _ = media.request_keyframe(generation);
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            },
-            incoming = socket.recv() => {
-                let Some(Ok(message)) = incoming else { break; };
-                match message {
-                    Message::Ping(payload) => {
-                        if send_h264_message(
-                            &mut socket,
-                            Message::Pong(payload),
-                            &media_metrics,
-                        ).await.is_err() {
-                            break;
-                        }
-                    }
-                    Message::Text(text) => {
-                        let request = serde_json::from_str::<serde_json::Value>(&text).ok();
-                        if request.as_ref().is_some_and(|request| {
-                            request["v"] == 1 && request["type"] == "media.keyframe.request"
-                        }) {
-                            let _ = media.request_keyframe(generation);
-                        }
-                    }
-                    Message::Close(_) => break,
-                    Message::Binary(_) | Message::Pong(_) => {}
-                }
-            }
-        }
-    }
-    media_metrics.record_stream_disconnect();
-}
-
-fn webcodecs_newer_descriptor(
-    current_generation: u64,
-    descriptor: Option<Arc<H264StreamDescriptor>>,
-) -> Option<Arc<H264StreamDescriptor>> {
-    descriptor.filter(|descriptor| descriptor.generation != current_generation)
-}
-
-fn webcodecs_access_unit_message(
-    segment: &H264MediaSegment,
-    discontinuity: bool,
-) -> Result<Bytes, String> {
-    let payload = segment.access_unit_avcc.as_ref();
-    if segment.generation == 0
-        || segment.sequence == 0
-        || segment.duration_us == 0
-        || segment.duration_us > u64::from(u32::MAX)
-        || payload.is_empty()
-        || payload.len() > WEBCODECS_MAX_ACCESS_UNIT_BYTES
-        || payload.len() > u32::MAX as usize
-    {
-        return Err("invalid WebCodecs access-unit metadata".to_owned());
-    }
-    let mut bytes = BytesMut::with_capacity(WEBCODECS_AU_HEADER_BYTES + payload.len());
-    bytes.extend_from_slice(b"FSTW");
-    bytes.extend_from_slice(&[1]);
-    let mut flags = if segment.keyframe { 1u8 } else { 2u8 };
-    if discontinuity {
-        flags |= 4;
-    }
-    bytes.extend_from_slice(&[flags]);
-    bytes.extend_from_slice(&(WEBCODECS_AU_HEADER_BYTES as u16).to_be_bytes());
-    bytes.extend_from_slice(&segment.generation.to_be_bytes());
-    bytes.extend_from_slice(&segment.sequence.to_be_bytes());
-    bytes.extend_from_slice(&segment.timestamp_us.to_be_bytes());
-    bytes.extend_from_slice(&(segment.duration_us as u32).to_be_bytes());
-    bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    bytes.extend_from_slice(payload);
-    Ok(bytes.freeze())
-}
-
-async fn send_webcodecs_descriptor(
-    socket: &mut WebSocket,
-    descriptor: &H264StreamDescriptor,
-    bytes_sent: &AtomicU64,
-    media_metrics: &ScreenShareMediaMetrics,
-) -> Result<(), axum::Error> {
-    let message = webcodecs_descriptor_message(descriptor)
-        .map_err(|error| axum::Error::new(io::Error::new(io::ErrorKind::InvalidData, error)))?;
-    let message_length = message.len();
-    send_h264_message(socket, Message::Text(message), media_metrics).await?;
-    bytes_sent.fetch_add(message_length as u64, Ordering::Relaxed);
-    Ok(())
-}
-
-fn webcodecs_descriptor_message(descriptor: &H264StreamDescriptor) -> Result<String, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    if descriptor.decoder_configuration.is_empty() {
-        return Err("H.264 decoder configuration is empty".to_owned());
-    }
-    Ok(serde_json::json!({
-        "v": 1,
-        "type": "media.hello",
-        "transport": "webcodecs_h264",
-        "generation": descriptor.generation,
-        "codec": descriptor.codec,
-        "description_base64": STANDARD.encode(descriptor.decoder_configuration.as_ref()),
-        "width": descriptor.width,
-        "height": descriptor.height,
-        "fps": descriptor.fps,
-        "bitrate_bps": descriptor.bitrate_bps,
-        "color_space": null,
-    })
-    .to_string())
 }
 
 #[cfg(feature = "screen-share-webrtc-prototype")]
@@ -6646,7 +6416,7 @@ async fn handler_webrtc_offer(
         .fetch_add(1, Ordering::Relaxed);
     state.events.emit_tool_log(
         &format!(
-            "Viewer connected: ip={}, viewers={}, transport=web_rtc, user_agent={}",
+            "Viewer media negotiation started: ip={}, media_leases={}, transport=web_rtc, role=primary, user_agent={}",
             client_ip,
             viewer_total,
             summarize_user_agent(&headers)
@@ -6661,6 +6431,8 @@ async fn handler_webrtc_offer(
         transport_count: None,
         ips: state.viewer_ips.clone(),
         ip: client_ip,
+        transport: "web_rtc",
+        role: "primary",
     };
     match webrtc
         .answer_offer_with_lease(offer, Some(Box::new(viewer_guard)))
@@ -7883,7 +7655,7 @@ mod tests {
             height: 1040,
         };
         let position = annotation_bar_placement(work_area, 1.0);
-        assert_eq!(position.x, 1920 - 360 - 16);
+        assert_eq!(position.x, 1920 - 440 - 16);
         assert_eq!(position.y, 1040 - 60 - 16);
     }
 
@@ -7896,7 +7668,7 @@ mod tests {
             height: 2160,
         };
         let position = annotation_bar_placement(work_area, 2.0);
-        assert_eq!(position.x, 3840 - 720 - 32);
+        assert_eq!(position.x, 3840 - 880 - 32);
         assert_eq!(position.y, 2160 - 120 - 32);
     }
 
@@ -7909,7 +7681,7 @@ mod tests {
             height: 1000,
         };
         let position = annotation_bar_placement(work_area, 1.0);
-        assert_eq!(position.x, -1920 + 1920 - 360 - 16);
+        assert_eq!(position.x, -1920 + 1920 - 440 - 16);
         assert_eq!(position.y, 120 + 1000 - 60 - 16);
     }
 
@@ -8329,6 +8101,7 @@ mod tests {
             session_id: 77,
             capture_paused: Arc::new(AtomicBool::new(false)),
             capture_issue: Arc::new(Mutex::new(None)),
+            requested_transport: ScreenShareMediaTransport::Mjpeg,
             transport: Arc::new(Mutex::new(ScreenShareMediaTransport::Mjpeg)),
             input_worker: None,
             #[cfg(feature = "screen-share-webrtc-prototype")]
@@ -8500,106 +8273,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn webcodecs_lag_recovery_refreshes_only_changed_generation() {
-        let descriptor = Arc::new(H264StreamDescriptor {
-            generation: 4,
-            codec: "avc1.42C028".to_owned(),
-            width: 1280,
-            height: 720,
-            fps: 30,
-            bitrate_bps: 3_000_000,
-            init_segment: Arc::new(Bytes::new()),
-            decoder_configuration: Arc::new(Bytes::from_static(&[1, 0x42, 0xc0, 0x28])),
-        });
-
-        assert!(webcodecs_newer_descriptor(4, Some(descriptor.clone())).is_none());
-        assert_eq!(
-            webcodecs_newer_descriptor(3, Some(descriptor))
-                .expect("changed generation")
-                .generation,
-            4
-        );
-        assert!(webcodecs_newer_descriptor(3, None).is_none());
-    }
-
-    #[test]
-    fn webcodecs_wire_preserves_complete_access_unit_and_exact_header() {
-        let segment = H264MediaSegment {
-            generation: 7,
-            sequence: 99,
-            keyframe: true,
-            timestamp_us: 1_234_567,
-            duration_us: 16_667,
-            capture_sequence: 5,
-            captured_at_unix_ms: 10,
-            visible_input_sequence: None,
-            input_applied_at_server_unix_ms: None,
-            access_unit_avcc: Arc::new(Bytes::from_static(&[
-                0, 0, 0, 2, 0x67, 0x64, 0, 0, 0, 3, 0x65, 1, 2,
-            ])),
-            bytes: Arc::new(Bytes::new()),
-        };
-        let wire = webcodecs_access_unit_message(&segment, true).unwrap();
-        assert_eq!(&wire[0..4], b"FSTW");
-        assert_eq!(wire[4], 1);
-        assert_eq!(wire[5], 0b0101);
-        assert_eq!(u16::from_be_bytes(wire[6..8].try_into().unwrap()), 40);
-        assert_eq!(u64::from_be_bytes(wire[8..16].try_into().unwrap()), 7);
-        assert_eq!(u64::from_be_bytes(wire[16..24].try_into().unwrap()), 99);
-        assert_eq!(
-            u64::from_be_bytes(wire[24..32].try_into().unwrap()),
-            1_234_567
-        );
-        assert_eq!(u32::from_be_bytes(wire[32..36].try_into().unwrap()), 16_667);
-        assert_eq!(
-            u32::from_be_bytes(wire[36..40].try_into().unwrap()) as usize,
-            segment.access_unit_avcc.len()
-        );
-        assert_eq!(&wire[40..], segment.access_unit_avcc.as_ref());
-
-        let mut invalid = segment.clone();
-        invalid.generation = 0;
-        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
-        invalid = segment.clone();
-        invalid.sequence = 0;
-        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
-        invalid = segment.clone();
-        invalid.duration_us = 0;
-        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
-        invalid = segment.clone();
-        invalid.access_unit_avcc = Arc::new(Bytes::new());
-        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
-        invalid.access_unit_avcc =
-            Arc::new(Bytes::from(vec![0; WEBCODECS_MAX_ACCESS_UNIT_BYTES + 1]));
-        assert!(webcodecs_access_unit_message(&invalid, false).is_err());
-    }
-
-    #[test]
-    fn webcodecs_descriptor_contains_avcc_configuration() {
-        let descriptor = H264StreamDescriptor {
-            generation: 4,
-            codec: "avc1.42C028".to_owned(),
-            width: 1920,
-            height: 1080,
-            fps: 30,
-            bitrate_bps: 5_000_000,
-            init_segment: Arc::new(Bytes::new()),
-            decoder_configuration: Arc::new(Bytes::from_static(&[1, 0x42, 0xc0, 0x28])),
-        };
-        let message: serde_json::Value =
-            serde_json::from_str(&webcodecs_descriptor_message(&descriptor).unwrap()).unwrap();
-        assert_eq!(message["transport"], "webcodecs_h264");
-        assert_eq!(message["generation"], 4);
-        assert_eq!(message["codec"], "avc1.42C028");
-        assert_eq!(message["description_base64"], "AULAKA==");
-        assert!(message["color_space"].is_null());
-
-        let mut invalid = descriptor;
-        invalid.decoder_configuration = Arc::new(Bytes::new());
-        assert!(webcodecs_descriptor_message(&invalid).is_err());
-    }
-
     #[tokio::test]
     async fn long_lived_mjpeg_stream_sends_cached_frame_without_waiting_for_broadcast() {
         let state = test_http_state();
@@ -8677,18 +8350,69 @@ mod tests {
     fn h264_selector_preserves_explicit_mjpeg_and_webrtc_fallback() {
         assert!(ScreenShareMediaTransport::Auto.wants_h264());
         assert!(ScreenShareMediaTransport::MseH264.wants_h264());
-        assert!(ScreenShareMediaTransport::WebCodecs.wants_h264());
         assert!(ScreenShareMediaTransport::WebRtc.wants_h264());
         assert!(!ScreenShareMediaTransport::Mjpeg.wants_h264());
         assert_eq!(ScreenShareMediaTransport::Mjpeg.resolved_label(), "mjpeg");
         assert_eq!(
-            ScreenShareMediaTransport::WebCodecs.resolved_label(),
-            "web_codecs"
-        );
-        assert_eq!(
             ScreenShareMediaTransport::WebRtc.resolved_label(),
             "web_rtc"
         );
+    }
+
+    #[test]
+    fn media_logs_distinguish_primary_streams_from_compatibility_fallbacks() {
+        assert_eq!(
+            viewer_media_role(
+                ScreenShareMediaTransport::WebRtc,
+                ScreenShareMediaTransport::Mjpeg
+            ),
+            "compatibility_fallback"
+        );
+        assert_eq!(
+            viewer_media_role(
+                ScreenShareMediaTransport::MseH264,
+                ScreenShareMediaTransport::Mjpeg
+            ),
+            "compatibility_fallback"
+        );
+        assert_eq!(
+            viewer_media_role(
+                ScreenShareMediaTransport::Mjpeg,
+                ScreenShareMediaTransport::Mjpeg
+            ),
+            "primary"
+        );
+    }
+
+    #[test]
+    fn h264_logs_report_gpu_fallback_as_recovering_then_show_the_final_pipeline() {
+        let raw_error = "No hardware H.264 encoder accepted the WGC DXGI surface: Intel Quick Sync: hardware MFT did not expose a valid MFT_ENUM_ADAPTER_LUID blob; Intel Quick Sync: duplicate candidate";
+        let metrics = H264MediaMetricsSnapshot {
+            ready: false,
+            gpu_fallback_count: 1,
+            gpu_fallback_reason: Some(raw_error.to_string()),
+            error: Some(raw_error.to_string()),
+            ..Default::default()
+        };
+        let (level, retry) = h264_retry_log_message(raw_error, &metrics, true);
+        assert_eq!(level, "warn");
+        assert!(retry.contains("正在切换 CPU 兼容路径"));
+        assert!(retry.contains("暂用 MJPEG"));
+        assert!(!retry.contains("已回退 MJPEG"));
+        assert!(!retry.contains("duplicate candidate"));
+
+        let ready_metrics = H264MediaMetricsSnapshot {
+            ready: true,
+            encoder_name: Some("Intel Quick Sync Video H.264 Encoder MFT".to_string()),
+            encoder_hardware: Some(true),
+            gpu_fallback_reason: metrics.gpu_fallback_reason,
+            ..Default::default()
+        };
+        let ready = h264_ready_log_message(ScreenShareMediaTransport::WebRtc, &ready_metrics, true);
+        assert!(ready.contains("已通过兼容路径就绪"));
+        assert!(ready.contains("transport=web_rtc"));
+        assert!(ready.contains("hardware=true"));
+        assert!(ready.contains("input=cpu_fallback"));
     }
 
     #[test]
@@ -9036,6 +8760,8 @@ mod tests {
             transport_count: Some(transport.clone()),
             ips: ips.clone(),
             ip: "10.0.0.1".to_string(),
+            transport: "mjpeg",
+            role: "primary",
         });
         assert_eq!(viewers.load(Ordering::Relaxed), 0);
         assert_eq!(ip_references.load(Ordering::Relaxed), 0);

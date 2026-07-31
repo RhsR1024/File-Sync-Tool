@@ -46,3 +46,8 @@ test('file share save action labels restart when sharing is active', () => {
   assert.match(pageSource, /isActive \? startShare\(true, true\) : saveSettings\(\)/);
   assert.match(pageSource, /isActive \? t\('tools\.fileShare\.saveAndRestart'\) : t\('tools\.fileShare\.saveSettings'\)/);
 });
+
+test('file share header keeps the product description while sharing is active', () => {
+  assert.match(pageSource, /\{\{ t\('tools\.fileShare\.consoleDescription'\) \}\}/);
+  assert.doesNotMatch(pageSource, /isActive \? serverUrl : t\('tools\.fileShare\.consoleDescription'\)/);
+});

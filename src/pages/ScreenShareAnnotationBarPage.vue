@@ -19,6 +19,7 @@ import type { AnnotationDocument } from '@/screen-share-web/types';
 defineOptions({ name: 'ScreenShareAnnotationBarPage' });
 
 const { t } = useI18n();
+const annotationBarWindow = getCurrentWindow();
 
 const documentState = ref<AnnotationDocument>(emptyDocument());
 const pendingAction = ref<'undo' | 'clear' | null>(null);
@@ -31,6 +32,7 @@ const actionError = ref(false);
 const dismissedAtCount = ref<number | null>(null);
 
 let unlistenAnnotationState: UnlistenFn | null = null;
+let visibilitySync = Promise.resolve();
 
 const barView = computed(() => annotationBarView(documentState.value, dismissedAtCount.value));
 const annotationCount = computed(() => barView.value.count);
@@ -75,19 +77,49 @@ async function clearAll() {
   }
 }
 
+function requestBarVisibility(visible: boolean): Promise<void> {
+  // Serialize window commands so a slower, stale "show" request cannot win
+  // after the annotation count reaches zero or the host dismisses the bar.
+  visibilitySync = visibilitySync.then(async () => {
+    if (!visible) {
+      try {
+        // Hide the native window directly as a fail-safe. The Rust command
+        // below also updates the session-side visibility flag.
+        await annotationBarWindow.hide();
+      } catch {
+        /* The Rust command below remains the authoritative fallback. */
+      }
+    }
+    try {
+      await screenShareSetAnnotationBarVisible(visible);
+    } catch {
+      /* A stale session or a stopped share already hides the window. */
+    }
+  });
+  return visibilitySync;
+}
+
 function dismiss() {
   dismissedAtCount.value = annotationCount.value;
+  // The bar can be visible while the reactive view already says "hidden"
+  // (for example after the last annotation is removed). Always issue the hide
+  // command instead of relying solely on the visibility watcher to re-run.
+  void requestBarVisibility(false);
+}
+
+function startDragging(event: MouseEvent) {
+  if (event.button !== 0 || (event.target as Element).closest('button')) return;
+  event.preventDefault();
+  void annotationBarWindow.startDragging().catch(() => {
+    /* A closing or stale window no longer needs to be draggable. */
+  });
 }
 
 // Visibility lives in Rust so the bar can appear without stealing focus from
 // whatever the host is presenting.
-watch(shouldShow, async (visible) => {
+watch(shouldShow, (visible) => {
   actionError.value = false;
-  try {
-    await screenShareSetAnnotationBarVisible(visible);
-  } catch {
-    /* A stale session or a stopped share already hides the window. */
-  }
+  void requestBarVisibility(visible);
 });
 
 // Keep the stored dismissal in step with the live count, so clearing (or
@@ -106,9 +138,11 @@ onMounted(async () => {
     });
     applyDocument(await screenShareGetAnnotationState());
     await screenShareAnnotationBarReady();
-    if (shouldShow.value) await screenShareSetAnnotationBarVisible(true);
+    // Reconcile both states after startup. An explicit false also removes a
+    // stale zero-count bar left visible by an earlier asynchronous request.
+    await requestBarVisibility(shouldShow.value);
   } catch {
-    await getCurrentWindow().close();
+    await annotationBarWindow.close();
   }
 });
 
@@ -121,7 +155,12 @@ onUnmounted(() => {
 
 <template>
   <main class="bar-root">
-    <div class="bar-shell">
+    <div
+      v-if="shouldShow"
+      class="bar-shell"
+      :title="t('tools.screenShare.annotationBarMove')"
+      @mousedown="startDragging"
+    >
       <span class="bar-count">
         <span class="bar-dot" aria-hidden="true"></span>
         <span class="bar-count-text">
@@ -191,7 +230,7 @@ onUnmounted(() => {
   border: 1px solid rgb(148 163 184 / 0.28);
   background: rgb(15 23 42 / 0.92);
   padding: 8px 10px;
-  box-shadow: 0 8px 24px rgb(2 6 23 / 0.45);
+  cursor: move;
   font-family: inherit;
 }
 
@@ -205,11 +244,11 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
+  user-select: none;
 }
 
 .bar-count-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex-shrink: 0;
 }
 
 .bar-dot {
@@ -218,7 +257,6 @@ onUnmounted(() => {
   flex-shrink: 0;
   border-radius: 9999px;
   background: rgb(245 158 11);
-  box-shadow: 0 0 6px rgb(245 158 11 / 0.85);
 }
 
 .bar-actions {
@@ -240,6 +278,7 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
+  cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease;
 }
 
@@ -267,6 +306,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   border-radius: 8px;
+  cursor: pointer;
   color: rgb(148 163 184);
   transition: background-color 120ms ease, color 120ms ease;
 }
@@ -274,6 +314,12 @@ onUnmounted(() => {
 .bar-dismiss:hover {
   background: rgb(71 85 105 / 0.7);
   color: rgb(241 245 249);
+}
+
+.bar-button:focus-visible,
+.bar-dismiss:focus-visible {
+  outline: 2px solid rgb(56 189 248);
+  outline-offset: 2px;
 }
 
 .bar-icon {

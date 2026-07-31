@@ -113,12 +113,6 @@ pnpm benchmark:screen-share:field-evidence -- --gate performance_matrix --report
 pnpm benchmark:screen-share -- --base-url http://192.0.2.10:9870/ --transport mse-h264 --healthy-clients 30 --slow-clients 1 --duration-seconds 1800 --scenario fast-scroll --output artifacts/screen-share-benchmarks/fast-scroll-h264.json
 ```
 
-WebCodecs wire fan-out 使用相同工具和 `/media/webcodecs/ws`，但该 Node 客户端不解码、不绘制，不能证明浏览器安全上下文、解码或呈现性能：
-
-```powershell
-pnpm benchmark:screen-share -- --base-url https://192.0.2.10:9870/ --transport webcodecs-h264 --healthy-clients 30 --duration-seconds 1800 --scenario fast-scroll --output artifacts/screen-share-benchmarks/fast-scroll-webcodecs-wire.json
-```
-
 需要脚本以退出码执行子集门禁时增加 `--require-gates`。JSON 中的 `acceptance.scope` 固定为 `fanout_subset`；即使 `fanout_subset_overall=pass`，也不表示 M1 整体通过。浏览器 live-edge/hard seek、IDR storm、远控输入、资源曲线、网络损伤和独立设备矩阵仍需分别给出证据。
 
 工具仅支持未配置用户名/密码的受控测试共享。媒体端点返回 HTTP 401 时，工具会明确报告鉴权限制；不要把密码或共享 Cookie 写入命令行、日志或报告。
@@ -157,7 +151,7 @@ pnpm benchmark:screen-share -- --base-url https://192.0.2.10:9870/ --transport w
 | `WebSocket.bufferedAmount`（bytes） |  |  |  |  |  |
 | 断线重连恢复（ms） |  |  |  |  |  |
 
-断线重连恢复来自播放器指标 `reconnectRecoveryMs` 与 `unexpectedDisconnectCount`：计时从非人为断线开始，到重连后的画面重新呈现为止。MSE 会跳过断线前已缓冲、断线后继续呈现的帧，只有 `mediaTime` 超过断线时刻缓冲末端的帧才结算；WebCodecs 没有播放缓冲，重连后第一帧绘制即结算。主动停止和终止性失败不产生样本。WebRTC 原型不自动重连，该行留空并注明。
+断线重连恢复来自播放器指标 `reconnectRecoveryMs` 与 `unexpectedDisconnectCount`：计时从非人为断线开始，到重连后的画面重新呈现为止。MSE 会跳过断线前已缓冲、断线后继续呈现的帧，只有 `mediaTime` 超过断线时刻缓冲末端的帧才结算。主动停止和终止性失败不产生样本。WebRTC 原型不自动重连，该行留空并注明。
 
 时钟和呈现来源必须单独记录：
 
@@ -166,7 +160,6 @@ pnpm benchmark:screen-share -- --base-url https://192.0.2.10:9870/ --transport w
 | clock sample count / RTT / offset | 待填写 |
 | offset range / last offset / discontinuity count | 待填写 |
 | MSE `presentationTraceSource` | 待填写（`expected-display-time` / `callback-time`） |
-| WebCodecs `presentationTraceSource` | 待填写（应为 `animation-frame-pre-paint-proxy`） |
 | WebRTC `presentationTraceSource` | 待填写 |
 | WebRTC Absolute Capture Time registered / negotiated offers / sent samples | 待填写；来自服务端 `webrtc` 指标 |
 | WebRTC Absolute Capture Time 客户端 validation | 待填写（`not-negotiated` / `awaiting-browser-sample` / `pending-target-browser-correlation`） |
@@ -236,6 +229,6 @@ cargo test --bin app --features screen-share-webrtc-prototype screenshare_media:
 window.__SCREEN_SHARE_DIAGNOSTICS__.snapshot()
 ```
 
-快照只读取当前传输类型、服务端计数器和浏览器播放器指标，不包含画面、账号、Cookie、连接 IP 或按键内容，也不会自动上传或持久化。WebCodecs 结果应同时保留安全上下文/WSS 可用性、播放器 `state`、解码队列、paint 前覆盖丢帧及端到端 trace；MSE 与 WebRTC 也必须同时保留各自的 `state` 和 `metrics`。WebRTC 原型还应记录浏览器连接状态和服务端 peer/RTCP 指标。若全局对象不存在，先记录页面版本与构建 commit，不能用肉眼流畅度代替指标。
+快照只读取当前传输类型、服务端计数器和浏览器播放器指标，不包含画面、账号、Cookie、连接 IP 或按键内容，也不会自动上传或持久化。MSE 与 WebRTC 必须同时保留各自的 `state` 和 `metrics`。WebRTC 原型还应记录浏览器连接状态和服务端 peer/RTCP 指标。若全局对象不存在，先记录页面版本与构建 commit，不能用肉眼流畅度代替指标。
 
 WebRTC 原型已在 SDP 实际协商后发送 WebRTC 实验性 Absolute Capture Time，并报告服务端发送计数与客户端 `captureTime` 样本状态；但当前仍没有把目标浏览器样本与同一 H.264 capture sequence 交叉验证，因此诊断会把 `endToEndLatency.available` 明确标为 `false`。`requestVideoFrameCallback` 的 `captureTime` / `receiveTime` 只填 browser proxy 行；`getStats()` 的 jitter、RTT、丢包或帧数也不能冒充 capture-to-display / input-to-visible。权威行必须通过目标浏览器 capture-sequence 关联或外部光学/高速相机基准后填写。

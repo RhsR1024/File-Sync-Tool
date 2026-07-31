@@ -44,18 +44,10 @@ const LAUNCHER_DRAG_THRESHOLD: i32 = 4;
 const LAUNCHER_DRAG_TICK_MS: u64 = 8;
 /// Ceiling on a single drag, so a missed button-up cannot pin a worker thread.
 const LAUNCHER_DRAG_MAX_MS: u64 = 60_000;
-/// Folded papers become a compact pill instead of a shrunken window. The size
-/// is fixed so every capsule stacks predictably along a display edge.
-const CAPSULE_WIDTH: f64 = 216.0;
-const CAPSULE_HEIGHT: f64 = 40.0;
-/// Logical width of the capsule spine left on screen while it rests at an edge.
-const CAPSULE_PEEK_VISIBLE: f64 = 14.0;
 const PAPER_MIN_WIDTH: f64 = 300.0;
 const PAPER_MIN_HEIGHT: f64 = 220.0;
 const PAPER_MAX_WIDTH: f64 = 900.0;
 const PAPER_MAX_HEIGHT: f64 = 1000.0;
-const PEEK_ANIMATION_STEPS: u32 = 9;
-const PEEK_ANIMATION_STEP_MS: u64 = 12;
 /// Foreground polling stays lazy: the fast cadence only runs while there is a
 /// pinned paper that a fullscreen app could cover.
 const FULLSCREEN_POLL_ACTIVE_MS: u64 = 750;
@@ -78,8 +70,6 @@ pub struct PaperTodoRuntime {
     /// Logical width the collapsed master capsule reported for its own label.
     /// Zero until the webview has measured itself.
     launcher_capsule_width: AtomicUsize,
-    /// Per-window slide generation; a newer request invalidates the running one.
-    peek_animations: Mutex<HashMap<String, u64>>,
 }
 
 impl Drop for PaperTodoRuntime {
@@ -436,7 +426,6 @@ fn create_paper_value(kind: &str) -> Value {
         "content": "",
         "zoom": 100,
         "pinned": true,
-        "collapsed": false,
         "hidden": false,
         "desktopOpen": true,
         "geometry": {
@@ -444,8 +433,7 @@ fn create_paper_value(kind: &str) -> Value {
             "y": null,
             "width": 380,
             "height": 520,
-            "monitorName": null,
-            "dockEdge": null
+            "monitorName": null
         },
         "createdAt": now,
         "updatedAt": now
@@ -617,7 +605,7 @@ fn ensure_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), Strin
             LAUNCHER_LABEL,
             WebviewUrl::App("index.html#/paper-todo/launcher".into()),
         )
-        .title("PaperTodo便签")
+        .title("PaperTodo 便签")
         .inner_size(
             LAUNCHER_COLLAPSED_WIDTH as f64,
             LAUNCHER_COLLAPSED_HEIGHT as f64,
@@ -1202,30 +1190,18 @@ fn open_window_internal(app: &AppHandle, paper: Value, settings: Value) -> Resul
         return Ok(());
     }
 
-    let collapsed = paper
-        .get("collapsed")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let pinned = paper.get("pinned").and_then(Value::as_bool).unwrap_or(true);
     let geometry = paper.get("geometry").and_then(Value::as_object);
-    let width = if collapsed {
-        CAPSULE_WIDTH
-    } else {
-        geometry
-            .and_then(|value| value.get("width"))
-            .and_then(Value::as_f64)
-            .unwrap_or(380.0)
-            .clamp(PAPER_MIN_WIDTH, PAPER_MAX_WIDTH)
-    };
-    let height = if collapsed {
-        CAPSULE_HEIGHT
-    } else {
-        geometry
-            .and_then(|value| value.get("height"))
-            .and_then(Value::as_f64)
-            .unwrap_or(520.0)
-            .clamp(PAPER_MIN_HEIGHT, PAPER_MAX_HEIGHT)
-    };
+    let width = geometry
+        .and_then(|value| value.get("width"))
+        .and_then(Value::as_f64)
+        .unwrap_or(380.0)
+        .clamp(PAPER_MIN_WIDTH, PAPER_MAX_WIDTH);
+    let height = geometry
+        .and_then(|value| value.get("height"))
+        .and_then(Value::as_f64)
+        .unwrap_or(520.0)
+        .clamp(PAPER_MIN_HEIGHT, PAPER_MAX_HEIGHT);
     let skip_taskbar = settings
         .get("hideFromTaskbar")
         .and_then(Value::as_bool)
@@ -1242,23 +1218,12 @@ fn open_window_internal(app: &AppHandle, paper: Value, settings: Value) -> Resul
             paper
                 .get("title")
                 .and_then(Value::as_str)
-                .unwrap_or("PaperTodo便签"),
+                .unwrap_or("PaperTodo 便签"),
         )
         .inner_size(width, height)
-        .min_inner_size(
-            if collapsed {
-                CAPSULE_WIDTH
-            } else {
-                PAPER_MIN_WIDTH
-            },
-            if collapsed {
-                CAPSULE_HEIGHT
-            } else {
-                PAPER_MIN_HEIGHT
-            },
-        )
+        .min_inner_size(PAPER_MIN_WIDTH, PAPER_MIN_HEIGHT)
         .decorations(false)
-        .resizable(!collapsed)
+        .resizable(true)
         .transparent(true)
         // The paper surface draws its own rounded silhouette. Native shadows
         // on a transparent borderless HWND show up as dark seams on three
@@ -1404,14 +1369,11 @@ fn position_new_paper_on_primary(
 }
 
 #[tauri::command]
-pub fn paper_todo_set_window_mode(
+pub fn paper_todo_set_window_pinned(
     app: AppHandle,
     runtime: tauri::State<'_, PaperTodoRuntime>,
     id: String,
-    collapsed: bool,
     pinned: bool,
-    width: f64,
-    height: f64,
 ) -> Result<(), String> {
     let label = format!("{PAPER_WINDOW_PREFIX}{}", safe_label(&id));
     let window = app
@@ -1419,56 +1381,11 @@ pub fn paper_todo_set_window_mode(
         .ok_or_else(|| "便签窗口不存在".to_string())?;
     window
         .set_always_on_top(pinned && !runtime.fullscreen_active.load(Ordering::Relaxed))
-        .map_err(|error| error.to_string())?;
-    window
-        .set_resizable(!collapsed)
-        .map_err(|error| error.to_string())?;
-    window
-        .set_shadow(false)
-        .map_err(|error| error.to_string())?;
-    // A running slide animation would fight the resize, and an expanding paper
-    // must never keep the capsule's off-screen offset.
-    cancel_capsule_slide(&runtime, &label);
-    // Windows enforces the minimum size on `set_size`, so widen the floor before
-    // shrinking into a capsule and restore it before growing back.
-    window
-        .set_min_size(Some(tauri::LogicalSize::new(
-            if collapsed {
-                CAPSULE_WIDTH
-            } else {
-                PAPER_MIN_WIDTH
-            },
-            if collapsed {
-                CAPSULE_HEIGHT
-            } else {
-                PAPER_MIN_HEIGHT
-            },
-        )))
-        .map_err(|error| error.to_string())?;
-    window
-        .set_size(tauri::LogicalSize::new(
-            if collapsed {
-                CAPSULE_WIDTH
-            } else {
-                width.clamp(PAPER_MIN_WIDTH, PAPER_MAX_WIDTH)
-            },
-            if collapsed {
-                CAPSULE_HEIGHT
-            } else {
-                height.clamp(PAPER_MIN_HEIGHT, PAPER_MAX_HEIGHT)
-            },
-        ))
-        .map_err(|error| error.to_string())?;
-    if !collapsed {
-        // An edge-docked capsule grows away from the display edge it was pinned
-        // to; without this the freshly expanded paper hangs half off screen.
-        let _ = pull_window_into_monitor(&window);
-    }
-    Ok(())
+        .map_err(|error| error.to_string())
 }
 
-/// Move `window` back inside its monitor's work area when a resize pushed it
-/// past an edge. Vertical placement is preserved whenever it already fits.
+/// Move a window back inside its current monitor without changing its size.
+/// This also rescues papers restored from a display that was disconnected.
 fn pull_window_into_monitor(window: &tauri::WebviewWindow) -> Result<(), String> {
     let monitor = window
         .current_monitor()
@@ -1489,240 +1406,6 @@ fn pull_window_into_monitor(window: &tauri::WebviewWindow) -> Result<(), String>
     window
         .set_position(PhysicalPosition::new(x, y))
         .map_err(|error| error.to_string())
-}
-
-/// Slide a docked capsule out to its display edge so only the spine stays
-/// visible (`peek`), or back into full view. Vertical placement never changes.
-#[tauri::command]
-pub fn paper_todo_set_edge_peek(
-    app: AppHandle,
-    runtime: tauri::State<'_, PaperTodoRuntime>,
-    id: String,
-    edge: String,
-    peek: bool,
-    animate: bool,
-) -> Result<(), String> {
-    let label = format!("{PAPER_WINDOW_PREFIX}{}", safe_label(&id));
-    let window = app
-        .get_webview_window(&label)
-        .ok_or_else(|| "便签窗口不存在".to_string())?;
-    let monitor = window
-        .current_monitor()
-        .map_err(|error| error.to_string())?
-        .or_else(|| window.primary_monitor().ok().flatten())
-        .ok_or_else(|| "未找到显示器".to_string())?;
-    let scale = monitor.scale_factor();
-    let origin = monitor.position();
-    let extent = monitor.size();
-    let size = window.outer_size().map_err(|error| error.to_string())?;
-    let current = window.outer_position().map_err(|error| error.to_string())?;
-    let width = size.width as i32;
-    let visible = (CAPSULE_PEEK_VISIBLE * scale).round() as i32;
-    let hidden = (width - visible).max(0);
-    let left_rest = origin.x;
-    let right_rest = origin.x + extent.width as i32 - width;
-    let on_left_half = current.x + width / 2 < origin.x + extent.width as i32 / 2;
-    let target_x = match (edge.as_str(), peek) {
-        ("left", true) => left_rest - hidden,
-        ("left", false) => left_rest,
-        ("right", true) => right_rest + hidden,
-        ("right", false) => right_rest,
-        // "nearest" and anything unexpected: infer the edge from where the
-        // capsule currently sits rather than yanking it across the display.
-        (_, true) if on_left_half => left_rest - hidden,
-        (_, true) => right_rest + hidden,
-        (_, false) if on_left_half => left_rest,
-        (_, false) => right_rest,
-    };
-    if target_x == current.x {
-        return Ok(());
-    }
-    if !animate {
-        // "Animations off" is a user setting, not just an OS preference.
-        cancel_capsule_slide(&runtime, &label);
-        return window
-            .set_position(PhysicalPosition::new(target_x, current.y))
-            .map_err(|error| error.to_string());
-    }
-    start_capsule_slide(
-        &app, &runtime, window, label, current.x, target_x, current.y,
-    );
-    Ok(())
-}
-
-fn cancel_capsule_slide(runtime: &PaperTodoRuntime, label: &str) {
-    let mut generations = match runtime.peek_animations.lock() {
-        Ok(guard) => guard,
-        Err(error) => error.into_inner(),
-    };
-    let slot = generations.entry(label.to_string()).or_insert(0);
-    *slot = slot.wrapping_add(1);
-}
-
-/// Step the window horizontally over a handful of frames. Tauri has no native
-/// position animation, and a hard jump reads as a glitch rather than a slide.
-fn start_capsule_slide(
-    app: &AppHandle,
-    runtime: &PaperTodoRuntime,
-    window: tauri::WebviewWindow,
-    label: String,
-    from: i32,
-    to: i32,
-    y: i32,
-) {
-    let generation = {
-        let mut generations = match runtime.peek_animations.lock() {
-            Ok(guard) => guard,
-            Err(error) => error.into_inner(),
-        };
-        let slot = generations.entry(label.clone()).or_insert(0);
-        *slot = slot.wrapping_add(1);
-        *slot
-    };
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        for step in 1..=PEEK_ANIMATION_STEPS {
-            {
-                let runtime = app.state::<PaperTodoRuntime>();
-                let generations = match runtime.peek_animations.lock() {
-                    Ok(guard) => guard,
-                    Err(error) => error.into_inner(),
-                };
-                if generations.get(&label).copied() != Some(generation) {
-                    return;
-                }
-            }
-            let progress = f64::from(step) / f64::from(PEEK_ANIMATION_STEPS);
-            // Ease-out cubic: leaves quickly, settles softly against the edge.
-            let eased = 1.0 - (1.0 - progress).powi(3);
-            let x = from + (f64::from(to - from) * eased).round() as i32;
-            if window.set_position(PhysicalPosition::new(x, y)).is_err() {
-                return;
-            }
-            if step < PEEK_ANIMATION_STEPS {
-                tokio::time::sleep(std::time::Duration::from_millis(PEEK_ANIMATION_STEP_MS)).await;
-            }
-        }
-    });
-}
-
-#[tauri::command]
-pub fn paper_todo_dock_window(
-    app: AppHandle,
-    runtime: tauri::State<'_, PaperTodoRuntime>,
-    id: String,
-    edge: String,
-) -> Result<String, String> {
-    let label = format!("{PAPER_WINDOW_PREFIX}{}", safe_label(&id));
-    let window = app
-        .get_webview_window(&label)
-        .ok_or_else(|| "便签窗口不存在".to_string())?;
-    // Docking wins over an in-flight peek slide; otherwise the animation would
-    // drag the capsule back off the edge it was just parked against.
-    cancel_capsule_slide(&runtime, &label);
-    let monitor = window
-        .current_monitor()
-        .map_err(|error| error.to_string())?
-        .or_else(|| window.primary_monitor().ok().flatten())
-        .ok_or_else(|| "未找到显示器".to_string())?;
-    let monitor_position = monitor.position();
-    let monitor_size = monitor.size();
-    let window_size = window.outer_size().map_err(|error| error.to_string())?;
-    let current = window.outer_position().unwrap_or(*monitor_position);
-    let resolved_edge = if edge == "nearest" {
-        let window_center = current.x + window_size.width as i32 / 2;
-        let monitor_center = monitor_position.x + monitor_size.width as i32 / 2;
-        if window_center < monitor_center {
-            "left"
-        } else {
-            "right"
-        }
-    } else {
-        edge.as_str()
-    };
-    let x = if resolved_edge == "left" {
-        monitor_position.x
-    } else {
-        monitor_position.x + monitor_size.width as i32 - window_size.width as i32
-    };
-    let top = monitor_position.y;
-    let max_y = monitor_position.y + monitor_size.height as i32 - window_size.height as i32;
-    // Collect the vertical spans of other paper capsules already docked to this
-    // same edge so the new one stacks into the first free slot instead of
-    // landing on top of them.
-    let occupied = docked_capsule_spans(&app, &label, x, window_size.width as i32);
-    let preferred = current.y.clamp(top, max_y.max(top));
-    let y = first_free_slot(preferred, window_size.height as i32, top, max_y, &occupied);
-    window
-        .set_position(PhysicalPosition::new(x, y))
-        .map_err(|error| error.to_string())?;
-    // Report where the capsule actually landed so the caller can persist the
-    // edge; auto-hide needs to know which way to slide it away.
-    Ok(resolved_edge.to_string())
-}
-
-/// Vertical `[start, end)` spans of other paper windows currently docked to the
-/// same edge (their left edge sits within tolerance of `edge_x`).
-fn docked_capsule_spans(
-    app: &AppHandle,
-    self_label: &str,
-    edge_x: i32,
-    width: i32,
-) -> Vec<(i32, i32)> {
-    const EDGE_TOLERANCE: i32 = 12;
-    let mut spans = Vec::new();
-    for (label, other) in app.webview_windows() {
-        if label == self_label || label == LAUNCHER_LABEL || !label.starts_with(PAPER_WINDOW_PREFIX)
-        {
-            continue;
-        }
-        let (Ok(position), Ok(size)) = (other.outer_position(), other.outer_size()) else {
-            continue;
-        };
-        // Only stack against windows that share this edge and roughly this
-        // capsule width; expanded papers on the same edge are left alone.
-        if (position.x - edge_x).abs() > EDGE_TOLERANCE
-            || (size.width as i32 - width).abs() > EDGE_TOLERANCE
-        {
-            continue;
-        }
-        spans.push((position.y, position.y + size.height as i32));
-    }
-    spans.sort_by_key(|span| span.0);
-    spans
-}
-
-/// First non-overlapping slot of `height` at or below `preferred`, wrapping to
-/// the top of the monitor if the preferred region is full, clamped to `max_y`.
-fn first_free_slot(
-    preferred: i32,
-    height: i32,
-    top: i32,
-    max_y: i32,
-    occupied: &[(i32, i32)],
-) -> i32 {
-    const GAP: i32 = 6;
-    let overlaps = |candidate: i32| {
-        occupied
-            .iter()
-            .any(|&(start, end)| candidate < end + GAP && candidate + height + GAP > start)
-    };
-    for start in [preferred, top] {
-        let mut candidate = start.clamp(top, max_y.max(top));
-        while candidate <= max_y {
-            if !overlaps(candidate) {
-                return candidate;
-            }
-            let next = occupied
-                .iter()
-                .filter(|&&(_, end)| end + GAP > candidate)
-                .map(|&(_, end)| end + GAP)
-                .min()
-                .unwrap_or(candidate + height + GAP);
-            candidate = next.max(candidate + 1);
-        }
-    }
-    preferred.clamp(top, max_y.max(top))
 }
 
 #[tauri::command]
@@ -1788,9 +1471,8 @@ fn set_all_windows_internal(app: &AppHandle, action: &str) -> Result<(), String>
     for window in windows {
         if should_show {
             let _ = window.show();
-            // "Show all" has to mean visible. A capsule resting at a display
-            // edge is technically shown while sitting almost entirely off
-            // screen, so bring any parked window fully back into view.
+            // "Show all" has to mean visible even after a display was removed
+            // or its work area changed while the paper was closed.
             let _ = pull_window_into_monitor(&window);
         } else {
             let _ = window.hide();
@@ -2220,7 +1902,7 @@ pub async fn paper_todo_import(
         }
         let value: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
         if !is_valid_document(&value) {
-            return Err("导入文件不是有效的 PaperTodo便签 数据".into());
+            return Err("导入文件不是有效的 PaperTodo 便签数据".into());
         }
         Ok(Some(value))
     })
@@ -2278,8 +1960,8 @@ pub fn paper_todo_clean_assets(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_document, first_free_slot, is_valid_document, prepare_papers_for_show_all,
-        rect_is_on_any_screen, safe_extension, safe_label, Rect,
+        default_document, is_valid_document, prepare_papers_for_show_all, rect_is_on_any_screen,
+        safe_extension, safe_label, Rect,
     };
     use serde_json::json;
 
@@ -2327,15 +2009,6 @@ mod tests {
     }
 
     #[test]
-    fn docked_capsules_use_the_next_vertical_slot_and_wrap() {
-        let occupied = [(100, 158), (164, 222)];
-        assert_eq!(first_free_slot(100, 58, 0, 500, &occupied), 228);
-
-        let bottom_occupied = [(400, 500)];
-        assert_eq!(first_free_slot(442, 58, 0, 442, &bottom_occupied), 0);
-    }
-
-    #[test]
     fn papers_saved_on_a_detached_monitor_count_as_off_screen() {
         // Geometry left over from a secondary display to the left of the
         // primary one. With that monitor unplugged the paper would be restored
@@ -2373,13 +2046,13 @@ mod tests {
     #[test]
     fn native_chinese_paper_todo_branding_is_consistent() {
         let main_source = include_str!("main.rs");
-        assert!(main_source.contains(".text(TRAY_PAPER_TODO_ID, \"PaperTodo便签\")"));
-        assert!(main_source.contains("show_main_window(app, \"托盘菜单「PaperTodo便签」\")"));
+        assert!(main_source.contains(".text(TRAY_PAPER_TODO_ID, \"PaperTodo 便签\")"));
+        assert!(main_source.contains("show_main_window(app, \"托盘菜单「PaperTodo 便签」\")"));
 
         let paper_todo_source = include_str!("paper_todo.rs");
-        assert!(paper_todo_source.contains(".title(\"PaperTodo便签\")"));
-        assert!(paper_todo_source.contains(".unwrap_or(\"PaperTodo便签\")"));
+        assert!(paper_todo_source.contains(".title(\"PaperTodo 便签\")"));
+        assert!(paper_todo_source.contains(".unwrap_or(\"PaperTodo 便签\")"));
         assert!(paper_todo_source
-            .contains("return Err(\"导入文件不是有效的 PaperTodo便签 数据\".into());"));
+            .contains("return Err(\"导入文件不是有效的 PaperTodo 便签数据\".into());"));
     }
 }

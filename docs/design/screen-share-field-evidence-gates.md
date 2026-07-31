@@ -82,7 +82,6 @@ pnpm benchmark:screen-share:spec-evidence-audit -- --manifest artifacts/screen-s
 - `transports[]` 列出实际验证过的传输。
 - `real_media_playback`：`verified: true` 且 `rendered_frames > 0`。
 - `external_peer`：`independent_host: true` 和 `network_segment`。
-- `secure_context` 的五个字段必须是显式布尔值：`https_terminated`、`certificate_trusted`、`certificate_rotation_tested`、`browser_profile_clear_tested`、`dhcp_ip_change_tested`。当 `transports` 含 `web_codecs` 时五项必须全部为 `true`；纯 `web_rtc` 明文会话可以如实填 `false`。
 
 ## 6. `network_impairment_recovery`（scope `network-impairment-recovery`）
 
@@ -97,7 +96,7 @@ pnpm benchmark:screen-share:spec-evidence-audit -- --manifest artifacts/screen-s
 
 ## 7. `transport_selection`（scope `transport-selection`）
 
-- `candidates[]` 必须同时包含 `mse_h264`、`web_codecs`、`web_rtc`；每项需要 `capture_to_display_ms`、`input_to_visible_response_ms`、`recovery_after_impairment_ms` 三个分布，以及 `outbound_bitrate_bps`、`host_cpu_percent`、`per_viewer_memory_mb`、`join_leave_idr_count`。
+- `candidates[]` 必须同时包含 `mse_h264`、`web_rtc`；每项需要 `capture_to_display_ms`、`input_to_visible_response_ms`、`recovery_after_impairment_ms` 三个分布，以及 `outbound_bitrate_bps`、`host_cpu_percent`、`per_viewer_memory_mb`、`join_leave_idr_count`。
 - `comparison_conditions`：`same_conditions: true`、`client_count ≥ 30`、`cpu_generations` 覆盖三代目标 Intel。
 - `decision`：`selected` 与 `rationale`。选择非 `mse_h264` 时，还必须有 `improvement_over_mse.significant: true`、对应 `evidence` 和 `operational_cost_acceptable: true`——§7.4 规定只有明显更优且可运营才替换 MSE。
 - `fps_default_decision`：`selected_fps` 为 30 或 60、`rationale`，以及引用性能矩阵 run id 的 `evidence_run_ids`。

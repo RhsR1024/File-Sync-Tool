@@ -197,6 +197,10 @@ onBeforeUnmount(() => systemThemeQuery?.removeEventListener('change', onSystemTh
             <span><strong>{{ t('paperTodo.settings.launcherEnabled') }}</strong><small>{{ t('paperTodo.settings.launcherEnabledHint') }}</small></span>
             <input class="paper-switch" type="checkbox" :checked="settings.launcherEnabled" @change="setBoolean('launcherEnabled', $event)">
           </label>
+          <label class="settings-row">
+            <span><strong>{{ t('paperTodo.settings.autoCollapseLauncher') }}</strong><small>{{ t('paperTodo.settings.autoCollapseLauncherHint') }}</small></span>
+            <input class="paper-switch" type="checkbox" :checked="settings.autoCollapseLauncher" :disabled="!settings.launcherEnabled" @change="setBoolean('autoCollapseLauncher', $event)">
+          </label>
           <div class="settings-row">
             <span><strong>{{ t('paperTodo.settings.launcherEdge') }}</strong><small>{{ t('paperTodo.settings.launcherEdgeHint') }}</small></span>
             <div class="settings-segmented">
@@ -256,16 +260,6 @@ onBeforeUnmount(() => systemThemeQuery?.removeEventListener('change', onSystemTh
           <label v-for="field in PAPER_TODO_TOGGLE_GROUPS.appearance" :key="field.key" class="settings-row">
             <span><strong>{{ t(field.label) }}</strong><small>{{ t(field.description) }}</small></span>
             <input class="paper-switch" type="checkbox" :checked="Boolean(settings[field.key])" @change="setBoolean(field.key, $event)">
-          </label>
-        </div>
-      </template>
-
-      <template v-else-if="activeTab === 'capsule'">
-        <div class="settings-card">
-          <div class="settings-row"><span><strong>{{ t('paperTodo.settings.capsuleSize') }}</strong></span><select class="settings-select" :value="settings.capsuleFontSize" @change="setString('capsuleFontSize', $event)"><option v-for="size in TEXT_SIZES" :key="size" :value="size">{{ t(`paperTodo.settings.${size}`) }}</option></select></div>
-          <label v-for="field in PAPER_TODO_TOGGLE_GROUPS.capsule" :key="field.key" class="settings-row">
-            <span><strong>{{ t(field.label) }}</strong><small>{{ t(field.description) }}</small></span>
-            <input class="paper-switch" type="checkbox" :checked="Boolean(settings[field.key])" :disabled="field.key === 'autoHideDockedCapsules' && !settings.autoDockCapsules" @change="setBoolean(field.key, $event)">
           </label>
         </div>
       </template>

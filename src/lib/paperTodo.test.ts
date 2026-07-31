@@ -4,7 +4,6 @@ import {
   createDefaultSettings,
   createPaper,
   createTodoItem,
-  isPaperEmpty,
   isPowerPaper,
   movePaperId,
   normalizePaperTodoState,
@@ -51,6 +50,7 @@ describe('paper todo core data', () => {
     expect(settings.hotkeys.toggleAll).toBe('Ctrl+Shift+Space');
     expect(settings.launcherEnabled).toBe(true);
     expect(settings.launcherEdge).toBe('right');
+    expect(settings.autoCollapseLauncher).toBe(false);
     expect(settings.paperSkin).toBe('classic');
   });
 
@@ -67,19 +67,23 @@ describe('paper todo core data', () => {
     expect(papers.every((paper) => !paper.desktopOpen)).toBe(true);
   });
 
-  it('treats untouched papers as disposable but keeps any authored content', () => {
-    const todo = createPaper('todo');
-    const note = createPaper('note');
-    expect(isPaperEmpty(todo)).toBe(true);
-    expect(isPaperEmpty(note)).toBe(true);
-
-    todo.items.push(createTodoItem('remember this'));
-    note.content = 'A saved note';
-    expect(isPaperEmpty(todo)).toBe(false);
-    expect(isPaperEmpty(note)).toBe(false);
-
-    const titled = createPaper('note', 'Custom title');
-    expect(isPaperEmpty(titled)).toBe(false);
+  it('drops legacy per-paper capsule state during normalization', () => {
+    const state = normalizePaperTodoState({
+      papers: [{
+        ...createPaper('note'),
+        collapsed: true,
+        geometry: { ...createPaper('note').geometry, dockEdge: 'left' },
+      }],
+      settings: {
+        capsuleMode: true,
+        autoDockCapsules: true,
+        autoHideDockedCapsules: true,
+      },
+    });
+    expect(state.papers[0]).not.toHaveProperty('collapsed');
+    expect(state.papers[0].geometry).not.toHaveProperty('dockEdge');
+    expect(state.settings).not.toHaveProperty('capsuleMode');
+    expect(state.settings.autoCollapseLauncher).toBe(false);
   });
 
   it('moves a dragged paper before or after the target without dropping ids', () => {

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pageSource = readFileSync(join(__dirname, 'ScreenSharePage.vue'), 'utf8');
+const cargoSource = readFileSync(join(__dirname, '..', '..', 'src-tauri', 'Cargo.toml'), 'utf8');
 
 test('screen share shows the connected IP list directly without a details toggle gate', () => {
   assert.match(pageSource, /tools\.screenShare\.connectedIpList/);
@@ -32,23 +33,47 @@ test('screen share stop action executes directly without a confirmation prompt',
   assert.doesNotMatch(pageSource, /@click="confirmStopShare"/);
 });
 
-test('screen share offers the 60 FPS experiment tier without changing the default', () => {
-  assert.match(pageSource, /const EXPERIMENTAL_HIGH_FPS = 60;/);
-  assert.match(pageSource, /const highFpsExperiment = ref\(false\);/);
+test('screen share exposes 60 FPS as the final discrete frame-rate tier', () => {
+  assert.match(pageSource, /const FRAME_RATE_OPTIONS = \[5, 10, 15, 20, 25, 30, 60\] as const;/);
+  assert.match(pageSource, /const DEFAULT_FRAME_RATE = 15;/);
+  assert.match(pageSource, /const frameRateIndex = ref\(FRAME_RATE_OPTIONS\.indexOf\(DEFAULT_FRAME_RATE\)\);/);
   assert.match(
     pageSource,
-    /const effectiveFps = computed\(\(\) => \(highFpsExperiment\.value \? EXPERIMENTAL_HIGH_FPS : fps\.value\)\);/,
+    /v-model\.number="frameRateIndex"[\s\S]*?min="0"[\s\S]*?:max="FRAME_RATE_OPTIONS\.length - 1"[\s\S]*?step="1"/,
   );
-  assert.match(pageSource, /tools\.screenShare\.highFpsExperiment/);
-  assert.match(pageSource, /tools\.screenShare\.highFpsExperimentDesc/);
-  // 常规滑块保持 5-30，60 FPS 只能由实验开关选择。
-  assert.match(pageSource, /v-model\.number="fps"[\s\S]*?min="5"[\s\S]*?max="30"/);
+  assert.match(pageSource, /tools\.screenShare\.highFpsNotice/);
+  assert.doesNotMatch(pageSource, /tools\.screenShare\.highFpsExperiment/);
+  // 原生滑块按档位索引移动，30 后直接跳到 60，不暴露 35-55 FPS。
+  assert.doesNotMatch(pageSource, /v-model\.number="fps"[\s\S]*?min="5"[\s\S]*?max="30"/);
 });
 
-test('screen share starts and persists the experiment tier instead of the raw slider value', () => {
-  assert.match(pageSource, /fps: effectiveFps\.value,/);
-  assert.match(pageSource, /highFpsExperiment: highFpsExperiment\.value,/);
-  assert.match(pageSource, /highFpsExperiment\.value = saved\.highFpsExperiment \?\? false;/);
+test('screen share frame-rate ticks align with the native range thumb positions', () => {
+  assert.match(
+    pageSource,
+    /function frameRateTickPosition\(index: number\): string \{[\s\S]*?index \/ \(FRAME_RATE_OPTIONS\.length - 1\)/,
+  );
+  assert.match(pageSource, /:style="\{ left: frameRateTickPosition\(index\) \}"/);
+  assert.match(pageSource, /\.ss-range-ticks \{[\s\S]*?margin-inline: calc\(var\(--ss-range-thumb-size\) \/ 2\);/);
+  assert.doesNotMatch(pageSource, /grid grid-cols-7 font-mono/);
+});
+
+test('screen share persists the selected frame rate and migrates the legacy experiment toggle', () => {
+  assert.match(pageSource, /fps: fps\.value,/);
+  assert.match(pageSource, /saved\.highFpsExperiment \? HIGH_FRAME_RATE : saved\.fps/);
+  assert.doesNotMatch(pageSource, /highFpsExperiment: highFpsExperiment\.value,/);
+});
+
+test('screen share removes WebCodecs and migrates its saved transport to MSE H.264', () => {
+  assert.doesNotMatch(pageSource, /value: 'web_codecs' as const/);
+  assert.doesNotMatch(pageSource, /mediaTransportWebCodecs/);
+  assert.match(
+    pageSource,
+    /saved\.mediaTransport === 'web_codecs'[\s\S]*?\? 'mse_h264'/,
+  );
+});
+
+test('standard builds compile the WebRTC transport by default', () => {
+  assert.match(cargoSource, /default = \["screen-share-webrtc-prototype"\]/);
 });
 
 test('screen share exposes explicit capture backend modes with explanatory helper copy', () => {

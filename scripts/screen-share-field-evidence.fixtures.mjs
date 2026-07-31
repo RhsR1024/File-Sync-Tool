@@ -127,16 +127,9 @@ export function managedBrowserExternalMediaReport(overrides = {}) {
       { name: 'edge', version: '150.0.0.0', managed: true, policy_scope: 'machine' },
       { name: 'chrome', version: '150.0.0.0', managed: true, policy_scope: 'user' },
     ],
-    transports: ['web_rtc', 'web_codecs'],
+    transports: ['web_rtc'],
     real_media_playback: { verified: true, transport: 'web_rtc', rendered_frames: 5400 },
     external_peer: { independent_host: true, network_segment: '192.168.30.0/24' },
-    secure_context: {
-      https_terminated: true,
-      certificate_trusted: true,
-      certificate_rotation_tested: true,
-      browser_profile_clear_tested: true,
-      dhcp_ip_change_tested: true,
-    },
     ...overrides,
   };
 }
@@ -188,7 +181,6 @@ export function transportSelectionReport(overrides = {}) {
     run_id: 'transport-selection-2026-07-28',
     candidates: [
       transportCandidate('mse_h264'),
-      transportCandidate('web_codecs'),
       transportCandidate('web_rtc'),
     ],
     comparison_conditions: {

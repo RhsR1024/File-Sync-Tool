@@ -12,7 +12,7 @@ import tls from 'node:tls';
 import { pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 
-const TRANSPORTS = new Set(['mse-h264', 'webcodecs-h264', 'mjpeg']);
+const TRANSPORTS = new Set(['mse-h264', 'mjpeg']);
 const AUTHENTICATION_ERROR =
   'screen sharing requires authentication; this benchmark intentionally does not accept or store credentials. Restart sharing without username/password for a controlled benchmark run.';
 
@@ -23,7 +23,7 @@ Usage:
 
 Options:
   --base-url <url>             Screen-share origin (default: http://127.0.0.1:9870/)
-  --transport <name>           mse-h264, webcodecs-h264, or mjpeg (default: mse-h264)
+  --transport <name>           mse-h264 or mjpeg (default: mse-h264)
   --healthy-clients <count>    Clients that continuously consume media (default: 1)
   --slow-clients <count>       Raw TCP clients paused immediately after handshake (default: 0)
   --duration-seconds <number>  Measurement duration after all handshakes (default: 30)
@@ -38,7 +38,6 @@ Options:
 
 Examples:
   node scripts/screen-share-benchmark.mjs --transport mse-h264 --healthy-clients 30 --duration-seconds 1800
-  node scripts/screen-share-benchmark.mjs --transport webcodecs-h264 --healthy-clients 30 --duration-seconds 1800
   node scripts/screen-share-benchmark.mjs --transport mjpeg --healthy-clients 5 --slow-clients 1 --duration-seconds 30 --output artifacts/screen-share-benchmarks/mjpeg-slow.json
 
 Authentication:
@@ -140,7 +139,7 @@ export function parseArgs(argv, now = new Date()) {
 
   if (values.help) return values;
   if (!TRANSPORTS.has(values.transport)) {
-    throw new Error('--transport must be mse-h264, webcodecs-h264, or mjpeg');
+    throw new Error('--transport must be mse-h264 or mjpeg');
   }
   if (values.healthyClients + values.slowClients === 0) {
     throw new Error('at least one healthy or slow client is required');
@@ -265,9 +264,7 @@ function parseBoundary(contentType) {
 export function mediaUrl(baseUrl, transport) {
   const path = transport === 'mse-h264'
     ? '/media/ws'
-    : transport === 'webcodecs-h264'
-      ? '/media/webcodecs/ws'
-      : '/stream';
+    : '/stream';
   const url = new URL(path, baseUrl);
   if (transport !== 'mjpeg') url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   return url;
@@ -378,10 +375,8 @@ class HealthyH264Client extends HealthyClientBase {
           try {
             const message = JSON.parse(data.toString());
             if (message?.type === 'media.hello') {
-              // MSE sends a separate binary init segment after each hello;
-              // WebCodecs carries avcC in the hello and its next binary message
-              // is already a complete access unit.
-              this.expectingInit = options.transport === 'mse-h264';
+              // MSE sends a separate binary init segment after each hello.
+              this.expectingInit = true;
             }
           } catch {
             // Non-protocol text is still accounted as received bytes.

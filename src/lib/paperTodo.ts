@@ -21,7 +21,6 @@ export interface PaperGeometry {
   width: number;
   height: number;
   monitorName: string | null;
-  dockEdge: 'left' | 'right' | null;
 }
 
 export interface PaperDocument {
@@ -32,7 +31,6 @@ export interface PaperDocument {
   content: string;
   zoom: number;
   pinned: boolean;
-  collapsed: boolean;
   hidden: boolean;
   desktopOpen: boolean;
   geometry: PaperGeometry;
@@ -52,6 +50,7 @@ export interface PaperTodoSettings {
   launcherEnabled: boolean;
   launcherEdge: 'left' | 'right';
   launcherOffset: number;
+  autoCollapseLauncher: boolean;
   theme: PaperTheme;
   palette: PaperPalette;
   paperSkin: PaperSkin;
@@ -61,11 +60,6 @@ export interface PaperTodoSettings {
   hoverTips: boolean;
   autoClearCompleted: boolean;
   showLinkedNoteTitle: boolean;
-  hideLinkedNoteCapsules: boolean;
-  capsuleMode: boolean;
-  autoDockCapsules: boolean;
-  autoHideDockedCapsules: boolean;
-  rememberExpandedPosition: boolean;
   hideFromTaskbar: boolean;
   avoidFullscreen: boolean;
   showNewTodoButton: boolean;
@@ -80,11 +74,9 @@ export interface PaperTodoSettings {
   noteFontSize: TodoVisualSize;
   todoFontSize: TodoVisualSize;
   titleFontSize: TodoVisualSize;
-  capsuleFontSize: TodoVisualSize;
   noteBold: boolean;
   todoBold: boolean;
   titleBold: boolean;
-  capsuleBold: boolean;
   textRendering: TextRendering;
   imageMarkerVisibility: ImageMarkerVisibility;
   hotkeys: PaperHotkeys;
@@ -119,6 +111,7 @@ export function createDefaultSettings(): PaperTodoSettings {
     launcherEnabled: true,
     launcherEdge: 'right',
     launcherOffset: 35,
+    autoCollapseLauncher: false,
     theme: 'system',
     palette: 'warm',
     paperSkin: 'classic',
@@ -128,11 +121,6 @@ export function createDefaultSettings(): PaperTodoSettings {
     hoverTips: true,
     autoClearCompleted: false,
     showLinkedNoteTitle: true,
-    hideLinkedNoteCapsules: false,
-    capsuleMode: true,
-    autoDockCapsules: true,
-    autoHideDockedCapsules: true,
-    rememberExpandedPosition: true,
     hideFromTaskbar: true,
     avoidFullscreen: true,
     showNewTodoButton: true,
@@ -147,11 +135,9 @@ export function createDefaultSettings(): PaperTodoSettings {
     noteFontSize: 'medium',
     todoFontSize: 'medium',
     titleFontSize: 'medium',
-    capsuleFontSize: 'medium',
     noteBold: false,
     todoBold: false,
     titleBold: true,
-    capsuleBold: true,
     textRendering: 'standard',
     imageMarkerVisibility: 'editing',
     hotkeys: {
@@ -174,7 +160,6 @@ export function createPaper(kind: PaperKind, title?: string): PaperDocument {
     content: '',
     zoom: 100,
     pinned: true,
-    collapsed: false,
     hidden: false,
     desktopOpen: false,
     geometry: {
@@ -183,25 +168,10 @@ export function createPaper(kind: PaperKind, title?: string): PaperDocument {
       width: 380,
       height: 520,
       monitorName: null,
-      dockEdge: null,
     },
     createdAt: now,
     updatedAt: now,
   };
-}
-
-/**
- * A fresh paper with only its generated title is disposable. A custom title,
- * a real todo item, or note text makes it user content that must be retained.
- */
-export function isPaperEmpty(paper: PaperDocument): boolean {
-  const title = paper.title.trim();
-  const defaultTitle = paper.kind === 'todo' ? '待办纸' : '笔记纸';
-  if (title && title !== defaultTitle) return false;
-  if (paper.kind === 'todo') {
-    return !paper.items.some((item) => item.text.trim() || item.linkedNoteId);
-  }
-  return !paper.content.trim();
 }
 
 export function createDefaultState(): PaperTodoState {
@@ -234,6 +204,16 @@ export function normalizePaperTodoState(value: unknown): PaperTodoState {
         : {}),
     },
   } as PaperTodoSettings;
+  const settingsRecord = settings as PaperTodoSettings & Record<string, unknown>;
+  // Remove settings from the retired per-paper capsule implementation when an
+  // older profile is loaded, so the next save does not preserve dead options.
+  delete settingsRecord.hideLinkedNoteCapsules;
+  delete settingsRecord.capsuleMode;
+  delete settingsRecord.autoDockCapsules;
+  delete settingsRecord.autoHideDockedCapsules;
+  delete settingsRecord.rememberExpandedPosition;
+  delete settingsRecord.capsuleFontSize;
+  delete settingsRecord.capsuleBold;
   settings.titleMaxLength = Math.min(20, Math.max(2, finiteNumber(settings.titleMaxLength, 20)));
   settings.interfaceScale = Math.min(120, Math.max(80, finiteNumber(settings.interfaceScale, 100)));
   settings.launcherOffset = Math.min(100, Math.max(0, finiteNumber(settings.launcherOffset, 35)));
@@ -274,6 +254,8 @@ export function normalizePaperTodoState(value: unknown): PaperTodoState {
           createdAt: finiteNumber(raw.createdAt, base.createdAt),
           updatedAt: finiteNumber(raw.updatedAt, base.updatedAt),
         };
+        delete (paper as PaperDocument & Record<string, unknown>).collapsed;
+        delete (paper.geometry as PaperGeometry & Record<string, unknown>).dockEdge;
         return [paper];
       })
     : [];
@@ -390,19 +372,9 @@ export async function openPaperWindow(paper: PaperDocument, settings: PaperTodoS
   await invoke('paper_todo_open_window', { paper, settings });
 }
 
-/**
- * Slide a docked capsule out to its display edge (`peek`) or back into view.
- * Only the spine stays on screen while it rests, so the desktop underneath
- * remains clickable.
- */
-export async function setPaperEdgePeek(
-  id: string,
-  edge: 'left' | 'right' | 'nearest',
-  peek: boolean,
-  animate: boolean,
-): Promise<void> {
+export async function setPaperWindowPinned(id: string, pinned: boolean): Promise<void> {
   if (!isTauriRuntime()) return;
-  await invoke('paper_todo_set_edge_peek', { id, edge, peek, animate });
+  await invoke('paper_todo_set_window_pinned', { id, pinned });
 }
 
 export async function createDesktopPaper(kind: PaperKind): Promise<void> {

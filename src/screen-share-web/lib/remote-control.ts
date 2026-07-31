@@ -44,50 +44,17 @@ export interface RemoteControlModeState {
 export interface RemoteKeyboardInput {
   code: string;
   pressed: boolean;
-  metaKey?: boolean;
   composing?: boolean;
 }
 
 export type RemoteKeyboardAction =
   | { type: 'key'; code: string; pressed: boolean }
-  | { type: 'release_all' }
   | { type: 'ignore' };
 
-const FIXED_KEY_CODES = new Set([
-  'ArrowLeft',
-  'ArrowRight',
-  'ArrowUp',
-  'ArrowDown',
-  'Enter',
-  'Escape',
-  'Backspace',
-  'Tab',
-  'Space',
-  'ControlLeft',
-  'ControlRight',
-  'ShiftLeft',
-  'ShiftRight',
-  'AltLeft',
-  'AltRight',
-]);
-
 export function toRemoteKeyboardCode(code: string): string | null {
-  if (/^Key[A-Z]$/.test(code) || /^Digit[0-9]$/.test(code) || FIXED_KEY_CODES.has(code)) {
-    return code;
-  }
-  return null;
-}
-
-export function isRemoteKeyboardModifier(code: string): boolean {
-  return code.startsWith('Control') || code.startsWith('Shift') || code.startsWith('Alt');
-}
-
-export function isRestrictedRemoteShortcut(code: string, pressed: ReadonlySet<string>): boolean {
-  const hasAlt = [...pressed].some((item) => item.startsWith('Alt'));
-  const hasControl = [...pressed].some((item) => item.startsWith('Control'));
-  if (code === 'Tab' && hasAlt) return true;
-  if (code === 'Escape' && (hasAlt || hasControl)) return true;
-  return false;
+  const normalized = code.trim();
+  if (!normalized || normalized === 'Unidentified' || normalized.length > 32) return null;
+  return normalized;
 }
 
 export function decideRemoteKeyboardAction(
@@ -103,11 +70,7 @@ export function decideRemoteKeyboardAction(
       : { type: 'ignore' };
   }
 
-  if (input.metaKey) return { type: 'release_all' };
-  if (!code) {
-    return forwarded.size > 0 ? { type: 'release_all' } : { type: 'ignore' };
-  }
-  if (isRestrictedRemoteShortcut(code, forwarded)) return { type: 'release_all' };
+  if (!code) return { type: 'ignore' };
   return { type: 'key', code, pressed: true };
 }
 

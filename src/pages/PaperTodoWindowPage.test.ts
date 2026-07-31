@@ -23,6 +23,10 @@ const launcherSource = readFileSync(
   resolve(process.cwd(), 'src/pages/PaperTodoLauncherPage.vue'),
   'utf8',
 );
+const settingsSource = readFileSync(
+  resolve(process.cwd(), 'src/components/paper-todo/PaperTodoSettingsPanel.vue'),
+  'utf8',
+);
 const mainSource = readFileSync(
   resolve(process.cwd(), 'src-tauri/src/main.rs'),
   'utf8',
@@ -72,14 +76,15 @@ describe('paper todo standalone window lifecycle', () => {
     expect(paperSource).toContain('await store.removePaper(id)');
   });
 
-  it('deletes an untouched paper on close and saves authored papers explicitly', () => {
-    const closeHandler = paperSource.slice(
-      paperSource.indexOf('async function closeDesktop'),
-      paperSource.indexOf('function cancelPeekTimer'),
+  it('returns every paper to the launcher without treating an empty paper as disposable', () => {
+    const minimizeHandler = paperSource.slice(
+      paperSource.indexOf('async function minimizeToLauncher'),
+      paperSource.indexOf('function todoPriorityClass'),
     );
-    expect(closeHandler).toContain('isPaperEmpty(current)');
-    expect(closeHandler).toContain('await store.removePaper(id)');
-    expect(closeHandler).toContain('await store.flush()');
+    expect(minimizeHandler).toContain('value.desktopOpen = false');
+    expect(minimizeHandler).toContain('await store.flush()');
+    expect(minimizeHandler).toContain('await getCurrentWindow().close()');
+    expect(minimizeHandler).not.toContain('store.removePaper');
     expect(paperSource).toMatch(
       /event\.key\.toLowerCase\(\) === 's'[\s\S]*?event\.preventDefault\(\)[\s\S]*?saveCurrentPaper/,
     );
@@ -89,10 +94,7 @@ describe('paper todo standalone window lifecycle', () => {
     expect(launcherSource).toContain('launcher-drag-handle');
     expect(launcherSource).toContain('await dragPaperLauncher()');
     expect(paperSource).toContain('paper-window-drag-handle');
-    expect(paperSource).toContain("dockCapsule('nearest')");
-    expect(paperSource).toMatch(
-      /async function dockCapsule[\s\S]*?invoke<string>\('paper_todo_dock_window'/,
-    );
+    expect(paperSource).toContain('await getCurrentWindow().startDragging()');
   });
 
   it('makes the whole master capsule the drag handle instead of a grip icon', () => {
@@ -203,36 +205,22 @@ describe('paper todo standalone window lifecycle', () => {
     expect(backendSource).toContain('delayed launcher size sync failed');
   });
 
-  it('folds a paper into a capsule rather than a shrunken window', () => {
-    expect(backendSource).toContain('const CAPSULE_WIDTH: f64 = 216.0;');
-    expect(backendSource).toContain('const CAPSULE_HEIGHT: f64 = 40.0;');
-    // The min size has to move with the mode or Windows refuses to shrink the
-    // window down to the capsule.
-    expect(backendSource).toMatch(/set_min_size[\s\S]*?CAPSULE_WIDTH/);
-    // The capsule draws its own surface; it must not reuse the expanded header.
-    expect(paperSource).toContain('class="paper-capsule"');
-    expect(paperSource).toContain('paper-capsule-spine-fill');
-    expect(paperSource).toContain('border-radius: 999px');
+  it('uses one master capsule and returns paper windows to it', () => {
+    expect(paperSource).not.toContain('class="paper-capsule"');
+    expect(paperSource).not.toContain('applyWindowMode');
+    expect(backendSource).not.toContain('paper_todo_set_window_mode');
+    expect(backendSource).not.toContain('paper_todo_dock_window');
+    expect(backendSource).not.toContain('paper_todo_set_edge_peek');
+    expect(paperSource).toContain('<Minus class="h-4 w-4" />');
+    expect(paperSource).toContain("@click=\"minimizeToLauncher\"");
   });
 
-  it('rests a docked capsule at the display edge and slides it back on hover', () => {
-    expect(backendSource).toContain('pub fn paper_todo_set_edge_peek');
-    expect(backendSource).toContain('const CAPSULE_PEEK_VISIBLE: f64 = 14.0;');
-    // Docking and mode changes must supersede an in-flight slide.
-    expect(backendSource).toMatch(/pub fn paper_todo_dock_window[\s\S]*?cancel_capsule_slide/);
-    expect(backendSource).toMatch(/pub fn paper_todo_set_window_mode[\s\S]*?cancel_capsule_slide/);
-    expect(paperSource).toContain('@mouseenter="onCapsuleEnter"');
-    expect(paperSource).toContain('@mouseleave="onCapsuleLeave"');
-  });
-
-  it('never persists a window origin that the app moved itself', () => {
-    expect(pageSource).toContain('if (store.geometryTrackingSuspended.value) return;');
-    expect(paperSource).toContain('store.suspendGeometryTracking(400)');
-  });
-
-  it('pulls an expanding capsule back inside its monitor', () => {
-    expect(backendSource).toContain('fn pull_window_into_monitor');
-    expect(backendSource).toMatch(/if !collapsed \{[\s\S]*?pull_window_into_monitor/);
+  it('offers one direct header delete action with an in-app confirmation', () => {
+    expect(paperSource).toContain('text-rose-600');
+    expect(paperSource).toContain('<Trash2 class="h-4 w-4" />');
+    expect(paperSource).toContain('@click="openDeleteConfirmation"');
+    expect(paperSource).toContain("t('paperTodo.confirmDeletePaper', { title: paper.title })");
+    expect(paperSource).toContain(':disabled="deletingPaper"');
   });
 
   it('expands the launcher vertically on the primary monitor', () => {
@@ -272,6 +260,9 @@ describe('paper todo standalone window lifecycle', () => {
     expect(launcherSource).toMatch(
       /function scheduleCollapse[\s\S]*?if \(Date\.now\(\) < settleUntil\) return;/,
     );
+    expect(launcherSource).toContain('!store.settings.value.autoCollapseLauncher');
+    expect(launcherSource).toContain('if (!enabled) cancelCollapse();');
+    expect(settingsSource).toContain("setBoolean('autoCollapseLauncher', $event)");
     expect(launcherSource).toContain('settleUntil = Date.now() + SETTLE_MS;');
     // The collapse itself re-checks the pointer, so a leave that is followed by
     // the cursor coming back never folds the list away underneath it.

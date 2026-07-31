@@ -1,6 +1,6 @@
 # 屏幕共享媒体传输决策：Media Foundation H.264 + MSE
 
-**状态：** 已接受并实现（2026-07-20）
+**状态：** 已接受并实现（2026-07-20；2026-07-30 移除 WebCodecs 并默认编译 WebRTC 实验传输）
 
 **适用范围：** Windows 共享端、可信局域网、浏览器观看端；公网、音频和无人值守不在本决策范围。
 
@@ -8,7 +8,7 @@
 
 原有 MJPEG 链路兼容性高、故障定位简单，但每一帧都是独立 JPEG，出口带宽会随分辨率、帧率和观看者数量快速增长。多人批注、冻结和远程控制已经通过独立的 `/session/ws` 协议与视频解耦，因此媒体链路可以替换，而不改变 `session_id`、`source_epoch`、`frame_id`、批注坐标或控制授权语义。
 
-局域网观看地址使用普通 HTTP，例如 `http://192.168.0.111:9870`。WebCodecs 在浏览器中依赖安全上下文，不能作为这类局域网 HTTP 地址的稳定默认能力。WebRTC 可以进一步降低延迟并提供自适应码率，但需要维护每个 peer 的 RTP/RTCP、拥塞控制和连接生命周期，当前单向查看场景没有足够收益支撑这项复杂度。
+局域网观看地址使用普通 HTTP，例如 `http://192.168.0.111:9870`。WebCodecs 在浏览器中依赖安全上下文，已从产品实现中移除。WebRTC 可进一步降低延迟并提供拥塞控制，当前作为只接收实验传输保留。
 
 ## 决策
 
@@ -16,9 +16,9 @@
 2. 编码使用 Windows Media Foundation H.264 MFT，输入为捕获线程提供的 BGRA 帧，经 NV12 转换后编码。
 3. 编码输出从 Annex B 解析 SPS/PPS 和访问单元，再封装为 fragmented MP4：连接先发送 `media.hello` 和 init segment，随后发送可直接追加到 MSE `SourceBuffer` 的 media segment。
 4. 浏览器通过同源 `/media/ws` 接收媒体，通过 Media Source Extensions 播放；批注、冻结和远程控制继续使用 `/session/ws`。
-5. `auto` 和 `mse_h264` 会尝试启动 H.264；编码器就绪后运行时传输标记切换为 `mse_h264`。显式 `mjpeg` 不启动 H.264；`webrtc` 当前保留枚举但按 MJPEG 路径运行。
+5. `auto`、`mse_h264` 和 `web_rtc` 会尝试启动 H.264；编码器就绪后运行时传输标记切换到所选 H.264 传输。显式 `mjpeg` 不启动 H.264。
 6. MJPEG `/stream` 永久保留。编码器启动/运行失败、H.264 尚未就绪、浏览器 `MediaSource.isTypeSupported` 返回 false、媒体 WebSocket/MSE append 失败时，观看端继续或恢复 MJPEG，不中止屏幕共享。
-7. WebCodecs 暂不采用；WebRTC 暂缓。若 release 实测无法满足远控反馈延迟，或未来需要音频、自适应码率、公网穿透，再单独评估 WebRTC。
+7. WebCodecs 已从产品代码中移除；WebRTC 保留为实验传输，并作为标准开发版和正式版的默认编译功能随包提供。
 
 ## 关键实现约束
 
@@ -44,8 +44,8 @@
 
 ## 暂不实现
 
-- WebCodecs：局域网普通 HTTP 不是稳定安全上下文。
-- WebRTC、STUN/TURN、WSS 和公网穿透。
+- WebRTC 的 STUN/TURN 和公网穿透。
+- WSS 与 HTTPS 终止。
 - 音频、录屏、自适应码率、AV1/HEVC 和多档转码。
 - 为每个观看者独立编码；当前保持单次编码、多连接广播。
 

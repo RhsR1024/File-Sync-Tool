@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import {
   canHandleRemoteInput,
   decideRemoteKeyboardAction,
-  isRestrictedRemoteShortcut,
   mergeControlSnapshot,
   mergeHttpControlSnapshot,
   normalizeRemoteWheelDelta,
@@ -70,20 +69,16 @@ describe('remote control browser input', () => {
     expect(normalizeRemoteWheelDelta(Number.NaN)).toBeNull();
   });
 
-  it('maps only the documented keyboard whitelist', () => {
+  it('forwards every identified browser keyboard code within the protocol bound', () => {
     expect(toRemoteKeyboardCode('KeyA')).toBe('KeyA');
     expect(toRemoteKeyboardCode('Digit7')).toBe('Digit7');
-    expect(toRemoteKeyboardCode('ArrowLeft')).toBe('ArrowLeft');
-    expect(toRemoteKeyboardCode('F1')).toBeNull();
-    expect(toRemoteKeyboardCode('MetaLeft')).toBeNull();
-    expect(toRemoteKeyboardCode('Delete')).toBeNull();
-  });
-
-  it('blocks system escape shortcuts but keeps ordinary combinations', () => {
-    expect(isRestrictedRemoteShortcut('Tab', new Set(['AltLeft']))).toBe(true);
-    expect(isRestrictedRemoteShortcut('Escape', new Set(['ControlLeft']))).toBe(true);
-    expect(isRestrictedRemoteShortcut('KeyC', new Set(['ControlLeft']))).toBe(false);
-    expect(isRestrictedRemoteShortcut('KeyV', new Set(['ControlRight', 'ShiftLeft']))).toBe(false);
+    expect(toRemoteKeyboardCode('Semicolon')).toBe('Semicolon');
+    expect(toRemoteKeyboardCode('F24')).toBe('F24');
+    expect(toRemoteKeyboardCode('MetaLeft')).toBe('MetaLeft');
+    expect(toRemoteKeyboardCode('AudioVolumeUp')).toBe('AudioVolumeUp');
+    expect(toRemoteKeyboardCode('Unidentified')).toBeNull();
+    expect(toRemoteKeyboardCode('')).toBeNull();
+    expect(toRemoteKeyboardCode('K'.repeat(33))).toBeNull();
   });
 
   it('forwards only supported key edges and ignores untracked releases', () => {
@@ -102,26 +97,26 @@ describe('remote control browser input', () => {
     expect(decideRemoteKeyboardAction(
       { code: 'F1', pressed: true },
       new Set(),
-    )).toEqual({ type: 'ignore' });
+    )).toEqual({ type: 'key', code: 'F1', pressed: true });
   });
 
-  it('releases remote keys for restricted, meta, or composing input', () => {
+  it('forwards system combinations and ignores only unidentified or composing input', () => {
     expect(decideRemoteKeyboardAction(
       { code: 'Tab', pressed: true },
       new Set(['AltLeft']),
-    )).toEqual({ type: 'release_all' });
+    )).toEqual({ type: 'key', code: 'Tab', pressed: true });
     expect(decideRemoteKeyboardAction(
       { code: 'Escape', pressed: true },
       new Set(['ControlLeft']),
-    )).toEqual({ type: 'release_all' });
+    )).toEqual({ type: 'key', code: 'Escape', pressed: true });
     expect(decideRemoteKeyboardAction(
-      { code: 'KeyR', pressed: true, metaKey: true },
+      { code: 'MetaLeft', pressed: true },
       new Set(),
-    )).toEqual({ type: 'release_all' });
+    )).toEqual({ type: 'key', code: 'MetaLeft', pressed: true });
     expect(decideRemoteKeyboardAction(
-      { code: 'F4', pressed: true },
-      new Set(['AltLeft']),
-    )).toEqual({ type: 'release_all' });
+      { code: 'Unidentified', pressed: true },
+      new Set(['ShiftLeft']),
+    )).toEqual({ type: 'ignore' });
     expect(decideRemoteKeyboardAction(
       { code: 'KeyA', pressed: true, composing: true },
       new Set(),

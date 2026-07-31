@@ -94,7 +94,7 @@ test('independent device evidence rejects tab substitution, duplicates and slow 
   assert.ok(codes(slowResult).includes('fanout_healthy_lag_detected'));
 });
 
-test('managed browser evidence rejects loopback substitutes and untested certificate operations', () => {
+test('managed browser evidence rejects loopback substitutes and unmanaged browsers', () => {
   const loopback = FIELD_EVIDENCE_FIXTURES.managed_browser_external_media({ synthetic_loopback_only: true });
   assert.equal(evaluateFieldEvidence('managed_browser_external_media', loopback).status, 'failed');
 
@@ -106,14 +106,6 @@ test('managed browser evidence rejects loopback substitutes and untested certifi
   assert.ok(unmanagedFindings.includes('managed_browser_missing'));
   assert.ok(unmanagedFindings.includes('managed_external_acceptance_missing'));
 
-  const staleCertificate = FIELD_EVIDENCE_FIXTURES.managed_browser_external_media();
-  staleCertificate.secure_context.certificate_rotation_tested = false;
-  assert.ok(codes(evaluateFieldEvidence('managed_browser_external_media', staleCertificate)).includes('managed_secure_context_unverified'));
-
-  // A WebRTC-only session over plain HTTP may report the certificate work as untested.
-  const webRtcOnly = FIELD_EVIDENCE_FIXTURES.managed_browser_external_media({ transports: ['web_rtc'] });
-  webRtcOnly.secure_context.certificate_rotation_tested = false;
-  assert.equal(evaluateFieldEvidence('managed_browser_external_media', webRtcOnly).status, 'passed');
 });
 
 test('impairment thresholds come from the manifest and cannot be relaxed by the report', () => {
@@ -134,9 +126,9 @@ test('impairment thresholds come from the manifest and cannot be relaxed by the 
   assert.ok(codes(evaluateFieldEvidence('network_impairment_recovery', lossOnly)).includes('impairment_kind_coverage_missing'));
 });
 
-test('transport selection requires all three prototypes plus an explicit FPS decision', () => {
+test('transport selection requires MSE and WebRTC plus an explicit FPS decision', () => {
   const partial = FIELD_EVIDENCE_FIXTURES.transport_selection();
-  partial.candidates = partial.candidates.slice(0, 2);
+  partial.candidates = partial.candidates.slice(0, 1);
   assert.ok(codes(evaluateFieldEvidence('transport_selection', partial)).includes('transport_candidate_coverage_missing'));
 
   const noFpsDecision = FIELD_EVIDENCE_FIXTURES.transport_selection({ fps_default_decision: undefined });

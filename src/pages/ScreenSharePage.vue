@@ -34,6 +34,7 @@ import {
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import QRCode from 'qrcode';
+import HintTip from '../components/HintTip.vue';
 import { LAN_SHARE_STATUS_REFRESH_INTERVAL_MS } from '../lib/lanShareStatus';
 import {
   screenShareListMonitors,
@@ -66,8 +67,25 @@ defineOptions({ name: 'ScreenSharePage' });
 
 const { t } = useI18n();
 const AUTO_REFRESH_SECONDS = Math.round(LAN_SHARE_STATUS_REFRESH_INTERVAL_MS / 1000);
-/** 实验档帧率，必须与 Rust 的 `MAX_CAPTURE_FPS` 一致，否则启动会被拒绝。 */
-const EXPERIMENTAL_HIGH_FPS = 60;
+/** 离散档位避免把尚未验证的 35-55 FPS 暴露为可选值。 */
+const FRAME_RATE_OPTIONS = [5, 10, 15, 20, 25, 30, 60] as const;
+const DEFAULT_FRAME_RATE = 15;
+const HIGH_FRAME_RATE = 60;
+
+function frameRateIndexFor(value: number | null | undefined): number {
+  const candidate = typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : DEFAULT_FRAME_RATE;
+  return FRAME_RATE_OPTIONS.reduce((closestIndex, option, index) => (
+    Math.abs(option - candidate) < Math.abs(FRAME_RATE_OPTIONS[closestIndex] - candidate)
+      ? index
+      : closestIndex
+  ), FRAME_RATE_OPTIONS.indexOf(DEFAULT_FRAME_RATE));
+}
+
+function frameRateTickPosition(index: number): string {
+  return `${(index / (FRAME_RATE_OPTIONS.length - 1)) * 100}%`;
+}
 
 const monitors = ref<MonitorInfo[]>([]);
 const interfaces = ref<NetworkInterfaceInfo[]>([]);
@@ -79,18 +97,15 @@ const username = ref('');
 const passwordEnabled = ref(false);
 const password = ref('');
 const quality = ref(70);
-const fps = ref(15);
-// 60 FPS 是与 30 FPS 分档对比的实验项，默认关闭：默认档位要等目标机型的
-// capture-to-display、资源和扇出数据出来后再决定。
-const highFpsExperiment = ref(false);
+const frameRateIndex = ref(FRAME_RATE_OPTIONS.indexOf(DEFAULT_FRAME_RATE));
+const fps = computed(() => FRAME_RATE_OPTIONS[frameRateIndex.value] ?? DEFAULT_FRAME_RATE);
+const highFrameRateSelected = computed(() => fps.value === HIGH_FRAME_RATE);
 const showCursor = ref(true);
 const backendMode = ref<ScreenShareBackendMode>('auto');
 const mediaTransport = ref<ScreenShareMediaTransport>('auto');
 const autoStart = ref(false);
 const controlRequestsEnabled = ref(false);
 const keyboardControlEnabled = ref(false);
-
-const effectiveFps = computed(() => (highFpsExperiment.value ? EXPERIMENTAL_HIGH_FPS : fps.value));
 
 const isActive = ref(false);
 const isStarting = ref(false);
@@ -317,10 +332,11 @@ interface SavedSettings {
   password: string;
   quality: number;
   fps: number;
+  /** 旧版 60 FPS 复选框，仅用于迁移已经保存的设置。 */
   highFpsExperiment?: boolean;
   showCursor: boolean;
   backendMode: ScreenShareBackendMode;
-  mediaTransport?: ScreenShareMediaTransport;
+  mediaTransport?: ScreenShareMediaTransport | 'web_codecs';
   selectedMonitor: number;
   selectedBindAddress: string;
   autoStart: boolean;
@@ -340,7 +356,6 @@ async function saveSettings() {
         password: password.value,
         quality: quality.value,
         fps: fps.value,
-        highFpsExperiment: highFpsExperiment.value,
         showCursor: showCursor.value,
         backendMode: backendMode.value,
         mediaTransport: mediaTransport.value,
@@ -368,11 +383,14 @@ async function loadSettings() {
     passwordEnabled.value = saved.passwordEnabled ?? false;
     password.value = saved.password ?? '';
     quality.value = saved.quality ?? 70;
-    fps.value = saved.fps ?? 15;
-    highFpsExperiment.value = saved.highFpsExperiment ?? false;
+    frameRateIndex.value = frameRateIndexFor(
+      saved.highFpsExperiment ? HIGH_FRAME_RATE : saved.fps,
+    );
     showCursor.value = saved.showCursor ?? true;
     backendMode.value = saved.backendMode ?? 'auto';
-    mediaTransport.value = saved.mediaTransport ?? 'auto';
+    mediaTransport.value = saved.mediaTransport === 'web_codecs'
+      ? 'mse_h264'
+      : saved.mediaTransport ?? 'auto';
     selectedMonitor.value = saved.selectedMonitor ?? 0;
     selectedBindAddress.value = saved.selectedBindAddress ?? '0.0.0.0';
     autoStart.value = saved.autoStart ?? false;
@@ -392,7 +410,7 @@ function buildScreenShareConfig(): ScreenShareConfig {
     password: passwordEnabled.value && password.value ? password.value : null,
     monitor_index: selectedMonitor.value,
     quality: quality.value,
-    fps: effectiveFps.value,
+    fps: fps.value,
     show_cursor: showCursor.value,
     capture_backend_mode: backendMode.value,
     bind_address: selectedBindAddress.value || '0.0.0.0',
@@ -433,11 +451,6 @@ const mediaTransportOptions = computed(() => [
     description: t('tools.screenShare.mediaTransportH264Desc'),
   },
   {
-    value: 'web_codecs' as const,
-    label: t('tools.screenShare.mediaTransportWebCodecs'),
-    description: t('tools.screenShare.mediaTransportWebCodecsDesc'),
-  },
-  {
     value: 'web_rtc' as const,
     label: t('tools.screenShare.mediaTransportWebRtc'),
     description: t('tools.screenShare.mediaTransportWebRtcDesc'),
@@ -452,11 +465,9 @@ const mediaTransportOptions = computed(() => [
 const activeTransportLabel = computed(() => (
   status.value.transport === 'mse_h264'
     ? t('tools.screenShare.mediaTransportH264')
-    : status.value.transport === 'web_codecs'
-      ? t('tools.screenShare.mediaTransportWebCodecs')
-      : status.value.transport === 'web_rtc'
-        ? t('tools.screenShare.mediaTransportWebRtc')
-        : t('tools.screenShare.mediaTransportMjpeg')
+    : status.value.transport === 'web_rtc'
+      ? t('tools.screenShare.mediaTransportWebRtc')
+      : t('tools.screenShare.mediaTransportMjpeg')
 ));
 
 watch(controlRequestsEnabled, (enabled) => {
@@ -994,43 +1005,52 @@ onUnmounted(() => {
               </div>
               <div>
                 <div class="mb-2 flex items-center justify-between">
-                  <label class="ss-label">{{ t('tools.screenShare.fps') }}</label>
+                  <label for="screen-share-fps" class="ss-label">{{ t('tools.screenShare.fps') }}</label>
                   <span class="font-mono text-sm font-semibold text-violet-600">
-                    {{ effectiveFps }} <span class="text-xs font-normal text-slate-400">{{ t('tools.screenShare.fpsUnit') }}</span>
+                    {{ fps }} <span class="text-xs font-normal text-slate-400">{{ t('tools.screenShare.fpsUnit') }}</span>
                   </span>
                 </div>
-                <input
-                  v-model.number="fps"
-                  type="range"
-                  min="5"
-                  max="30"
-                  step="5"
-                  :disabled="isActive || highFpsExperiment"
-                  class="ss-range w-full"
-                  :class="highFpsExperiment ? 'opacity-50' : ''"
-                >
-                <label
-                  class="mt-2 flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 transition"
-                  :class="isActive ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:border-violet-200 hover:bg-violet-50/40'"
-                >
+                <div class="ss-range-control">
                   <input
-                    v-model="highFpsExperiment"
-                    type="checkbox"
+                    id="screen-share-fps"
+                    v-model.number="frameRateIndex"
+                    type="range"
+                    min="0"
+                    :max="FRAME_RATE_OPTIONS.length - 1"
+                    step="1"
                     :disabled="isActive"
-                    class="mt-0.5 h-4 w-4 accent-violet-600"
+                    :aria-valuetext="`${fps} ${t('tools.screenShare.fpsUnit')}`"
+                    :aria-describedby="highFrameRateSelected ? 'screen-share-high-fps-notice' : undefined"
+                    class="ss-range block w-full"
                   >
-                  <span class="min-w-0">
-                    <span class="block text-sm font-medium text-slate-800">{{ t('tools.screenShare.highFpsExperiment') }}</span>
-                    <span class="mt-1 block text-xs leading-5 text-slate-500">{{ t('tools.screenShare.highFpsExperimentDesc') }}</span>
-                  </span>
-                </label>
+                  <div
+                    class="ss-range-ticks relative mt-1 h-4 font-mono text-[10px] text-slate-400"
+                    aria-hidden="true"
+                  >
+                    <span
+                      v-for="(option, index) in FRAME_RATE_OPTIONS"
+                      :key="option"
+                      class="absolute top-0 -translate-x-1/2"
+                      :class="option === fps ? 'font-semibold text-violet-600' : ''"
+                      :style="{ left: frameRateTickPosition(index) }"
+                    >{{ option }}</span>
+                  </div>
+                </div>
+                <p
+                  v-if="highFrameRateSelected"
+                  id="screen-share-high-fps-notice"
+                  class="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"
+                  aria-live="polite"
+                >
+                  {{ t('tools.screenShare.highFpsNotice') }}
+                </p>
               </div>
               <div>
                 <div class="mb-2 flex items-center justify-between gap-3">
                   <label class="ss-label">{{ t('tools.screenShare.mediaTransport') }}</label>
                   <span class="text-[11px] text-slate-400">{{ t('tools.screenShare.mediaTransportHint') }}</span>
                 </div>
-                <div class="grid grid-cols-3 gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1">
+                <div class="grid grid-cols-4 gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1">
                   <button
                     v-for="option in mediaTransportOptions"
                     :key="option.value"
@@ -1123,12 +1143,15 @@ onUnmounted(() => {
                 <span class="text-sm font-medium text-slate-700">{{ t('tools.screenShare.allowControlRequests') }}</span>
               </span>
             </label>
-            <label
+            <div
               class="ss-toggle-card"
-              :class="isActive || !controlRequestsEnabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'"
+              :class="isActive || !controlRequestsEnabled ? 'opacity-60' : ''"
               :title="!controlRequestsEnabled ? t('tools.screenShare.keyboardControlRequiresRemote') : undefined"
             >
-              <span class="flex items-center gap-3">
+              <label
+                class="flex min-w-0 flex-1 items-center gap-3"
+                :class="isActive || !controlRequestsEnabled ? 'cursor-not-allowed' : 'cursor-pointer'"
+              >
                 <span class="ss-toggle">
                   <input
                     v-model="keyboardControlEnabled"
@@ -1141,8 +1164,12 @@ onUnmounted(() => {
                   </span>
                 </span>
                 <span class="text-sm font-medium text-slate-700">{{ t('tools.screenShare.allowKeyboardControl') }}</span>
-              </span>
-            </label>
+              </label>
+              <HintTip
+                :title="t('tools.screenShare.allowKeyboardControl')"
+                :text="t('tools.screenShare.keyboardControlCapabilityHint')"
+              />
+            </div>
           </div>
 
           <div v-if="errorMsg" class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600 shadow-sm">
@@ -1602,6 +1629,11 @@ onUnmounted(() => {
   transition: transform 0.2s ease;
 }
 
+.ss-range,
+.ss-range-control {
+  --ss-range-thumb-size: 16px;
+}
+
 .ss-range {
   appearance: none;
   height: 6px;
@@ -1617,12 +1649,16 @@ onUnmounted(() => {
 
 .ss-range::-webkit-slider-thumb {
   appearance: none;
-  width: 16px;
-  height: 16px;
+  width: var(--ss-range-thumb-size);
+  height: var(--ss-range-thumb-size);
   border-radius: 9999px;
   background: rgb(124 58 237);
   box-shadow: 0 0 0 4px rgb(124 58 237 / 0.18);
   cursor: pointer;
+}
+
+.ss-range-ticks {
+  margin-inline: calc(var(--ss-range-thumb-size) / 2);
 }
 
 .ss-toggle-card {

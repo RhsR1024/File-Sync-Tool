@@ -34,7 +34,6 @@ const loading = ref(false);
 const loaded = ref(false);
 const error = ref('');
 const savingIds = ref(new Set<string>());
-const geometrySuspensions = ref(0);
 const histories = new Map<string, PaperHistory>();
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingPaperSaves = new Map<string, Promise<void>>();
@@ -256,18 +255,6 @@ async function reorderPapers(ids: string[]): Promise<void> {
   state.value.revision = await savePaperOrder(ids);
 }
 
-/**
- * Ignore window-move events for `durationMs`. Edge-peek and docking reposition
- * the capsule themselves; persisting those frames would save an off-screen
- * origin and restore the paper hidden at the display edge on the next launch.
- */
-function suspendGeometryTracking(durationMs: number): void {
-  geometrySuspensions.value += 1;
-  setTimeout(() => {
-    geometrySuspensions.value = Math.max(0, geometrySuspensions.value - 1);
-  }, durationMs);
-}
-
 async function flush(): Promise<void> {
   const pending = [...saveTimers.keys()];
   for (const id of pending) {
@@ -294,8 +281,6 @@ export function usePaperTodo() {
     loaded,
     error,
     savingIds,
-    geometryTrackingSuspended: computed(() => geometrySuspensions.value > 0),
-    suspendGeometryTracking,
     initialize,
     refreshFromDisk,
     addPaper,

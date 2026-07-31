@@ -135,7 +135,7 @@ export interface ScreenShareHttpStatus {
   interaction_connected_count?: number;
   capture_paused?: boolean;
   capture_issue?: 'retrying' | 'privacy_mode_or_display_off' | string | null;
-  transport?: 'mjpeg' | 'mse_h264' | 'web_codecs' | 'web_rtc';
+  transport?: 'mjpeg' | 'mse_h264' | 'web_rtc';
   h264_media?: {
     ready?: boolean;
     codec?: string | null;

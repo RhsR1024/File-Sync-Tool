@@ -35,10 +35,6 @@ import {
   type ScreenShareTool,
 } from './lib/remote-control';
 import { ScreenShareSessionClient } from './lib/session-client';
-import {
-  WebCodecsH264Player,
-  type WebCodecsPlayerState,
-} from './lib/webcodecs-player';
 import { WebRtcH264Player, type WebRtcPlayerState } from './lib/webrtc-player';
 import { detectLocale, messages, type ScreenShareLocale } from './messages';
 import type {
@@ -61,7 +57,6 @@ const t = (key: keyof typeof messages.en): string => messages[locale.value][key]
 const stage = ref<HTMLElement | null>(null);
 const screenImage = ref<HTMLImageElement | null>(null);
 const screenVideo = ref<HTMLVideoElement | null>(null);
-const screenCanvas = ref<HTMLCanvasElement | null>(null);
 const imageSource = ref('/stream');
 const imageLoadError = ref(false);
 const imageReady = ref(false);
@@ -84,14 +79,6 @@ const h264PlayerState = ref<MsePlayerState>({
   height: 0,
 });
 const h264DisabledForSession = ref(false);
-const webCodecsPlayerState = ref<WebCodecsPlayerState>({
-  status: 'idle',
-  failureKind: null,
-  attempts: 0,
-  lastError: null,
-  width: 0,
-  height: 0,
-});
 const webRtcPlayerState = ref<WebRtcPlayerState>('idle');
 let lastMediaSessionId = 0;
 
@@ -132,14 +119,12 @@ const controlStateLabelKeys: Record<ControlState, keyof typeof messages.en> = {
 
 const sessionClient = new ScreenShareSessionClient();
 const h264Player = new MseH264Player();
-const webCodecsPlayer = new WebCodecsH264Player();
 let webRtcPlayer: WebRtcH264Player | null = null;
 let statusTimer: number | null = null;
 let laserTimer: number | null = null;
 let sessionNoticeTimer: number | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let stopH264StateListener: (() => void) | null = null;
-let stopWebCodecsStateListener: (() => void) | null = null;
 let stopInputTraceListener: (() => void) | null = null;
 let uninstallDiagnostics: (() => void) | null = null;
 const forwardedKeys = new Set<string>();
@@ -148,11 +133,6 @@ const statusActive = computed(() => httpStatus.value.active ?? httpStatus.value.
 const h264Desired = computed(() => (
   statusActive.value
   && httpStatus.value.transport === 'mse_h264'
-  && !h264DisabledForSession.value
-));
-const webCodecsDesired = computed(() => (
-  statusActive.value
-  && httpStatus.value.transport === 'web_codecs'
   && !h264DisabledForSession.value
 ));
 const webRtcDesired = computed(() => (
@@ -165,10 +145,7 @@ const showH264Video = computed(() => (
   (h264Desired.value && h264Ready.value)
   || (webRtcDesired.value && webRtcPlayerState.value === 'ready')
 ));
-const showWebCodecsCanvas = computed(() => (
-  webCodecsDesired.value && webCodecsPlayerState.value.status === 'ready'
-));
-const showPrimaryMedia = computed(() => showH264Video.value || showWebCodecsCanvas.value);
+const showPrimaryMedia = computed(() => showH264Video.value);
 const streamConnected = computed(() => (
   showPrimaryMedia.value || (mjpegConnected.value && imageReady.value)
 ));
@@ -207,7 +184,6 @@ const streamLabel = computed(() => {
     imageLoadError.value
     || streamRetryAttempt.value > 0
     || h264PlayerState.value.status === 'reconnecting'
-    || webCodecsPlayerState.value.status === 'reconnecting'
     || webRtcPlayerState.value === 'connecting'
     || webRtcPlayerState.value === 'connected'
     || webRtcPlayerState.value === 'disconnected'
@@ -280,8 +256,8 @@ function updateGeometry() {
   geometry.value = computeContainedRect(
     container.clientWidth,
     container.clientHeight,
-    naturalWidth.value || screenImage.value?.naturalWidth || screenVideo.value?.videoWidth || screenCanvas.value?.width || 0,
-    naturalHeight.value || screenImage.value?.naturalHeight || screenVideo.value?.videoHeight || screenCanvas.value?.height || 0,
+    naturalWidth.value || screenImage.value?.naturalWidth || screenVideo.value?.videoWidth || 0,
+    naturalHeight.value || screenImage.value?.naturalHeight || screenVideo.value?.videoHeight || 0,
     window.devicePixelRatio || 1,
   );
 }
@@ -347,29 +323,6 @@ function handleH264PlayerState(state: MsePlayerState) {
   }
 }
 
-function handleWebCodecsPlayerState(state: WebCodecsPlayerState) {
-  const wasReady = webCodecsPlayerState.value.status === 'ready';
-  webCodecsPlayerState.value = state;
-  if (state.status === 'ready') {
-    naturalWidth.value = state.width;
-    naturalHeight.value = state.height;
-    stopMjpegStream();
-    nextTick(updateGeometry);
-    return;
-  }
-  if (
-    state.status === 'unsupported'
-    || (state.status === 'error' && state.failureKind === 'fatal')
-  ) {
-    h264DisabledForSession.value = true;
-    if (state.lastError) showSessionNotice(`${state.lastError}; falling back to MJPEG`);
-  }
-  if (wasReady && statusActive.value) {
-    mjpegConnected.value = false;
-    setImageSource(`/stream?reconnect=1&t=${Date.now()}`);
-  }
-}
-
 function handleWebRtcPlayerState(state: WebRtcPlayerState) {
   const wasReady = webRtcPlayerState.value === 'ready';
   webRtcPlayerState.value = state;
@@ -388,12 +341,9 @@ function handleWebRtcPlayerState(state: WebRtcPlayerState) {
   }
 }
 
-function stopInactiveMediaPlayers(active: 'mse_h264' | 'web_codecs' | 'web_rtc' | null) {
+function stopInactiveMediaPlayers(active: 'mse_h264' | 'web_rtc' | null) {
   if (active !== 'mse_h264' && !['idle', 'closed'].includes(h264PlayerState.value.status)) {
     h264Player.stop();
-  }
-  if (active !== 'web_codecs' && !['idle', 'closed'].includes(webCodecsPlayerState.value.status)) {
-    webCodecsPlayer.stop();
   }
   if (active !== 'web_rtc' && webRtcPlayer) {
     webRtcPlayer.stop();
@@ -409,14 +359,6 @@ function ensureMediaPlayback() {
     stopInactiveMediaPlayers('mse_h264');
     const video = screenVideo.value;
     if (video && ['idle', 'closed'].includes(h264PlayerState.value.status)) h264Player.start(video);
-    return;
-  }
-  if (webCodecsDesired.value) {
-    stopInactiveMediaPlayers('web_codecs');
-    const canvas = screenCanvas.value;
-    if (canvas && ['idle', 'closed'].includes(webCodecsPlayerState.value.status)) {
-      webCodecsPlayer.start(canvas);
-    }
     return;
   }
   if (webRtcDesired.value) {
@@ -572,7 +514,6 @@ async function refreshStatus() {
       lastMediaSessionId = sessionId;
       h264DisabledForSession.value = false;
       h264Player.stop();
-      webCodecsPlayer.stop();
       webRtcPlayer?.stop();
       webRtcPlayer = null;
     }
@@ -586,7 +527,6 @@ async function refreshStatus() {
     if (!statusActive.value) {
       mjpegConnected.value = false;
       h264Player.stop();
-      webCodecsPlayer.stop();
       webRtcPlayer?.stop();
       webRtcPlayer = null;
       if (streamRetryTimer !== null) {
@@ -736,17 +676,11 @@ function forwardRemoteKeyboardEvent(event: KeyboardEvent, pressed: boolean): boo
   const action = decideRemoteKeyboardAction({
     code: event.code,
     pressed,
-    metaKey: event.metaKey,
     composing: event.isComposing,
   }, forwardedKeys);
   if (action.type === 'ignore') return false;
 
   event.preventDefault();
-  if (action.type === 'release_all') {
-    releaseForwardedKeys(true);
-    return true;
-  }
-
   const sent = sessionClient.send('input.key', {
     code: action.code,
     pressed: action.pressed,
@@ -846,14 +780,11 @@ onMounted(async () => {
   stopInputTraceListener = sessionClient.onInputTrace((event) => {
     if (event.phase === 'sent') {
       h264Player.recordInputTrace(event.clientSequence, event.occurredAtClientUnixMs);
-      webCodecsPlayer.recordInputTrace(event.clientSequence, event.occurredAtClientUnixMs);
     } else {
       h264Player.recordInputQueueAcknowledged(event.clientSequence, event.observedAtClientUnixMs);
-      webCodecsPlayer.recordInputQueueAcknowledged(event.clientSequence, event.observedAtClientUnixMs);
     }
   });
   stopH264StateListener = h264Player.onState(handleH264PlayerState);
-  stopWebCodecsStateListener = webCodecsPlayer.onState(handleWebCodecsPlayerState);
   uninstallDiagnostics = installScreenShareDiagnostics(() => ({
     capturedAtUnixMs: Date.now(),
     transport: httpStatus.value.transport ?? null,
@@ -868,10 +799,6 @@ onMounted(async () => {
       mse: {
         state: h264PlayerState.value,
         metrics: h264Player.getMetrics(),
-      },
-      web_codecs: {
-        state: webCodecsPlayerState.value,
-        metrics: webCodecsPlayer.getMetrics(),
       },
       web_rtc: {
         state: webRtcPlayerState.value,
@@ -901,13 +828,10 @@ onUnmounted(() => {
   releaseForwardedKeys();
   sessionClient.close();
   h264Player.stop();
-  webCodecsPlayer.stop();
   webRtcPlayer?.stop();
   webRtcPlayer = null;
   stopH264StateListener?.();
   stopH264StateListener = null;
-  stopWebCodecsStateListener?.();
-  stopWebCodecsStateListener = null;
   uninstallDiagnostics?.();
   uninstallDiagnostics = null;
   stopInputTraceListener?.();
@@ -972,12 +896,6 @@ onUnmounted(() => {
         autoplay
         playsinline
         @loadedmetadata="handleVideoMetadata"
-      />
-      <canvas
-        ref="screenCanvas"
-        class="screen-image"
-        :class="{ 'is-hidden-media': !showWebCodecsCanvas }"
-        aria-hidden="true"
       />
       <img
         v-if="!showPrimaryMedia && statusActive"

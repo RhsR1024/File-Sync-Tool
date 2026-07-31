@@ -16,7 +16,7 @@ use serde_json::json;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
-const TOOL_NAME: &str = "UMS初始密码修改";
+const TOOL_NAME: &str = "UMS 初始密码修改";
 
 const FRAMEWORK_PORT: u16 = 21900;
 const UMS_PORT: u16 = 80;

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { invoke } from '@tauri-apps/api/core';
 import {
   Bold,
   CheckCheck,
@@ -18,9 +17,9 @@ import {
   List,
   ListPlus,
   Maximize2,
+  Minus,
   MoreHorizontal,
   PanelLeftClose,
-  PanelRightClose,
   Pin,
   PinOff,
   Play,
@@ -29,9 +28,8 @@ import {
   StickyNote,
   Trash2,
   Undo2,
-  X,
 } from 'lucide-vue-next';
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type CSSProperties } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, type CSSProperties } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { VueDraggable } from 'vue-draggable-plus';
 
@@ -41,13 +39,12 @@ import {
   createTodoItem,
   createDesktopPaper,
   importPaperImage,
-  isPaperEmpty,
   isPowerPaper,
   MAX_NOTE_LENGTH,
   openPaperNoteExternally,
   openPaperWindow,
   runPaperScript,
-  setPaperEdgePeek,
+  setPaperWindowPinned,
   splitTodoPaste,
   type PaperDocument,
   type PaperTodoItem,
@@ -69,6 +66,7 @@ const noteTextarea = ref<HTMLTextAreaElement | null>(null);
 const previewMode = ref<'edit' | 'split' | 'preview'>('edit');
 const pendingImage = ref(false);
 const deleteConfirmationOpen = ref(false);
+const deletingPaper = ref(false);
 const deleteDialog = ref<HTMLElement | null>(null);
 const scriptConfirmationOpen = ref(false);
 const scriptDialog = ref<HTMLElement | null>(null);
@@ -83,9 +81,6 @@ const completedGroupOpen = ref(false);
 const compactToolbarVisible = ref(false);
 const outlineOpen = ref(true);
 const outlineWidth = ref(96);
-const capsuleHovered = ref(false);
-const peekedAway = ref(false);
-let peekTimer: ReturnType<typeof setTimeout> | null = null;
 
 const paper = computed(() => store.state.value.papers.find((item) => item.id === props.paperId) ?? null);
 const settings = computed(() => store.state.value.settings);
@@ -137,14 +132,8 @@ const noteTextClass = computed(() => ({
 const titleTextClass = computed(() => ({
   small: 'text-xs', medium: 'text-sm', large: 'text-base', xlarge: 'text-lg',
 }[settings.value.titleFontSize]));
-const capsuleTextClass = computed(() => ({
-  small: 'text-xs', medium: 'text-sm', large: 'text-base', xlarge: 'text-lg',
-}[settings.value.capsuleFontSize]));
 const visualSizeIndex = { small: 0, medium: 1, large: 2, xlarge: 3 } as const;
-// The capsule is the paper folded away, not a shrunken window: it draws its own
-// compact surface instead of squeezing the expanded header into 216 px.
-const isCapsule = computed(() => Boolean(props.standalone && paper.value?.collapsed));
-const capsuleAccent = computed(() => ({
+const paletteAccent = computed(() => ({
   warm: useDarkTheme.value ? '#d9a441' : '#b8791a',
   ink: useDarkTheme.value ? '#a1a1aa' : '#52525b',
   forest: useDarkTheme.value ? '#4ade80' : '#15803d',
@@ -186,7 +175,7 @@ const skinVars = computed<CSSProperties>(() => {
     '--paper-ink': tokens.ink,
     '--paper-muted': tokens.muted,
     '--paper-hairline': tokens.hairline,
-    '--paper-tint': capsuleAccent.value,
+    '--paper-tint': paletteAccent.value,
     '--paper-radius': tokens.radius,
     '--paper-header-h': tokens.header,
     '--paper-row-h': tokens.row,
@@ -196,31 +185,6 @@ const skinVars = computed<CSSProperties>(() => {
     '--paper-note-font-size': `${sizeSets.note[visualSizeIndex[settings.value.noteFontSize]]}px`,
   } as CSSProperties;
 });
-const capsuleDockSide = computed(() => paper.value?.geometry.dockEdge ?? 'right');
-/// Share of the spine that is inked in: completed items for a todo paper, and
-/// how full the note is for a note paper. Readable from the docked sliver alone.
-const capsuleFill = computed(() => {
-  const current = paper.value;
-  if (!current) return 0;
-  if (current.kind === 'todo') {
-    return current.items.length ? completedCount.value / current.items.length : 0;
-  }
-  return current.content.length ? Math.min(1, current.content.length / 4_000) : 0;
-});
-const capsuleMeta = computed(() => {
-  const current = paper.value;
-  if (!current) return '';
-  if (current.kind === 'todo') {
-    return current.items.length ? `${completedCount.value}/${current.items.length}` : '';
-  }
-  const lines = current.content.trim() ? current.content.trim().split('\n').length : 0;
-  return lines ? t('paperTodo.capsuleLines', { count: lines }) : '';
-});
-const canAutoHideCapsule = computed(() => Boolean(
-  props.standalone
-  && settings.value.autoDockCapsules
-  && settings.value.autoHideDockedCapsules,
-));
 
 /** Tooltips are opt-in; screen-reader labels stay on the controls regardless. */
 function tip(key: string): string | undefined {
@@ -242,11 +206,6 @@ const paperStyle = computed<CSSProperties>(() => ({
     color: 'var(--paper-ink)',
   }),
 }));
-const capsuleStyle = computed<CSSProperties>(() => ({
-  ...paperStyle.value,
-  '--paper-capsule-accent': capsuleAccent.value,
-} as CSSProperties));
-
 function update(mutator: (value: PaperDocument) => void, history = false, immediate = false): void {
   store.updatePaper(props.paperId, mutator, { history, immediate });
 }
@@ -454,9 +413,26 @@ async function createSiblingPaper(kind: 'todo' | 'note'): Promise<void> {
 }
 
 async function openDeleteConfirmation(): Promise<void> {
+  store.error.value = '';
   deleteConfirmationOpen.value = true;
   await nextTick();
   deleteDialog.value?.focus();
+}
+
+function trapDeleteDialogFocus(event: KeyboardEvent): void {
+  const focusable = Array.from(
+    deleteDialog.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [],
+  );
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 async function openLinkedNote(id: string | null): Promise<void> {
@@ -467,15 +443,9 @@ async function openLinkedNote(id: string | null): Promise<void> {
   await openPaperWindow(note, settings.value);
 }
 
-async function closeDesktop(): Promise<void> {
+async function minimizeToLauncher(): Promise<void> {
   const current = paper.value;
   if (!current) return;
-  if (isPaperEmpty(current)) {
-    const id = current.id;
-    await store.removePaper(id);
-    emit('deleted', id);
-    return;
-  }
   update((value) => { value.desktopOpen = false; }, false, true);
   await store.flush();
   await getCurrentWindow().close();
@@ -614,98 +584,24 @@ async function saveCurrentPaper(): Promise<void> {
   await store.flush();
 }
 
-function cancelPeekTimer(): void {
-  if (peekTimer) clearTimeout(peekTimer);
-  peekTimer = null;
-}
-
-async function setEdgePeek(peek: boolean): Promise<void> {
-  const current = paper.value;
-  if (!current || !current.collapsed || !canAutoHideCapsule.value) return;
-  if (peekedAway.value === peek) return;
-  peekedAway.value = peek;
-  // The slide takes ~110 ms in Rust; hold move tracking a little longer so the
-  // trailing frames cannot be mistaken for a user reposition.
-  store.suspendGeometryTracking(400);
-  try {
-    await setPaperEdgePeek(
-      current.id,
-      current.geometry.dockEdge ?? 'nearest',
-      peek,
-      settings.value.animations,
-    );
-  } catch (reason) {
-    peekedAway.value = !peek;
-    store.error.value = String(reason);
-  }
-}
-
-/** Rest the capsule against the edge once the pointer has clearly left it. */
-function schedulePeekAway(delay = 900): void {
-  cancelPeekTimer();
-  if (!canAutoHideCapsule.value || capsuleHovered.value) return;
-  peekTimer = setTimeout(() => {
-    peekTimer = null;
-    void setEdgePeek(true);
-  }, delay);
-}
-
-function onCapsuleEnter(): void {
-  capsuleHovered.value = true;
-  cancelPeekTimer();
-  void setEdgePeek(false);
-}
-
-function onCapsuleLeave(): void {
-  capsuleHovered.value = false;
-  schedulePeekAway(650);
-}
-
-async function dockCapsule(edge: 'left' | 'right' | 'nearest'): Promise<void> {
-  const current = paper.value;
-  if (!current || !props.standalone) return;
-  store.suspendGeometryTracking(400);
-  const resolved = await invoke<string>('paper_todo_dock_window', { id: current.id, edge });
-  update((value) => { value.geometry.dockEdge = resolved === 'left' ? 'left' : 'right'; }, false, true);
-}
-
-async function applyWindowMode(collapsed: boolean): Promise<void> {
-  if (!paper.value) return;
-  cancelPeekTimer();
-  peekedAway.value = false;
-  update((value) => { value.collapsed = collapsed; }, false, true);
-  if (props.standalone) {
-    store.suspendGeometryTracking(400);
-    await invoke('paper_todo_set_window_mode', {
-      id: paper.value.id,
-      collapsed,
-      pinned: paper.value.pinned,
-      width: paper.value.geometry.width,
-      height: paper.value.geometry.height,
-    });
-    if (collapsed && settings.value.autoDockCapsules) {
-      await dockCapsule(paper.value.geometry.dockEdge ?? 'nearest');
-      schedulePeekAway();
-    }
-  }
-}
-
 async function togglePinned(): Promise<void> {
   if (!paper.value) return;
   update((value) => { value.pinned = !value.pinned; }, false, true);
-  if (props.standalone) await applyWindowMode(paper.value.collapsed);
-}
-
-async function dock(edge: 'left' | 'right'): Promise<void> {
-  await dockCapsule(edge);
+  if (props.standalone) await setPaperWindowPinned(paper.value.id, paper.value.pinned);
 }
 
 async function confirmDeletePaper(): Promise<void> {
-  if (!paper.value) return;
+  if (!paper.value || deletingPaper.value) return;
   const id = paper.value.id;
-  deleteConfirmationOpen.value = false;
-  await store.removePaper(id);
-  emit('deleted', id);
+  deletingPaper.value = true;
+  try {
+    await store.removePaper(id);
+    if (store.state.value.papers.some((candidate) => candidate.id === id)) return;
+    deleteConfirmationOpen.value = false;
+    emit('deleted', id);
+  } finally {
+    deletingPaper.value = false;
+  }
 }
 
 async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promise<void> {
@@ -714,59 +610,12 @@ async function startWindowDrag(event: MouseEvent, explicitHandle = false): Promi
   if (!explicitHandle && target.closest('button,input,textarea,select,a')) return;
   try {
     await getCurrentWindow().startDragging();
-    if (paper.value?.collapsed && settings.value.autoDockCapsules) {
-      await dockCapsule('nearest');
-    }
   } catch (reason) {
     store.error.value = String(reason);
   }
 }
 
-/**
- * The capsule has one press gesture: drag it to move, or press and release
- * without moving to open the paper. Buttons inside it keep their own clicks.
- */
-async function startCapsuleDrag(event: MouseEvent): Promise<void> {
-  const current = paper.value;
-  if (!current || !props.standalone || event.button !== 0) return;
-  if ((event.target as HTMLElement).closest('button')) return;
-  cancelPeekTimer();
-  const capsuleWindow = getCurrentWindow();
-  try {
-    const origin = await capsuleWindow.outerPosition();
-    // `startDragging` resolves when the OS drag loop ends, so the position
-    // afterwards tells us whether this press was a move or a plain click.
-    await capsuleWindow.startDragging();
-    const landed = await capsuleWindow.outerPosition();
-    if (Math.abs(landed.x - origin.x) < 3 && Math.abs(landed.y - origin.y) < 3) {
-      await applyWindowMode(false);
-      return;
-    }
-    peekedAway.value = false;
-    if (settings.value.autoDockCapsules) await dockCapsule('nearest');
-    schedulePeekAway();
-  } catch (reason) {
-    store.error.value = String(reason);
-  }
-}
-
-// Turning auto-hide off must not strand a capsule that is already resting off
-// screen: it has no visible surface left to grab, so bring it back immediately.
-watch(canAutoHideCapsule, (enabled) => {
-  const current = paper.value;
-  if (enabled || !peekedAway.value || !current) return;
-  cancelPeekTimer();
-  peekedAway.value = false;
-  store.suspendGeometryTracking(400);
-  setPaperEdgePeek(
-    current.id,
-    current.geometry.dockEdge ?? 'nearest',
-    false,
-    settings.value.animations,
-  ).catch((reason) => { store.error.value = String(reason); });
-});
-
-/** Save explicitly with Ctrl+S; Escape folds an expanded desktop paper away. */
+/** Save explicitly with Ctrl+S; Escape returns a desktop paper to the launcher. */
 function onWindowKeydown(event: KeyboardEvent): void {
   if (!props.standalone) return;
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's') {
@@ -780,8 +629,9 @@ function onWindowKeydown(event: KeyboardEvent): void {
     closeOverflowMenu(true);
     return;
   }
-  if (!paper.value || paper.value.collapsed || !settings.value.capsuleMode) return;
-  void applyWindowMode(true);
+  if (!paper.value) return;
+  event.preventDefault();
+  void minimizeToLauncher();
 }
 
 function onSystemThemeChange(event: MediaQueryListEvent): void {
@@ -789,15 +639,12 @@ function onSystemThemeChange(event: MediaQueryListEvent): void {
 }
 
 onMounted(() => {
-  // A paper restored as a capsule should settle against its edge on its own.
-  if (isCapsule.value) schedulePeekAway(1_400);
   if (props.standalone) window.addEventListener('keydown', onWindowKeydown);
   document.addEventListener('pointerdown', onDocumentPointerDown);
   systemThemeQuery?.addEventListener('change', onSystemThemeChange);
 });
 
 onBeforeUnmount(() => {
-  cancelPeekTimer();
   stopOutlineResize();
   window.removeEventListener('keydown', onWindowKeydown);
   document.removeEventListener('pointerdown', onDocumentPointerDown);
@@ -806,58 +653,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div
-    v-if="paper && isCapsule"
-    class="paper-capsule"
-    :class="[
-      paletteClass,
-      capsuleDockSide === 'left' ? 'is-docked-left' : 'is-docked-right',
-      !settings.animations && 'paper-no-motion',
-    ]"
-    :style="capsuleStyle"
-    :title="tip('paperTodo.capsuleHint')"
-    @mouseenter="onCapsuleEnter"
-    @mouseleave="onCapsuleLeave"
-    @mousedown="startCapsuleDrag"
-    @dblclick.prevent="applyWindowMode(false)"
-    @contextmenu.prevent
-  >
-    <span class="paper-capsule-spine" aria-hidden="true">
-      <span class="paper-capsule-spine-fill" :style="{ height: `${Math.round(capsuleFill * 100)}%` }"></span>
-    </span>
-    <component
-      :is="paper.kind === 'todo' ? StickyNote : FileText"
-      class="paper-capsule-icon"
-      aria-hidden="true"
-    />
-    <span class="paper-capsule-title" :class="[capsuleTextClass, settings.capsuleBold && 'font-bold']">
-      {{ paper.title }}
-    </span>
-    <span v-if="capsuleMeta" class="paper-capsule-meta">{{ capsuleMeta }}</span>
-    <span class="paper-capsule-actions">
-      <button
-        type="button"
-        class="paper-capsule-action"
-        :title="tip('paperTodo.expand')"
-        :aria-label="t('paperTodo.openCapsule', { title: paper.title })"
-        @click.stop="applyWindowMode(false)"
-      >
-        <ChevronDown class="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        class="paper-capsule-action"
-        :title="tip('paperTodo.close')"
-        :aria-label="t('paperTodo.close')"
-        @click.stop="closeDesktop"
-      >
-        <X class="h-3.5 w-3.5" />
-      </button>
-    </span>
-  </div>
-
   <section
-    v-else-if="paper"
+    v-if="paper"
     class="paper-surface relative flex min-h-0 flex-col overflow-hidden"
     :class="[
       paletteClass,
@@ -953,19 +750,16 @@ onBeforeUnmount(() => {
           <button v-if="isScript" type="button" role="menuitem" @click="closeOverflowMenu(); openScriptConfirmation()"><Play class="h-4 w-4" />{{ t('paperTodo.runScript') }}</button>
           <button v-if="paper.kind === 'note' && paperSkin !== 'desk'" type="button" role="menuitem" @click="compactToolbarVisible = !compactToolbarVisible; closeOverflowMenu()"><Bold class="h-4 w-4" />{{ t(compactToolbarVisible ? 'paperTodo.hideToolbar' : 'paperTodo.showToolbar') }}</button>
           <button v-if="paper.kind === 'note' && paperSkin === 'grain'" type="button" role="menuitem" @click="previewMode = 'split'; closeOverflowMenu()"><PanelLeftClose class="h-4 w-4" />{{ t('paperTodo.split') }}</button>
-          <button v-if="standalone && settings.autoDockCapsules" type="button" role="menuitem" @click="closeOverflowMenu(); dock('left')"><PanelLeftClose class="h-4 w-4" />{{ t('paperTodo.dockLeft') }}</button>
-          <button v-if="standalone && settings.autoDockCapsules" type="button" role="menuitem" @click="closeOverflowMenu(); dock('right')"><PanelRightClose class="h-4 w-4" />{{ t('paperTodo.dockRight') }}</button>
           <button v-if="paper.kind === 'todo'" type="button" role="menuitem" :disabled="!store.canUndo(paper.id)" @click="closeOverflowMenu(); store.undoPaper(paper.id)"><Undo2 class="h-4 w-4" />{{ t('paperTodo.undo') }}</button>
           <button v-if="paper.kind === 'todo'" type="button" role="menuitem" :disabled="!store.canRedo(paper.id)" @click="closeOverflowMenu(); store.redoPaper(paper.id)"><Redo2 class="h-4 w-4" />{{ t('paperTodo.redo') }}</button>
           <button v-if="paper.kind === 'todo'" type="button" role="menuitem" :disabled="!completedCount" @click="closeOverflowMenu(); clearCompleted()"><RotateCcw class="h-4 w-4" />{{ t('paperTodo.clearCompleted') }}</button>
-          <button type="button" role="menuitem" class="is-danger" @click="closeOverflowMenu(); openDeleteConfirmation()"><Trash2 class="h-4 w-4" />{{ t('paperTodo.deletePaper') }}</button>
         </div>
       </div>
-      <button v-if="settings.capsuleMode" class="paper-icon-button" type="button" :title="tip('paperTodo.collapse')" :aria-label="t('paperTodo.collapse')" @click="applyWindowMode(true)">
-        <ChevronUp class="h-4 w-4" />
+      <button v-if="standalone" class="paper-icon-button text-rose-600" type="button" :title="tip('paperTodo.deletePaper')" :aria-label="t('paperTodo.deletePaper')" @click="openDeleteConfirmation">
+        <Trash2 class="h-4 w-4" />
       </button>
-      <button v-if="standalone" class="paper-icon-button" type="button" :title="tip('paperTodo.close')" :aria-label="t('paperTodo.close')" @click="closeDesktop">
-        <X class="h-4 w-4" />
+      <button v-if="standalone" class="paper-icon-button" type="button" :title="tip('paperTodo.minimizeToLauncher')" :aria-label="t('paperTodo.minimizeToLauncher')" @click="minimizeToLauncher">
+        <Minus class="h-4 w-4" />
       </button>
     </header>
 
@@ -1102,7 +896,6 @@ onBeforeUnmount(() => {
           <button class="paper-desk-history-button" type="button" :disabled="!store.canUndo(paper.id)" @click="store.undoPaper(paper.id)"><Undo2 class="h-3 w-3" />{{ t('paperTodo.undo') }}</button>
           <button class="paper-desk-history-button" type="button" :disabled="!store.canRedo(paper.id)" @click="store.redoPaper(paper.id)"><Redo2 class="h-3 w-3" />{{ t('paperTodo.redo') }}</button>
           <button class="paper-icon-button paper-footer-icon" type="button" :disabled="!completedCount" :title="tip('paperTodo.clearCompleted')" :aria-label="t('paperTodo.clearCompleted')" @click="clearCompleted"><RotateCcw class="h-4 w-4" /></button>
-          <button class="paper-icon-button paper-footer-icon text-rose-600" type="button" :title="tip('paperTodo.deletePaper')" :aria-label="t('paperTodo.deletePaper')" @click="openDeleteConfirmation"><Trash2 class="h-4 w-4" /></button>
         </footer>
     </div>
 
@@ -1166,9 +959,6 @@ onBeforeUnmount(() => {
             <button type="button" :class="previewMode === 'preview' && 'is-active'" @click="previewMode = 'preview'">{{ t('paperTodo.preview') }}</button>
             <button type="button" :title="tip('paperTodo.resetZoom')" :aria-label="t('paperTodo.resetZoom')" @click="update(value => { value.zoom = 100; }, false, true)">{{ paper.zoom }}%</button>
           </div>
-          <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="tip('paperTodo.dockLeft')" :aria-label="t('paperTodo.dockLeft')" @click="dock('left')"><PanelLeftClose class="h-4 w-4" /></button>
-          <button v-if="standalone && settings.autoDockCapsules" class="paper-icon-button" type="button" :title="tip('paperTodo.dockRight')" :aria-label="t('paperTodo.dockRight')" @click="dock('right')"><PanelRightClose class="h-4 w-4" /></button>
-          <button class="paper-icon-button text-rose-600" type="button" :title="tip('paperTodo.deletePaper')" :aria-label="t('paperTodo.deletePaper')" @click="openDeleteConfirmation"><Trash2 class="h-4 w-4" /></button>
         </footer>
     </div>
 
@@ -1181,12 +971,14 @@ onBeforeUnmount(() => {
       tabindex="-1"
       :aria-label="t('paperTodo.deletePaper')"
       @keydown.esc.stop="deleteConfirmationOpen = false"
+      @keydown.tab="trapDeleteDialogFocus"
     >
       <div class="w-full max-w-72 rounded-md border border-current/15 bg-white p-4 text-slate-800 shadow-xl dark:bg-zinc-900 dark:text-zinc-100">
-        <p class="text-sm leading-6">{{ t('paperTodo.confirmDeletePaper') }}</p>
-        <div class="mt-4 flex justify-end gap-2">
-          <button type="button" class="paper-confirm-button" autofocus @click="deleteConfirmationOpen = false">{{ t('common.cancel') }}</button>
-          <button type="button" class="paper-confirm-button border-rose-300 text-rose-700 hover:bg-rose-50 dark:text-rose-300" @click="confirmDeletePaper">{{ t('paperTodo.deletePaper') }}</button>
+          <p class="text-sm leading-6">{{ t('paperTodo.confirmDeletePaper', { title: paper.title }) }}</p>
+          <p v-if="store.error.value" class="mt-2 text-xs leading-5 text-rose-600" role="alert">{{ store.error.value }}</p>
+          <div class="mt-4 flex justify-end gap-2">
+          <button type="button" class="paper-confirm-button" :disabled="deletingPaper" autofocus @click="deleteConfirmationOpen = false">{{ t('common.cancel') }}</button>
+          <button type="button" class="paper-confirm-button border-rose-300 text-rose-700 hover:bg-rose-50 disabled:cursor-default disabled:opacity-50 dark:text-rose-300" :disabled="deletingPaper" @click="confirmDeletePaper">{{ deletingPaper ? t('common.loading') : t('paperTodo.deletePaper') }}</button>
         </div>
       </div>
     </div>
@@ -1517,113 +1309,6 @@ onBeforeUnmount(() => {
 .paper-skin-desk .paper-note-editor,
 .paper-skin-desk .paper-note-preview { padding: 10px; }
 
-/*
- * The capsule reads as a sheet of paper resting on its edge rather than a
- * shrunken window. Its one deliberate flourish is the spine: the palette-inked
- * bar along the docked side. The spine is the binding of the paper, the
- * progress meter (filled by completed items), and — because auto-hide slides
- * the pill off the display until only this bar shows — the handle you grab to
- * bring it back. One element, three jobs, so nothing else needs decorating.
- */
-.paper-capsule {
-  position: relative;
-  display: flex;
-  width: 100%;
-  height: 100%;
-  align-items: center;
-  gap: 7px;
-  overflow: hidden;
-  border-width: 1px;
-  border-style: solid;
-  border-radius: 999px;
-  box-shadow: 0 2px 6px rgb(15 23 42 / 0.2);
-  cursor: grab;
-  user-select: none;
-}
-.paper-capsule:active { cursor: grabbing; }
-.paper-capsule.is-docked-left { padding: 0 13px 0 16px; }
-.paper-capsule.is-docked-right { padding: 0 16px 0 13px; }
-.paper-capsule-spine {
-  position: absolute;
-  top: 5px;
-  bottom: 5px;
-  display: flex;
-  width: 3px;
-  flex-direction: column;
-  justify-content: flex-end;
-  overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--paper-capsule-accent) 24%, transparent);
-}
-/* Stays within the sliver the window leaves on screen while parked. */
-.is-docked-left .paper-capsule-spine { left: 5px; }
-.is-docked-right .paper-capsule-spine { right: 5px; }
-.paper-capsule-spine-fill {
-  width: 100%;
-  border-radius: 999px;
-  background: var(--paper-capsule-accent);
-  transition: height 240ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.paper-capsule-icon {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
-  opacity: 0.5;
-}
-.paper-capsule-title {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  letter-spacing: 0.01em;
-}
-.paper-capsule-meta {
-  flex: 0 0 auto;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  opacity: 0.48;
-  transition: opacity 150ms ease;
-}
-/* Actions overlay the count instead of displacing it, so the resting capsule
-   never reflows when the pointer arrives. */
-.paper-capsule-actions {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 150ms ease;
-}
-.is-docked-left .paper-capsule-actions { right: 9px; }
-.is-docked-right .paper-capsule-actions { right: 12px; }
-.paper-capsule:hover .paper-capsule-meta,
-.paper-capsule:focus-within .paper-capsule-meta { opacity: 0; }
-.paper-capsule:hover .paper-capsule-actions,
-.paper-capsule:focus-within .paper-capsule-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-.paper-capsule-action {
-  display: inline-flex;
-  width: 20px;
-  height: 20px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  cursor: pointer;
-  opacity: 0.62;
-  transition: background-color 140ms ease, opacity 140ms ease;
-}
-.paper-capsule-action:hover { background: rgb(100 116 139 / 0.2); opacity: 1; }
-.paper-capsule-action:focus-visible {
-  outline: 2px solid rgb(14 165 233 / 0.6);
-  outline-offset: 1px;
-  opacity: 1;
-}
 /* "Animations off" is a setting, not just an OS preference. */
 .paper-no-motion,
 .paper-no-motion :deep(*) {
@@ -1689,10 +1374,6 @@ onBeforeUnmount(() => {
 .paper-confirm-button:hover { background: rgb(248 250 252 / 0.85); }
 .paper-confirm-button:focus-visible { outline: 2px solid rgb(14 165 233 / 0.55); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
-  .paper-icon-button,
-  .paper-capsule-action,
-  .paper-capsule-meta,
-  .paper-capsule-actions,
-  .paper-capsule-spine-fill { transition: none; }
+  .paper-icon-button { transition: none; }
 }
 </style>

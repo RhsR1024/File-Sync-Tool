@@ -4320,7 +4320,7 @@ fn main() {
                 .text(TRAY_SHOW_ID, "显示主窗口")
                 .text(TRAY_CLIPBOARD_PANEL_ID, "Clipboard Panel")
                 .separator()
-                .text(TRAY_PAPER_TODO_ID, "PaperTodo便签")
+                .text(TRAY_PAPER_TODO_ID, "PaperTodo 便签")
                 .text(TRAY_NEW_TODO_ID, "新建待办纸")
                 .text(TRAY_NEW_NOTE_ID, "新建笔记纸")
                 .separator()
@@ -4338,7 +4338,7 @@ fn main() {
                         let _ = clipboard::commands::cb_toggle_panel_internal(app.clone());
                     }
                     TRAY_PAPER_TODO_ID => {
-                        show_main_window(app, "托盘菜单「PaperTodo便签」");
+                        show_main_window(app, "托盘菜单「PaperTodo 便签」");
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.eval("window.location.hash = '#/tools/paper-todo'");
                         }
@@ -4547,9 +4547,7 @@ fn main() {
             paper_todo::paper_todo_set_launcher_expanded,
             paper_todo::paper_todo_drag_launcher,
             paper_todo::paper_todo_open_settings,
-            paper_todo::paper_todo_set_window_mode,
-            paper_todo::paper_todo_dock_window,
-            paper_todo::paper_todo_set_edge_peek,
+            paper_todo::paper_todo_set_window_pinned,
             paper_todo::paper_todo_set_all_windows,
             paper_todo::paper_todo_import_image,
             paper_todo::paper_todo_resolve_assets,

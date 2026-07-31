@@ -44,20 +44,11 @@ const MINIMUM_INDEPENDENT_DEVICES = 20;
 const MINIMUM_FANOUT_DURATION_MINUTES = 30;
 const MAXIMUM_STATE_RECLAIM_SECONDS = 3;
 /** §7.4: the transports that must be compared under the same conditions. */
-const REQUIRED_TRANSPORT_CANDIDATES = ['mse_h264', 'web_codecs', 'web_rtc'];
+const REQUIRED_TRANSPORT_CANDIDATES = ['mse_h264', 'web_rtc'];
 const REQUIRED_TRANSPORT_METRICS = [
   'capture_to_display_ms',
   'input_to_visible_response_ms',
   'recovery_after_impairment_ms',
-];
-/** §7.1/§7.3: transports that cannot run without a trusted secure context. */
-const SECURE_CONTEXT_TRANSPORTS = new Set(['web_codecs']);
-const SECURE_CONTEXT_CHECKS = [
-  'https_terminated',
-  'certificate_trusted',
-  'certificate_rotation_tested',
-  'browser_profile_clear_tested',
-  'dhcp_ip_change_tested',
 ];
 /** §7.4/§3.3: loss and jitter injection are both required. */
 const REQUIRED_IMPAIRMENT_KINDS = ['loss', 'jitter'];
@@ -322,23 +313,6 @@ function assessManagedBrowserExternalMedia(report) {
   const peer = report.external_peer;
   if (!isRecord(peer) || peer.independent_host !== true || !nonEmptyString(peer.network_segment)) {
     issues.push(issue('managed_external_peer_missing', 'external_peer requires independent_host=true and network_segment'));
-  }
-
-  const secure = report.secure_context;
-  if (!isRecord(secure)) {
-    issues.push(issue('managed_secure_context_missing', 'secure_context evidence is required'));
-  } else {
-    const needsSecureContext = transports.some((transport) => SECURE_CONTEXT_TRANSPORTS.has(transport));
-    for (const field of SECURE_CONTEXT_CHECKS) {
-      if (typeof secure[field] !== 'boolean') {
-        issues.push(issue('managed_secure_context_field_missing', `secure_context.${field} must be an explicit boolean`));
-      } else if (needsSecureContext && secure[field] !== true) {
-        issues.push(issue(
-          'managed_secure_context_unverified',
-          `secure_context.${field} must be true for ${[...SECURE_CONTEXT_TRANSPORTS].join('/')}`,
-        ));
-      }
-    }
   }
 
   return { issues, checks: { managed_browser_count: managed.length, transports } };

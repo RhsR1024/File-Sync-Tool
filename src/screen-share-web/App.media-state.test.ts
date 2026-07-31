@@ -38,11 +38,17 @@ describe('screen share viewer media visibility', () => {
     // host would keep a phantom MJPEG consumer and run the JPEG encoder for the
     // whole session on top of H.264. Clearing `src` is the actual abort.
     expect(appSource).toMatch(/function stopMjpegStream\(\)\s*\{[\s\S]*?mjpegConnected\.value = false;[\s\S]*?imageReady\.value = false;[\s\S]*?screenImage\.value\?\.removeAttribute\('src'\);/);
-    for (const handler of ['handleH264PlayerState', 'handleWebCodecsPlayerState', 'handleWebRtcPlayerState']) {
+    for (const handler of ['handleH264PlayerState', 'handleWebRtcPlayerState']) {
       const body = appSource.slice(appSource.indexOf(`function ${handler}(`));
       const readyBranch = body.slice(0, body.indexOf('nextTick(updateGeometry);'));
       expect(readyBranch, handler).toContain('stopMjpegStream();');
     }
+  });
+
+  it('does not ship the HTTPS-only WebCodecs player', () => {
+    expect(appSource).not.toContain('WebCodecsH264Player');
+    expect(appSource).not.toContain("transport === 'web_codecs'");
+    expect(appSource).not.toContain('screenCanvas');
   });
 
   it('forwards DOM pointer timestamps to the session transport', () => {
