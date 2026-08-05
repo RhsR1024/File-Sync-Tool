@@ -1,0 +1,40 @@
+{
+  "Reference": "192.167.0.112:80/Subscription/Subscribers/6",
+  "TimeStamp": 1618471363,
+  "Seq": 139154,
+  "SrcID": 1,
+  "SrcName": " ",
+  "NotificationType": 0,
+  "RelatedID": "",
+  "StructureInfo": {
+    "ObjInfo": {
+      "FaceNum": 0,
+      "FaceInfoList": [],
+      "PersonNum": 0,
+      "PersonInfoList": [],
+      "NonMotorVehicleNum": 0,
+      "NonMotorVehicleInfoList": [],
+      "VehicleNum": 1,
+      "VehicleInfoList": [{
+        "ID": 36892,
+        "Position": "6864,4148;9666,7870",
+        "SmallPicAttachIndex": 2,
+        "LargePicAttachIndex": 1,
+        "PlatePicAttachIndex": 3,
+        "FeatureVersion": "",
+        "Feature": "",
+        "RuleInfo": {},
+        "VehicleAttributeInfo": { "Type": 11, "Color": 13, "SpeedUnit": 0, "SpeedValue": 0, "SpeedType": 4, "VehicleBrand": "F3", "ImageDirection": 2 },
+        "PlateAttributeInfo": { "PlateNo": "TEST-001", "Color": 4, "Type": 1 },
+        "PersonOnVehicleNum": 0,
+        "PersonOnVehicleInfoList": []
+      }]
+    },
+    "ImageNum": 3,
+    "ImageInfoList": [
+      { "Index": 1, "Type": 23, "Format": "1", "Width": 1920, "Height": 1080, "CaptureTime": "20210415202257135", "Size": 809828, "Data": "", "URL": "/LAPI/V1.0/System/Picture?Type=23&Index=\\pic\\STRUCT\\normal\\car&Size=317132" },
+      { "Index": 2, "Type": 13, "Format": "1", "Width": 1280, "Height": 720, "CaptureTime": "20210415202257135", "Size": 504020, "Data": "", "URL": "/LAPI/V1.0/System/Picture?Type=13&Index=\\pic\\STRUCT\\normal\\car&Size=317132" },
+      { "Index": 3, "Type": 2, "Format": "1", "Width": 512, "Height": 256, "CaptureTime": "20210415202257135", "Size": 31376, "Data": "", "URL": "/LAPI/V1.0/System/Picture?Type=2&Index=\\pic\\STRUCT\\normal\\car&Size=317132" }
+    ]
+  }
+}

@@ -1,0 +1,39 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/0/Alarm/Capabilities",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"MotionDetection":	{
+		"IsSupportCfg":	1,
+		"RectangleAreaNum":	4,
+		"BlockWidth":	22,
+		"BlockHeight":	18
+	},
+	"TamperDetection":	{
+		"IsSupportCfg":	1,
+		"TamperRectangleAreaNum":	1
+	},
+	"AudioDetection":	{
+		"SupportCfg":	1
+	},
+	"HumanShapeDetection":	{
+		"SupportCfg":	0,
+		"RectangleAreaNum":	0
+	},
+	"ConflagrationDetection":	{
+		"IsSupportCfg":	0
+	},
+	"TemperatureDetection":	{
+		"SupportTypeNum":	0,
+		"TypeList":	[],
+		"SupportUnitNum":	0,
+		"UnitList":	[]
+	}
+}
+	}
+}

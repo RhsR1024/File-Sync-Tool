@@ -1,0 +1,20 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Smart/FaceRecognition/Feature/Extraction",
+	"CreatedID": -1,
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"FeatureNum":	1,
+	"FeatureList":	[{
+			"ResultCode":	0,
+			"Manufacturer":	"Uniview",
+			"FeatureVersion":	"10041721",
+			"Feature":	"d4oYvQ9VLjwCzp+9ixGnPdW/Ar0jpQ0+zL+CPFwDij2w6JS90r+CPeot4T3Hb6O9reiUPV/q2bwAAAAA07+CvdK/Aj3rRpG96i3hPShVLrzyRpG8Fjx+PZlI1r3Yv4K8AAAAAEVjSzyOESe9enHoOzbcvLxf6lm9WepZPaSYtb0VVS49E60+vlFjy7yJ+PY8B3YPvon49jyt6JQ96XDoOrDP5L0Bzp89X+rZPJhhBr4PVS48YnFoPKpx6LpIY0u9sOiUvVzq2T1icWg8Ac6fvFKzqj1FY0u87EYRvV/q2TxFY0s8MNy8vQAAAAB0ceg907+CveZGkTw8LJy96UaRPVOzqr0EtW+9D1UuPAsFzz2P+Pa8D1UuPNK/gj16cei72kYRPAG1bz0bVS698kYRvPJGkbzsRhG9YnFoPMRvoz1Ss6o9vB/EvY/49rx0cWg9g8HHvZhhBr5FY0s8zL+CPEpxaDticWg8BLVvvdpGETyP+Pa9FVUuPQHOn7zyRhG8NoQsvkpxaDt6ceg7d3FovQS1b71Smvo95kYRPY4Rp73UptK9ppg1vTbcvLx6cei8enHouwLOn71f6tm8VJr6vaaYNb0jpY09SGNLvYsRpz13cWi9PCycvdK/Aj1FY8s8Ldy8PQ9VLjzyRhG8enHovI/49rxFY8s8GFWuvdpGETx0ihg9Nty8vG5x6DyIESc9dHFoPTbcvLx6cWi8mGGGPV8Dir1fA4q9j/j2vNpGETzMv4I8AbVvPbaQBL4Dte+9Kty8PAHOnzx6cei7qkAlvl/qWb3Sv4I9aTq5PVKzqj3SvwI9078Cvg9VLjwCzp+91b8CvaOYNT26H8Q9d4oYvY/49rwEtW+9BM4fvRY8fj2ZSNY9Nty8vAS1b710ipg9GFWuvdW/Ar3mRhE9ixGnPZhhhj16cei8aTq5PV8Dir13cWi9ppg1vVFjy7y6H8Q9tZAEPhtVLr3pcOg6U7OqvXpx6LvSptI9iBEnPdO/Ar4EtW+9WQMKPQ9VLjxKcWg78kYRvNO/gr0kjN29FVUuPVFjy7wEzh+92L+CvBY8fj3rRpG9QFWuu70fRL0PVa48Ac6fPAAAAADpcOg6enHoOxk8/j1rOrm9U7OqvUVjS7xicWg8DgXPvVFjy7wPVS483PaxPVFjy7ztLWG9enFovN/2sb16cei7tx9EPRhVrr2mmDW9MNw8vQAAAAC9H0S9d3FovRw8fr13ihi90r+CPdSm0r0PVa476i3hPexGEb0BtW89D1UuPKaYNb2t6JQ9D1UuPFwDij0w3Dy9zL+CPOlw6DocPH69FVUuPRY8fj1FY0s8X+rZvOZGET3SvwI9enHovI/49ryqcei6X+pZvQ=="
+		}]
+}
+	}
+}

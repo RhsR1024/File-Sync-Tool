@@ -1,0 +1,36 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/System/Devices/ResourcesCapabilities",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num": 1,
+	"List": [{
+	"ID": 1,
+	"Capabilities": {
+	"SupportedVideoChannelNums":	1,
+	"VideoChannelResourcesList":	[{
+			"VideoChannelID":	1,
+			"SupportImageChannel":	1,
+			"SupportIntelligentChannel":	1,
+			"SupportAudioChannel":	1,
+			"SupportAlarmChannel":	1,
+			"SupportPTZChannel":	1,
+			"VideoChannelAttributes":	{
+				"SpectralImagingType":	2,
+				"FunctionType":	0
+			}
+		}],
+	"SupportedIOInputChannelNums":	2,
+	"SupportedIOOutputChannelNums":	1,
+	"SupportedAudioInChannelNums":	1,
+	"SupportedAudioOutChannelNums":	1
+}
+}]
+}
+	}
+}

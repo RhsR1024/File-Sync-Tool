@@ -1,0 +1,15 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/0/Alarm/HumanShapeDetection/Areas",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num":	0,
+	"RectangleAreasList":	[]
+}
+	}
+}

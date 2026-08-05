@@ -1,0 +1,10 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Channels/0/Smart/Capabilities",
+		"ResponseCode":	1,
+		"ResponseString":	"Common Error",
+		"StatusCode":	1,
+		"Data":	{
+	}
+	}
+}

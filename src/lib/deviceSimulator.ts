@@ -70,6 +70,7 @@ export interface DeviceGroupDraft {
 /** Persisted application-domain settings. Worker/session credentials never belong here. */
 export interface DeviceSimulatorSettings {
   asset_server_url_override: string | null;
+  local_materials_directory: string | null;
   selected_interface_id: string | null;
   last_platform: DeviceSimulatorPlatform | null;
   last_start_ip: string | null;
@@ -170,7 +171,9 @@ export interface ProfileAlarmTypes {
 export interface MediaThemeSummary {
   id: string;
   display_name_key: string;
+  display_name?: string | null;
   is_default: boolean;
+  is_local?: boolean;
 }
 
 export interface AssetPackStatus {
@@ -402,6 +405,26 @@ export interface SimulatorLogEvent {
   message: string;
 }
 
+export interface RemoteMaterialSyncResult {
+  downloaded_files: number;
+  reused_files: number;
+  removed_files: number;
+  downloaded_bytes: number;
+  themes: MediaThemeSummary[];
+}
+
+export interface LocalMaterialMigrationResult {
+  settings: DeviceSimulatorSettings;
+  source_path: string;
+  target_path: string;
+  copied_files: number;
+  reused_files: number;
+  copied_bytes: number;
+  removed_files: number;
+  cleanup_completed: boolean;
+  cleanup_error: string | null;
+}
+
 export interface PlatformDeviceEntry {
   address: string;
   port: number;
@@ -433,10 +456,15 @@ export interface PlatformAddDevicesReport {
 export const DEVICE_SIMULATOR_COMMANDS = {
   getSettings: 'device_simulator_get_settings',
   saveSettings: 'device_simulator_save_settings',
+  migrateLocalMaterials: 'device_simulator_migrate_local_materials',
   listInterfaces: 'device_simulator_list_interfaces',
   listProfiles: 'device_simulator_list_profiles',
   listAlarmTypes: 'device_simulator_list_alarm_types',
   listMediaThemes: 'device_simulator_list_media_themes',
+  getLocalMaterialsPath: 'device_simulator_get_local_materials_path',
+  refreshLocalMaterials: 'device_simulator_refresh_local_materials',
+  syncRemoteMaterials: 'device_simulator_sync_remote_materials',
+  resetAndSyncRemoteMaterials: 'device_simulator_reset_and_sync_remote_materials',
   getAssetStatus: 'device_simulator_get_asset_status',
   prepareAssets: 'device_simulator_prepare_assets',
   cancelAssetDownload: 'device_simulator_cancel_asset_download',
@@ -483,10 +511,15 @@ export type DeviceSimulatorInvoke = <T>(
 export interface DeviceSimulatorApi {
   getSettings(): Promise<DeviceSimulatorSettings>;
   saveSettings(settings: DeviceSimulatorSettings): Promise<DeviceSimulatorSettings>;
+  migrateLocalMaterials(settings: DeviceSimulatorSettings): Promise<LocalMaterialMigrationResult>;
   listInterfaces(): Promise<SimulatorNetworkInterfaceInfo[]>;
   listProfiles(): Promise<DeviceProfileSummary[]>;
   listAlarmTypes(): Promise<ProfileAlarmTypes[]>;
   listMediaThemes(): Promise<MediaThemeSummary[]>;
+  getLocalMaterialsPath(): Promise<string>;
+  refreshLocalMaterials(): Promise<MediaThemeSummary[]>;
+  syncRemoteMaterials(): Promise<RemoteMaterialSyncResult>;
+  resetAndSyncRemoteMaterials(): Promise<RemoteMaterialSyncResult>;
   getAssetStatus(profileIds: string[]): Promise<AssetStatus>;
   prepareAssets(profileIds: string[]): Promise<string>;
   cancelAssetDownload(jobId: string): Promise<void>;
@@ -510,10 +543,18 @@ export function createDeviceSimulatorApi(invokeCommand: DeviceSimulatorInvoke): 
   return {
     getSettings: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getSettings),
     saveSettings: (settings) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.saveSettings, { settings }),
+    migrateLocalMaterials: (settings) => invokeCommand(
+      DEVICE_SIMULATOR_COMMANDS.migrateLocalMaterials,
+      { settings },
+    ),
     listInterfaces: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listInterfaces),
     listProfiles: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listProfiles),
     listAlarmTypes: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listAlarmTypes),
     listMediaThemes: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.listMediaThemes),
+    getLocalMaterialsPath: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getLocalMaterialsPath),
+    refreshLocalMaterials: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.refreshLocalMaterials),
+    syncRemoteMaterials: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.syncRemoteMaterials),
+    resetAndSyncRemoteMaterials: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.resetAndSyncRemoteMaterials),
     getAssetStatus: (profileIds) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getAssetStatus, { profileIds }),
     prepareAssets: (profileIds) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.prepareAssets, { profileIds }),
     cancelAssetDownload: (jobId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.cancelAssetDownload, { jobId }),

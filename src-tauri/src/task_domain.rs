@@ -200,14 +200,23 @@ pub struct TaskGroup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskState {
     pub version: u32,
+    /// Timestamp of the most recent successful persistence checkpoint.
+    ///
+    /// Active tasks use this as their interruption boundary after an unclean
+    /// shutdown so time spent with the application stopped is not counted.
+    #[serde(default)]
+    pub last_checkpoint_at: Option<String>,
     pub groups: Vec<TaskGroup>,
 }
 
 impl TaskState {
     pub fn mark_in_progress_as_interrupted(&mut self) {
-        let now = current_timestamp();
+        let interruption_at = self
+            .last_checkpoint_at
+            .clone()
+            .unwrap_or_else(current_timestamp);
         for group in &mut self.groups {
-            group.mark_in_progress_as_interrupted(&now);
+            group.mark_in_progress_as_interrupted(&interruption_at);
         }
     }
 
@@ -215,6 +224,7 @@ impl TaskState {
     pub fn sample_running() -> Self {
         Self {
             version: 1,
+            last_checkpoint_at: None,
             groups: vec![TaskGroup {
                 task_group_id: "group-1".to_string(),
                 merge_key: TaskMergeKey::new(
@@ -650,6 +660,26 @@ mod tests {
             state.groups[0].runs[0].deploy_attempts[0].status,
             AttemptStatus::Interrupted
         );
+    }
+
+    #[test]
+    fn interrupted_conversion_uses_last_checkpoint_instead_of_restart_time() {
+        let mut state = TaskState::sample_running();
+        state.last_checkpoint_at = Some("2026-04-02T12:00:45+08:00".to_string());
+
+        state.mark_in_progress_as_interrupted();
+
+        let group = &state.groups[0];
+        assert_eq!(
+            group.finished_at.as_deref(),
+            Some("2026-04-02T12:00:45+08:00")
+        );
+        assert_eq!(group.elapsed_seconds, 45);
+        assert_eq!(
+            group.runs[0].deploy_attempts[0].finished_at.as_deref(),
+            Some("2026-04-02T12:00:45+08:00")
+        );
+        assert_eq!(group.runs[0].deploy_attempts[0].elapsed_seconds, 35);
     }
 
     #[test]

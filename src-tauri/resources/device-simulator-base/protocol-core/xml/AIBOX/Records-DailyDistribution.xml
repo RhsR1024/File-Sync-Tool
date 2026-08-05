@@ -1,0 +1,12 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Channels/1/Media/Video/Streams/Records/DailyDistribution",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Nums":	31,
+			"DailyStatuses":	[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+		}
+	}
+}

@@ -1599,6 +1599,7 @@ export interface ScreenShareH264EncoderCandidateReport {
 }
 
 export interface ScreenShareStatus {
+  webrtc_available: boolean;
   is_active: boolean;
   viewer_count: number;
   viewer_ip_reference_count: number;

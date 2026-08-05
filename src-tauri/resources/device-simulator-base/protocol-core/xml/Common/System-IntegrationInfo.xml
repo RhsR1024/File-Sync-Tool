@@ -1,0 +1,32 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/System/IntegrationInfo",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"ManufacturerInfo":	{
+		"Name":	0,
+		"Type":	0
+	},
+	"DeviceType":	0,
+	"FirmwareVersion":	"QIPC-B6501.6.3.230814",
+	"Num":	3,
+	"SDKInfoList":	[{
+			"Type":	"SDK3",
+			"Version":	"1.9.0"
+		}, {
+			"Type":	"",
+			"Version":	"1.0.0"
+		}, {
+			"Type":	"SDK1",
+			"Version":	"1.0.0"
+		}],
+	"SupportFaceRecognition":	0,
+	"SupportVehicleRecognition":	0
+}
+	}
+}

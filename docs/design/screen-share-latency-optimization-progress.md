@@ -177,6 +177,7 @@ Intel/NVIDIA/AMD、1080p/4K、真实颜色与缩放、锁屏/恢复、分辨率�
 ### 7.2 receive-only WebRTC
 
 - 可选 feature：`screen-share-webrtc-prototype`；默认构建未开启时，选择该传输会在启动阶段明确失败。
+- 当前正式裸 EXE 为控制约 7–8 MiB 的依赖增量而默认不编译该 feature，桌面界面通过后端编译能力自动隐藏 WebRTC；代码、测试和显式 feature 均保留，待 H.264/MSE 60 FPS 实测收益不足时可重新开启。
 - 不配置 STUN/TURN，仅 host candidate；复用单份 H.264 AU，转换为 Annex-B/RTP，不重复编码。
 - 支持 NACK/PLI/FIR 并接入全局 IDR gate；显式注册 sender TWCC interceptor 并统计反馈；offer 复用 Cookie/preview 鉴权与全局 40 viewer/IP lease。
 - capture sequence 缺口通过空 sample 只推进 packetizer timestamp、不发空 RTP 包；依赖行为已有单测锁定，避免丢帧后时间轴被压缩。

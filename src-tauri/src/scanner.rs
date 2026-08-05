@@ -86,7 +86,7 @@ fn emit_scan_queued<R: tauri::Runtime>(
     task_group_id: &str,
     run_id: &str,
 ) {
-    let _ = app_handle.emit(
+    if let Err(error) = app_handle.emit(
         "scan-queued",
         ScanQueuedEvent {
             folder: folder.to_string(),
@@ -95,7 +95,9 @@ fn emit_scan_queued<R: tauri::Runtime>(
             task_group_id: task_group_id.to_string(),
             run_id: run_id.to_string(),
         },
-    );
+    ) {
+        log::warn!("[sync-notification] failed to emit scan-queued event: {error}");
+    }
 }
 
 #[derive(Debug)]

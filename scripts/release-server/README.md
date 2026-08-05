@@ -140,16 +140,17 @@ http://192.168.1.20:8080/notepad-plugins/catalog-v1.json
 
 ## 视频设备模拟器素材目录
 
-开发服务器也可托管测试、学习用途的视频设备模拟器素材；它只负责静态文件传输，不负责生成、签名或修改素材。生产静态服务器应发布由 `scripts/device-simulator-assets/asset-release.mjs` 完整校验的不可变 ZIP、Catalog 和分离签名，并按“ZIP 与签名先就绪，Catalog 最后原子替换”的顺序上线。
+升级服务器还会分发视频设备模拟器的松散素材。openEuler/Linux 发布机通过同级的 `prepare-device-simulator-materials.sh` 调用 Python 3 和 FFmpeg，将源 MP4 一次性转换为客户端可直接读取的 H.264 与帧索引。
 
 ```text
 <服务器根目录>/
+|-- prepare-device-simulator-materials.sh
+|-- prepare-device-simulator-materials.py
 `-- virtual-device-assets/
-    |-- catalog-v1.json
-    |-- catalog-v1.json.sig
-    `-- packs/<pack-id>/<version>/<pack-id>-<version>.zip
+    |-- source-videos/*.mp4
+    |-- prepared-videos/prepared-catalog.json
+    |-- prepared-videos/media/themes/...
+    `-- alarm-images/<category>/<category-NNN>/<role>.{jpg,jpeg,png}
 ```
 
-素材已获准用于测试、学习、复制和打包，禁止商业使用；目录结构、缓存头、密钥边界和发布步骤见 [视频设备模拟器素材目录说明](./virtual-device-assets/README.md)。仓库和服务器目录均不得存放私钥。
-
-当前版本的具体文件清单、Profile 最小依赖、客户端实际请求 URL 和上线验收步骤见 [视频设备模拟器素材部署指南](./virtual-device-assets/DEPLOYMENT_GUIDE.md)。
+客户端只下载 `prepared-videos` 和 `alarm-images`，不下载源 MP4，也不需要 FFmpeg。素材分发不使用签名、素材版本号或 ZIP；SHA-256 仅用于精确缓存复用。具体操作见 [视频设备模拟器素材部署指南](./virtual-device-assets/DEPLOYMENT_GUIDE.md)。

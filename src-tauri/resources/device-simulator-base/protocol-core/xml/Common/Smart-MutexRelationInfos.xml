@@ -1,0 +1,36 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/0/Smart/MutexRelationInfos",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num":	7,
+	"CompatibleRelations":	[{
+			"Num":	14,
+			"IDs":	[100, 101, 102, 103, 104, 105, 106, 200, 201, 202, 203, 204, 205, 206]
+		}, {
+			"Num":	1,
+			"IDs":	[3]
+		}, {
+			"Num":	1,
+			"IDs":	[0]
+		}, {
+			"Num":	1,
+			"IDs":	[1]
+		}, {
+			"Num":	1,
+			"IDs":	[2]
+		}, {
+			"Num":	1,
+			"IDs":	[4]
+		}, {
+			"Num":	0,
+			"IDs":	[]
+		}]
+}
+	}
+}

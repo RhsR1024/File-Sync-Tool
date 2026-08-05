@@ -123,6 +123,7 @@ pub enum WorkerCommandName {
 #[serde(deny_unknown_fields)]
 pub struct InitializeSessionPayload {
     pub app_data_dir: PathBuf,
+    pub local_materials_root: PathBuf,
     pub request: SimulatorStartRequest,
     pub preview: DevicePreview,
     pub pinned_packs: Vec<PinnedPackDirectory>,

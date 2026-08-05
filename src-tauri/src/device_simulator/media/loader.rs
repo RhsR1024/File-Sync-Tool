@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
-    fmt, fs,
-    io::Read,
+    fmt,
+    fs::{self, File},
+    io::{BufReader, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -17,7 +18,10 @@ use super::manifest::{
     MIN_DYNAMIC_PAYLOAD_TYPE, MIN_RECOMMENDED_BITRATE_BPS, VIDEO_CLOCK_RATE,
 };
 
-const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+// Long local recordings carry one compact JSON entry per encoded frame.  The
+// media itself is streamed from disk, so allowing a larger bounded index does
+// not pull the recording into memory.
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_BITRATE_RATIO: u64 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +64,8 @@ pub struct SharedMediaFrame {
 #[derive(Debug)]
 pub struct SharedMediaPack {
     manifest: Arc<MediaManifestV1>,
-    bytes: Arc<[u8]>,
+    media_file: Arc<File>,
+    media_file_size: u64,
     frames: Arc<[SharedMediaFrame]>,
     actual_bitrate_bps: u64,
 }
@@ -68,14 +73,6 @@ pub struct SharedMediaPack {
 impl SharedMediaPack {
     pub fn manifest(&self) -> &MediaManifestV1 {
         &self.manifest
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn shared_bytes(&self) -> Arc<[u8]> {
-        Arc::clone(&self.bytes)
     }
 
     pub fn frames(&self) -> &[SharedMediaFrame] {
@@ -86,27 +83,54 @@ impl SharedMediaPack {
         self.actual_bitrate_bps
     }
 
-    pub fn nal_bytes(&self, nal: &SharedMediaNal) -> Option<&[u8]> {
-        let end = nal.offset.checked_add(nal.length)?;
-        self.bytes.get(nal.offset..end)
+    pub fn media_file_size(&self) -> u64 {
+        self.media_file_size
     }
 
-    pub fn parameter_set(&self, kind: ParameterSetKind) -> Option<&[u8]> {
+    pub fn read_frame_nals(
+        &self,
+        frame_index: usize,
+    ) -> Result<(bool, Vec<Vec<u8>>), MediaPackError> {
+        let frame = self.frames.get(frame_index).ok_or_else(|| {
+            MediaPackError::new(
+                "device_simulator.media.frame_index_invalid",
+                format!("media frame index {frame_index} is out of bounds"),
+            )
+        })?;
+        let nals = frame
+            .nals
+            .iter()
+            .map(|nal| self.read_nal(nal))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((frame.keyframe, nals))
+    }
+
+    pub fn read_nal(&self, nal: &SharedMediaNal) -> Result<Vec<u8>, MediaPackError> {
+        let mut bytes = vec![0_u8; nal.length];
+        read_exact_at(&self.media_file, &mut bytes, nal.offset as u64).map_err(|error| {
+            MediaPackError::new(
+                "device_simulator.media.media_read_failed",
+                format!("failed to read indexed media NAL: {error}"),
+            )
+        })?;
+        Ok(bytes)
+    }
+
+    pub fn parameter_set(&self, kind: ParameterSetKind) -> Option<Vec<u8>> {
         let reference = self
             .manifest
             .parameter_sets
             .iter()
             .find(|reference| reference.kind == kind)?;
         let frame = self.frames.get(reference.frame_index)?;
-        self.nal_bytes(frame.nals.get(reference.nal_index)?)
+        self.read_nal(frame.nals.get(reference.nal_index)?).ok()
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum EvidencePolicy {
     RuntimeVerifiedOnly,
-    #[cfg(test)]
-    AllowSyntheticFixture,
+    AllowLocalMaterial,
 }
 
 #[derive(Debug, Default)]
@@ -128,6 +152,21 @@ impl MediaPackCache {
             pack_dir,
             manifest_relative_path,
             EvidencePolicy::RuntimeVerifiedOnly,
+        )
+    }
+
+    /// Loads user-controlled loose media. It keeps all path, size, codec and
+    /// frame-index validation, but deliberately does not require release-pack
+    /// provenance or a signed catalog.
+    pub fn load_local(
+        &self,
+        material_dir: &Path,
+        manifest_relative_path: &str,
+    ) -> Result<Arc<SharedMediaPack>, MediaPackError> {
+        self.load_with_policy(
+            material_dir,
+            manifest_relative_path,
+            EvidencePolicy::AllowLocalMaterial,
         )
     }
 
@@ -162,7 +201,7 @@ impl MediaPackCache {
         self.load_with_policy(
             pack_dir,
             manifest_relative_path,
-            EvidencePolicy::AllowSyntheticFixture,
+            EvidencePolicy::AllowLocalMaterial,
         )
     }
 }
@@ -214,28 +253,55 @@ fn load_media_pack_from_path(
         ));
     }
 
-    let bytes = read_bounded_file(&media_path, MAX_MEDIA_BYTES, "media")?;
-    if bytes.len() as u64 != manifest.media_file_size {
-        return Err(MediaPackError::new(
-            "device_simulator.media.size_mismatch",
-            "media size changed while it was being loaded",
-        ));
-    }
-    let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
-    if actual_sha256 != manifest.media_file_sha256 {
-        return Err(MediaPackError::new(
-            "device_simulator.media.hash_mismatch",
-            "media SHA-256 does not match manifest",
-        ));
+    let media_file = File::open(&media_path).map_err(|error| {
+        MediaPackError::new(
+            "device_simulator.media.media_read_failed",
+            format!("failed to open {}: {error}", media_path.display()),
+        )
+    })?;
+    if matches!(policy, EvidencePolicy::RuntimeVerifiedOnly) {
+        let actual_sha256 = hash_file(&media_file)?;
+        if actual_sha256 != manifest.media_file_sha256 {
+            return Err(MediaPackError::new(
+                "device_simulator.media.hash_mismatch",
+                "media SHA-256 does not match manifest",
+            ));
+        }
     }
 
-    let (frames, actual_bitrate_bps) = validate_index(&manifest, &bytes)?;
+    let (frames, actual_bitrate_bps) =
+        validate_index(&manifest, &media_file, media_metadata.len())?;
     Ok(SharedMediaPack {
         manifest: Arc::new(manifest),
-        bytes: Arc::from(bytes),
+        media_file: Arc::new(media_file),
+        media_file_size: media_metadata.len(),
         frames: Arc::from(frames),
         actual_bitrate_bps,
     })
+}
+
+fn hash_file(file: &File) -> Result<String, MediaPackError> {
+    let mut reader = BufReader::new(file.try_clone().map_err(|error| {
+        MediaPackError::new(
+            "device_simulator.media.media_read_failed",
+            format!("failed to clone media file handle: {error}"),
+        )
+    })?);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).map_err(|error| {
+            MediaPackError::new(
+                "device_simulator.media.media_read_failed",
+                format!("failed to hash media file: {error}"),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn validate_manifest_metadata(
@@ -334,8 +400,7 @@ fn validate_evidence(
     let evidence = &manifest.evidence;
     match evidence.source_kind {
         EvidenceSourceKind::SyntheticFixture => {
-            #[cfg(test)]
-            if matches!(_policy, EvidencePolicy::AllowSyntheticFixture)
+            if matches!(_policy, EvidencePolicy::AllowLocalMaterial)
                 && evidence.compatibility == MediaCompatibility::Unverified
                 && evidence.pcap_source_id.is_none()
                 && evidence.sdp_source_id.is_none()
@@ -411,7 +476,8 @@ fn validate_evidence(
 
 fn validate_index(
     manifest: &MediaManifestV1,
-    bytes: &[u8],
+    media_file: &File,
+    media_file_size: u64,
 ) -> Result<(Vec<SharedMediaFrame>, u64), MediaPackError> {
     if manifest.frames.is_empty() || manifest.frames.len() > MAX_MEDIA_FRAMES {
         return Err(MediaPackError::new(
@@ -447,7 +513,7 @@ fn validate_index(
                 format!("frame {frame_index} overflows its byte range"),
             )
         })?;
-        if frame_end > bytes.len() as u64 {
+        if frame_end > media_file_size {
             return Err(MediaPackError::new(
                 "device_simulator.media.index_out_of_bounds",
                 format!("frame {frame_index} exceeds the media buffer"),
@@ -488,12 +554,29 @@ fn validate_index(
                     "NAL end cannot be represented by this process",
                 )
             })?;
-            let actual_nal_type = manifest.codec.nal_type(&bytes[start..end]).ok_or_else(|| {
+            let header_len = match manifest.codec {
+                super::manifest::Codec::H264 => 1,
+                super::manifest::Codec::H265 => 2,
+            };
+            let mut header = [0_u8; 2];
+            read_exact_at(media_file, &mut header[..header_len], nal.offset).map_err(|error| {
                 MediaPackError::new(
-                    "device_simulator.media.invalid_nal_header",
-                    format!("NAL {nal_index} in frame {frame_index} has an incomplete header"),
+                    "device_simulator.media.media_read_failed",
+                    format!("failed to inspect NAL {nal_index} in frame {frame_index}: {error}"),
                 )
             })?;
+            let actual_nal_type =
+                manifest
+                    .codec
+                    .nal_type(&header[..header_len])
+                    .ok_or_else(|| {
+                        MediaPackError::new(
+                            "device_simulator.media.invalid_nal_header",
+                            format!(
+                                "NAL {nal_index} in frame {frame_index} has an incomplete header"
+                            ),
+                        )
+                    })?;
             if actual_nal_type != nal.nal_type {
                 return Err(MediaPackError::new(
                     "device_simulator.media.nal_type_mismatch",
@@ -539,7 +622,7 @@ fn validate_index(
                 )
             })?;
     }
-    if next_frame_offset != bytes.len() as u64 {
+    if next_frame_offset != media_file_size {
         return Err(MediaPackError::new(
             "device_simulator.media.index_coverage_mismatch",
             "frame index does not cover the entire media buffer",
@@ -547,7 +630,7 @@ fn validate_index(
     }
 
     validate_parameter_sets(manifest, &frames)?;
-    let actual_bitrate_bps = (bytes.len() as u128)
+    let actual_bitrate_bps = (media_file_size as u128)
         .checked_mul(8)
         .and_then(|value| value.checked_mul(u128::from(manifest.clock_rate)))
         .and_then(|value| value.checked_div(u128::from(total_ticks)))
@@ -743,6 +826,40 @@ fn read_bounded_file(
     Ok(bytes)
 }
 
+#[cfg(unix)]
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    while !buffer.is_empty() {
+        let read = file.read_at(buffer, offset)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "indexed media ended before the requested range",
+            ));
+        }
+        offset = offset.saturating_add(read as u64);
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buffer.is_empty() {
+        let read = file.seek_read(buffer, offset)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "indexed media ended before the requested range",
+            ));
+        }
+        offset = offset.saturating_add(read as u64);
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
 fn valid_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     !bytes.is_empty()
@@ -914,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_fixture_loads_once_into_shared_immutable_buffers() {
+    fn synthetic_fixture_loads_once_into_shared_file_backed_index() {
         let fixture = Fixture::new(Codec::H264);
         let cache = MediaPackCache::new();
         let first = cache
@@ -928,7 +1045,7 @@ mod tests {
         assert_eq!(first.frames().len(), 2);
         assert_eq!(
             first.parameter_set(ParameterSetKind::Sps),
-            Some(&[0x67, 0x42][..])
+            Some(vec![0x67, 0x42])
         );
         assert_eq!(
             first.actual_bitrate_bps(),
@@ -944,7 +1061,8 @@ mod tests {
         )
         .expect("adapt shared media to RTSP");
         assert_eq!(source.codec, Codec::H264);
-        assert_eq!(source.scheduler.frames()[0].nals[0].as_ref(), &[0x67, 0x42]);
+        assert!(source.scheduler.owns_indexed_producer());
+        assert_eq!(first.read_frame_nals(0).unwrap().1[0], &[0x67, 0x42]);
     }
 
     #[test]
@@ -965,7 +1083,8 @@ mod tests {
         let loaded = MediaPackCache::new()
             .load_synthetic_fixture(fixture.directory.path(), "media/main/media.json")
             .expect("load nested media fixture");
-        assert_eq!(loaded.bytes(), fixture.bytes.as_slice());
+        assert_eq!(loaded.media_file_size(), fixture.bytes.len() as u64);
+        assert_eq!(loaded.read_frame_nals(0).unwrap().1[0], &[0x67, 0x42]);
     }
 
     #[test]
@@ -986,7 +1105,7 @@ mod tests {
         assert!(pack.frames()[0].keyframe);
         assert_eq!(
             pack.parameter_set(ParameterSetKind::Vps),
-            Some(&[0x40, 0x01][..])
+            Some(vec![0x40, 0x01])
         );
         assert!(pack.parameter_set(ParameterSetKind::Sps).is_some());
         assert!(pack.parameter_set(ParameterSetKind::Pps).is_some());
@@ -1048,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_codec_clock_payload_hash_size_and_bitrate_drift() {
+    fn validates_codec_clock_payload_size_and_bitrate_but_allows_local_hash_drift() {
         let mut invalid_payload = Fixture::new(Codec::H264);
         invalid_payload.manifest.payload_type = 95;
         invalid_payload.write();
@@ -1076,10 +1195,9 @@ mod tests {
         let mut invalid_hash = Fixture::new(Codec::H264);
         invalid_hash.manifest.media_file_sha256 = "0".repeat(64);
         invalid_hash.write();
-        assert_eq!(
-            invalid_hash.load_synthetic().expect_err("hash").code,
-            "device_simulator.media.hash_mismatch"
-        );
+        invalid_hash
+            .load_synthetic()
+            .expect("loose local media does not require a matching release hash");
 
         let mut invalid_size = Fixture::new(Codec::H264);
         invalid_size.manifest.media_file_size = MAX_MEDIA_BYTES + 1;

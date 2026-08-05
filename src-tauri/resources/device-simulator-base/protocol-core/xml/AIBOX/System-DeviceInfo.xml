@@ -1,0 +1,22 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/System/DeviceInfo",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"ID":	0,
+			"DeviceName":	"ECS-B300-I1@8-B-HD",
+			"DeviceTypeV2":	"AIBox",
+			"DeviceCode":	1,
+			"DeviceModel":	"ECS-B300-I1@8-B-HD",
+			"SerialNumber":	"210235C1XMA161000144",
+			"HardwareID":	"",
+			"UbootVersion":	"",
+			"FirmwareVersion":	"NVR-B1227.3.23.211124",
+			"ProtoName":	"RUNTLUIzMDAtSTFAOC1CLUhE",
+			"Manufacturer":"UNIVIEW",
+			"PowerType":0
+		}
+	}
+}

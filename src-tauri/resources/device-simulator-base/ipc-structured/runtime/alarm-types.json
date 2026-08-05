@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "profile_id": "ipc-structured",
+  "handler_id": "alarm.structured.v1",
+  "definitions": [
+    {
+      "id": "person",
+      "display_name": "结构化-人体",
+      "platforms": [
+        "ums"
+      ],
+      "protocol": "v1_0",
+      "event_type": "person",
+      "alarm_template": null,
+      "structure_template": "object/StructStruct/StructurePerson.json",
+      "structure_path": null,
+      "image_root": "pic/STRUCT/normal/person",
+      "supports_pictures": true,
+      "recovery_event_type": null,
+      "source_type": null,
+      "evidence": {
+        "status": "reviewed_static",
+        "source": "data/alarms_info.yml",
+        "line": 19
+      }
+    },
+    {
+      "id": "face",
+      "display_name": "结构化-人脸",
+      "platforms": [
+        "ums"
+      ],
+      "protocol": "v1_0",
+      "event_type": "face",
+      "alarm_template": null,
+      "structure_template": "object/StructStruct/StructureFace.json",
+      "structure_path": null,
+      "image_root": "pic/STRUCT/normal/face",
+      "supports_pictures": true,
+      "recovery_event_type": null,
+      "source_type": null,
+      "evidence": {
+        "status": "reviewed_static",
+        "source": "data/alarms_info.yml",
+        "line": 20
+      }
+    },
+    {
+      "id": "car",
+      "display_name": "结构化-机动车",
+      "platforms": [
+        "ums"
+      ],
+      "protocol": "v1_0",
+      "event_type": "car",
+      "alarm_template": null,
+      "structure_template": "object/StructStruct/StructureCar.json",
+      "structure_path": null,
+      "image_root": "pic/STRUCT/normal/car",
+      "supports_pictures": true,
+      "recovery_event_type": null,
+      "source_type": null,
+      "evidence": {
+        "status": "reviewed_static",
+        "source": "data/alarms_info.yml",
+        "line": 21
+      }
+    },
+    {
+      "id": "nonmotor",
+      "display_name": "结构化-非机动车",
+      "platforms": [
+        "ums"
+      ],
+      "protocol": "v1_0",
+      "event_type": "nonmotor",
+      "alarm_template": null,
+      "structure_template": "object/StructStruct/StructureNonMotor.json",
+      "structure_path": null,
+      "image_root": "pic/STRUCT/normal/nonmotor",
+      "supports_pictures": true,
+      "recovery_event_type": null,
+      "source_type": null,
+      "evidence": {
+        "status": "reviewed_static",
+        "source": "data/alarms_info.yml",
+        "line": 22
+      }
+    }
+  ]
+}

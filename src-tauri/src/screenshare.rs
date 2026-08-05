@@ -433,6 +433,9 @@ pub struct MonitorInfo {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScreenShareStatus {
+    /// Build-time capability used by the desktop UI to hide transports that
+    /// were deliberately left out of this EXE.
+    pub webrtc_available: bool,
     pub is_active: bool,
     pub viewer_count: u32,
     pub connection_count: u32,
@@ -1276,6 +1279,7 @@ impl Drop for ScreenShareStartGuard {
 
 fn inactive_status() -> ScreenShareStatus {
     ScreenShareStatus {
+        webrtc_available: cfg!(feature = "screen-share-webrtc-prototype"),
         is_active: false,
         viewer_count: 0,
         connection_count: 0,
@@ -2156,6 +2160,7 @@ pub fn screen_share_get_status(state: State<'_, crate::AppState>) -> ScreenShare
         .unwrap_or_default();
 
     ScreenShareStatus {
+        webrtc_available: cfg!(feature = "screen-share-webrtc-prototype"),
         is_active: true,
         viewer_count: handle.viewer_count.load(Ordering::Relaxed),
         connection_count: connected_ips.len() as u32,
@@ -7428,6 +7433,7 @@ async fn status_reporter(
             media_metrics.snapshot(latest_frame.as_ref().map(|frame| frame.captured_at_ms));
 
         let status = ScreenShareStatus {
+            webrtc_available: cfg!(feature = "screen-share-webrtc-prototype"),
             is_active: true,
             viewer_count: viewer_count.load(Ordering::Relaxed),
             connection_count: connected_ips.len() as u32,

@@ -1,0 +1,21 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/PeopleLibraries/BasicInfo",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Num":	1,
+			"LibList":	[{
+					"ID":	1,
+					"AgboxType":	0,
+					"Name":	".........1",
+					"PersonNum":	3,
+					"FaceNum":	3,
+					"MemberNum":	3,
+					"LastChange":	1734348121,
+					"BelongIndex":	"d90facec03bc90620e9e6ea24ec80844"
+				}]
+		}
+	}
+}

@@ -1,0 +1,38 @@
+{
+  "Reference": "192.167.0.112:80/Subscription/Subscribers/6",
+  "TimeStamp": 1618471337,
+  "Seq": 139133,
+  "SrcID": 1,
+  "SrcName": " ",
+  "NotificationType": 0,
+  "StructureInfo": {
+    "ObjInfo": {
+      "FaceNum": 0,
+      "FaceInfoList": [],
+      "PersonNum": 0,
+      "PersonInfoList": [],
+      "NonMotorVehicleNum": 1,
+      "NonMotorVehicleInfoList": [{
+        "ID": 36853,
+        "Position": "2333,6027;2927,8166",
+        "SmallPicAttachIndex": 2,
+        "LargePicAttachIndex": 1,
+        "PlatePicAttachIndex": 0,
+        "FeatureVersion": "",
+        "Feature": "",
+        "RuleInfo": {},
+        "AttributeInfo": { "SpeedType": 4, "ImageDirection": 3, "NonVehicleType": 5 },
+        "PlateAttributeInfo": { "PlateNo": "", "Color": 1, "Type": 99 },
+        "PersonOnNoVehicleNum": 0,
+        "PersonOnNoVehicleInfoList": []
+      }],
+      "VehicleNum": 0,
+      "VehicleInfoList": []
+    },
+    "ImageNum": 2,
+    "ImageInfoList": [
+      { "Index": 1, "Type": 23, "Format": "1", "Width": 1920, "Height": 1080, "CaptureTime": "20210415202216265", "Size": 807412, "Data": "", "URL": "/LAPI/V1.0/System/Picture?Type=23&Index=\\pic\\STRUCT\\normal\\nonmotor&Size=317132" },
+      { "Index": 2, "Type": 14, "Format": "1", "Width": 1280, "Height": 720, "CaptureTime": "20210415202216265", "Size": 60436, "Data": "", "URL": "/LAPI/V1.0/System/Picture?Type=14&Index=\\pic\\STRUCT\\normal\\nonmotor&Size=317132" }
+    ]
+  }
+}

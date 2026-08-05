@@ -108,7 +108,7 @@ function createId(): string {
 
 export function createDefaultSettings(): PaperTodoSettings {
   return {
-    launcherEnabled: true,
+    launcherEnabled: false,
     launcherEdge: 'right',
     launcherOffset: 35,
     autoCollapseLauncher: false,
@@ -194,9 +194,14 @@ export function normalizePaperTodoState(value: unknown): PaperTodoState {
   const fallback = createDefaultState();
   if (!value || typeof value !== 'object') return fallback;
   const input = value as Partial<PaperTodoState>;
+  const inputSettings = input.settings && typeof input.settings === 'object'
+    ? input.settings as Partial<PaperTodoSettings>
+    : null;
+  const hasExplicitLauncherSetting = inputSettings !== null
+    && Object.prototype.hasOwnProperty.call(inputSettings, 'launcherEnabled');
   const settings = {
     ...fallback.settings,
-    ...(input.settings && typeof input.settings === 'object' ? input.settings : {}),
+    ...(inputSettings ?? {}),
     hotkeys: {
       ...fallback.settings.hotkeys,
       ...(input.settings?.hotkeys && typeof input.settings.hotkeys === 'object'
@@ -214,6 +219,12 @@ export function normalizePaperTodoState(value: unknown): PaperTodoState {
   delete settingsRecord.rememberExpandedPosition;
   delete settingsRecord.capsuleFontSize;
   delete settingsRecord.capsuleBold;
+  // Profiles created before the shared edge launcher setting existed should
+  // keep the entry visible when they already contain papers. An explicit
+  // false is a user choice and must never be overwritten by this migration.
+  settings.launcherEnabled = hasExplicitLauncherSetting
+    ? inputSettings?.launcherEnabled === true
+    : Array.isArray(input.papers) && input.papers.length > 0;
   settings.titleMaxLength = Math.min(20, Math.max(2, finiteNumber(settings.titleMaxLength, 20)));
   settings.interfaceScale = Math.min(120, Math.max(80, finiteNumber(settings.interfaceScale, 100)));
   settings.launcherOffset = Math.min(100, Math.max(0, finiteNumber(settings.launcherOffset, 35)));

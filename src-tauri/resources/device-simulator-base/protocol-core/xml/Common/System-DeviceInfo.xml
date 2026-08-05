@@ -1,0 +1,22 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/System/DeviceInfo",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"ID":	0,
+	"DeviceName":	"IPC244S-IR9-PF80-DT",
+	"DeviceType":	0,
+	"DeviceCode":	0,
+	"DeviceModel":	"IPC244S-IR9-PF80-DT",
+	"SerialNumber":	"210235C1XMA161000144",
+	"FirmwareVersion":	"IPC_G6102-B5025P22D1907",
+	"HardwareID":	"A",
+	"UbootVersion":	"V1.0"
+}
+	}
+}

@@ -1,0 +1,12 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Network/NATOutAddress",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"AddressType":	0,
+			"IPAddress":	"206.2.18.166"
+		}
+	}
+}

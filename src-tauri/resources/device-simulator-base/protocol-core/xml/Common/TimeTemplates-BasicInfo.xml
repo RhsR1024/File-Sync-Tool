@@ -1,0 +1,27 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/System/TimeTemplates/BasicInfo",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num":	3,
+	"List":	[{
+			"ID":	0,
+			"Name":	"default",
+			"LastChange":	0
+		}, {
+			"ID":	1,
+			"Name":	"All-day",
+			"LastChange":	1670924723
+		}, {
+			"ID":	1680072957,
+			"Name":	"AllWeekAC",
+			"LastChange":	740734139
+		}]
+}
+	}
+}

@@ -1,0 +1,192 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Smart/Capabilities?ChannelID",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num":	1,
+	"SmartCapInfoList":	[{
+			"ChannelID":	1,
+			"SmartCapabilities":	{
+				"FaceDetection":	{
+					"IsSupport":	1,
+					"QualityAnalysisIsSupport":	1,
+					"AttributeAnalysisIsSupport":	1,
+					"PersonSnapshotSupport":	1,
+					"FeatureIsSupport":	0,
+					"RecognitionIsSupport":	0,
+					"PupilDistanceSizeNum":	6,
+					"PupilDistanceSizeList":	[{
+							"Resolution":	{
+								"Width":	2688,
+								"Height":	1520
+							},
+							"PupilDistance":	{
+								"Min":	104,
+								"Max":	781
+							}
+						}, {
+							"Resolution":	{
+								"Width":	2560,
+								"Height":	1440
+							},
+							"PupilDistance":	{
+								"Min":	104,
+								"Max":	781
+							}
+						}, {
+							"Resolution":	{
+								"Width":	1920,
+								"Height":	1080
+							},
+							"PupilDistance":	{
+								"Min":	104,
+								"Max":	781
+							}
+						}, {
+							"Resolution":	{
+								"Width":	1280,
+								"Height":	720
+							},
+							"PupilDistance":	{
+								"Min":	104,
+								"Max":	781
+							}
+						}, {
+							"Resolution":	{
+								"Width":	720,
+								"Height":	576
+							},
+							"PupilDistance":	{
+								"Min":	104,
+								"Max":	781
+							}
+						}, {
+							"Resolution":	{
+								"Width":	640,
+								"Height":	360
+							},
+							"PupilDistance":	{
+								"Min":	104,
+								"Max":	781
+							}
+						}]
+				},
+				"ObjTrack":	{
+					"IsSupport":	1,
+					"SupportWeekPlan":	1,
+					"SupportZoomOption":	1,
+					"SupportAudioLinkagePlan":	1,
+					"SupportLightLinkagePlan":	1,
+					"Mode":	[1, 0, 0, 0, 0, 0],
+					"OverAll":	{
+						"TrackTimeMin":	1,
+						"TrackTimeMax":	300
+					}
+				},
+				"IntrusionDetection":	{
+					"SupportCfg":	1,
+					"Mode":	1,
+					"SupportBoxDomeLink":	0,
+					"SupportTrackLink":	1,
+					"LinkagePlanCfg":	{
+						"SupportAudioLinkagePlan":	1,
+						"SupportLightLinkagePlan":	1
+					}
+				},
+				"CrossLineDetection":	{
+					"SupportCfg":	1,
+					"Mode":	1,
+					"SupportBoxDomeLink":	0,
+					"SupportTrackLink":	1,
+					"LinkagePlanCfg":	{
+						"SupportAudioLinkagePlan":	1,
+						"SupportLightLinkagePlan":	1
+					}
+				},
+				"AccessZone":	{
+					"SupportCfg":	1,
+					"Mode":	1,
+					"SupportBoxDomeLink":	0,
+					"SupportTrackLink":	1,
+					"LinkagePlanCfg":	{
+						"SupportAudioLinkagePlan":	1,
+						"SupportLightLinkagePlan":	1
+					}
+				},
+				"LeaveZone":	{
+					"SupportCfg":	1,
+					"Mode":	1,
+					"SupportBoxDomeLink":	0,
+					"SupportTrackLink":	1,
+					"LinkagePlanCfg":	{
+						"SupportAudioLinkagePlan":	1,
+						"SupportLightLinkagePlan":	1
+					}
+				},
+				"LinesPeopleCounting":	{
+					"SupportLinesPeopleCounting":	1,
+					"MaxLineNum":	1
+				},
+				"AreasPeopleCounting":	{
+					"SupportAreasPeopleCounting":	1,
+					"MaxAreaNum":	1
+				},
+				"CrowdDensity":	{
+					"SupportCrowdDensity":	1
+				},
+				"AccessElevator":	{
+					"SupportCfg":	0
+				},
+				"RemainArticle":	{
+					"IsSupport":	1,
+					"ThresholdMin":	5,
+					"ThresholdMax":	20
+				},
+				"RemoveArticle":	{
+					"IsSupport":	1,
+					"ThresholdMin":	5,
+					"ThresholdMax":	20
+				},
+				"AttributeCollect":	{
+					"FaceAttributeNum":	1,
+					"FaceAttributeList":	[7],
+					"PedestrianAttributeNum":	0,
+					"PedestrianAttributeList":	[],
+					"NonMotorVehicleAttributeNum":	0,
+					"NonMotorVehicleAttributeList":	[],
+					"VehicleAttributeNum":	0,
+					"VehicleAttributeList":	[]
+				},
+				"MixDetection":	{
+					"IsSupported":	0
+				},
+				"TrafficMonitoring":	{
+					"IsSupported":	0,
+					"MaxLaneNum":	4
+				},
+				"FlameAndFumesDetection":	{
+					"IsSupported":	0
+				},
+				"WaterGaugeDetection":	{
+					"IsSupported":	1,
+					"LinkagePlanCfg":	{
+						"SupportAudioLinkagePlan":	1,
+						"SupportLightLinkagePlan":	1
+					}
+				},
+				"MasterSlaveLinkage":	{
+					"SupportMode":	0
+				},
+				"ObjectAttributeOverlayStream":	{
+					"Support":	0
+				}
+			}
+		}]
+}
+	}
+}

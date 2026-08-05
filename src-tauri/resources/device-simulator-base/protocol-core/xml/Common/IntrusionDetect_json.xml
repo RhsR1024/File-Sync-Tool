@@ -1,0 +1,31 @@
+{
+	"ReportTime":	1469242760,
+	"SequenceNo":	108389228,
+	"MAC":	"48:ea:63:25:3d:c1",
+	"Type":	2,
+	"ObjectInfo":	{
+		"SmartALarm":	{
+			"ObjectNum":	1,
+			"Object":	[{
+					"ObjectID":	28308,
+					"RuleID":	1,
+					"ObjectPosition":	{
+						"PointNum":	4,
+						"Point":	[{
+								"X":	4687,
+								"Y":	6805
+							}, {
+								"X":	4687,
+								"Y":	7740
+							}, {
+								"X":	5312,
+								"Y":	7740
+							}, {
+								"X":	5312,
+								"Y":	6805
+							}]
+					}
+				}]
+		}
+	}
+}

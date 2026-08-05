@@ -72,10 +72,8 @@ const PROFILES = PROFILE_IDS.map((id) => ({
 }));
 
 const MEDIA_THEMES = [
-  { id: 'classic', display_name_key: 'deviceSimulator.mediaThemes.classic', is_default: true },
-  { id: 'windows-tech', display_name_key: 'deviceSimulator.mediaThemes.windowsTech', is_default: false },
-  { id: 'fanren-xiuxian', display_name_key: 'deviceSimulator.mediaThemes.fanrenXiuxian', is_default: false },
-  { id: 'green-hill-running', display_name_key: 'deviceSimulator.mediaThemes.greenHillRunning', is_default: false },
+  { id: 'fanren-xiuxian', display_name_key: 'deviceSimulator.mediaThemes.fanrenXiuxian', is_default: true },
+  { id: 'cloud-inspiration', display_name_key: 'deviceSimulator.mediaThemes.cloudInspiration', is_default: false },
 ];
 
 const ALARM_TYPES = [
@@ -114,7 +112,7 @@ const SETTINGS = {
   ],
   last_http_port: 81,
   last_rtsp_ports: { main: 554, sub: 555, third: 556 },
-  last_media_theme_id: 'classic',
+  last_media_theme_id: 'fanren-xiuxian',
   auto_check_asset_updates: true,
   manage_firewall: true,
 };

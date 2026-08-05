@@ -1,0 +1,22 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Network/BandWidth",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Live":	{
+				"Input":	7808,
+				"Output":	0
+			},
+			"ReplayAndDownload":	{
+				"Input":	0,
+				"Output":	0
+			},
+			"Free":	{
+				"Input":	57728,
+				"Output":	65536
+			}
+		}
+	}
+}

@@ -1,0 +1,12 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Smart/FaceRecognition/Capabilities",
+	"CreatedID": -1, 
+	"ResponseCode": 4,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Not Supported",
+	"StatusCode": 8,
+	"StatusString": "UnSupport",
+	"Data": "null"
+	}
+}

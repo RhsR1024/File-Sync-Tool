@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
 import { defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { RouterView, useRouter } from 'vue-router';
@@ -18,6 +17,7 @@ import {
 import { startScheduler } from '@/lib/scheduler';
 import { appStore, addLog, setToolRuntime, startLiveTicker, stopLiveTicker } from '@/lib/store';
 import {
+  createSyncTaskNotificationDispatcher,
   createSyncTaskNotificationTracker,
   type SyncTaskNotificationEvent,
 } from '@/lib/syncTaskNotifications';
@@ -67,7 +67,6 @@ let unlistenDeviceSimulatorStatus: (() => void) | null = null;
 let unlistenOpenClipboardSettings: (() => void) | null = null;
 let unlistenMainWindowResize: (() => void) | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-let notificationPermissionPromise: Promise<boolean> | null = null;
 let initialSyncTaskNotificationsEnabled = true;
 let syncTaskNotificationTracker = createSyncTaskNotificationTracker();
 
@@ -97,27 +96,23 @@ function syncTaskNotificationsEnabled(): boolean {
     ?? initialSyncTaskNotificationsEnabled;
 }
 
-async function ensureNotificationPermission(): Promise<boolean> {
-  notificationPermissionPromise ??= (async () => {
-    if (await isPermissionGranted()) return true;
-    return (await requestPermission()) === 'granted';
-  })();
-  return notificationPermissionPromise;
-}
-
-async function showSyncTaskNotification(event: SyncTaskNotificationEvent): Promise<void> {
-  if (!syncTaskNotificationsEnabled()) return;
-
-  try {
-    if (!await ensureNotificationPermission()) return;
-    await showAppNotification(
-      t(`sync.notifications.${event.kind}Title`),
-      t(`sync.notifications.${event.kind}Body`, { task: event.taskName }),
-    );
-  } catch (error) {
+const syncTaskNotificationDispatcher = createSyncTaskNotificationDispatcher({
+  isEnabled: syncTaskNotificationsEnabled,
+  render: (event) => ({
+    title: t(`sync.notifications.${event.kind}Title`),
+    body: t(`sync.notifications.${event.kind}Body`, { task: event.taskName }),
+  }),
+  show: async (title, body) => {
+    // Windows notifications are sent by the same Rust WinRT command used by the
+    // clipboard startup toast. Do not gate that native path on WebView's
+    // Notification.permission: it is a separate permission model and could
+    // silently suppress every sync notification while native toasts still work.
+    await showAppNotification(title, body);
+  },
+  onError: (error) => {
     addLog(`System notification failed: ${error}`, 'error');
-  }
-}
+  },
+});
 
 function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
@@ -145,6 +140,10 @@ async function revealMainWindowForPrompt() {
   } catch {
     // The Rust tray handler also restores and foregrounds the main window.
   }
+}
+
+function queueSyncTaskNotification(event: SyncTaskNotificationEvent): void {
+  void syncTaskNotificationDispatcher.enqueue(event);
 }
 
 async function cancelQuitConfirmation() {
@@ -364,24 +363,40 @@ onMounted(async () => {
     }
   });
 
-  await taskStateStore.hydrateTaskState();
-  syncTaskNotificationTracker = createSyncTaskNotificationTracker(taskStateStore.groups);
-
-  unlistenScanQueued = await listen<ScanQueuedEvent>('scan-queued', (event) => {
-    syncTaskNotificationTracker.markQueued(event.payload.run_id);
-    void showSyncTaskNotification({
-      kind: 'queued',
-      taskName: event.payload.folder,
+  // Subscribe before the initial task-state IPC call. If hydration is slow or
+  // fails, live task transitions must still reach the notification tracker.
+  try {
+    unlistenScanQueued = await listen<ScanQueuedEvent>('scan-queued', (event) => {
+      syncTaskNotificationTracker.markQueued(event.payload.run_id);
+      queueSyncTaskNotification({
+        kind: 'queued',
+        taskName: event.payload.folder,
+      });
     });
-  });
+  } catch (error) {
+    addLog(`Sync queue notification listener failed: ${error}`, 'error');
+  }
 
-  unlistenTaskGroups = await listen('task-groups-snapshot', (event) => {
-    const snapshot = event.payload as TaskGroupsSnapshot;
-    for (const notification of syncTaskNotificationTracker.collect(snapshot.groups)) {
-      void showSyncTaskNotification(notification);
-    }
-    taskStateStore.applyGroupsSnapshot(snapshot);
-  });
+  try {
+    unlistenTaskGroups = await listen('task-groups-snapshot', (event) => {
+      const snapshot = event.payload as TaskGroupsSnapshot;
+      for (const notification of syncTaskNotificationTracker.collect(snapshot.groups)) {
+        queueSyncTaskNotification(notification);
+      }
+      taskStateStore.applyGroupsSnapshot(snapshot);
+    });
+  } catch (error) {
+    addLog(`Sync task notification listener failed: ${error}`, 'error');
+  }
+
+  try {
+    await taskStateStore.hydrateTaskState();
+    syncTaskNotificationTracker.remember(taskStateStore.groups);
+  } catch (error) {
+    // The listeners above remain active and can recover state from the next
+    // backend snapshot even when the initial list request fails.
+    addLog(`Task state load failed: ${error}`, 'error');
+  }
 
   unlistenTaskDetail = await listen('task-group-detail-snapshot', (event) => {
     taskStateStore.applyDetailSnapshot(event.payload as TaskGroupDetailSnapshot);

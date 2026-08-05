@@ -1,0 +1,14 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/1/Media/Video/Streams/0/LiveStreamURL",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"URL":	"rtsp://206.2.18.165:554/media1/video1"
+}
+	}
+}

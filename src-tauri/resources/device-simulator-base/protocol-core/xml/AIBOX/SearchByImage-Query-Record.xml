@@ -1,0 +1,45 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Smart/SearchByImage/Query",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Total":	1000,
+			"Offset":	0,
+			"Num":	40,
+			"FacePassRecordList":	[{
+					"Similarity":	41,
+					"TargetFileName":	"",
+					"PassRecordInfo":	{
+						"RecordID":	75068,
+						"Type":	0,
+						"PassingTime":	1734348837,
+						"ChannelName":	"......... 03",
+						"ChannelID":	3,
+						"Similarity":	41,
+						"SnapshotImage":	{
+							"BigImage":	{
+								"URL":	"/LAPI/V1.0/System/Picture?Type=1&Index=ubs_5_0_0_2_0_0_1933_44_41684_1734348837&Size=179852",
+								"Type":	0,
+								"LastChange":	0,
+								"Name":	"D3_20241216193357000"
+							},
+							"SmallImage":	{
+								"URL":	"/LAPI/V1.0/System/Picture?Type=2&Index=ubs_5_0_0_2_0_0_1933_1_41683_1734348837&Size=3546",
+								"Type":	0,
+								"Name":	"D3_20241216193357000",
+								"LastChange":	0
+							},
+							"Area":	{
+								"left":	5234,
+								"top":	3861,
+								"right":	5812,
+								"bottom":	5138
+							}
+						}
+					}
+				}]
+		}
+	}
+}

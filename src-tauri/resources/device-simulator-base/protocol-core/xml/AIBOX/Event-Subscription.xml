@@ -1,0 +1,15 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/System/Event/Subscription",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"ID":	178,
+			"Reference":	"206.2.18.166:55000/210235C1XMA161000144/Subscription/Subscribers/178",
+			"CurrentTime":	1618228378,
+			"TerminationTime":	1618228438,
+			"SupportType":	8255
+		}
+	}
+}

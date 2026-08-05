@@ -1,0 +1,28 @@
+{
+	"Response": {
+		"ResponseURL": "/LAPI/V1.0/PeopleLibraries/3/People",
+		"CreatedID": -1,
+		"ResponseCode": 0,
+		"SubResponseCode": 0,
+		"ResponseString": "Succeed",
+		"StatusCode": 0,
+		"StatusString": "Succeed",
+		"Data": {
+			"Num": 1,
+			"PersonList": [
+				{
+					"PersonID": 1,
+					"FaceNum": 1,
+					"FaceList": [
+						{
+							"FaceID": 1,
+							"ResultCode": 0
+						}
+					],
+					"FingerprintNum": 0,
+					"FingerprintList": []
+				}
+			]
+		}
+	}
+}

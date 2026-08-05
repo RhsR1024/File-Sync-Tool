@@ -1,0 +1,32 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Channels/System/DeviceInfos",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Nums":	2,
+			"DeviceInfos":	[{
+					"ID":	1,
+					"DeviceName":	"",
+					"DeviceType":	0,
+					"DeviceCode":	"",
+					"DeviceModel":	"IPC-H244@PEK-F60-PW-VG",
+					"FirmwareVersion":	"GIPC-B6207.1.67.220119",
+					"SerialNumber":	"210235C5XS321A000069",
+					"HardwareID":	"",
+					"UbootVersion":	""
+				}, {
+					"ID":	2,
+					"DeviceName":	"",
+					"DeviceType":	0,
+					"DeviceCode":	"",
+					"DeviceModel":	"IPC-H244@PEK-F60-PW-VG",
+					"FirmwareVersion":	"GIPC-B6207.1.65.220104",
+					"SerialNumber":	"210235C5XS321A000046",
+					"HardwareID":	"",
+					"UbootVersion":	""
+				}]
+		}
+	}
+}

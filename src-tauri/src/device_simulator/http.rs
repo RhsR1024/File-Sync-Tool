@@ -1156,7 +1156,7 @@ mod tests {
         assert_eq!(listener.local_ip(), Ipv4Addr::LOCALHOST);
         assert_eq!(
             listener.local_addr().unwrap(),
-            (Ipv4Addr::LOCALHOST, port).into()
+            std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port))
         );
         drop(listener);
         std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();

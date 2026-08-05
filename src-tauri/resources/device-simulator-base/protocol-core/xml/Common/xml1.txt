@@ -1,0 +1,15 @@
+<?xml version="1.0" ?>
+<Message>
+<CamID>IPC244S-IR9-PF80-DT</CamID>
+<DevID></DevID>
+<DevType></DevType>
+<RecordID>0000000000000485</RecordID>
+<PlaceCode></PlaceCode>
+<PlaceName></PlaceName>
+<TollgateID>Chanl64</TollgateID>
+<TollgateName></TollgateName>
+<PassTime>20190826145149265</PassTime>
+<FaceID>141</FaceID>
+<FaceCaptureFinish>1</FaceCaptureFinish>
+</Message>
+

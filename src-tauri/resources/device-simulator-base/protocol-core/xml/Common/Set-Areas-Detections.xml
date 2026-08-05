@@ -1,0 +1,12 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/%d/Smart/FaceDetection/Areas/Detections",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": "null"
+	}
+}

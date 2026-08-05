@@ -1,0 +1,39 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/PACS/PermissionGroup/BasicInfos",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+		"Num": 4, 
+		"PermissionBasicInfoList": [{
+		"LastChange": 0, 
+		"PermissionID": 1, 
+		"TemplateID": 0, 
+		"DoorNum": 1, 
+		"DoorList":[0] 
+	},{
+		"LastChange": 0, 
+		"PermissionID": 2, 
+		"TemplateID": 0, 
+		"DoorNum": 1, 
+		"DoorList":[0] 
+	},{
+		"LastChange": 0, 
+		"PermissionID": 3, 
+		"TemplateID": 0, 
+		"DoorNum": 1, 
+		"DoorList":[0] 
+	},{
+		"LastChange": 0, 
+		"PermissionID": 4, 
+		"TemplateID": 0, 
+		"DoorNum": 1, 
+		"DoorList":[0] 
+	}] 
+	}
+	}
+}

@@ -1,0 +1,19 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/System/HolidayTemplates/BasicInfo",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num":	1,
+	"List":	[{
+			"ID":	1,
+			"Name":	"1",
+			"LastChange":	0
+		}]
+}
+	}
+}

@@ -1,0 +1,12 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/0/Alarm/HumanShapeDetection/Areas",
+	"CreatedID": -1,
+	"ResponseCode": 4,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Not Supported",
+	"StatusCode": 8,
+	"StatusString": "UnSupport",
+	"Data": "null"
+	}
+}

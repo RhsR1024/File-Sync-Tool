@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.2.0"
+version = "1.2.1"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
@@ -9,7 +9,12 @@ edition = "2021"
 rust-version = "1.77.2"
 
 [features]
-default = ["screen-share-webrtc-prototype"]
+# WebRTC remains available for later evaluation, but is intentionally excluded
+# from normal builds for now: its Rust transport stack adds roughly 7-8 MiB to
+# the bare EXE while MSE H.264 already covers the current LAN + 60 FPS trial.
+# Re-enable it explicitly with:
+#   pnpm tauri build --features screen-share-webrtc-prototype
+default = []
 screen-share-webrtc-prototype = ["dep:webrtc", "dep:rtcp"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

@@ -1,0 +1,33 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/PeopleLibraries/BasicInfo",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num":	2,
+	"LibList":	[{
+			"ID":	3,
+			"Type":	3,
+			"PersonNum":	1,
+			"MemberNum":	1,
+			"FaceNum":	1,
+			"LastChange":	0,
+			"Name":	"Staff Lib",
+			"BelongIndex":	""
+		}, {
+			"ID":	4,
+			"Type":	4,
+			"PersonNum":	0,
+			"MemberNum":	0,
+			"FaceNum":	0,
+			"LastChange":	0,
+			"Name":	"Visit Lib",
+			"BelongIndex":	""
+		}]
+}
+	}
+}

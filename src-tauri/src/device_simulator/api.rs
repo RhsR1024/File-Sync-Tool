@@ -16,7 +16,7 @@ use std::net::Ipv4Addr;
 /// `Event/Subscription`. Observed on real UMS deployments; a learned port always
 /// replaces it.
 pub const DEFAULT_ALARM_RECEIVER_PORT: u16 = 22_815;
-pub const DEFAULT_MEDIA_THEME_ID: &str = "classic";
+pub const DEFAULT_MEDIA_THEME_ID: &str = "fanren-xiuxian";
 
 pub const DEVICE_SIMULATOR_EVENT_STATUS: &str = "device-simulator-status";
 pub const DEVICE_SIMULATOR_EVENT_LOG: &str = "device-simulator-log";
@@ -162,7 +162,21 @@ fn local_player_access_enabled() -> bool {
 pub struct MediaThemeSummary {
     pub id: String,
     pub display_name_key: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub is_default: bool,
+    #[serde(default)]
+    pub is_local: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteMaterialSyncResult {
+    pub downloaded_files: usize,
+    pub reused_files: usize,
+    pub removed_files: usize,
+    pub downloaded_bytes: u64,
+    pub themes: Vec<MediaThemeSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -13,10 +13,10 @@ import {
   CloudUpload,
   Clock3,
   Clipboard,
-  Download,
   Eye,
   EyeOff,
   FileDown,
+  FolderOpen,
   Globe,
   ImagePlus,
   KeyRound,
@@ -31,13 +31,14 @@ import {
   Server,
   ShieldAlert,
   ShieldCheck,
-  Square,
   Trash2,
   Video,
   XCircle,
 } from 'lucide-vue-next';
 
 import HintTip from '@/components/HintTip.vue';
+import DeviceMaterialMigrationConfirmDialog from '@/components/DeviceMaterialMigrationConfirmDialog.vue';
+import DeviceMaterialResetConfirmDialog from '@/components/DeviceMaterialResetConfirmDialog.vue';
 import DevicePlatformReplaceConfirmDialog from '@/components/DevicePlatformReplaceConfirmDialog.vue';
 import { STRUCTURED_PROFILE_ID, useDeviceSimulator } from '@/composables/useDeviceSimulator';
 import {
@@ -52,6 +53,7 @@ import {
   type PlatformAccessMode,
   type PreflightCheck,
 } from '@/lib/deviceSimulator';
+import { openDirectory } from '@/lib/tauri';
 
 const { t, te } = useI18n();
 const router = useRouter();
@@ -61,7 +63,7 @@ const configSection = ref<'server' | 'network' | 'media' | 'devices'>('server');
 const logLevel = ref('all');
 const logQuery = ref('');
 const copiedValue = ref('');
-const continuousAlarm = ref(false);
+const continuousAlarm = ref(true);
 const now = ref(Date.now());
 let subscriptionTicker: number | null = null;
 const assetDetailsOpen = ref(false);
@@ -69,6 +71,89 @@ const interfaceSelectorOpen = ref(false);
 const ipAllocationMode = ref<'continuous' | 'explicit'>('continuous');
 const deviceIpText = ref('');
 const platformPasswordVisible = ref(false);
+const materialResetPromptOpen = ref(false);
+const materialResetError = ref('');
+const materialMigrationPromptOpen = ref(false);
+const materialMigrationError = ref('');
+const materialMigrationPendingAction = ref<'save' | 'start'>('save');
+const materialDirectoryInput = computed({
+  get: () => simulator.settings.value.local_materials_directory ?? '',
+  set: (value: string) => {
+    simulator.settings.value.local_materials_directory = value.trim() || null;
+  },
+});
+const materialDirectoryDisplayPath = computed(() => (
+  materialDirectoryInput.value || simulator.localMaterialsPath.value
+));
+const materialMigrationTarget = computed(() => (
+  materialDirectoryInput.value || t('deviceSimulator.materialMigration.defaultDirectory')
+));
+
+async function requestSettingsAction(action: 'save' | 'start') {
+  if (!simulator.localMaterialsDirectoryChanged.value) {
+    if (action === 'start') await simulator.start();
+    else await simulator.saveSettings();
+    return;
+  }
+  materialMigrationPendingAction.value = action;
+  materialMigrationError.value = '';
+  materialMigrationPromptOpen.value = true;
+}
+
+function cancelMaterialMigration() {
+  if (!new Set(['save-settings', 'migrate-local-materials']).has(simulator.busyAction.value ?? '')) {
+    materialMigrationPromptOpen.value = false;
+    materialMigrationError.value = '';
+  }
+}
+
+async function finishMaterialDirectoryChange(migrate: boolean) {
+  materialMigrationError.value = '';
+  const saved = migrate
+    ? await simulator.migrateLocalMaterialsAndSave()
+    : await simulator.saveSettings();
+  if (!saved) {
+    materialMigrationError.value = simulator.errorMessage.value;
+    return;
+  }
+  const pendingAction = materialMigrationPendingAction.value;
+  materialMigrationPromptOpen.value = false;
+  if (pendingAction === 'start') await simulator.start();
+}
+
+function useDefaultMaterialDirectory() {
+  simulator.settings.value.local_materials_directory = null;
+}
+
+async function selectMaterialDirectory() {
+  try {
+    const selected = await openDirectory();
+    if (selected) materialDirectoryInput.value = selected;
+  } catch (error) {
+    simulator.errorMessage.value = t('settings.selectDirectoryFailed', { error: String(error) });
+  }
+}
+
+function openMaterialResetPrompt() {
+  materialResetError.value = '';
+  materialResetPromptOpen.value = true;
+}
+
+function cancelMaterialResetPrompt() {
+  if (simulator.busyAction.value !== 'reset-and-sync-remote-materials') {
+    materialResetPromptOpen.value = false;
+    materialResetError.value = '';
+  }
+}
+
+async function confirmMaterialReset() {
+  materialResetError.value = '';
+  if (await simulator.resetAndSyncRemoteMaterials()) {
+    materialResetPromptOpen.value = false;
+    return;
+  }
+  materialResetError.value = simulator.errorMessage.value;
+}
 
 const alarm = reactive<AlarmJobRequest>({
   target_device_ids: [],
@@ -104,6 +189,9 @@ const profilesById = computed(() => new Map(simulator.profiles.value.map((profil
 const selectedAlarmProfileId = ref(STRUCTURED_PROFILE_ID);
 const selectedAlarmTypeId = ref('');
 const alarmSending = computed(() => simulator.activeAlarmJobId.value !== null);
+const alarmConfigurationLocked = computed(() => alarmSending.value
+  || simulator.alarmStartPending.value
+  || simulator.busyAction.value === 'trigger-alarm');
 const availableAlarmTypes = computed(() => simulator.alarmTypes.value
   .find((profile) => profile.profile_id === selectedAlarmProfileId.value)?.alarm_types ?? []);
 const alarmProfileOptions = computed(() => simulator.request.groups
@@ -293,29 +381,7 @@ watch(selectedAlarmProfileId, () => {
   alarm.target_device_ids = [];
   if (alarm.mode === 'configured') alarm.mode = 'sequential';
 });
-const assetDownloadActive = computed(() => {
-  // Asset readiness is refreshed independently from progress events. If a
-  // terminal event was missed, never let its stale progress contradict the
-  // authoritative status shown in the details below.
-  if (simulator.assets.value?.state === 'ready') return false;
-  return new Set([
-    'checking',
-    'downloading',
-    'verifying',
-    'installing',
-  ]).has(simulator.assetProgress.value?.state ?? '');
-});
-const assetPercent = computed(() => {
-  const progress = simulator.assetProgress.value;
-  if (!progress?.total) return null;
-  return Math.min(100, Math.round((progress.downloaded / progress.total) * 100));
-});
 const assetSummaryLabel = computed(() => {
-  if (assetDownloadActive.value) {
-    return assetPercent.value !== null
-      ? t('deviceSimulator.assets.summary.preparingPercent', { percent: assetPercent.value })
-      : t('deviceSimulator.assets.summary.preparing');
-  }
   if (assetTone.value === 'ready') return t('deviceSimulator.assets.summary.ready');
   if (assetTone.value === 'error') return t('deviceSimulator.assets.summary.failed');
   return t('deviceSimulator.assets.summary.attention');
@@ -414,9 +480,16 @@ const interfaceSelectionDescription = computed(() => {
   });
 });
 
-// The runtime treats the type list as a filter in every mode, so a chosen type
-// survives a mode switch. Only "configured" carries the extra requirement of
-// exactly one type, so clearing the type has to drop that mode.
+// Match the legacy simulator's dispatch contract: configured mode pins one
+// explicit alarm type, while sequential and random modes cover every type.
+watch(() => alarm.mode, (mode) => {
+  if (mode === 'configured') {
+    selectedAlarmTypeId.value ||= availableAlarmTypes.value[0]?.id ?? '';
+  } else {
+    selectedAlarmTypeId.value = '';
+  }
+});
+
 watch(selectedAlarmTypeId, (alarmTypeId) => {
   if (!alarmTypeId && alarm.mode === 'configured') alarm.mode = 'sequential';
 });
@@ -482,6 +555,7 @@ function profileLabel(profileId: string) {
 }
 
 function mediaThemeLabel(theme: MediaThemeSummary) {
+  if (theme.display_name) return theme.display_name;
   return te(theme.display_name_key) ? t(theme.display_name_key) : theme.id;
 }
 
@@ -750,19 +824,12 @@ function revealPreflightDetails() {
               aria-controls="asset-details"
               @click="assetDetailsOpen = !assetDetailsOpen"
             >
-              <LoaderCircle v-if="assetDownloadActive" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              <LoaderCircle v-if="simulator.busyAction.value === 'check-assets'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
               <CheckCircle2 v-else-if="assetTone === 'ready'" class="h-4 w-4" aria-hidden="true" />
               <XCircle v-else-if="assetTone === 'error'" class="h-4 w-4" aria-hidden="true" />
               <AlertTriangle v-else class="h-4 w-4" aria-hidden="true" />
               <span class="tabular-nums">{{ assetSummaryLabel }}</span>
               <ChevronDown class="h-4 w-4 transition-transform" :class="assetDetailsOpen ? 'rotate-180' : ''" aria-hidden="true" />
-              <span
-                v-if="assetDownloadActive"
-                class="absolute inset-x-0 bottom-0 h-0.5 bg-sky-600 transition-[width] duration-200"
-                :class="assetPercent === null ? 'w-1/3 animate-pulse motion-reduce:animate-none' : ''"
-                :style="assetPercent === null ? undefined : { width: `${assetPercent}%` }"
-                aria-hidden="true"
-              ></span>
             </button>
             <button
               type="button"
@@ -784,42 +851,26 @@ function revealPreflightDetails() {
               <p class="mt-1 text-sm leading-6 text-slate-600" aria-live="polite">
                 {{ t(`deviceSimulator.assets.states.${simulator.assets.value?.state ?? 'unknown'}`) }}
               </p>
-              <p v-if="assetDownloadActive && simulator.assetProgress.value" class="mt-2 text-xs font-medium text-slate-700" aria-live="polite">
-                {{ simulator.assetProgress.value.current_pack_id
-                  ? requiredFileLabel(simulator.assetProgress.value.current_pack_id)
-                  : t(`deviceSimulator.assets.states.${simulator.assetProgress.value.state}`) }}
-                <template v-if="simulator.assetProgress.value.total">
-                  · {{ formatImageSize(simulator.assetProgress.value.downloaded) }} /
-                  {{ formatImageSize(simulator.assetProgress.value.total) }}
-                </template>
-                <template v-if="simulator.assetProgress.value.speed_bps > 0">
-                  · {{ formatImageSize(simulator.assetProgress.value.speed_bps) }}/s
-                </template>
-              </p>
-              <div v-if="assetDownloadActive" class="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-200" role="progressbar" :aria-label="t('deviceSimulator.assets.progressLabel')" :aria-valuenow="assetPercent ?? undefined" aria-valuemin="0" aria-valuemax="100">
-                <div v-if="assetPercent !== null" class="h-full rounded-full bg-sky-600 transition-[width] duration-200" :style="{ width: `${assetPercent}%` }" />
-                <div v-else class="h-full w-1/3 animate-pulse rounded-full bg-sky-600 motion-reduce:animate-none" />
-              </div>
               <ul v-if="simulator.assets.value?.packs.length" class="mt-3 space-y-1 text-xs text-slate-600">
                 <li v-for="pack in simulator.assets.value.packs" :key="pack.id" class="flex flex-wrap gap-x-2">
                   <span class="font-semibold text-slate-700">{{ requiredFileLabel(pack.id) }}</span>
-                  <span>{{ t('deviceSimulator.assets.version') }} {{ pack.installed_version ?? '—' }} / {{ pack.required_version }}</span>
+                  <span>{{ t('deviceSimulator.assets.usable') }}</span>
                   <span v-if="pack.error_code" class="text-rose-700">{{ t('deviceSimulator.assets.fileError') }}</span>
                 </li>
               </ul>
               <p v-if="assetTone === 'ready'" class="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-900">
                 {{ t('deviceSimulator.assets.staticReviewWarning') }}
               </p>
+              <p v-else class="mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-medium leading-5 text-sky-900">
+                {{ t('deviceSimulator.assets.syncHint') }}
+              </p>
             </div>
             <div class="flex shrink-0 flex-wrap gap-2 border-t border-slate-100 pt-3">
+              <button v-if="assetTone !== 'ready'" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-700 px-3 py-2 text-sm font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="runtimeActive || simulator.busyAction.value !== null" @click="simulator.syncRemoteMaterials">
+                <LoaderCircle v-if="simulator.busyAction.value === 'sync-remote-materials'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><FileDown v-else class="h-4 w-4" aria-hidden="true" />{{ simulator.busyAction.value === 'sync-remote-materials' ? t('deviceSimulator.mediaThemes.syncingRemote') : t('deviceSimulator.mediaThemes.syncRemote') }}
+              </button>
               <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.refreshAssets">
                 <RefreshCw class="h-4 w-4" :class="simulator.busyAction.value === 'check-assets' ? 'animate-spin motion-reduce:animate-none' : ''" aria-hidden="true" />{{ t('deviceSimulator.actions.checkAssets') }}
-              </button>
-              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl bg-sky-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.prepareAssets">
-                <Download class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.downloadAssets') }}
-              </button>
-              <button v-if="assetDownloadActive" type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-rose-300 bg-white px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50" :class="buttonFocus" @click="simulator.cancelAssetDownload">
-                <Square class="h-4 w-4" aria-hidden="true" />{{ t('common.cancel') }}
               </button>
             </div>
           </div>
@@ -1164,6 +1215,38 @@ function revealPreflightDetails() {
                   </span>
                   <span class="pointer-events-none absolute inset-0 rounded-xl peer-focus-visible:ring-2 peer-focus-visible:ring-sky-500 peer-focus-visible:ring-offset-2" aria-hidden="true" />
                 </label>
+               </div>
+              <div class="mt-4 rounded-xl border border-sky-200 bg-sky-50/70 p-4">
+                <p class="text-sm font-semibold text-sky-950">{{ t('deviceSimulator.mediaThemes.localTitle') }}</p>
+                <p class="mt-1 text-xs leading-5 text-sky-800">{{ t('deviceSimulator.mediaThemes.localHint') }}</p>
+                <code class="mt-2 block break-all rounded-lg bg-white px-3 py-2 text-xs text-slate-700">{{ materialDirectoryDisplayPath || '—' }}</code>
+                <div class="mt-3 flex flex-wrap gap-2">
+                    <button type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-lg border border-sky-300 bg-white px-3 text-xs font-semibold text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50" :class="buttonFocus" :disabled="!materialDirectoryDisplayPath" @click="copyText(materialDirectoryDisplayPath)">
+                      <CheckCircle2 v-if="copiedValue === materialDirectoryDisplayPath" class="h-4 w-4 text-emerald-600" aria-hidden="true" /><Clipboard v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.mediaThemes.copyPath') }}
+                    </button>
+                    <button type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-lg border border-sky-300 bg-white px-3 text-xs font-semibold text-sky-800 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50" :class="buttonFocus" :disabled="runtimeActive || simulator.busyAction.value !== null" @click="simulator.syncRemoteMaterials()">
+                      <LoaderCircle v-if="simulator.busyAction.value === 'sync-remote-materials'" class="h-4 w-4 animate-spin" aria-hidden="true" /><FileDown v-else class="h-4 w-4" aria-hidden="true" />{{ simulator.busyAction.value === 'sync-remote-materials' ? t('deviceSimulator.mediaThemes.syncingRemote') : t('deviceSimulator.mediaThemes.syncRemote') }}
+                    </button>
+                    <button type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-lg border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-800 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50" :class="buttonFocus" :disabled="runtimeActive || simulator.busyAction.value !== null" @click="openMaterialResetPrompt">
+                      <Trash2 class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.mediaThemes.resetRemote') }}
+                    </button>
+                    <button type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-lg bg-sky-700 px-3 text-xs font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50" :class="buttonFocus" :disabled="runtimeActive || simulator.busyAction.value !== null" @click="simulator.refreshLocalMaterials()">
+                      <LoaderCircle v-if="simulator.busyAction.value === 'refresh-local-materials'" class="h-4 w-4 animate-spin" aria-hidden="true" /><RefreshCw v-else class="h-4 w-4" aria-hidden="true" />{{ simulator.busyAction.value === 'refresh-local-materials' ? t('deviceSimulator.mediaThemes.processing') : t('deviceSimulator.mediaThemes.refreshLocal') }}
+                    </button>
+                    <button type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-lg border border-sky-300 bg-white px-3 text-xs font-semibold text-sky-800 transition-colors duration-200 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none" :class="buttonFocus" :disabled="runtimeActive || simulator.busyAction.value !== null" @click="selectMaterialDirectory">
+                      <FolderOpen class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.mediaThemes.changeStorageDirectory') }}
+                    </button>
+                    <button type="button" class="inline-flex min-h-10 cursor-pointer items-center gap-2 rounded-lg border border-sky-300 bg-white px-3 text-xs font-semibold text-sky-800 transition-colors duration-200 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none" :class="buttonFocus" :disabled="runtimeActive || simulator.busyAction.value !== null || !simulator.settings.value.local_materials_directory" @click="useDefaultMaterialDirectory">
+                      <RotateCcw class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.mediaThemes.restoreDefaultStorageDirectory') }}
+                    </button>
+                  </div>
+                <p v-if="simulator.lastRemoteMaterialSync.value" class="mt-3 text-xs text-sky-800">
+                  {{ t('deviceSimulator.mediaThemes.syncSummary', { downloaded: simulator.lastRemoteMaterialSync.value.downloaded_files, reused: simulator.lastRemoteMaterialSync.value.reused_files, removed: simulator.lastRemoteMaterialSync.value.removed_files }) }}
+                </p>
+                <div v-if="simulator.lastLocalMaterialMigration.value" class="mt-3 rounded-lg border px-3 py-2 text-xs leading-5" :class="simulator.lastLocalMaterialMigration.value.cleanup_completed ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-amber-200 bg-amber-50 text-amber-900'" role="status">
+                  <p>{{ t('deviceSimulator.materialMigration.summary', { copied: simulator.lastLocalMaterialMigration.value.copied_files, reused: simulator.lastLocalMaterialMigration.value.reused_files, removed: simulator.lastLocalMaterialMigration.value.removed_files, size: formatImageSize(simulator.lastLocalMaterialMigration.value.copied_bytes) }) }}</p>
+                  <p v-if="!simulator.lastLocalMaterialMigration.value.cleanup_completed" class="mt-1 break-all font-semibold">{{ t('deviceSimulator.materialMigration.cleanupIncomplete', { path: simulator.lastLocalMaterialMigration.value.source_path }) }} {{ simulator.lastLocalMaterialMigration.value.cleanup_error }}</p>
+                </div>
               </div>
               <label class="mt-4 flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 transition-colors duration-200 hover:border-sky-300 hover:bg-sky-50/60 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60 motion-reduce:transition-none">
                 <input v-model="simulator.request.stream.time_watermark_enabled" class="peer sr-only" type="checkbox" role="switch" :disabled="simulator.topologyLocked.value" />
@@ -1268,8 +1351,15 @@ function revealPreflightDetails() {
               <h2 id="alarm-title" class="font-bold text-slate-900">{{ t('deviceSimulator.alarms.title') }}</h2>
               <HintTip :text="t('deviceSimulator.alarms.description')" />
               <p v-if="!running" class="ml-auto flex items-center gap-2 text-xs text-amber-800"><AlertTriangle class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.alarms.requiresRunning') }}</p>
+              <p v-else-if="alarmConfigurationLocked" id="alarm-configuration-locked-hint" class="ml-auto flex items-center gap-2 text-xs font-semibold text-slate-600"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.alarms.configurationLocked') }}</p>
             </div>
-            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <fieldset
+              class="mt-4 grid gap-3 transition-opacity duration-200 sm:grid-cols-2 xl:grid-cols-4 motion-reduce:transition-none"
+              :class="alarmConfigurationLocked ? 'opacity-60' : ''"
+              :disabled="alarmConfigurationLocked"
+              :aria-describedby="alarmConfigurationLocked ? 'alarm-configuration-locked-hint' : undefined"
+            >
+              <legend class="sr-only">{{ t('deviceSimulator.alarms.title') }}</legend>
               <label class="text-sm font-semibold text-slate-700">
                 {{ t('deviceSimulator.fields.alarmProfile') }}
                 <select v-model="selectedAlarmProfileId" :class="[fieldClass, 'mt-2']">
@@ -1278,7 +1368,7 @@ function revealPreflightDetails() {
               </label>
               <label class="text-sm font-semibold text-slate-700">
                 {{ t('deviceSimulator.fields.alarmTypes') }}
-                <select v-model="selectedAlarmTypeId" :class="[fieldClass, 'mt-2']" :disabled="availableAlarmTypes.length === 0">
+                <select v-model="selectedAlarmTypeId" :class="[fieldClass, 'mt-2']" :disabled="availableAlarmTypes.length === 0 || alarm.mode !== 'configured'">
                   <option value="">{{ t('deviceSimulator.alarms.allTypes') }}</option>
                   <option v-for="alarmType in availableAlarmTypes" :key="alarmType.id" :value="alarmType.id">{{ alarmType.display_name }}</option>
                 </select>
@@ -1289,7 +1379,7 @@ function revealPreflightDetails() {
                 <select v-model="alarm.mode" :class="[fieldClass, 'mt-2']">
                   <option value="sequential">{{ t('deviceSimulator.alarms.sequential') }}</option>
                   <option value="random">{{ t('deviceSimulator.alarms.random') }}</option>
-                  <option value="configured" :disabled="selectedAlarmTypeId === ''">{{ t('deviceSimulator.alarms.configured') }}</option>
+                  <option value="configured" :disabled="availableAlarmTypes.length === 0">{{ t('deviceSimulator.alarms.configured') }}</option>
                 </select>
               </label>
               <label class="text-sm font-semibold text-slate-700 xl:order-5">
@@ -1356,9 +1446,9 @@ function revealPreflightDetails() {
                   </div>
                 </div>
               </div>
-            </div>
+            </fieldset>
             <div class="mt-5 flex flex-wrap gap-2">
-              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="triggerAlarm"><BellRing class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.triggerOnce') }}</button>
+              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running || alarmSending" @click="triggerAlarm"><BellRing class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.triggerOnce') }}</button>
               <button
                 type="button"
                 class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-60"
@@ -1371,7 +1461,7 @@ function revealPreflightDetails() {
                 @click="toggleAlarmSending"
               >
                 <LoaderCircle v-if="simulator.busyAction.value === 'start-alarm' || simulator.alarmStopPending.value" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-                <Square v-else-if="alarmSending" class="h-4 w-4" aria-hidden="true" />
+                <XCircle v-else-if="alarmSending" class="h-4 w-4" aria-hidden="true" />
                 <Activity v-else class="h-4 w-4" aria-hidden="true" />
                 {{ t(alarmSending ? 'deviceSimulator.actions.stopAlarm' : 'deviceSimulator.actions.startAlarm') }}
               </button>
@@ -1450,9 +1540,9 @@ function revealPreflightDetails() {
         <HintTip v-else-if="!simulator.topologyLocked.value" :text="t('deviceSimulator.preflight.startHint')" />
         <p v-else class="flex items-center gap-2 text-xs text-amber-800"><AlertTriangle class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.configuration.locked') }}</p>
         <div class="ml-auto flex items-center gap-2">
-          <button type="button" class="inline-flex min-h-10 cursor-pointer items-center justify-center rounded-lg border border-slate-300 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || simulator.topologyLocked.value" @click="simulator.saveSettings">{{ t('common.save') }}</button>
+          <button type="button" class="inline-flex min-h-10 cursor-pointer items-center justify-center rounded-lg border border-slate-300 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || simulator.topologyLocked.value" @click="requestSettingsAction('save')">{{ t('common.save') }}</button>
           <button v-if="stoppable" type="button" class="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-lg bg-rose-700 px-5 text-sm font-bold text-white shadow-sm hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null" @click="simulator.stop"><LoaderCircle v-if="simulator.busyAction.value === 'stop'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><Power v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.stop') }}</button>
-          <button v-else-if="!recoveryRequired" type="button" class="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 text-sm font-bold text-white shadow-[0_6px_16px_rgba(5,150,105,0.25)] hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || platformAutoAddNeedsConfig" @click="simulator.start"><LoaderCircle v-if="simulator.busyAction.value === 'start'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><RadioTower v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.start') }}</button>
+          <button v-else-if="!recoveryRequired" type="button" class="inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 text-sm font-bold text-white shadow-[0_6px_16px_rgba(5,150,105,0.25)] hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || platformAutoAddNeedsConfig" @click="requestSettingsAction('start')"><LoaderCircle v-if="simulator.busyAction.value === 'start'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><RadioTower v-else class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.start') }}</button>
         </div>
       </footer>
     </div>
@@ -1462,6 +1552,23 @@ function revealPreflightDetails() {
       :error="simulator.platformReplaceRetryError.value"
       @cancel="simulator.cancelPlatformReplaceRetry"
       @confirm="simulator.confirmPlatformReplaceRetry"
+    />
+    <DeviceMaterialResetConfirmDialog
+      :open="materialResetPromptOpen"
+      :busy="simulator.busyAction.value === 'reset-and-sync-remote-materials'"
+      :error="materialResetError"
+      @cancel="cancelMaterialResetPrompt"
+      @confirm="confirmMaterialReset"
+    />
+    <DeviceMaterialMigrationConfirmDialog
+      :open="materialMigrationPromptOpen"
+      :busy="new Set(['save-settings', 'migrate-local-materials']).has(simulator.busyAction.value ?? '')"
+      :error="materialMigrationError"
+      :source-path="simulator.localMaterialsPath.value"
+      :target-path="materialMigrationTarget"
+      @cancel="cancelMaterialMigration"
+      @switch-only="finishMaterialDirectoryChange(false)"
+      @migrate="finishMaterialDirectoryChange(true)"
     />
   </main>
 </template>

@@ -1,0 +1,11 @@
+{
+	"Response": {
+		"Data": {
+			"EventList": "ObjectIsRecognized,FieldDetectorObjectsInside,LineRuleData,AreaRuleData,AccessElevatorAlarm,ObjectRemoved,SafetyHelmetAlarm,WorkClothesAlarm,TelephoningAlarm,NoMaskAlarm,FallOverAlarm,OffDutyDetectionAlarm,SleepingDetectionAlarm,ReflectiveClothesDetectionAlarm,SmokingAlarm,PlayMobilePhoneDetection,FireDetection,FumesAlarmBegin,CrowdDensityCriticalAlarm,AbnormalParkingDetection,ChannelBlockageDetection,NonMotorAbnormalParkingDetection,ChannelStatus,IPCOnline,IPCOffline,ChannelDeleted,FaceMatchAlarm"
+		},
+		"ResponseCode": 0,
+		"ResponseString": "Succeed",
+		"ResponseURL": "/LAPI/V1.0/System/Event/Subscription/Capabilities",
+		"StatusCode": 0
+	}
+}

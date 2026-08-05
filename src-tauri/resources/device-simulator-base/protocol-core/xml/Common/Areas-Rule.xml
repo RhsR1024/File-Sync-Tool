@@ -1,0 +1,42 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/%d/Smart/PeopleCounting/Areas/Rule",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Enabled":	1,
+	"ReportInterval":	60,
+	"AreaNum":	1,
+	"AreaRuleInfoList":	[{
+			"Enabled":	1,
+			"ID":	0,
+			"AreaLocation":	{
+				"Num":	6,
+				"PointList":	[{
+						"X":	3085,
+						"Y":	3524
+					}, {
+						"X":	5085,
+						"Y":	3524
+					}, {
+						"X":	5085,
+						"Y":	4524
+					}, {
+						"X":	5085,
+						"Y":	5524
+					}, {
+						"X":	3085,
+						"Y":	5524
+					}, {
+						"X":	3085,
+						"Y":	4524
+					}]
+			}
+		}]
+}
+	}
+}

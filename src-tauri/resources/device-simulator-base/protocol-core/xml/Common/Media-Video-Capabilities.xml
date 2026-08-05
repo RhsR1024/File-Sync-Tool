@@ -1,0 +1,144 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/1/Media/Video/Capabilities",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"IsSupportCfg":	1,
+	"IsSupportSmoothLevel":	1,
+	"IsSupportImageFormat":	1,
+	"IsSupportScrambled":	0,
+	"EncodeFormatNum":	3,
+	"EncodeFormatList":	[0, 1, 2],
+	"MinIFrameInterval":	5,
+	"MaxIFrameInterval":	250,
+	"StreamCapabilityNum":	3,
+	"StreamCapabilityList":	[{
+			"ID":	0,
+			"ResolutionNum":	4,
+			"ResolutionCapabilityList":	[{
+					"Width":	2560,
+					"Height":	1440,
+					"MinBitRate":	128,
+					"MaxBitRate":	16384
+				}, {
+					"Width":	1920,
+					"Height":	1080,
+					"MinBitRate":	128,
+					"MaxBitRate":	16384
+				}, {
+					"Width":	1280,
+					"Height":	720,
+					"MinBitRate":	128,
+					"MaxBitRate":	16384
+				}, {
+					"Width":	720,
+					"Height":	576,
+					"MinBitRate":	128,
+					"MaxBitRate":	16384
+				}],
+			"MaxFrameRate":	25,
+			"MaxMJPEGFrameRate":	5,
+			"SmartEncode":	{
+				"H264SmartEncodeModeNum":	3,
+				"H264SmartEncodeModeList":	[0, 1, 2],
+				"H265SmartEncodeModeNum":	3,
+				"H265SmartEncodeModeList":	[0, 1, 2]
+			}
+		}, {
+			"ID":	1,
+			"ResolutionNum":	4,
+			"ResolutionCapabilityList":	[{
+					"Width":	720,
+					"Height":	576,
+					"MinBitRate":	128,
+					"MaxBitRate":	16384
+				}, {
+					"Width":	704,
+					"Height":	288,
+					"MinBitRate":	128,
+					"MaxBitRate":	16384
+				}, {
+					"Width":	640,
+					"Height":	360,
+					"MinBitRate":	128,
+					"MaxBitRate":	16384
+				}, {
+					"Width":	352,
+					"Height":	288,
+					"MinBitRate":	128,
+					"MaxBitRate":	16384
+				}],
+			"MaxFrameRate":	25,
+			"MaxMJPEGFrameRate":	15,
+			"SmartEncode":	{
+				"H264SmartEncodeModeNum":	3,
+				"H264SmartEncodeModeList":	[0, 1, 2],
+				"H265SmartEncodeModeNum":	3,
+				"H265SmartEncodeModeList":	[0, 1, 2]
+			}
+		}, {
+			"ID":	2,
+			"ResolutionNum":	1,
+			"ResolutionCapabilityList":	[{
+					"Width":	352,
+					"Height":	288,
+					"MinBitRate":	128,
+					"MaxBitRate":	16384
+				}],
+			"MaxFrameRate":	25,
+			"MaxMJPEGFrameRate":	15,
+			"SmartEncode":	{
+				"H264SmartEncodeModeNum":	3,
+				"H264SmartEncodeModeList":	[0, 1, 2],
+				"H265SmartEncodeModeNum":	3,
+				"H265SmartEncodeModeList":	[0, 1, 2]
+			}
+		}],
+	"VideoModeNum":	6,
+	"VideoModeInfoList":	[{
+			"Resolution":	{
+				"Width":	2592,
+				"Height":	1520
+			},
+			"FrameRate":	20
+		}, {
+			"Resolution":	{
+				"Width":	2560,
+				"Height":	1440
+			},
+			"FrameRate":	25
+		}, {
+			"Resolution":	{
+				"Width":	2048,
+				"Height":	1520
+			},
+			"FrameRate":	30
+		}, {
+			"Resolution":	{
+				"Width":	2048,
+				"Height":	1520
+			},
+			"FrameRate":	25
+		}, {
+			"Resolution":	{
+				"Width":	1920,
+				"Height":	1080
+			},
+			"FrameRate":	30
+		}, {
+			"Resolution":	{
+				"Width":	1920,
+				"Height":	1080
+			},
+			"FrameRate":	25
+		}],
+	"GOPTypeNum":	1,
+	"GOPTypeList":	[0]
+}
+	}
+}

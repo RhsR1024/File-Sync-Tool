@@ -1,36 +1,5 @@
-# Virtual device asset release root
+# 虚拟设备松散素材分发目录
 
-该目录是视频设备模拟器素材在升级/静态服务器上的发布根目录模板。实际 ZIP、Catalog 和签名属于发布产物，不提交到 Git。
+本目录由升级服务器直接发布。openEuler/Linux 服务器将 MP4 放入 `source-videos` 后，通过发布根目录下的 `prepare-device-simulator-materials.sh` 一次性生成 `prepared-videos`；客户端只下载可直接播放的结果，不需要 FFmpeg。无需签名、素材版本号、ZIP 包或人工维护 catalog；`serve.py` 会动态提供 `files.json`。
 
-生产目录结构：
-
-```text
-virtual-device-assets/
-├── catalog-v1.json
-├── catalog-v1.json.sig
-└── packs/
-    └── <pack-id>/
-        └── <version>/
-            └── <pack-id>-<version>.zip
-```
-
-发布规则：
-
-- 素材仅限已确认授权的非商业测试、学习、复制和打包用途；禁止商业使用。
-- `pack-id + version` 一经发布不得替换，变更内容必须提升版本。
-- 先上传并校验所有 ZIP，最后使用 `scripts/device-simulator-assets/asset-release.mjs publish` 原子更新 Catalog。
-- `catalog-v1.json` 使用 `Cache-Control: no-cache`；版本化 ZIP 使用长期 `Cache-Control: public, max-age=31536000, immutable`。
-- 签名私钥永远不得放入本目录。这里只发布 Catalog、分离签名、不可变 ZIP；公钥由应用的受信密钥配置分发。
-- 仓库中的 `scripts/release-server/serve.py` 仅适合开发验证，不作为大规模生产素材分发服务。
-
-本机构建机签名密钥位置：
-
-- 私钥：`D:\FileSyncTool-Secrets\device-assets-static-review-2026.key`
-- 公钥：`D:\FileSyncTool-Secrets\device-assets-static-review-2026.pub.pem`
-- Key ID：`device-assets-static-review-2026`
-
-这里只记录本机外部路径，私钥文件本身不得复制到仓库、发布目录、日志或构建产物中。执行签名前必须确认私钥派生公钥与应用内置受信公钥匹配。
-
-完整生成、签名、校验、发布和密钥轮换步骤见 [`scripts/device-simulator-assets/README.md`](../../device-simulator-assets/README.md)。
-
-如果需要把当前版本真正部署到升级服务器，请参阅 [`DEPLOYMENT_GUIDE.md`](./DEPLOYMENT_GUIDE.md)，其中列出了当前 Catalog 对应的 ZIP 文件、Profile 依赖、客户端访问 URL 和验收步骤。
+目录结构和操作方式见 [`DEPLOYMENT_GUIDE.md`](DEPLOYMENT_GUIDE.md)。

@@ -1,0 +1,21 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/PeopleLibraries/Capacity",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"MaxPeopleNum":	10000,
+	"FreePeopleNum":	9999,
+	"MaxFaceNum":	10000,
+	"FreeFaceNum":	9999,
+	"MaxCardNum":	20000,
+	"FreeCardNum":	19998,
+	"MaxLibNum":	16,
+	"FreeLibNum":	14
+}
+	}
+}

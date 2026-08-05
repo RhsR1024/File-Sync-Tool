@@ -1,0 +1,148 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Image/Capabilities",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Num":	2,
+			"ImageCapabilitiesList":	[{
+					"ChannelID":	1,
+					"ImageCapabilities":	{
+						"IsSupportCfg":	1,
+						"Enhance":	{
+							"ImageRotationModeNum":	4,
+							"ImageRotationModeList":	[0, 3, 4, 5],
+							"IsSupportSharpness":	1,
+							"IsSupport2DNoiseReduce":	1
+						},
+						"Focus":	{
+							"SupportFocusCfg":	0,
+							"FocusModeNum":	0,
+							"FocusSceneNum":	0
+						},
+						"WhiteBalance":	{
+							"WhiteBalanceModeNum":	5,
+							"WhiteBalanceModeList":	[0, 1, 3, 6, 7]
+						},
+						"Exposure":	{
+							"SupportCompensation":	1,
+							"ExposureModeNum":	6,
+							"ExposureModeList":	[0, 1, 5, 6, 7, 8],
+							"SupportIrisCfg":	0,
+							"IrisRangeNum":	0,
+							"MinGain":	0,
+							"MaxGain":	100,
+							"SupportHLCCfg":	0,
+							"SupportMeteringCfg":	0,
+							"MeteringModeNum":	0,
+							"Shutter":	{
+								"SupportShutterTimeCfg":	1,
+								"ShutterTimeUnit":	1,
+								"ShutterTimeRangeNum":	17,
+								"ShutterTimeRangeList":	[25, 30, 50, 60, 100, 120, 150, 180, 200, 250, 500, 1000, 2000, 4000, 8000, 50000, 100000],
+								"SupportSlowShutterCfg":	1,
+								"SlowShutterTimeRangeNum":	7,
+								"SlowShutterTimeRangeList":	[6, 8, 10, 12, 15, 20, 25]
+							},
+							"DayNight":	{
+								"SupportDayNightCfg":	1,
+								"DayNightModeNum":	3,
+								"DayNightModeList":	[0, 1, 2],
+								"SupportSensibilityCfg":	1,
+								"SupportSwitchingCfg":	1
+							},
+							"WideDynamic":	{
+								"SupportWideDynamicCfg":	1,
+								"WideDynamicModeNum":	2,
+								"WideDynamicModeList":	[0, 1]
+							}
+						},
+						"LampCtrl":	{
+							"LampNum":	1,
+							"LampInfos":	[{
+									"LampType":	2,
+									"LampCtrlModeList":	[0, 1, 3],
+									"LampCtrlModeListNum":	3,
+									"SupportNearLampCfg":	1,
+									"SupportMiddleLampCfg":	0,
+									"SupportFarLampCfg":	1,
+									"SupportSuperFarLampCfg":	0,
+									"SupportLaserAngleCfg":	0,
+									"LaserAngleMin":	0,
+									"LaserAngleMax":	0
+								}]
+						}
+					}
+				}, {
+					"ChannelID":	2,
+					"ImageCapabilities":	{
+						"IsSupportCfg":	1,
+						"Enhance":	{
+							"ImageRotationModeNum":	2,
+							"ImageRotationModeList":	[0, 3],
+							"IsSupportSharpness":	1,
+							"IsSupport2DNoiseReduce":	1
+						},
+						"Focus":	{
+							"SupportFocusCfg":	0,
+							"FocusModeNum":	0,
+							"FocusSceneNum":	0
+						},
+						"WhiteBalance":	{
+							"WhiteBalanceModeNum":	5,
+							"WhiteBalanceModeList":	[0, 1, 3, 6, 7]
+						},
+						"Exposure":	{
+							"SupportCompensation":	1,
+							"ExposureModeNum":	7,
+							"ExposureModeList":	[0, 1, 2, 5, 6, 7, 8],
+							"SupportIrisCfg":	0,
+							"IrisRangeNum":	0,
+							"MinGain":	0,
+							"MaxGain":	100,
+							"SupportHLCCfg":	0,
+							"SupportMeteringCfg":	0,
+							"MeteringModeNum":	0,
+							"Shutter":	{
+								"SupportShutterTimeCfg":	1,
+								"ShutterTimeUnit":	1,
+								"ShutterTimeRangeNum":	17,
+								"ShutterTimeRangeList":	[25, 30, 50, 60, 100, 120, 150, 180, 200, 250, 500, 1000, 2000, 4000, 8000, 50000, 100000],
+								"SupportSlowShutterCfg":	1,
+								"SlowShutterTimeRangeNum":	7,
+								"SlowShutterTimeRangeList":	[6, 8, 10, 12, 15, 20, 25]
+							},
+							"DayNight":	{
+								"SupportDayNightCfg":	1,
+								"DayNightModeNum":	3,
+								"DayNightModeList":	[0, 1, 2],
+								"SupportSensibilityCfg":	1,
+								"SupportSwitchingCfg":	1
+							},
+							"WideDynamic":	{
+								"SupportWideDynamicCfg":	1,
+								"WideDynamicModeNum":	2,
+								"WideDynamicModeList":	[0, 1]
+							}
+						},
+						"LampCtrl":	{
+							"LampNum":	1,
+							"LampInfos":	[{
+									"LampType":	2,
+									"LampCtrlModeList":	[0, 1, 3],
+									"LampCtrlModeListNum":	3,
+									"SupportNearLampCfg":	1,
+									"SupportMiddleLampCfg":	0,
+									"SupportFarLampCfg":	0,
+									"SupportSuperFarLampCfg":	0,
+									"SupportLaserAngleCfg":	0,
+									"LaserAngleMin":	0,
+									"LaserAngleMax":	0
+								}]
+						}
+					}
+				}]
+		}
+	}
+}

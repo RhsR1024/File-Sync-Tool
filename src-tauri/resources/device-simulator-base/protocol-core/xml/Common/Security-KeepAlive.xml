@@ -1,0 +1,14 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/System/Security/KeepAlive",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	    "DeviceStatusCode": "1092599520"
+	    }
+	}
+}

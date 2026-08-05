@@ -1,0 +1,14 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Smart/SearchByImage/Progress",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Percent":	100,
+			"EndTime":	0,
+			"MatchNum":	1000,
+			"RunStatus":	2
+		}
+	}
+}

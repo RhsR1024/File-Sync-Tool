@@ -1,0 +1,21 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/0/Image/LampCtrl",
+	"CreatedID": -1,
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Enabled":	1,
+	"Type":	0,
+	"Mode":	0,
+	"NearLevel":	0,
+	"MiddleLevel":	0,
+	"FarLevel":	0,
+	"SuperFarLevel":	6000,
+	"LaserAngle":	128
+}
+	}
+}

@@ -1,6 +1,9 @@
 use super::rtp::{MediaClock, RtpPacketError};
 use crate::device_simulator::media::SharedMediaPack;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 
@@ -18,14 +21,6 @@ impl SharedNal {
         Self {
             buffer,
             offset: 0,
-            length,
-        }
-    }
-
-    fn from_shared_buffer(buffer: Arc<[u8]>, offset: usize, length: usize) -> Self {
-        Self {
-            buffer,
-            offset,
             length,
         }
     }
@@ -53,9 +48,11 @@ pub struct ScheduledAccessUnit {
 #[derive(Debug, Clone)]
 pub struct SharedFrameScheduler {
     frames: Arc<[Arc<SharedAccessUnit>]>,
+    media: Option<Arc<SharedMediaPack>>,
     sender: broadcast::Sender<ScheduledAccessUnit>,
     clock_rate: u32,
     frame_duration_ticks: u32,
+    producer_started: Arc<AtomicBool>,
 }
 
 /// Producer side of a live media source. The session-level media hub owns this
@@ -97,28 +94,6 @@ impl SharedFrameScheduler {
         media: Arc<SharedMediaPack>,
         client_queue_capacity: usize,
     ) -> Result<Self, RtpPacketError> {
-        let buffer = media.shared_bytes();
-        let frames = media
-            .frames()
-            .iter()
-            .map(|frame| {
-                Arc::new(SharedAccessUnit {
-                    nals: frame
-                        .nals
-                        .iter()
-                        .map(|nal| {
-                            SharedNal::from_shared_buffer(
-                                Arc::clone(&buffer),
-                                nal.offset,
-                                nal.length,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .into(),
-                    keyframe: frame.keyframe,
-                })
-            })
-            .collect::<Vec<_>>();
         let frame_duration_ticks = media
             .frames()
             .first()
@@ -137,12 +112,21 @@ impl SharedFrameScheduler {
                 message: "the shared scheduler requires a constant indexed frame duration".into(),
             });
         }
-        Self::with_duration(
-            frames.into(),
-            media.manifest().clock_rate,
+        if client_queue_capacity == 0 || client_queue_capacity > 4_096 {
+            return Err(RtpPacketError {
+                code: "device_simulator.rtsp.queue_invalid",
+                message: "client queue capacity must be within 1..=4096".into(),
+            });
+        }
+        let (sender, _) = broadcast::channel(client_queue_capacity);
+        Ok(Self {
+            frames: Arc::from([]),
+            media: Some(media.clone()),
+            sender,
+            clock_rate: media.manifest().clock_rate,
             frame_duration_ticks,
-            client_queue_capacity,
-        )
+            producer_started: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     pub fn external(
@@ -165,9 +149,11 @@ impl SharedFrameScheduler {
         Ok((
             Self {
                 frames: Arc::from([]),
+                media: None,
                 sender: sender.clone(),
                 clock_rate,
                 frame_duration_ticks,
+                producer_started: Arc::new(AtomicBool::new(false)),
             },
             SharedFramePublisher { sender },
         ))
@@ -199,9 +185,11 @@ impl SharedFrameScheduler {
         let (sender, _) = broadcast::channel(client_queue_capacity);
         Ok(Self {
             frames,
+            media: None,
             sender,
             clock_rate,
             frame_duration_ticks,
+            producer_started: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -222,11 +210,15 @@ impl SharedFrameScheduler {
     }
 
     pub(crate) fn owns_indexed_producer(&self) -> bool {
-        !self.frames.is_empty()
+        !self.frames.is_empty() || self.media.is_some()
     }
 
     pub fn spawn(&self, mut shutdown: watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
+        if self.producer_started.swap(true, Ordering::AcqRel) {
+            return tokio::spawn(async {});
+        }
         let frames = Arc::clone(&self.frames);
+        let media = self.media.clone();
         let sender = self.sender.clone();
         let clock_rate = self.clock_rate;
         let frame_duration_ticks = self.frame_duration_ticks;
@@ -237,18 +229,37 @@ impl SharedFrameScheduler {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut timestamp = 0_u32;
             let mut frame_index = 0usize;
+            let frame_count = media
+                .as_ref()
+                .map_or_else(|| frames.len(), |source| source.frames().len());
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let frame = ScheduledAccessUnit {
-                            frame_index,
-                            timestamp,
-                            access_unit: Arc::clone(&frames[frame_index]),
-                        };
-                        // No receivers is normal. A slow receiver is isolated by
-                        // the bounded broadcast queue and reports lag to itself.
-                        let _ = sender.send(frame);
-                        frame_index = (frame_index + 1) % frames.len();
+                        // Preserve a live timeline while idle, but do no disk IO
+                        // or frame allocation until at least one RTSP client is
+                        // actually subscribed.
+                        if sender.receiver_count() > 0 {
+                            let access_unit = if let Some(source) = media.as_ref() {
+                                match source.read_frame_nals(frame_index) {
+                                    Ok((keyframe, nals)) => Arc::new(SharedAccessUnit {
+                                        nals: nals.into_iter().map(SharedNal::from_bytes).collect::<Vec<_>>().into(),
+                                        keyframe,
+                                    }),
+                                    Err(error) => {
+                                        log::error!("device simulator media read failed: {error}");
+                                        break;
+                                    }
+                                }
+                            } else {
+                                Arc::clone(&frames[frame_index])
+                            };
+                            let _ = sender.send(ScheduledAccessUnit {
+                                frame_index,
+                                timestamp,
+                                access_unit,
+                            });
+                        }
+                        frame_index = (frame_index + 1) % frame_count;
                         timestamp = timestamp.wrapping_add(frame_duration_ticks);
                     }
                     changed = shutdown.changed() => {

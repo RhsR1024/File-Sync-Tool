@@ -216,6 +216,7 @@ function emptyMediaMetrics(): ScreenShareMediaMetrics {
 }
 
 const status = ref<ScreenShareStatus>({
+  webrtc_available: false,
   is_active: false,
   viewer_count: 0,
   viewer_ip_reference_count: 0,
@@ -450,11 +451,11 @@ const mediaTransportOptions = computed(() => [
     label: t('tools.screenShare.mediaTransportH264'),
     description: t('tools.screenShare.mediaTransportH264Desc'),
   },
-  {
+  ...(status.value.webrtc_available ? [{
     value: 'web_rtc' as const,
     label: t('tools.screenShare.mediaTransportWebRtc'),
     description: t('tools.screenShare.mediaTransportWebRtcDesc'),
-  },
+  }] : []),
   {
     value: 'mjpeg' as const,
     label: t('tools.screenShare.mediaTransportMjpeg'),
@@ -507,6 +508,7 @@ async function stopShare() {
   qrForUrl.value = null;
   showAllConnIps.value = false;
   status.value = {
+    webrtc_available: status.value.webrtc_available,
     is_active: false,
     viewer_count: 0,
     viewer_ip_reference_count: 0,
@@ -772,6 +774,9 @@ function applyStatus(payload: ScreenShareStatus) {
     ...payload,
     media_metrics: payload.media_metrics ?? emptyMediaMetrics(),
   };
+  if (!payload.webrtc_available && mediaTransport.value === 'web_rtc') {
+    mediaTransport.value = 'mse_h264';
+  }
   if (payload.is_active && !isActive.value) {
     isActive.value = true;
     serverUrl.value = payload.server_url;

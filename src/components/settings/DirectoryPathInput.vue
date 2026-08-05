@@ -10,6 +10,7 @@ type PickMode = 'directory' | 'file';
 
 interface Props {
   modelValue: string;
+  inputId?: string;
   placeholder?: string;
   title?: string;
   disabled?: boolean;
@@ -20,6 +21,7 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), {
   placeholder: '',
+  inputId: '',
   title: '',
   disabled: false,
   allowFile: false,
@@ -56,6 +58,7 @@ async function pick(mode: PickMode) {
 <template>
   <div class="flex gap-2">
     <input
+      :id="inputId || undefined"
       :value="modelValue"
       type="text"
       :placeholder="placeholder"

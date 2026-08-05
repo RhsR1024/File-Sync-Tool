@@ -1,0 +1,20 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/PACS/Capabilities",
+	"CreatedID": -1,
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"SupportCaptureMode":	1,
+	"SupportRecordPushMode":	1,
+	"SupportBatchPersonFeatureMax":	{
+		"PersonMax":	100,
+		"FeaturesMax":	100,
+		"ImageMax":	6
+	}
+}
+	}
+}

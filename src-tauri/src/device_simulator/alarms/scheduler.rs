@@ -1,16 +1,16 @@
 #[cfg(test)]
 use super::ImageCache;
 use super::{
-    build_alarm_requests, build_recovery_request, AlarmBuildContext, AlarmError,
-    AlarmHandlerDefinition, AlarmResult, HttpAlarmRequest, LegacyAlarmValues, RecoveryDefinition,
-    ResponseSuccessRule, SharedImageCache,
+    build_alarm_requests, build_recovery_request, event_image_references, AlarmBuildContext,
+    AlarmError, AlarmHandlerDefinition, AlarmResult, HttpAlarmRequest, LegacyAlarmValues,
+    RecoveryDefinition, ResponseSuccessRule, SharedImageCache,
 };
 use crate::device_simulator::profiles::scope::TargetPlatform;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
@@ -19,6 +19,12 @@ pub const MAX_ALARM_TARGETS: usize = 2_048;
 pub const MAX_ALARM_RETRY_ATTEMPTS: u8 = 5;
 pub const MAX_ALARM_REQUEST_TIMEOUT_MS: u64 = 60_000;
 pub const MAX_ALARM_INTERVAL_MS: u64 = 24 * 60 * 60 * 1_000;
+
+// A Worker is recreated for each simulator session. Starting every Worker at
+// event 1 makes a platform treat a later session's structured objects as
+// updates to the previous session. Keep IDs in the legacy numeric range while
+// choosing a new high-entropy starting point for every Worker process.
+static NEXT_ALARM_EVENT_ID: OnceLock<AtomicU64> = OnceLock::new();
 
 pub type AlarmFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -506,7 +512,6 @@ pub struct AlarmScheduler {
     global_semaphore: Arc<Semaphore>,
     global_rate: Arc<RateGate>,
     destinations: Arc<Mutex<BTreeMap<String, Arc<DestinationControl>>>>,
-    event_sequence: Arc<AtomicU64>,
 }
 
 impl AlarmScheduler {
@@ -523,7 +528,6 @@ impl AlarmScheduler {
             clock,
             limits,
             destinations: Arc::new(Mutex::new(BTreeMap::new())),
-            event_sequence: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -674,13 +678,33 @@ impl AlarmScheduler {
     ) {
         let mut round = 0_u64;
         let mut random = DeterministicRandom::new(random_seed);
+        let mut invocation_cycle = ShuffledCycle::default();
+        // Image materials rotate independently for each alarm type. Using the
+        // global event ID here skips groups whenever the number of alarm types
+        // and the number of material groups share a divisor (for example four
+        // types with six car groups).
+        let mut image_group_sequences = vec![0_u64; target.invocations.len()];
+        let mut image_group_cycles = vec![ShuffledCycle::default(); target.invocations.len()];
         while send_count.map_or(true, |limit| round < limit) && !cancellation.is_cancelled() {
             let invocation_index = match mode {
                 AlarmDispatchMode::Specified => 0,
                 AlarmDispatchMode::Sequential => round as usize % target.invocations.len(),
-                AlarmDispatchMode::Random => random.next_index(target.invocations.len()),
+                AlarmDispatchMode::Random => {
+                    invocation_cycle.next(target.invocations.len(), &mut random)
+                }
             };
             let invocation = &target.invocations[invocation_index];
+            let image_group_count = 1 + invocation.definition.alternate_images.len();
+            let image_group_sequence = match mode {
+                AlarmDispatchMode::Random => {
+                    image_group_cycles[invocation_index].next(image_group_count, &mut random) as u64
+                }
+                AlarmDispatchMode::Specified | AlarmDispatchMode::Sequential => {
+                    let sequence = image_group_sequences[invocation_index];
+                    image_group_sequences[invocation_index] = sequence.saturating_add(1);
+                    sequence
+                }
+            };
             let legacy_values = LegacyAlarmValues::new(random.next_u64());
             let event_id = self.next_event_id();
             let alarm_succeeded = self
@@ -690,6 +714,7 @@ impl AlarmScheduler {
                     AlarmDeliveryPhase::Alarm,
                     &legacy_values,
                     event_id,
+                    image_group_sequence,
                     &tracker,
                     &cancellation,
                 )
@@ -714,6 +739,7 @@ impl AlarmScheduler {
                     AlarmDeliveryPhase::Recovery,
                     &legacy_values,
                     event_id,
+                    image_group_sequence,
                     &tracker,
                     &cancellation,
                 )
@@ -745,6 +771,7 @@ impl AlarmScheduler {
         phase: AlarmDeliveryPhase,
         legacy_values: &LegacyAlarmValues,
         event_id: u64,
+        image_group_sequence: u64,
         tracker: &AlarmJobTracker,
         cancellation: &AlarmCancellation,
     ) -> bool {
@@ -768,22 +795,38 @@ impl AlarmScheduler {
             event_id.to_string(),
         );
         context.fields.insert(
+            crate::device_simulator::alarms::DynamicField::ImageGroupSequence,
+            image_group_sequence.to_string(),
+        );
+        context.fields.insert(
             crate::device_simulator::alarms::DynamicField::RelatedId,
             legacy_values.related_id(),
         );
         context.legacy_values = Some(legacy_values.clone());
-        let requests = {
-            let image_cache = invocation.image_cache.read();
+        let definition = Arc::clone(&invocation.definition);
+        let image_cache = Arc::clone(&invocation.image_cache);
+        let requests = tokio::task::spawn_blocking(move || {
+            let references = event_image_references(&definition, &context);
+            let mut image_cache = image_cache.write();
+            image_cache.ensure_cached(references)?;
             match phase {
                 AlarmDeliveryPhase::Alarm => {
-                    build_alarm_requests(&invocation.definition, &context, &image_cache)
+                    build_alarm_requests(&definition, &context, &image_cache)
                 }
                 AlarmDeliveryPhase::Recovery => {
-                    build_recovery_request(&invocation.definition, &context, &image_cache)
+                    build_recovery_request(&definition, &context, &image_cache)
                         .map(|request| request.into_iter().collect())
                 }
             }
-        };
+        })
+        .await
+        .map_err(|error| {
+            AlarmError::new(
+                "device_simulator.alarm.image_cache_task_failed",
+                format!("alarm image cache task failed: {error}"),
+            )
+        })
+        .and_then(|result| result);
         let requests = match requests {
             Ok(requests) => requests,
             Err(error) => {
@@ -940,9 +983,13 @@ impl AlarmScheduler {
     }
 
     fn next_event_id(&self) -> u64 {
-        self.event_sequence
+        NEXT_ALARM_EVENT_ID
+            .get_or_init(|| {
+                let bytes = *uuid::Uuid::new_v4().as_bytes();
+                let seed = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as u64;
+                AtomicU64::new(seed % 800_000_000 + 100_000_000)
+            })
             .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1)
     }
 }
 
@@ -1117,6 +1164,27 @@ impl DeterministicRandom {
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ShuffledCycle {
+    remaining: Vec<usize>,
+}
+
+impl ShuffledCycle {
+    fn next(&mut self, length: usize, random: &mut DeterministicRandom) -> usize {
+        debug_assert!(length > 0);
+        if self.remaining.is_empty() {
+            self.remaining.extend(0..length);
+            for index in (1..length).rev() {
+                let swap_with = random.next_index(index + 1);
+                self.remaining.swap(index, swap_with);
+            }
+        }
+        self.remaining
+            .pop()
+            .expect("a shuffled cycle is replenished before selection")
     }
 }
 
@@ -1342,6 +1410,7 @@ mod tests {
             .unwrap(),
             image_policy: ImagePolicy::Forbidden,
             images: vec![],
+            alternate_images: vec![],
             transport: TransportDefinition {
                 method: HttpMethod::Post,
                 path: "/fixture/alarm".into(),
@@ -1431,6 +1500,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn random_cycles_use_all_one_hundred_entries_before_repeating() {
+        let mut random = DeterministicRandom::new(42);
+        let mut cycle = ShuffledCycle::default();
+        let first = (0..100)
+            .map(|_| cycle.next(100, &mut random))
+            .collect::<BTreeSet<_>>();
+        let second = (0..100)
+            .map(|_| cycle.next(100, &mut random))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(first, (0..100).collect());
+        assert_eq!(second, (0..100).collect());
+    }
+
     #[tokio::test]
     async fn one_shot_binds_each_request_to_the_device_source_ip() {
         let clock: Arc<dyn AlarmClock> = Arc::new(TestClock::default());
@@ -1477,6 +1561,28 @@ mod tests {
                 .is_some_and(|timestamp| timestamp > 1_600_000_000)
         }));
         assert_ne!(payloads[0]["eventId"], payloads[1]["eventId"]);
+    }
+
+    #[test]
+    fn separate_schedulers_share_a_non_repeating_event_sequence() {
+        let clock: Arc<dyn AlarmClock> = Arc::new(TestClock::default());
+        let first = AlarmScheduler::new(
+            Arc::new(ScriptedSender::successful(clock.clone())),
+            clock.clone(),
+            limits(),
+        )
+        .unwrap();
+        let second = AlarmScheduler::new(
+            Arc::new(ScriptedSender::successful(clock.clone())),
+            clock,
+            limits(),
+        )
+        .unwrap();
+
+        let first_id = first.next_event_id();
+        let second_id = second.next_event_id();
+        assert!(second_id > first_id);
+        assert!((100_000_000..900_000_002).contains(&first_id));
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ use crate::device_simulator::assets::catalog::PackManifest;
 use crate::device_simulator::errors::SimulatorErrorBody;
 use crate::device_simulator::models::AlarmJobState;
 use crate::device_simulator::profiles::scope::{FirstReleaseProfileId, TargetPlatform};
-use crate::device_simulator::runtime_assets::RuntimeAssetLayout;
+use crate::device_simulator::runtime_assets::{PinnedPackDirectory, RuntimeAssetLayout};
 use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::Value;
@@ -287,9 +287,14 @@ impl AlarmRuntime {
             .join("user-alarm-images");
         let mut image_references = registry.image_references();
         image_references.extend(all_declared_pack_images(&manifests));
-        let image_cache =
-            ImageCache::load_at_start(image_references, &pack_root, &user_asset_root, &manifests)
-                .map_err(|source| runtime_error(source.code, source.message))?;
+        image_references.extend(config.assets.local_alarm_image_references());
+        let image_cache = ImageCache::declare_at_start(
+            image_references,
+            &pack_root,
+            &user_asset_root,
+            &manifests,
+        )
+        .map_err(|source| runtime_error(source.code, source.message))?;
         let image_manifests = Arc::new(manifests);
 
         let mut devices = BTreeMap::new();
@@ -1007,29 +1012,21 @@ fn compile_runtime_definition(
     } else {
         embedded_image_count(&template)
     };
-    let image_references = select_pack_images(
+    let mut image_reference_groups = select_pack_image_groups(
         assets,
         profile_id,
         definition.image_root.as_deref(),
         image_count,
         &definition.id,
     )?;
-    let images = image_references
+    let images = build_image_attachments(
+        image_reference_groups.drain(..1).next().unwrap_or_default(),
+        multipart,
+        image_count,
+    );
+    let alternate_images = image_reference_groups
         .into_iter()
-        .enumerate()
-        .map(|(index, selected)| ImageAttachmentDefinition {
-            file_name: image_reference_file_name(&selected.reference),
-            reference: selected.reference,
-            url_reference: selected.url_reference,
-            field_name: if multipart {
-                "image".into()
-            } else if image_count == 1 {
-                "image".into()
-            } else {
-                format!("image{}", index + 1)
-            },
-            image_index: multipart.then_some((index + 1) as u16),
-        })
+        .map(|group| build_image_attachments(group, multipart, image_count))
         .collect::<Vec<_>>();
     let image_policy = if images.is_empty() {
         ImagePolicy::Forbidden
@@ -1117,6 +1114,7 @@ fn compile_runtime_definition(
         template,
         image_policy,
         images,
+        alternate_images,
         transport: TransportDefinition {
             method: HttpMethod::Post,
             path,
@@ -1412,15 +1410,59 @@ struct SelectedPackImage {
     url_reference: Option<ImageAssetRef>,
 }
 
-fn select_pack_images(
+fn build_image_attachments(
+    selected: Vec<SelectedPackImage>,
+    multipart: bool,
+    image_count: usize,
+) -> Vec<ImageAttachmentDefinition> {
+    selected
+        .into_iter()
+        .enumerate()
+        .map(|(index, selected)| ImageAttachmentDefinition {
+            file_name: image_reference_file_name(&selected.reference),
+            reference: selected.reference,
+            url_reference: selected.url_reference,
+            field_name: if multipart || image_count == 1 {
+                "image".into()
+            } else {
+                format!("image{}", index + 1)
+            },
+            image_index: multipart.then_some((index + 1) as u16),
+        })
+        .collect()
+}
+
+fn select_pack_image_groups(
     assets: &RuntimeAssetLayout,
     profile_id: FirstReleaseProfileId,
     image_root: Option<&str>,
     count: usize,
     alarm_type_id: &str,
-) -> Result<Vec<SelectedPackImage>, AlarmRuntimeError> {
+) -> Result<Vec<Vec<SelectedPackImage>>, AlarmRuntimeError> {
     if count == 0 {
-        return Ok(vec![]);
+        return Ok(vec![vec![]]);
+    }
+    if let Some(groups) = assets.local_alarm_image_groups(alarm_type_id, "normal") {
+        let mut selected_groups = Vec::with_capacity(groups.len());
+        for images in groups {
+            if images.len() != count {
+                return Err(runtime_error(
+                    "device_simulator.alarm.image_missing",
+                    format!("local alarm material '{alarm_type_id}' contains an incomplete image group: {} images found but {count} are required", images.len()),
+                ));
+            }
+            selected_groups.push(
+                images
+                    .iter()
+                    .cloned()
+                    .map(|reference| SelectedPackImage {
+                        reference,
+                        url_reference: None,
+                    })
+                    .collect(),
+            );
+        }
+        return Ok(selected_groups);
     }
     let Some(image_root) = image_root else {
         return Err(runtime_error(
@@ -1462,7 +1504,7 @@ fn select_pack_images(
             format!("profile pack '{}' is not pinned", profile_id.as_str()),
         )
     })?;
-    Ok(data_indexes
+    Ok(vec![data_indexes
         .into_iter()
         .zip(url_indexes)
         .map(|(data_index, url_index)| {
@@ -1481,7 +1523,7 @@ fn select_pack_images(
                 url_reference,
             }
         })
-        .collect())
+        .collect()])
 }
 
 fn image_reference_file_name(reference: &ImageAssetRef) -> String {
@@ -1600,6 +1642,7 @@ fn apply_user_image(definition: &mut AlarmHandlerDefinition, user_image: &ImageA
         image.url_reference = None;
         image.file_name = format!("user-alarm.{extension}");
     }
+    definition.alternate_images.clear();
     true
 }
 
@@ -1624,7 +1667,44 @@ fn apply_image_variant(
     let Some(variant) = variant else {
         return Ok(());
     };
-    for image in &mut definition.images {
+    if let Some(groups) =
+        assets.local_alarm_image_groups(definition.alarm_type_id.as_str(), variant)
+    {
+        let expected_group_count = 1 + definition.alternate_images.len();
+        if groups.len() != expected_group_count {
+            return Err(runtime_error(
+                "device_simulator.alarm.image_variant_unavailable",
+                format!(
+                    "local alarm material '{}' has a mismatched '{variant}' group count",
+                    definition.alarm_type_id.as_str()
+                ),
+            ));
+        }
+        let mut attachment_groups =
+            std::iter::once(&mut definition.images).chain(definition.alternate_images.iter_mut());
+        for (attachments, images) in attachment_groups.by_ref().zip(groups) {
+            if images.len() != attachments.len() {
+                return Err(runtime_error(
+                    "device_simulator.alarm.image_variant_unavailable",
+                    format!(
+                        "local alarm material '{}' has no complete '{variant}' variant",
+                        definition.alarm_type_id.as_str()
+                    ),
+                ));
+            }
+            for (attachment, reference) in attachments.iter_mut().zip(images) {
+                attachment.reference = reference.clone();
+                attachment.url_reference = None;
+                attachment.file_name = image_reference_file_name(reference);
+            }
+        }
+        return Ok(());
+    }
+    for image in definition
+        .images
+        .iter_mut()
+        .chain(definition.alternate_images.iter_mut().flatten())
+    {
         apply_image_variant_to_reference(&mut image.reference, variant, assets)?;
         if let Some(reference) = &mut image.url_reference {
             apply_image_variant_to_reference(reference, variant, assets)?;
@@ -1699,24 +1779,18 @@ fn image_manifest_index(
             "runtime assets contain no pinned packs",
         )
     })?;
-    let pack_root = first
-        .directory
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| {
-            runtime_error(
-                "device_simulator.alarm.pack_root_invalid",
-                "pinned pack directory is not under <root>/<id>/<version>",
-            )
-        })?;
+    let pack_root = pack_root_for_pin(first)?;
     let mut manifests = BTreeMap::new();
     for pin in pins {
-        let expected = pack_root.join(&pin.id).join(&pin.version);
+        let expected = if pin.version.trim().is_empty() {
+            pack_root.join(&pin.id)
+        } else {
+            pack_root.join(&pin.id).join(&pin.version)
+        };
         if expected != pin.directory {
             return Err(runtime_error(
                 "device_simulator.alarm.pack_root_mismatch",
-                "pinned packs do not share one immutable pack root",
+                "runtime asset directories do not share one loose or versioned asset root",
             ));
         }
         let manifest = assets.manifest(&pin.id).cloned().ok_or_else(|| {
@@ -1734,6 +1808,22 @@ fn image_manifest_index(
         );
     }
     Ok((pack_root, manifests))
+}
+
+fn pack_root_for_pin(pin: &PinnedPackDirectory) -> Result<PathBuf, AlarmRuntimeError> {
+    let root = if pin.version.trim().is_empty() {
+        // Built-in protocol/profile files are loose directories at <root>/<id>.
+        pin.directory.parent()
+    } else {
+        // Legacy release packs remain readable at <root>/<id>/<version>.
+        pin.directory.parent().and_then(Path::parent)
+    };
+    root.map(Path::to_path_buf).ok_or_else(|| {
+        runtime_error(
+            "device_simulator.alarm.pack_root_invalid",
+            "runtime asset directory is not under <root>/<id> or <root>/<id>/<version>",
+        )
+    })
 }
 
 fn build_destinations(
@@ -2012,6 +2102,37 @@ mod tests {
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn loose_runtime_pins_share_their_direct_parent() {
+        let root = TempDir::new().unwrap();
+        let pins = ["protocol-core", "media-h264-live", "ipc-structured"]
+            .into_iter()
+            .map(|id| PinnedPackDirectory {
+                id: id.into(),
+                version: String::new(),
+                directory: root.path().join(id),
+            })
+            .collect::<Vec<_>>();
+
+        let shared = pack_root_for_pin(&pins[0]).unwrap();
+        assert_eq!(shared, root.path());
+        for pin in &pins {
+            assert_eq!(shared.join(&pin.id), pin.directory);
+        }
+    }
+
+    #[test]
+    fn versioned_runtime_pin_keeps_the_legacy_root_shape() {
+        let root = TempDir::new().unwrap();
+        let pin = PinnedPackDirectory {
+            id: "ipc-structured".into(),
+            version: "1.0.3".into(),
+            directory: root.path().join("ipc-structured").join("1.0.3"),
+        };
+
+        assert_eq!(pack_root_for_pin(&pin).unwrap(), root.path());
+    }
 
     #[tokio::test]
     async fn alarm_http_client_reports_the_first_redirect_instead_of_following_it() {
@@ -2301,30 +2422,51 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn approved_release_alarm_registry_loads_when_explicitly_configured() {
-        let (root, explicitly_configured) = match std::env::var("FST_APPROVED_PACK_ROOT") {
-            Ok(root) => (PathBuf::from(root), true),
-            Err(_) => (
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("target")
-                    .join("approved-packs"),
-                false,
+    #[test]
+    fn built_in_structured_templates_keep_alarm_categories_independent() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/device-simulator-base/ipc-structured/object/StructStruct");
+        for (file, active_count, expected_types) in [
+            ("StructurePerson.json", "PersonNum", &[23u64, 12][..]),
+            ("StructureFace.json", "FaceNum", &[15u64, 11][..]),
+            ("StructureCar.json", "VehicleNum", &[23u64, 13, 2][..]),
+            (
+                "StructureNonMotor.json",
+                "NonMotorVehicleNum",
+                &[23u64, 14][..],
             ),
-        };
-        if !root.is_dir() {
-            if explicitly_configured {
-                panic!(
-                    "FST_APPROVED_PACK_ROOT does not exist or is not a directory: {}",
-                    root.display()
+        ] {
+            let document: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join(file)).unwrap()).unwrap();
+            let objects = document.pointer("/StructureInfo/ObjInfo").unwrap();
+            for count in ["PersonNum", "FaceNum", "VehicleNum", "NonMotorVehicleNum"] {
+                assert_eq!(
+                    objects[count].as_u64().unwrap(),
+                    (count == active_count) as u64,
+                    "{file} must contain only its own object category",
                 );
             }
-            eprintln!(
-                "skipping approved release alarm registry test: no approved Pack root at {}",
-                root.display()
-            );
-            return;
+            let types = document["StructureInfo"]["ImageInfoList"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|image| image["Type"].as_u64().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(types, expected_types, "{file} image roles are incorrect");
         }
+    }
+
+    #[tokio::test]
+    async fn approved_release_alarm_registry_loads_when_explicitly_configured() {
+        let Ok(root) = std::env::var("FST_APPROVED_PACK_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        assert!(
+            root.is_dir(),
+            "FST_APPROVED_PACK_ROOT does not exist or is not a directory: {}",
+            root.display()
+        );
         let version = std::env::var("FST_APPROVED_PACK_VERSION").unwrap_or_else(|_| "1.0.3".into());
         let pins = ["protocol-core", "media-h264-live", "ipc-structured"]
             .into_iter()
@@ -2392,7 +2534,8 @@ mod tests {
             .registry
             .definitions()
             .all(|definition| definition.profile_id == FirstReleaseProfileId::IpcStructured));
-        assert!(!runtime.image_cache.read().is_empty());
+        assert!(runtime.image_cache.read().declared_len() > 0);
+        assert!(runtime.image_cache.read().is_empty());
         let legacy_values = crate::device_simulator::alarms::LegacyAlarmValues::new(0x0f0f_0f0f);
         let structured_device = runtime
             .devices
@@ -2401,9 +2544,9 @@ mod tests {
             .unwrap();
         for (alarm_type_id, expected_types) in [
             ("person", vec![23, 12]),
-            ("face", vec![23, 12, 15, 11]),
-            ("car", vec![23, 13, 2, 15, 11]),
-            ("nonmotor", vec![23, 14, 15, 11]),
+            ("face", vec![15, 11]),
+            ("car", vec![23, 13, 2]),
+            ("nonmotor", vec![23, 14]),
         ] {
             let definition = runtime
                 .registry

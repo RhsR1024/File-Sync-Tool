@@ -225,7 +225,7 @@ fn initialize_pipeline(
     let input_sps = media
         .parameter_set(ParameterSetKind::Sps)
         .ok_or_else(|| "input H.264 media has no SPS".to_string())?;
-    let (width, height) = h264_sps_dimensions(input_sps)
+    let (width, height) = h264_sps_dimensions(&input_sps)
         .map_err(|error| format!("input SPS dimensions are invalid: {error}"))?;
     let bitrate = u32::try_from(media.manifest().recommended_bitrate_bps)
         .map_err(|_| "recommended watermark bitrate exceeds the encoder limit".to_string())?;
@@ -431,10 +431,10 @@ fn source_annex_b_access_unit(
     let mut bytes = Vec::with_capacity(capacity);
     for nal in frame.nals.iter() {
         let payload = media
-            .nal_bytes(nal)
-            .ok_or_else(|| "watermark source NAL is outside the media buffer".to_string())?;
+            .read_nal(nal)
+            .map_err(|error| format!("watermark source NAL read failed: {error}"))?;
         bytes.extend_from_slice(&[0, 0, 0, 1]);
-        bytes.extend_from_slice(payload);
+        bytes.extend_from_slice(&payload);
     }
     Ok(bytes)
 }

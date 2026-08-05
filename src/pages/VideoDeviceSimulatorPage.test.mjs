@@ -6,6 +6,8 @@ const composable = readFileSync(new URL('../composables/useDeviceSimulator.ts', 
 const deviceSimulatorTypes = readFileSync(new URL('../lib/deviceSimulator.ts', import.meta.url), 'utf8');
 const platformRegistration = readFileSync(new URL('../../src-tauri/src/device_simulator/platform_registration.rs', import.meta.url), 'utf8');
 const platformReplaceDialog = readFileSync(new URL('../components/DevicePlatformReplaceConfirmDialog.vue', import.meta.url), 'utf8');
+const materialResetDialog = readFileSync(new URL('../components/DeviceMaterialResetConfirmDialog.vue', import.meta.url), 'utf8');
+const materialMigrationDialog = readFileSync(new URL('../components/DeviceMaterialMigrationConfirmDialog.vue', import.meta.url), 'utf8');
 const router = readFileSync(new URL('../router/index.ts', import.meta.url), 'utf8');
 const sidebar = readFileSync(new URL('../lib/sidebarNavigation.ts', import.meta.url), 'utf8');
 const messages = readFileSync(new URL('../locales/messages.ts', import.meta.url), 'utf8');
@@ -16,6 +18,7 @@ const simulatorStopAction = composable.match(/async function stop\(\)[\s\S]*?(?=
 const startAlarmAction = composable.match(/async function startAlarm[\s\S]*?(?=\r?\n\s*async function stopAlarm)/)?.[0] ?? '';
 const stopAlarmAction = composable.match(/async function stopAlarm[\s\S]*?(?=\r?\n\s*function addGroup)/)?.[0] ?? '';
 const platformAddAction = composable.match(/async function addDevicesToPlatform[\s\S]*?(?=\r?\n\s*async function stop)/)?.[0] ?? '';
+const remoteMaterialSyncAction = composable.match(/async function syncRemoteMaterials\(\)[\s\S]*?(?=\r?\n\s*async function addDevicesToPlatform)/)?.[0] ?? '';
 const settingsProjection = composable.match(/function settingsFromRequest\(\)[\s\S]*?(?=\r?\n\s*function errorText)/)?.[0] ?? '';
 
 assert.match(router, /path: '\/tools\/video-device-simulator'/);
@@ -67,6 +70,11 @@ assert.ok(messages.includes("unverified: '已响应未验证数'"));
 assert.ok(messages.includes("unverifiedHint: '已收到 HTTP 响应，但尚未验证 UMS 是否已正确处理图片。'"));
 assert.match(page, /simulator\.alarmTypes\.value/, 'alarm names must come from the prepared device files');
 assert.match(page, /requiredFileLabel/, 'internal file identifiers must use familiar display labels');
+assert.match(page, /id="asset-details"[\s\S]*assetTone !== 'ready'[\s\S]*@click="simulator\.syncRemoteMaterials"/, 'missing files must expose server sync at the point of failure');
+assert.match(page, /deviceSimulator\.assets\.syncHint/, 'the missing-file panel must explain the first-use sync action');
+assert.match(remoteMaterialSyncAction, /refreshMediaThemes\(\);[\s\S]*refreshAssets\(\);/, 'server sync must automatically refresh required-file readiness');
+assert.match(messages, /syncHint: 'On first use, sync the prepared live video and alarm pictures from the upgrade server\.'/);
+assert.match(messages, /syncHint: '首次使用请先从升级服务器同步实况视频和告警图片。'/);
 assert.doesNotMatch(messages, /告警类型 ID/, 'internal alarm IDs must not be shown to users');
 assert.doesNotMatch(page, /<option value="normal">/, 'picture sizes must keep the legacy three-choice UI');
 assert.doesNotMatch(page, /value="vms"|>VMS</i, 'the simulator must expose UMS only');
@@ -79,7 +87,16 @@ for (const [name, source] of [['page', page], ['composable', composable], ['type
   );
 }
 assert.match(page, /send_count: continuousAlarm\.value \? null/, 'continuous alarm mode must cross the API as null, never a magic zero');
-assert.match(page, /v-model="selectedAlarmTypeId"[^>]*:disabled="availableAlarmTypes\.length === 0"/, 'the alarm type picker must only wait on prepared files, never on the dispatch mode');
+assert.match(page, /const continuousAlarm = ref\(true\)/, 'continuous picture sending must be selected by default');
+assert.doesNotMatch(page, /\bSquare\b/, 'the stop-sending state must not look like a missing-glyph square');
+assert.match(page, /<XCircle v-else-if="alarmSending"/, 'the stop-sending state must use an explicit non-power stop icon');
+assert.match(composable, /isDeviceSimulatorRuntimeActive\(next\.state\)[\s\S]*preflight\.value = null/, 'an active runtime must retire its startup-only preflight report');
+assert.match(page, /<fieldset[\s\S]*:disabled="alarmConfigurationLocked"[\s\S]*<legend/, 'all picture settings must lock as one accessible group while sending');
+assert.match(page, /const alarmConfigurationLocked = computed\([\s\S]*alarmSending\.value[\s\S]*alarmStartPending\.value/, 'the picture settings must lock before and throughout a continuous send');
+assert.match(messages, /configurationLocked: '正在发送图片，停止发送后才能修改配置。'/, 'the locked picture settings must explain how to edit them again');
+assert.match(page, /v-model="selectedAlarmTypeId"[^>]*:disabled="availableAlarmTypes\.length === 0 \|\| alarm\.mode !== 'configured'"/, 'only configured dispatch may pin one explicit alarm type');
+assert.match(page, /<option value="configured" :disabled="availableAlarmTypes\.length === 0"/, 'configured dispatch must be selectable whenever alarm types are available');
+assert.match(page, /watch\(\(\) => alarm\.mode,[\s\S]*mode === 'configured'[\s\S]*availableAlarmTypes\.value\[0\]\?\.id/, 'configured dispatch must automatically select an available alarm type');
 assert.match(page, /!alarmTypeId && alarm\.mode === 'configured'/, 'clearing the alarm type must leave configured mode, which requires exactly one type');
 assert.match(page, /downloadJson\('device-simulator-logs\.json'/, 'logs must be exportable');
 
@@ -101,12 +118,12 @@ assert.match(page, /deviceSimulator\.fields\.alarmReceiverPortHint/, 'the receiv
 assert.match(messages, /alarmReceiverPortHint: 'Fallback used only until the platform subscribes[^']*Default 22815\.'/, 'English receiver port copy must present the port as a fallback and name 22815');
 assert.match(messages, /alarmReceiverPortHint: '仅在尚未收到平台订阅时作为兜底使用[^']*默认 22815。'/, 'Chinese receiver port copy must present the port as a fallback and name 22815');
 
-// The advanced receiver URL and the asset pack download URL are unrelated
+// The advanced receiver URL and the loose-material server URL are unrelated
 // settings that were previously side by side and easy to confuse.
 assert.match(page, /deviceSimulator\.configuration\.advanced[\s\S]*deviceSimulator\.fields\.alarmReceiver\b[\s\S]*deviceSimulator\.fields\.assetServer/, 'both advanced URLs must live inside the collapsed advanced block');
-assert.match(messages, /assetServer: 'Asset pack download URL \(advanced\)'/, 'English asset source copy must name asset packs, not generic files');
-assert.match(messages, /assetServer: '资源包下载地址（高级）'/, 'Chinese asset source copy must name asset packs, not generic files');
-assert.match(messages, /assetServerHint: '设备类型资源包的下载来源，与告警投递无关。/, 'the asset source hint must state that it is unrelated to alarm delivery');
+assert.match(messages, /assetServer: 'Material server URL \(advanced\)'/, 'English asset source copy must name the material server');
+assert.match(messages, /assetServer: '素材服务器地址（高级）'/, 'Chinese asset source copy must name the material server');
+assert.match(messages, /assetServerHint: '已预处理虚拟设备视频与告警图片的同步来源。/, 'the asset source hint must explain the prepared-material source');
 assert.match(page, /deviceSimulator\.configuration\.serversHint/, 'the server list must explain that alarms are distributed, not broadcast');
 assert.match(messages, /serversHint: '这里的服务器是告警投递目标[^']*告警按顺序分摊/, 'Chinese server copy must state that alarm delivery is distributed');
 assert.match(page, /v-model="simulator\.settings\.value\.platform_username"/, 'the current server panel must expose the UMS username');
@@ -188,7 +205,32 @@ assert.match(page, /const alarmSending = computed\(\(\) => simulator\.activeAlar
 assert.match(page, /async function toggleAlarmSending\(\)[\s\S]*if \(alarmSending\.value\)[\s\S]*simulator\.stopAlarm\(\)[\s\S]*startAlarm\(\)/, 'the alarm control must toggle between starting and stopping one job');
 assert.match(page, /:aria-pressed="alarmSending"[\s\S]*@click="toggleAlarmSending"/, 'send and stop must share one accessible toggle button');
 assert.equal((page.match(/@click="toggleAlarmSending"/g) ?? []).length, 1, 'the send/stop toggle must be rendered once');
-assert.match(page, /assetDownloadActive[\s\S]*role="progressbar"/, 'file preparation must expose visible progress');
+assert.match(page, /busyAction\.value === 'sync-remote-materials'[\s\S]*animate-spin/, 'server material sync must expose visible progress');
+assert.match(page, /runtimeActive \|\| simulator\.busyAction\.value !== null[^>]*@click="simulator\.syncRemoteMaterials"/, 'server material sync must prevent duplicate or unsafe activation');
+assert.match(page, /deviceSimulator\.mediaThemes\.resetRemote/, 'server-managed materials must expose a clear-and-resync action');
+assert.match(page, /openDirectory\(\)/, 'the material root must be selectable from the simulator page');
+assert.match(page, /deviceSimulator\.mediaThemes\.changeStorageDirectory/, 'directory selection must use a clearly labelled action');
+assert.doesNotMatch(page, /DirectoryPathInput/, 'the material directory must not be shown twice through a second path input');
+assert.match(composable, /localMaterialsPath\.value = await deviceSimulatorApi\.getLocalMaterialsPath\(\)/, 'saving a material directory must refresh the effective path');
+assert.match(deviceSimulatorTypes, /local_materials_directory: string \| null;/, 'the custom material directory must cross the typed settings boundary');
+assert.match(page, /localMaterialsDirectoryChanged\.value[\s\S]*materialMigrationPromptOpen\.value = true/, 'saving a changed directory must open the migration choice');
+assert.match(page, /requestSettingsAction\('start'\)/, 'starting with an unsaved directory change must use the same migration choice');
+assert.match(composable, /deviceSimulatorApi\.migrateLocalMaterials\(next\)/, 'confirmed migration must use the native verified-copy command');
+assert.match(deviceSimulatorTypes, /migrateLocalMaterials: 'device_simulator_migrate_local_materials'/, 'the migration command must cross the typed API boundary');
+assert.match(materialMigrationDialog, /role="alertdialog"[\s\S]*aria-modal="true"/, 'material migration must use an application confirmation dialog');
+assert.match(materialMigrationDialog, /cancelButton\.value\?\.focus\(\)/, 'the safe cancel action must receive initial focus');
+assert.match(materialMigrationDialog, /getCurrentWindow\(\)[\s\S]*window\.show\(\)[\s\S]*window\.unminimize\(\)[\s\S]*window\.setFocus\(\)/, 'the main window must be restored before asking about material migration');
+assert.match(materialMigrationDialog, /@keydown\.tab\.stop="keepFocusInside"/, 'keyboard focus must stay inside the migration dialog');
+assert.match(materialMigrationDialog, /emit\('switchOnly'\)[\s\S]*emit\('migrate'\)/, 'the dialog must offer switch-only and verified migration choices');
+assert.match(messages, /localHint: 'Server videos are preprocessed once by the publisher and play immediately after clients download them\.'/);
+assert.match(messages, /localHint: '服务器视频由素材发布者一次性预处理，客户端下载后直接播放'/);
+assert.doesNotMatch(messages, /localHint: '[^']*FFmpeg/, 'the server-material explanation must not mention FFmpeg');
+assert.match(page, /DeviceMaterialResetConfirmDialog/, 'clearing server materials must require an application confirmation dialog');
+assert.match(deviceSimulatorTypes, /resetAndSyncRemoteMaterials: 'device_simulator_reset_and_sync_remote_materials'/, 'the reset command must cross the typed API boundary');
+assert.match(materialResetDialog, /role="alertdialog"[\s\S]*aria-modal="true"/, 'the material reset warning must be an application modal');
+assert.match(materialResetDialog, /cancelButton\.value\?\.focus\(\)/, 'the safe cancel action must receive initial focus');
+assert.match(materialResetDialog, /getCurrentWindow\(\)[\s\S]*window\.show\(\)[\s\S]*window\.unminimize\(\)[\s\S]*window\.setFocus\(\)/, 'the main window must be restored before material reset confirmation');
+assert.match(materialResetDialog, /@keydown\.tab\.stop="keepFocusInside"/, 'keyboard focus must stay inside the material reset dialog');
 assert.match(page, /simulator\.request\.device_ips/, 'non-contiguous device addresses must cross the API boundary');
 assert.match(page, /openPingScanner/, 'the network ping scanner must be reachable from device IP configuration');
 assert.match(page, /simulator\.selectedInterface\.value/, 'the selected adapter must be visible without opening advanced settings');

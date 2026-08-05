@@ -1,0 +1,98 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/0/Image/Capabilities",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"IsSupportCfg":	1,
+	"SupportCorrectCfg":	0,
+	"SupportIlluminationCfg":	1,
+	"SupportEPTZ":	0,
+	"SupportMonoColorFusion":	0,
+	"Enhance":	{
+		"ImageRotationModeNum":	4,
+		"ImageRotationModeList":	[1, 2, 3, 0],
+		"IsSupportSharpness":	1,
+		"IsSupport2DNoiseReduce":	1,
+		"IsSupport3DNoiseReduce":	1
+	},
+	"Focus":	{
+		"SupportFocusCfg":	0,
+		"FocusModeNum":	0,
+		"FocusModeList":	[],
+		"FocusSceneNum":	0,
+		"FocusSceneList":	[]
+	},
+	"LampCtrl":	{
+		"LampNum":	1,
+		"LampInfos":	[{
+				"LampType":	1,
+				"LampCtrlModeListNum":	2,
+				"LampCtrlModeList":	[3, 7],
+				"SupportNearLampCfg":	1,
+				"SupportMiddleLampCfg":	0,
+				"SupportFarLampCfg":	0,
+				"SupportSuperFarLampCfg":	0,
+				"SupportLaserAngleCfg":	0,
+				"LaserAngleMin":	0,
+				"LaserAngleMax":	0
+			}],
+		"ECModeNum":	0,
+		"ECModeList":	[]
+	},
+	"Exposure":	{
+		"SupportCompensation":	1,
+		"ExposureModeNum":	7,
+		"ExposureModeList":	[0, 7, 1, 2, 5, 6, 8],
+		"SupportIrisCfg":	0,
+		"IrisUnit":	0,
+		"IrisRangeNum":	1,
+		"IrisRangeList":	[160],
+		"MinGain":	0,
+		"MaxGain":	100,
+		"SupportHLCCfg":	1,
+		"SupportMeteringCfg":	1,
+		"MeteringModeNum":	3,
+		"MeteringModeList":	[0, 1, 5],
+		"Shutter":	{
+			"SupportShutterTimeCfg":	1,
+			"ShutterTimeUnit":	1,
+			"ShutterTimeRangeNum":	27,
+			"ShutterTimeRangeList":	[1, 2, 3, 4, 6, 8, 10, 12, 15, 20, 25, 30, 50, 60, 100, 120, 150, 180, 200, 250, 500, 1000, 2000, 4000, 8000, 50000, 100000],
+			"SupportSlowShutterCfg":	1,
+			"SlowShutterTimeRangeNum":	12,
+			"SlowShutterTimeRangeList":	[0, 1, 2, 3, 4, 6, 8, 10, 12, 15, 20, 25]
+		},
+		"WideDynamic":	{
+			"SupportWideDynamicCfg":	1,
+			"WideDynamicModeNum":	3,
+			"WideDynamicModeList":	[0, 1, 2]
+		},
+		"DayNight":	{
+			"SupportDayNightCfg":	1,
+			"DayNightModeNum":	3,
+			"DayNightModeList":	[0, 1, 2],
+			"SupportSensibilityCfg":	1,
+			"SupportSwitchingCfg":	1
+		}
+	},
+	"WhiteBalance":	{
+		"WhiteBalanceModeNum":	6,
+		"WhiteBalanceModeList":	[0, 1, 3, 6, 7, 9]
+	},
+	"Scene":	{
+		"SupportSceneCfg":	1,
+		"SceneTemplateNum":	5,
+		"SceneTypeNum":	6,
+		"SceneTypeList":	[2, 5, 8, 4, 7, 0],
+		"TriggerNum":	4,
+		"EnvironmentTypeNum":	1,
+		"EnvironmentTypeList":	[0]
+	}
+}
+	}
+}

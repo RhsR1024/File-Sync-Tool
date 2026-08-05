@@ -1,0 +1,134 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Channels/1/Smart/Capabilities",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"FaceDetection":	{
+				"IsSupport":	1,
+				"QualityAnalysisIsSupport":	0,
+				"FaceQualityAnalysisType":	1,
+				"AttributeAnalysisIsSupport":	1,
+				"AttributeAnalysisSkills":	0,
+				"FeatureIsSupport":	1,
+				"RecognitionIsSupport":	1,
+				"FaceRecognitionType":	1,
+				"PupilDistanceSizeNum":	1,
+				"PupilDistanceSizeList":	[{
+						"Resolution":	{
+							"Width":	1920,
+							"Height":	1080
+						},
+						"PupilDistance":	{
+							"Min":	104,
+							"Max":	781
+						}
+					}]
+			},
+			"IntrusionDetection":	{
+				"SupportCfg":	1,
+				"Mode":	1
+			},
+			"CrossLineDetection":	{
+				"SupportCfg":	1,
+				"Mode":	1
+			},
+			"LeaveZone":	{
+				"SupportCfg":	1,
+				"Mode":	1
+			},
+			"AccessZone":	{
+				"SupportCfg":	1,
+				"Mode":	1
+			},
+			"PassengerFlow":	{
+				"IsSupport":	0
+			},
+			"DefocusDetection":	{
+				"IsSupport":	0
+			},
+			"SceneChange":	{
+				"IsSupport":	1
+			},
+			"ObjTrack":	{
+				"IsSupport":	0,
+				"Mode":	[]
+			},
+			"RemainArticle":	{
+				"IsSupport":	0,
+				"ThresholdMin":	0
+			},
+			"RemoveArticle":	{
+				"IsSupport":	0,
+				"ThresholdMin":	0
+			},
+			"SafetyHat":	{
+				"IsSupport":	1
+			},
+			"WorkClothes":	{
+				"IsSupport":	1
+			},
+			"PhoneDetection":	{
+				"IsSupport":	1
+			},
+			"SmokeDetection":	{
+				"IsSupport":	1
+			},
+			"SmokeFireDetection":	{
+				"IsSupport":	1
+			},
+			"DeepmoveDetection":	{
+				"IsSupport":	1
+			},
+			"ChefDetection":	{
+				"IsSupport":	1
+			},
+			"FightDetection":	{
+				"IsSupport":	1
+			},
+			"LinesPeopleCounting":	{
+				"SupportLinesPeopleCounting":	1,
+				"MaxLineNum":	4,
+				"IsSupportStatisticType":	0,
+				"IsSupportTimingReset":	0
+			},
+			"AreasPeopleCounting":	{
+				"SupportAreasPeopleCounting":	1,
+				"MaxAreaNum":	4
+			},
+			"CrowdDensity":	{
+				"SupportCrowdDensity":	0
+			},
+			"HeatMap":	{
+				"IsSupport":	1
+			},
+			"MaskDetection":	{
+				"IsSupport":	1
+			},
+			"FallDetection":	{
+				"IsSupport":	1
+			},
+			"StayDetection":	{
+				"IsSupport":	1
+			},
+			"ClimbingDetection":	{
+				"SupportCfg":	1,
+				"LinkagePlanCfg":	{
+					"SupportAudioLinkagePlan":	1,
+					"SupportLightLinkagePlan":	1
+				}
+			},
+			"SleepingDetection":	{
+				"SupportCfg":	1,
+				"LinkagePlanCfg":	{
+					"SupportAudioLinkagePlan":	1,
+					"SupportLightLinkagePlan":	1
+				}
+			},
+			"VehicleRecognition":	{
+				"SupportVehicleRecognition":	1
+			}
+		}
+	}
+}

@@ -10,6 +10,7 @@ import { DEVICE_SIMULATOR_EVENTS } from './deviceSimulator';
 
 export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
   asset_server_url_override: null,
+  local_materials_directory: 'D:\\VirtualDeviceMaterials',
   selected_interface_id: 'adapter-1',
   last_platform: 'ums',
   last_start_ip: '192.168.50.10',
@@ -26,7 +27,7 @@ export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
   }],
   last_http_port: 81,
   last_rtsp_ports: { main: 554, sub: 555, third: 556 },
-  last_media_theme_id: 'classic',
+  last_media_theme_id: 'fanren-xiuxian',
   last_time_watermark_enabled: true,
   auto_check_asset_updates: true,
   manage_firewall: true,
@@ -50,7 +51,7 @@ export const simulatorStartRequestContract: SimulatorStartRequest = {
   subnet_prefix: 24,
   device_http_port: 81,
   rtsp_ports: { main: 554, sub: 555, third: 556 },
-  media_theme_id: 'classic',
+  media_theme_id: 'fanren-xiuxian',
   groups: [{
     id: 'group-1',
     profile_id: 'ipc-structured',

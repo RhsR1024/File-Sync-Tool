@@ -5,11 +5,12 @@ use app_lib::device_simulator::api::{
     list_first_release_profiles, preview_devices, AlarmJobRequest, AlarmTriggerResult,
     AlarmTypeSummary, AssetPackStatus, AssetProgressSnapshot, AssetStatus, DevicePreview,
     DeviceProfileAvailability, DeviceProfileSummary, ImportedAlarmImage, MediaThemeSummary,
-    PreflightReport, ProfileAlarmTypes, RecoveryResult, RuntimeTelemetrySnapshot,
-    SimulatorStartRequest, SimulatorStatusSnapshot, DEVICE_SIMULATOR_EVENT_ALARM_STATS,
-    DEVICE_SIMULATOR_EVENT_ALARM_SUBSCRIPTION, DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS,
-    DEVICE_SIMULATOR_EVENT_CLEANUP_PROGRESS, DEVICE_SIMULATOR_EVENT_DEVICE_STATUS,
-    DEVICE_SIMULATOR_EVENT_LOG, DEVICE_SIMULATOR_EVENT_RTSP_STATS, DEVICE_SIMULATOR_EVENT_STATUS,
+    PreflightReport, ProfileAlarmTypes, RecoveryResult, RemoteMaterialSyncResult,
+    RuntimeTelemetrySnapshot, SimulatorStartRequest, SimulatorStatusSnapshot,
+    DEVICE_SIMULATOR_EVENT_ALARM_STATS, DEVICE_SIMULATOR_EVENT_ALARM_SUBSCRIPTION,
+    DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS, DEVICE_SIMULATOR_EVENT_CLEANUP_PROGRESS,
+    DEVICE_SIMULATOR_EVENT_DEVICE_STATUS, DEVICE_SIMULATOR_EVENT_LOG,
+    DEVICE_SIMULATOR_EVENT_RTSP_STATS, DEVICE_SIMULATOR_EVENT_STATUS,
 };
 use app_lib::device_simulator::assets::cache::{
     validate_installed_pack, AssetStore, AssetStorePaths,
@@ -21,9 +22,14 @@ use app_lib::device_simulator::assets::catalog_cache::{
 use app_lib::device_simulator::assets::download::build_asset_http_client;
 use app_lib::device_simulator::assets::resolver::resolve_profile_dependencies;
 use app_lib::device_simulator::assets::signature::trusted_catalog_keys;
-use app_lib::device_simulator::assets::store::{AssetPreparationPhase, AssetPreparationService};
+use app_lib::device_simulator::embedded_assets::ensure_built_in_assets;
 use app_lib::device_simulator::errors::SimulatorErrorBody;
 use app_lib::device_simulator::events::WorkerEventPayload;
+use app_lib::device_simulator::local_materials::{
+    clear_prepared_alarm_materials, copy_local_materials_verified, list_local_media_themes,
+    refresh_local_alarm_materials, refresh_local_media, remove_verified_local_materials,
+    validate_remote_media_themes, LocalMaterialPaths,
+};
 use app_lib::device_simulator::manager::{ManagerNotification, SimulatorManager};
 use app_lib::device_simulator::models::{AssetState, SessionState, SimulatorStatus};
 use app_lib::device_simulator::preflight::{
@@ -31,7 +37,12 @@ use app_lib::device_simulator::preflight::{
 };
 use app_lib::device_simulator::profiles::loader::load_profile_from_pack;
 use app_lib::device_simulator::profiles::schema::EvidenceStatus;
-use app_lib::device_simulator::runtime_assets::{list_media_themes, PinnedPackDirectory};
+use app_lib::device_simulator::remote_materials::{
+    build_remote_material_client, clear_remote_materials, sync_remote_materials,
+};
+use app_lib::device_simulator::runtime_assets::{
+    list_media_themes, PinnedPackDirectory, RuntimeAssetLayout,
+};
 use app_lib::device_simulator::session_journal::SessionJournalStore;
 use app_lib::device_simulator::windows::interfaces::{
     list_system_interfaces, NetworkInterfaceInfo,
@@ -57,7 +68,7 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Semaphore};
 use tokio::task::JoinSet;
@@ -112,6 +123,20 @@ pub struct NetworkInterfaceDto {
     pub ipv4_addresses: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalMaterialMigrationResult {
+    pub settings: config::DeviceSimulatorSettings,
+    pub source_path: String,
+    pub target_path: String,
+    pub copied_files: u64,
+    pub reused_files: u64,
+    pub copied_bytes: u64,
+    pub removed_files: u64,
+    pub cleanup_completed: bool,
+    pub cleanup_error: Option<String>,
+}
+
 impl From<NetworkInterfaceInfo> for NetworkInterfaceDto {
     fn from(interface: NetworkInterfaceInfo) -> Self {
         Self {
@@ -145,6 +170,21 @@ pub async fn device_simulator_save_settings(
     let settings = config::normalize_device_simulator_settings(settings);
     config::validate_device_simulator_settings(&settings)
         .map_err(|details| settings_error("device_simulator.settings.invalid", details))?;
+    let material_paths = local_material_paths_for_settings(&app_handle, &settings)?;
+    tokio::task::spawn_blocking(move || material_paths.ensure_layout())
+        .await
+        .map_err(|source| {
+            settings_error(
+                "device_simulator.settings.material_directory_task_failed",
+                source.to_string(),
+            )
+        })?
+        .map_err(|source| {
+            settings_error(
+                "device_simulator.settings.material_directory_unavailable",
+                source.to_string(),
+            )
+        })?;
     let mut next = state.config.lock().unwrap().clone();
     next.device_simulator = settings.clone();
     config::validate_config(&next)
@@ -153,6 +193,128 @@ pub async fn device_simulator_save_settings(
         .map_err(|details| settings_error("device_simulator.settings.save_failed", details))?;
     *state.config.lock().unwrap() = next;
     Ok(settings)
+}
+
+#[tauri::command]
+pub async fn device_simulator_migrate_local_materials(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+    simulator_state: State<'_, DeviceSimulatorCommandState>,
+    settings: config::DeviceSimulatorSettings,
+) -> Result<LocalMaterialMigrationResult, SimulatorErrorBody> {
+    if simulator_state.manager.has_worker().await {
+        return Err(material_migration_error(
+            "device_simulator.settings.material_migration_runtime_active",
+            "Stop the virtual device session before moving materials".into(),
+        ));
+    }
+    let settings = config::normalize_device_simulator_settings(settings);
+    config::validate_device_simulator_settings(&settings)
+        .map_err(|details| settings_error("device_simulator.settings.invalid", details))?;
+    let current_settings = state.config.lock().unwrap().device_simulator.clone();
+    let source = local_material_paths_for_settings(&app_handle, &current_settings)?;
+    let destination = local_material_paths_for_settings(&app_handle, &settings)?;
+    let source_path = source.root.to_string_lossy().into_owned();
+    let target_path = destination.root.to_string_lossy().into_owned();
+    let copy_source = source.clone();
+    let copy_destination = destination.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        if copy_source.root == copy_destination.root
+            || copy_source.root.starts_with(&copy_destination.root)
+            || copy_destination.root.starts_with(&copy_source.root)
+        {
+            return Err(
+                "Old and new material directories must be separate, non-nested directories"
+                    .to_string(),
+            );
+        }
+        for root in [&copy_source.root, &copy_destination.root] {
+            if root.exists()
+                && fs::symlink_metadata(root)
+                    .map_err(|error| format!("inspect material directory: {error}"))?
+                    .file_type()
+                    .is_symlink()
+            {
+                return Err(format!(
+                    "Material migration does not support linked directories: {}",
+                    root.display()
+                ));
+            }
+        }
+        copy_source
+            .ensure_layout()
+            .map_err(|error| error.to_string())?;
+        copy_destination
+            .ensure_layout()
+            .map_err(|error| error.to_string())?;
+        let canonical_source = fs::canonicalize(&copy_source.root)
+            .map_err(|error| format!("resolve old material directory: {error}"))?;
+        let canonical_destination = fs::canonicalize(&copy_destination.root)
+            .map_err(|error| format!("resolve new material directory: {error}"))?;
+        if canonical_source == canonical_destination
+            || canonical_source.starts_with(&canonical_destination)
+            || canonical_destination.starts_with(&canonical_source)
+        {
+            return Err(
+                "Old and new material directories must be separate, non-nested directories"
+                    .to_string(),
+            );
+        }
+        copy_local_materials_verified(&copy_source, &copy_destination)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|source| {
+        material_migration_error(
+            "device_simulator.settings.material_migration_task_failed",
+            source.to_string(),
+        )
+    })?
+    .map_err(|details| {
+        material_migration_error(
+            "device_simulator.settings.material_migration_failed",
+            details,
+        )
+    })?;
+
+    let mut next = state.config.lock().unwrap().clone();
+    if next.device_simulator.local_materials_directory != current_settings.local_materials_directory
+    {
+        return Err(material_migration_error(
+            "device_simulator.settings.material_migration_config_changed",
+            "Material directory settings changed while files were being copied".into(),
+        ));
+    }
+    next.device_simulator = settings.clone();
+    config::validate_config(&next)
+        .map_err(|details| settings_error("device_simulator.settings.invalid", details))?;
+    config::save_config(&app_handle, &next)
+        .map_err(|details| settings_error("device_simulator.settings.save_failed", details))?;
+    *state.config.lock().unwrap() = next;
+
+    let cleanup_source = source.clone();
+    let cleanup_destination = destination.clone();
+    let cleanup = tokio::task::spawn_blocking(move || {
+        remove_verified_local_materials(&cleanup_source, &cleanup_destination)
+            .map_err(|error| error.to_string())
+    })
+    .await;
+    let (removed_files, cleanup_completed, cleanup_error) = match cleanup {
+        Ok(Ok(removed)) => (removed, true, None),
+        Ok(Err(error)) => (0, false, Some(error)),
+        Err(error) => (0, false, Some(error.to_string())),
+    };
+    Ok(LocalMaterialMigrationResult {
+        settings,
+        source_path,
+        target_path,
+        copied_files: report.copied_files,
+        reused_files: report.reused_files,
+        copied_bytes: report.copied_bytes,
+        removed_files,
+        cleanup_completed,
+        cleanup_error,
+    })
 }
 
 #[tauri::command]
@@ -180,43 +342,33 @@ pub async fn device_simulator_list_interfaces(
 #[tauri::command]
 pub async fn device_simulator_list_profiles(
     app_handle: AppHandle,
-    app_state: State<'_, AppState>,
+    _app_state: State<'_, AppState>,
 ) -> Result<Vec<DeviceProfileSummary>, SimulatorErrorBody> {
     let mut summaries = list_first_release_profiles();
-    let Ok(context) = load_catalog_context(&app_handle, app_state.inner(), false).await else {
-        return Ok(summaries);
-    };
-    let paths = context.paths;
-    let catalog = context.cached.catalog;
-    let fallback = summaries.clone();
-    match tokio::task::spawn_blocking(move || {
-        apply_profile_availability(&mut summaries, &paths, &catalog);
-        summaries
-    })
-    .await
-    {
-        Ok(updated) => Ok(updated),
-        Err(_) => Ok(fallback),
+    pin_runtime_assets(&app_handle, &[]).await?;
+    for summary in &mut summaries {
+        summary.availability = DeviceProfileAvailability::Local;
+        summary.installed_version = None;
+        summary.available_version = None;
     }
+    Ok(summaries)
 }
 
 #[tauri::command]
 pub async fn device_simulator_list_alarm_types(
     app_handle: AppHandle,
-    app_state: State<'_, AppState>,
+    _app_state: State<'_, AppState>,
 ) -> Result<Vec<ProfileAlarmTypes>, SimulatorErrorBody> {
-    let context = load_catalog_context(&app_handle, app_state.inner(), false).await?;
-    tokio::task::spawn_blocking(move || {
-        list_active_alarm_types(&context.paths, &context.cached.catalog)
-    })
-    .await
-    .map_err(|source| {
-        runtime_error(
-            "device_simulator.alarm.type_list_task_failed",
-            "deviceSimulator.errors.assetPreparationFailed",
-            source.to_string(),
-        )
-    })?
+    let pinned = pin_runtime_assets(&app_handle, &[]).await?;
+    tokio::task::spawn_blocking(move || list_alarm_types_from_pins(&pinned))
+        .await
+        .map_err(|source| {
+            runtime_error(
+                "device_simulator.alarm.type_list_task_failed",
+                "deviceSimulator.errors.assetPreparationFailed",
+                source.to_string(),
+            )
+        })?
 }
 
 #[tauri::command]
@@ -224,23 +376,12 @@ pub async fn device_simulator_list_media_themes(
     app_handle: AppHandle,
     app_state: State<'_, AppState>,
 ) -> Result<Vec<MediaThemeSummary>, SimulatorErrorBody> {
-    let context = load_catalog_context(&app_handle, app_state.inner(), false).await?;
+    let local_paths = local_material_paths(&app_handle, app_state.inner())?;
+    let pinned = pin_runtime_assets(&app_handle, &[]).await?;
     tokio::task::spawn_blocking(move || {
-        let pin = AssetStore::new(context.paths)
-            .pin_active(&context.cached.catalog)
-            .map_err(|source| {
-                runtime_error(
-                    source.code,
-                    "deviceSimulator.errors.assetPreparationFailed",
-                    source.message,
-                )
-            })?;
-        let media_directory = pin
-            .selection
-            .packs
+        let media_directory = pinned
             .iter()
-            .zip(pin.pack_directories)
-            .find_map(|(pack, directory)| (pack.id == "media-h264-live").then_some(directory))
+            .find_map(|pack| (pack.id == "media-h264-live").then_some(pack.directory.clone()))
             .ok_or_else(|| {
                 runtime_error(
                     "device_simulator.assets.media_pack_missing",
@@ -248,13 +389,31 @@ pub async fn device_simulator_list_media_themes(
                     "active media-h264-live pack is missing",
                 )
             })?;
-        list_media_themes(&media_directory).map_err(|source| {
+        let mut themes = list_media_themes(&media_directory).map_err(|source| {
             runtime_error(
                 source.code,
                 "deviceSimulator.errors.assetPreparationFailed",
                 source.message,
             )
-        })
+        })?;
+        let local_themes = list_local_media_themes(&local_paths).map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.localMaterialRefreshFailed",
+                source.message,
+            )
+        })?;
+        let preferred_default = local_themes
+            .iter()
+            .find(|theme| theme.is_default)
+            .map(|theme| theme.id.clone());
+        themes.extend(local_themes);
+        if let Some(preferred_default) = preferred_default {
+            for theme in &mut themes {
+                theme.is_default = theme.id == preferred_default;
+            }
+        }
+        Ok(themes)
     })
     .await
     .map_err(|source| {
@@ -282,47 +441,94 @@ pub async fn device_simulator_get_asset_status(
             error_code: None,
         });
     }
-    match load_catalog_context(&app_handle, app_state.inner(), true).await {
-        Ok(context) => {
-            let paths = context.paths;
-            let catalog = context.cached.catalog;
-            tokio::task::spawn_blocking(move || {
-                asset_status_from_catalog(&paths, &catalog, profile_ids)
-            })
-            .await
-            .map_err(|source| {
-                runtime_error(
-                    "device_simulator.assets.status_task_failed",
-                    "deviceSimulator.errors.assetPreparationFailed",
-                    source.to_string(),
-                )
-            })?
-        }
-        Err(error) => Ok(AssetStatus {
-            state: AssetState::Missing,
-            packs: profile_ids
+    let pinned = pin_runtime_assets(&app_handle, &profile_ids).await?;
+    let local_paths = local_material_paths(&app_handle, app_state.inner())?;
+    tokio::task::spawn_blocking(move || {
+        let local_themes = list_local_media_themes(&local_paths).map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.localMaterialRefreshFailed",
+                source.message,
+            )
+        })?;
+        let Some(theme_id) = local_themes
+            .iter()
+            .find(|theme| theme.is_default)
+            .or_else(|| local_themes.first())
+            .map(|theme| theme.id.as_str())
+        else {
+            return Ok(AssetStatus {
+                state: AssetState::Missing,
+                packs: pinned
+                    .iter()
+                    .map(|item| AssetPackStatus {
+                        id: item.id.clone(),
+                        required_version: String::new(),
+                        installed_version: None,
+                        size: 0,
+                        state: if item.id == "media-h264-live" {
+                            AssetState::Missing
+                        } else {
+                            AssetState::Ready
+                        },
+                        error_code: (item.id == "media-h264-live").then(|| {
+                            "device_simulator.local_materials.server_sync_required".to_owned()
+                        }),
+                    })
+                    .collect(),
+                profile_ids,
+                update_available: false,
+                error_code: Some(
+                    "device_simulator.local_materials.server_sync_required".to_owned(),
+                ),
+            });
+        };
+        RuntimeAssetLayout::load_for_theme_with_local_paths(
+            &pinned,
+            &profile_ids,
+            theme_id,
+            Some(&local_paths),
+        )
+        .map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.assetPreparationFailed",
+                source.message,
+            )
+        })?;
+        Ok(AssetStatus {
+            state: AssetState::Ready,
+            packs: pinned
                 .iter()
-                .map(|profile_id| AssetPackStatus {
-                    id: profile_id.clone(),
-                    required_version: "unavailable".into(),
+                .map(|item| AssetPackStatus {
+                    id: item.id.clone(),
+                    required_version: String::new(),
                     installed_version: None,
                     size: 0,
-                    state: AssetState::Missing,
-                    error_code: Some(error.code.clone()),
+                    state: AssetState::Ready,
+                    error_code: None,
                 })
                 .collect(),
             profile_ids,
             update_available: false,
-            error_code: Some(error.code),
-        }),
-    }
+            error_code: None,
+        })
+    })
+    .await
+    .map_err(|source| {
+        runtime_error(
+            "device_simulator.assets.status_task_failed",
+            "deviceSimulator.errors.assetPreparationFailed",
+            source.to_string(),
+        )
+    })?
 }
 
 #[tauri::command]
 pub async fn device_simulator_prepare_assets(
     app_handle: AppHandle,
-    app_state: State<'_, AppState>,
-    simulator_state: State<'_, DeviceSimulatorCommandState>,
+    _app_state: State<'_, AppState>,
+    _simulator_state: State<'_, DeviceSimulatorCommandState>,
     profile_ids: Vec<String>,
 ) -> Result<String, SimulatorErrorBody> {
     validate_profile_ids(&profile_ids)?;
@@ -333,95 +539,20 @@ pub async fn device_simulator_prepare_assets(
             "select at least one profile before preparing assets",
         ));
     }
-    let context = load_catalog_context(&app_handle, app_state.inner(), true).await?;
-    let client = build_asset_http_client().map_err(|source| {
-        runtime_error(
-            source.code,
-            "deviceSimulator.errors.assetPreparationFailed",
-            source.message,
-        )
-    })?;
-    let service = AssetPreparationService::new(context.paths, client, context.base_url);
+    pin_runtime_assets(&app_handle, &profile_ids).await?;
     let job_id = uuid::Uuid::new_v4().simple().to_string();
-    let (cancel, cancel_rx) = watch::channel(false);
-    {
-        let mut active = simulator_state.asset_job.lock().await;
-        if active.is_some() {
-            return Err(runtime_error(
-                "device_simulator.assets.job_already_running",
-                "deviceSimulator.errors.assetJobRunning",
-                "another asset preparation job is already running",
-            ));
-        }
-        *active = Some(AssetJobControl {
-            id: job_id.clone(),
-            cancel,
-        });
-    }
-    let jobs = Arc::clone(&simulator_state.asset_job);
-    let catalog = context.cached.catalog;
-    let event_app = app_handle.clone();
-    let event_job_id = job_id.clone();
-    tokio::spawn(async move {
-        let started = Instant::now();
-        let result = service
-            .prepare_profiles(&catalog, &profile_ids, cancel_rx, |progress| {
-                let state = match progress.phase {
-                    AssetPreparationPhase::Resolving | AssetPreparationPhase::CheckingDisk => {
-                        AssetState::Checking
-                    }
-                    AssetPreparationPhase::Downloading => AssetState::Downloading,
-                    AssetPreparationPhase::Installing => AssetState::Installing,
-                    AssetPreparationPhase::Activating => AssetState::Verifying,
-                };
-                let elapsed = started.elapsed().as_secs_f64();
-                let speed_bps = if elapsed > 0.0 {
-                    (progress.downloaded_bytes as f64 / elapsed) as u64
-                } else {
-                    0
-                };
-                let snapshot = AssetProgressSnapshot {
-                    job_id: event_job_id.clone(),
-                    state,
-                    current_pack_id: progress.current_pack.map(|pack| pack.id),
-                    downloaded: progress.downloaded_bytes,
-                    total: Some(progress.total_download_bytes),
-                    speed_bps,
-                    error: None,
-                };
-                let _ = event_app.emit(DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS, snapshot);
-            })
-            .await;
-        let final_progress = match result {
-            Ok(_) => AssetProgressSnapshot {
-                job_id: event_job_id.clone(),
-                state: AssetState::Ready,
-                current_pack_id: None,
-                downloaded: 0,
-                total: None,
-                speed_bps: 0,
-                error: None,
-            },
-            Err(error) => AssetProgressSnapshot {
-                job_id: event_job_id.clone(),
-                state: AssetState::Failed,
-                current_pack_id: None,
-                downloaded: 0,
-                total: None,
-                speed_bps: 0,
-                error: Some(runtime_error(
-                    error.code,
-                    "deviceSimulator.errors.assetPreparationFailed",
-                    error.message,
-                )),
-            },
-        };
-        let _ = event_app.emit(DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS, final_progress);
-        let mut active = jobs.lock().await;
-        if active.as_ref().is_some_and(|job| job.id == event_job_id) {
-            *active = None;
-        }
-    });
+    let _ = app_handle.emit(
+        DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS,
+        AssetProgressSnapshot {
+            job_id: job_id.clone(),
+            state: AssetState::Ready,
+            current_pack_id: None,
+            downloaded: 0,
+            total: None,
+            speed_bps: 0,
+            error: None,
+        },
+    );
     Ok(job_id)
 }
 
@@ -529,8 +660,9 @@ pub async fn device_simulator_start(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let pinned_packs = pin_runtime_assets(&app_handle, app_state.inner(), &profile_ids).await?;
+    let pinned_packs = pin_runtime_assets(&app_handle, &profile_ids).await?;
     let runtime_app_data_dir = app_data_dir(&app_handle)?;
+    let runtime_local_materials_root = local_material_paths(&app_handle, app_state.inner())?.root;
     let started = simulator_state
         .manager
         .begin_random_session()
@@ -571,6 +703,7 @@ pub async fn device_simulator_start(
 
     let initialize = InitializeSessionPayload {
         app_data_dir: runtime_app_data_dir,
+        local_materials_root: runtime_local_materials_root,
         request: request.clone(),
         preview: report.device_preview.clone(),
         pinned_packs,
@@ -800,6 +933,190 @@ pub async fn device_simulator_recover(
     recover_session(&app_handle, simulator_state.inner(), session_id).await
 }
 
+#[tauri::command]
+pub async fn device_simulator_get_local_materials_path(
+    app_handle: AppHandle,
+    app_state: State<'_, AppState>,
+) -> Result<String, SimulatorErrorBody> {
+    let paths = local_material_paths(&app_handle, app_state.inner())?;
+    tokio::task::spawn_blocking(move || {
+        paths.ensure_layout().map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.localMaterialRefreshFailed",
+                source.message,
+            )
+        })?;
+        Ok(paths.root.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|source| {
+        runtime_error(
+            "device_simulator.local_materials.task_failed",
+            "deviceSimulator.errors.localMaterialRefreshFailed",
+            source.to_string(),
+        )
+    })?
+}
+
+#[tauri::command]
+pub async fn device_simulator_refresh_local_materials(
+    app_handle: AppHandle,
+    app_state: State<'_, AppState>,
+) -> Result<Vec<MediaThemeSummary>, SimulatorErrorBody> {
+    let paths = local_material_paths(&app_handle, app_state.inner())?;
+    tokio::task::spawn_blocking(move || {
+        let themes = refresh_local_alarm_materials(&paths).map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.localMaterialRefreshFailed",
+                source.message,
+            )
+        })?;
+        validate_remote_media_themes(&paths).map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.remoteMaterialSyncFailed",
+                source.message,
+            )
+        })?;
+        Ok(themes)
+    })
+    .await
+    .map_err(|source| {
+        runtime_error(
+            "device_simulator.local_materials.task_failed",
+            "deviceSimulator.errors.localMaterialRefreshFailed",
+            source.to_string(),
+        )
+    })?
+}
+
+#[tauri::command]
+pub async fn device_simulator_sync_remote_materials(
+    app_handle: AppHandle,
+    app_state: State<'_, AppState>,
+) -> Result<RemoteMaterialSyncResult, SimulatorErrorBody> {
+    let paths = local_material_paths(&app_handle, app_state.inner())?;
+    let base_url = asset_base_url(app_state.inner())?;
+    let client = build_remote_material_client().map_err(|source| {
+        runtime_error(
+            source.code,
+            "deviceSimulator.errors.remoteMaterialSyncFailed",
+            source.message,
+        )
+    })?;
+    let report = sync_remote_materials(&client, &base_url, &paths)
+        .await
+        .map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.remoteMaterialSyncFailed",
+                source.message,
+            )
+        })?;
+    let themes = tokio::task::spawn_blocking(move || {
+        refresh_local_media(&paths).map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.localMaterialRefreshFailed",
+                source.message,
+            )
+        })
+    })
+    .await
+    .map_err(|source| {
+        runtime_error(
+            "device_simulator.local_materials.task_failed",
+            "deviceSimulator.errors.localMaterialRefreshFailed",
+            source.to_string(),
+        )
+    })??;
+    Ok(RemoteMaterialSyncResult {
+        downloaded_files: report.downloaded_files,
+        reused_files: report.reused_files,
+        removed_files: report.removed_files,
+        downloaded_bytes: report.downloaded_bytes,
+        themes,
+    })
+}
+
+#[tauri::command]
+pub async fn device_simulator_reset_and_sync_remote_materials(
+    app_handle: AppHandle,
+    app_state: State<'_, AppState>,
+) -> Result<RemoteMaterialSyncResult, SimulatorErrorBody> {
+    let paths = local_material_paths(&app_handle, app_state.inner())?;
+    let clear_paths = paths.clone();
+    let cleared_files = tokio::task::spawn_blocking(move || {
+        let removed = clear_remote_materials(&clear_paths).map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.localMaterialResetFailed",
+                source.message,
+            )
+        })?;
+        clear_prepared_alarm_materials(&clear_paths).map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.localMaterialResetFailed",
+                source.message,
+            )
+        })?;
+        Ok(removed)
+    })
+    .await
+    .map_err(|source| {
+        runtime_error(
+            "device_simulator.remote_materials.reset_task_failed",
+            "deviceSimulator.errors.localMaterialResetFailed",
+            source.to_string(),
+        )
+    })??;
+
+    let base_url = asset_base_url(app_state.inner())?;
+    let client = build_remote_material_client().map_err(|source| {
+        runtime_error(
+            source.code,
+            "deviceSimulator.errors.remoteMaterialSyncFailed",
+            source.message,
+        )
+    })?;
+    let report = sync_remote_materials(&client, &base_url, &paths)
+        .await
+        .map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.remoteMaterialSyncFailed",
+                source.message,
+            )
+        })?;
+    let themes = tokio::task::spawn_blocking(move || {
+        refresh_local_media(&paths).map_err(|source| {
+            runtime_error(
+                source.code,
+                "deviceSimulator.errors.localMaterialRefreshFailed",
+                source.message,
+            )
+        })
+    })
+    .await
+    .map_err(|source| {
+        runtime_error(
+            "device_simulator.local_materials.task_failed",
+            "deviceSimulator.errors.localMaterialRefreshFailed",
+            source.to_string(),
+        )
+    })??;
+    Ok(RemoteMaterialSyncResult {
+        downloaded_files: report.downloaded_files,
+        reused_files: report.reused_files,
+        removed_files: report.removed_files.saturating_add(cleared_files),
+        downloaded_bytes: report.downloaded_bytes,
+        themes,
+    })
+}
+
 async fn recover_session(
     app_handle: &AppHandle,
     simulator_state: &DeviceSimulatorCommandState,
@@ -907,48 +1224,18 @@ pub async fn shutdown_for_exit(
 
 async fn pin_runtime_assets(
     app_handle: &AppHandle,
-    app_state: &AppState,
     profile_ids: &[String],
 ) -> Result<Vec<PinnedPackDirectory>, SimulatorErrorBody> {
-    let context = load_catalog_context(app_handle, app_state, false).await?;
-    let paths = context.paths;
-    let catalog = context.cached.catalog;
-    let requested = {
-        let mut requested = profile_ids.to_vec();
-        requested.sort();
-        requested.dedup();
-        requested
-    };
+    validate_profile_ids(profile_ids)?;
+    let app_data = app_data_dir(app_handle)?;
     tokio::task::spawn_blocking(move || {
-        let pin = AssetStore::new(paths)
-            .pin_active(&catalog)
-            .map_err(|source| {
-                runtime_error(
-                    source.code,
-                    "deviceSimulator.errors.assetPreparationFailed",
-                    source.message,
-                )
-            })?;
-        if pin.selection.profiles != requested
-            || pin.selection.packs.len() != pin.pack_directories.len()
-        {
-            return Err(runtime_error(
-                "device_simulator.assets.active_selection_mismatch",
+        ensure_built_in_assets(&app_data).map_err(|source| {
+            runtime_error(
+                source.code,
                 "deviceSimulator.errors.assetPreparationFailed",
-                "active asset selection does not exactly match the requested profiles",
-            ));
-        }
-        Ok(pin
-            .selection
-            .packs
-            .into_iter()
-            .zip(pin.pack_directories)
-            .map(|(pack, directory)| PinnedPackDirectory {
-                id: pack.id,
-                version: pack.version.to_string(),
-                directory,
-            })
-            .collect())
+                source.message,
+            )
+        })
     })
     .await
     .map_err(|source| {
@@ -1467,83 +1754,69 @@ async fn build_preflight(
         .into_iter()
         .collect::<Vec<_>>();
     let (assets_ready, asset_details, profile_evidence) =
-        match load_catalog_context(app_handle, app_state, false).await {
-            Ok(context) => {
-                let paths = context.paths;
-                let catalog = context.cached.catalog;
+        match pin_runtime_assets(app_handle, &profile_ids).await {
+            Ok(pinned) => {
                 let selected = profile_ids.clone();
                 let platform = request.platform.kind;
+                let media_theme_id = request.media_theme_id.clone();
+                let runtime_local_paths = local_material_paths(app_handle, app_state)?;
                 tokio::task::spawn_blocking(move || {
-                    let status = asset_status_from_catalog(&paths, &catalog, selected.clone())?;
-                    let assets_ready = status.state == AssetState::Ready;
-                    // The profile documents ship inside the packs, so an
-                    // unprepared selection leaves the evidence unread rather
-                    // than unapproved.
-                    let mut profile_evidence = None;
-                    if assets_ready {
-                        let mut static_reviewed = true;
-                        let mut platform_verified = true;
-                        for profile_id in &selected {
-                            let profile_pack = catalog
-                                .profiles
-                                .iter()
-                                .find(|profile| profile.id == *profile_id)
-                                .and_then(|profile| {
-                                    profile
-                                        .required_packs
-                                        .iter()
-                                        .find(|pack| pack.id == *profile_id)
-                                })
-                                .ok_or_else(|| {
-                                    runtime_error(
-                                        "device_simulator.assets.profile_pack_missing",
-                                        "deviceSimulator.errors.assetPreparationFailed",
-                                        format!("profile pack for '{profile_id}' is missing"),
-                                    )
-                                })?;
-                            let directory = paths.pack_dir(profile_pack).map_err(|source| {
+                    RuntimeAssetLayout::load_for_theme_with_local_paths(
+                        &pinned,
+                        &selected,
+                        &media_theme_id,
+                        Some(&runtime_local_paths),
+                    )
+                    .map_err(|source| {
+                        runtime_error(
+                            source.code,
+                            "deviceSimulator.errors.assetPreparationFailed",
+                            source.message,
+                        )
+                    })?;
+                    let mut static_reviewed = true;
+                    let mut platform_verified = true;
+                    for profile_id in &selected {
+                        let directory = pinned
+                            .iter()
+                            .find(|item| item.id == *profile_id)
+                            .map(|item| &item.directory)
+                            .ok_or_else(|| {
+                                runtime_error(
+                                    "device_simulator.assets.profile_pack_missing",
+                                    "deviceSimulator.errors.assetPreparationFailed",
+                                    format!("built-in profile '{profile_id}' is missing"),
+                                )
+                            })?;
+                        let profile =
+                            load_profile_from_pack(directory, profile_id).map_err(|source| {
                                 runtime_error(
                                     source.code,
                                     "deviceSimulator.errors.assetPreparationFailed",
                                     source.message,
                                 )
                             })?;
-                            let profile = load_profile_from_pack(&directory, profile_id).map_err(
-                                |source| {
-                                    runtime_error(
-                                        source.code,
-                                        "deviceSimulator.errors.assetPreparationFailed",
-                                        source.message,
-                                    )
-                                },
-                            )?;
-                            static_reviewed &= profile.evidence.iter().all(|evidence| {
-                                matches!(
-                                    evidence.status,
-                                    EvidenceStatus::ReviewedStatic
-                                        | EvidenceStatus::PlatformVerified
-                                )
-                            });
-                            platform_verified &= profile.evidence.iter().all(|evidence| {
-                                evidence.status == EvidenceStatus::PlatformVerified
-                                    && evidence.verified_platforms.contains(&platform)
-                            });
-                        }
-                        profile_evidence = Some(if platform_verified {
-                            ProfileEvidenceVerdict::PlatformVerified
-                        } else if static_reviewed {
-                            ProfileEvidenceVerdict::StaticReviewed
-                        } else {
-                            ProfileEvidenceVerdict::Unreviewed
+                        static_reviewed &= profile.evidence.iter().all(|evidence| {
+                            matches!(
+                                evidence.status,
+                                EvidenceStatus::ReviewedStatic | EvidenceStatus::PlatformVerified
+                            )
+                        });
+                        platform_verified &= profile.evidence.iter().all(|evidence| {
+                            evidence.status == EvidenceStatus::PlatformVerified
+                                && evidence.verified_platforms.contains(&platform)
                         });
                     }
+                    let profile_evidence = Some(if platform_verified {
+                        ProfileEvidenceVerdict::PlatformVerified
+                    } else if static_reviewed {
+                        ProfileEvidenceVerdict::StaticReviewed
+                    } else {
+                        ProfileEvidenceVerdict::Unreviewed
+                    });
                     Ok::<_, SimulatorErrorBody>((
-                        assets_ready,
-                        Some(format!(
-                            "{} signed pack(s); catalog {}",
-                            status.packs.len(),
-                            catalog.generated_at
-                        )),
+                        true,
+                        Some("built-in protocol assets and local materials are usable".into()),
                         profile_evidence,
                     ))
                 })
@@ -1874,14 +2147,14 @@ fn asset_base_url(app_state: &AppState) -> Result<reqwest::Url, SimulatorErrorBo
     let url = reqwest::Url::parse(&normalized).map_err(|source| {
         runtime_error(
             "device_simulator.assets.server_url_invalid",
-            "deviceSimulator.errors.assetCatalogUnpublished",
+            "deviceSimulator.errors.remoteMaterialSyncFailed",
             source.to_string(),
         )
     })?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err(runtime_error(
             "device_simulator.assets.server_url_invalid",
-            "deviceSimulator.errors.assetCatalogUnpublished",
+            "deviceSimulator.errors.remoteMaterialSyncFailed",
             "asset server URL must be absolute HTTP(S)",
         ));
     }
@@ -2036,6 +2309,29 @@ struct AlarmTypeDefinitionSummary {
     display_name: String,
     platforms: Vec<app_lib::device_simulator::profiles::scope::TargetPlatform>,
     supports_pictures: bool,
+}
+
+fn list_alarm_types_from_pins(
+    pinned: &[PinnedPackDirectory],
+) -> Result<Vec<ProfileAlarmTypes>, SimulatorErrorBody> {
+    list_first_release_profiles()
+        .into_iter()
+        .map(|profile| {
+            let directory = pinned
+                .iter()
+                .find(|item| item.id == profile.id)
+                .map(|item| &item.directory)
+                .ok_or_else(|| {
+                    runtime_error(
+                        "device_simulator.assets.profile_pack_missing",
+                        "deviceSimulator.errors.assetPreparationFailed",
+                        format!("built-in profile '{}' is missing", profile.id),
+                    )
+                })?;
+            let bytes = read_alarm_types_manifest(directory, &profile.id)?;
+            parse_alarm_types_manifest(&profile.id, &bytes)
+        })
+        .collect()
 }
 
 fn list_active_alarm_types(
@@ -2383,6 +2679,35 @@ fn app_data_dir(app_handle: &AppHandle) -> Result<std::path::PathBuf, SimulatorE
     })
 }
 
+fn local_material_paths(
+    app_handle: &AppHandle,
+    app_state: &AppState,
+) -> Result<LocalMaterialPaths, SimulatorErrorBody> {
+    let settings = app_state.config.lock().unwrap().device_simulator.clone();
+    local_material_paths_for_settings(app_handle, &settings)
+}
+
+fn local_material_paths_for_settings(
+    app_handle: &AppHandle,
+    settings: &config::DeviceSimulatorSettings,
+) -> Result<LocalMaterialPaths, SimulatorErrorBody> {
+    let app_data = app_data_dir(app_handle)?;
+    if let Some(directory) = settings.local_materials_directory.as_deref() {
+        let configured = Path::new(directory);
+        let default_root = LocalMaterialPaths::from_app_data_dir(&app_data).root;
+        if configured != default_root && app_data.starts_with(configured) {
+            return Err(settings_error(
+                "device_simulator.settings.material_directory_unsafe",
+                "Material directory cannot contain the application data directory".into(),
+            ));
+        }
+    }
+    Ok(LocalMaterialPaths::from_configured_directory(
+        &app_data,
+        settings.local_materials_directory.as_deref(),
+    ))
+}
+
 fn probe_tcp_ports(ports: [u16; 4]) -> BTreeSet<u16> {
     ports
         .into_iter()
@@ -2407,6 +2732,14 @@ fn validate_profile_ids(profile_ids: &[String]) -> Result<(), SimulatorErrorBody
 
 fn settings_error(code: &'static str, details: String) -> SimulatorErrorBody {
     runtime_error(code, "deviceSimulator.errors.settingsInvalid", details)
+}
+
+fn material_migration_error(code: &'static str, details: String) -> SimulatorErrorBody {
+    runtime_error(
+        code,
+        "deviceSimulator.errors.localMaterialMigrationFailed",
+        details,
+    )
 }
 
 fn runtime_error(
@@ -2614,8 +2947,8 @@ mod tests {
     fn alarm_type_manifest_projection_keeps_only_ums_fields() {
         let manifest = serde_json::json!({
             "schema_version": 1,
-            "profile_id": "ipc-smart",
-            "handler_id": "alarm.smart.v1",
+            "profile_id": "ipc-structured",
+            "handler_id": "alarm.structured.v1",
             "definitions": [
                 {
                     "id": "motion",
@@ -2633,8 +2966,8 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&manifest).unwrap();
-        let result = parse_alarm_types_manifest("ipc-smart", &bytes).unwrap();
-        assert_eq!(result.profile_id, "ipc-smart");
+        let result = parse_alarm_types_manifest("ipc-structured", &bytes).unwrap();
+        assert_eq!(result.profile_id, "ipc-structured");
         assert_eq!(
             result.alarm_types,
             vec![AlarmTypeSummary {

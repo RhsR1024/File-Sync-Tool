@@ -1,0 +1,11 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Channels/1/Media/Video/Streams/Scramble",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Enabled":	0
+		}
+	}
+}

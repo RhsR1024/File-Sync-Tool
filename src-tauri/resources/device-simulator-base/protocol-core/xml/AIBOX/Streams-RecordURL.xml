@@ -1,0 +1,11 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Channels/1/Media/Video/Streams/RecordURL",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"URL":	"rtsp://206.2.18.165:554/c1/b1618228367/e1618228377/replay/s0/"
+		}
+	}
+}

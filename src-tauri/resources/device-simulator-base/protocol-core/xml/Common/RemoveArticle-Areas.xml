@@ -1,0 +1,43 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/7/Smart/RemoveArticle/Areas",
+	"CreatedID": -1,
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num":	4,
+	"PolygonInfoList":	[{
+			"ID":	0,
+			"Enabled":	0,
+			"Sensitivity":	50,
+			"TimeThreshold":	5,
+			"Num":	0,
+			"PointList":	[]
+		}, {
+			"ID":	1,
+			"Enabled":	0,
+			"Sensitivity":	50,
+			"TimeThreshold":	5,
+			"Num":	0,
+			"PointList":	[]
+		}, {
+			"ID":	2,
+			"Enabled":	0,
+			"Sensitivity":	50,
+			"TimeThreshold":	5,
+			"Num":	0,
+			"PointList":	[]
+		}, {
+			"ID":	3,
+			"Enabled":	0,
+			"Sensitivity":	50,
+			"TimeThreshold":	5,
+			"Num":	0,
+			"PointList":	[]
+		}]
+}
+	}
+}

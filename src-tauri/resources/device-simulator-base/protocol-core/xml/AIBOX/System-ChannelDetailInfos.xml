@@ -1,0 +1,37 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Channels/System/ChannelDetailInfos",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Nums":	1,
+			"DetailInfos":	[{
+					"ID":	1,
+					"Name":	"......... 01",
+					"ChannelType":	0,
+					"Status":	1,
+					"StreamNums":	3,
+					"DeviceType":	0,
+					"AllowDistribution":	0,
+					"AddType":	0,
+					"AccessProtocol":	2,
+					"OffReason":	1,
+					"RemoteIndex":	1,
+					"Manufacturer":	"UNIVIEW",
+					"DeviceModel":	"IPC-H244@PEK-F60-PW-VG",
+					"GBID":	"",
+					"AddressInfo":	{
+						"AddressType":	0,
+						"Address":	"192.167.12.71",
+						"Port":	80,
+						"MAC":	"6c:f1:7e:7d:32:6c",
+						"AccessAddress":	"http://192.167.12.71"
+					},
+					"IsPoEPort":	0,
+					"CameraType":	"1",
+					"DDNSAddress":	"8.8.8.8"
+				}]
+		}
+	}
+}

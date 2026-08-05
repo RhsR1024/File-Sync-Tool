@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "ipc-structured",
+  "device_kind": "ipc",
+  "legacy_device_type": "结构化相机",
+  "identity": {
+    "model": "HIC6881-IR@X38-L-WSGB-VC",
+    "firmware_version": "QIPC-B2201_0221",
+    "nickname": "STRUCT",
+    "device_type_enum": 0
+  },
+  "supported_platforms": [
+    "ums"
+  ],
+  "handlers": {
+    "identity": "legacy.identity.v1",
+    "discovery": "ws_discovery.ipc.v1",
+    "http": "http.structured_ipc.v1",
+    "rtsp": "rtsp.tcp_interleaved.v1",
+    "alarms": [
+      "alarm.structured.v1"
+    ]
+  },
+  "evidence": [
+    {
+      "topic": "identity",
+      "status": "reviewed_static",
+      "sources": [
+        "data/dev_type.yml",
+        "script/VSITool.py"
+      ],
+      "verified_platforms": [],
+      "intentional_changes": []
+    },
+    {
+      "topic": "discovery",
+      "status": "reviewed_static",
+      "sources": [
+        "script/Vsocket_ip.py",
+        "xml/Common/search.xml"
+      ],
+      "verified_platforms": [],
+      "intentional_changes": []
+    },
+    {
+      "topic": "http",
+      "status": "reviewed_static",
+      "sources": [
+        "script/HTTPServer.py"
+      ],
+      "verified_platforms": [],
+      "intentional_changes": [
+        "Static review permits local implementation; platform compatibility remains unverified"
+      ]
+    },
+    {
+      "topic": "rtsp",
+      "status": "reviewed_static",
+      "sources": [
+        "script/IPCRtspLib.py",
+        "mediafile/mainstream.pcap",
+        "mediafile/substream.pcap",
+        "mediafile/thirdstream.pcap"
+      ],
+      "verified_platforms": [],
+      "intentional_changes": [
+        "Third-stream capture duplicates substream bytes; /media/video3 is the user-approved static selection"
+      ]
+    },
+    {
+      "topic": "alarm",
+      "status": "reviewed_static",
+      "sources": [
+        "data/alarms_info.yml",
+        "script/StructureAlarm.py"
+      ],
+      "verified_platforms": [],
+      "intentional_changes": [
+        "HTTP response success semantics remain real-platform gated"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/Door/System/ChannelDetailInfos",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num":	4,
+	"DetailInfos":	[{
+			"ID":	0,
+			"Name":	".........1",
+			"Status":	1
+		}, {
+			"ID":	1,
+			"Name":	".........2",
+			"Status":	1
+		}, {
+			"ID":	2,
+			"Name":	".........3",
+			"Status":	1
+		}, {
+			"ID":	3,
+			"Name":	".........4",
+			"Status":	1
+		}]
+}
+	}
+}

@@ -42,6 +42,7 @@ vite.config.ts.timestamp-*.mjs
 
 # Locally generated media packs, validation captures, and UI debug screenshots
 /artifacts/
+/tmp/
 
 # Generated Python bytecode
 __pycache__/

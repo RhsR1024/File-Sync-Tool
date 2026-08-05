@@ -136,7 +136,7 @@ fn default_document() -> Value {
         "revision": 0,
         "papers": [todo, note],
         "settings": {
-            "launcherEnabled": true,
+            "launcherEnabled": false,
             "launcherEdge": "right",
             "launcherOffset": 35,
             "hotkeys": {
@@ -159,13 +159,32 @@ fn is_valid_document(value: &Value) -> bool {
         && value.get("settings").map(Value::is_object).unwrap_or(false)
 }
 
+fn apply_launcher_compatibility(document: &mut Value) {
+    let launcher_setting_exists = document["settings"].get("launcherEnabled").is_some();
+    if launcher_setting_exists {
+        return;
+    }
+    // Before launcherEnabled was persisted, having saved papers meant the
+    // edge entry was in use. Preserve that upgrade behavior, while an explicit
+    // false remains the user's manual opt-out.
+    let has_existing_papers = document["papers"]
+        .as_array()
+        .map(|papers| !papers.is_empty())
+        .unwrap_or(false);
+    document["settings"]["launcherEnabled"] = json!(has_existing_papers);
+}
+
 fn read_json(path: &Path) -> Option<Value> {
     let bytes = fs::read(path).ok()?;
     if bytes.len() > MAX_DATA_BYTES {
         return None;
     }
-    let value = serde_json::from_slice::<Value>(&bytes).ok()?;
-    is_valid_document(&value).then_some(value)
+    let mut value = serde_json::from_slice::<Value>(&bytes).ok()?;
+    if !is_valid_document(&value) {
+        return None;
+    }
+    apply_launcher_compatibility(&mut value);
+    Some(value)
 }
 
 fn load_document_unlocked(app: &AppHandle) -> Value {
@@ -556,7 +575,7 @@ fn sync_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), String>
     let enabled = settings
         .get("launcherEnabled")
         .and_then(Value::as_bool)
-        .unwrap_or(true);
+        .unwrap_or(false);
     let Some(window) = app.get_webview_window(LAUNCHER_LABEL) else {
         return Ok(());
     };
@@ -1911,6 +1930,7 @@ pub async fn paper_todo_import(
     let Some(mut document) = imported else {
         return Ok(None);
     };
+    apply_launcher_compatibility(&mut document);
     {
         let _guard = runtime.io_lock.lock().map_err(|error| error.to_string())?;
         next_revision(&mut document);
@@ -1960,8 +1980,8 @@ pub fn paper_todo_clean_assets(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_document, is_valid_document, prepare_papers_for_show_all, rect_is_on_any_screen,
-        safe_extension, safe_label, Rect,
+        apply_launcher_compatibility, create_paper_value, default_document, is_valid_document,
+        prepare_papers_for_show_all, rect_is_on_any_screen, safe_extension, safe_label, Rect,
     };
     use serde_json::json;
 
@@ -1976,11 +1996,31 @@ mod tests {
     fn default_document_is_valid() {
         let document = default_document();
         assert!(is_valid_document(&document));
+        assert_eq!(document["settings"]["launcherEnabled"], false);
         let papers = document["papers"].as_array().expect("default papers");
         assert_eq!(papers.len(), 2);
         assert_eq!(papers[0]["kind"], "todo");
         assert_eq!(papers[1]["kind"], "note");
         assert!(papers.iter().all(|paper| paper["desktopOpen"] == false));
+    }
+
+    #[test]
+    fn existing_papers_enable_legacy_launcher_unless_user_disabled_it() {
+        let paper = create_paper_value("note");
+        let mut legacy = json!({ "papers": [paper], "settings": {} });
+        apply_launcher_compatibility(&mut legacy);
+        assert_eq!(legacy["settings"]["launcherEnabled"], true);
+
+        let mut empty = json!({ "papers": [], "settings": {} });
+        apply_launcher_compatibility(&mut empty);
+        assert_eq!(empty["settings"]["launcherEnabled"], false);
+
+        let mut opted_out = json!({
+            "papers": [create_paper_value("todo")],
+            "settings": { "launcherEnabled": false }
+        });
+        apply_launcher_compatibility(&mut opted_out);
+        assert_eq!(opted_out["settings"]["launcherEnabled"], false);
     }
 
     #[test]

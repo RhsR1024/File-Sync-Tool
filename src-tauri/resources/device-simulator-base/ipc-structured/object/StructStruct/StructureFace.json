@@ -1,0 +1,34 @@
+{
+  "Reference": "192.168.13.109:80/Subscription/Subscribers/0",
+  "TimeStamp": 1577187146,
+  "Seq": 0,
+  "SrcID": 0,
+  "SrcName": " ",
+  "NotificationType": 0,
+  "RelatedID": "",
+  "StructureInfo": {
+    "ObjInfo": {
+      "FaceNum": 1,
+      "FaceInfoList": [{
+        "FaceID": 48366,
+        "Position": "0,3563;325,4139",
+        "SmallPicAttachIndex": 2,
+        "LargePicAttachIndex": 1,
+        "FeatureVersion": " ",
+        "Feature": " ",
+        "AttributeInfo": { "Gender": 2, "AgeRange": 3, "EthicCode": 0, "GlassFlag": 1, "GlassesStyle": 99 }
+      }],
+      "PersonNum": 0,
+      "PersonInfoList": [],
+      "NonMotorVehicleNum": 0,
+      "NonMotorVehicleInfoList": [],
+      "VehicleNum": 0,
+      "VehicleInfoList": []
+    },
+    "ImageNum": 2,
+    "ImageInfoList": [
+      { "Index": 1, "Type": 15, "Format": "1", "Width": 1920, "Height": 1080, "CaptureTime": "20191224193226450", "Size": 330036, "Data": "", "URL": "/LAPI/V1.0/System/Picture?Type=15&Index=\\pic\\STRUCT\\normal\\face&Size=317132" },
+      { "Index": 2, "Type": 11, "Format": "1", "Width": 512, "Height": 512, "CaptureTime": "20191224193226450", "Size": 16748, "Data": "", "URL": "/LAPI/V1.0/System/Picture?Type=11&Index=\\pic\\STRUCT\\normal\\face&Size=317132" }
+    ]
+  }
+}

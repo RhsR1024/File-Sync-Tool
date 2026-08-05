@@ -72,6 +72,8 @@ const MANUAL_COPY_RECOVERY_DELAY: Duration = Duration::from_secs(60);
 /// Must match `identifier` in tauri.conf.json (used for AUMID and the fallback data dir).
 const APP_IDENTIFIER: &str = "com.filesync.tool";
 const APP_DISPLAY_NAME: &str = "File Sync Tool";
+#[cfg(target_os = "windows")]
+const WINDOWS_NOTIFICATION_ICON: &[u8] = include_bytes!("../icons/128x128.png");
 const CLIPBOARD_INIT_MAX_ATTEMPTS: u32 = 5;
 const CLIPBOARD_INIT_RETRY_DELAY: Duration = Duration::from_millis(600);
 const WATCHDOG_PING_INTERVAL: Duration = Duration::from_secs(2);
@@ -1098,6 +1100,9 @@ fn should_close_to_tray(app: &tauri::AppHandle) -> bool {
 pub(crate) fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
         const VALUE_NAME: &str = "FileSyncToolAutoStart";
 
@@ -1110,7 +1115,8 @@ pub(crate) fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
         if enabled {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let exe_quoted = format!("\"{}\"", exe.to_string_lossy());
-            let status = Command::new("reg")
+            let mut command = Command::new("reg");
+            let status = command
                 .args([
                     "add",
                     RUN_KEY,
@@ -1122,6 +1128,7 @@ pub(crate) fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
                     &exe_quoted,
                     "/f",
                 ])
+                .creation_flags(CREATE_NO_WINDOW)
                 .status()
                 .map_err(|e| e.to_string())?;
             if !status.success() {
@@ -1129,8 +1136,10 @@ pub(crate) fn sync_launch_on_startup(enabled: bool) -> Result<(), String> {
             }
         } else {
             // Ignore delete failure if value does not exist.
-            let _ = Command::new("reg")
+            let mut command = Command::new("reg");
+            let _ = command
                 .args(["delete", RUN_KEY, "/v", VALUE_NAME, "/f"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .status();
         }
     }
@@ -1206,6 +1215,7 @@ async fn confirm_quit(
             // process goes away; a run that cannot react is still recovered on next start,
             // where task state left mid-flight is loaded back as interrupted.
             state.should_cancel.store(true, Ordering::SeqCst);
+            state.task_manager.interrupt_in_progress_for_exit();
             state.clipboard.shutdown();
             spawn_exit_watchdog();
             app_handle.exit(0);
@@ -1316,6 +1326,19 @@ fn register_windows_notification_identity() -> Result<(), String> {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
 
+    let icon_dir = default_app_data_dir()
+        .ok_or_else(|| "resolve notification icon directory: APPDATA is unavailable".to_string())?;
+    std::fs::create_dir_all(&icon_dir)
+        .map_err(|error| format!("create notification icon directory: {error}"))?;
+    let icon_path = icon_dir.join("notification-icon-v1.png");
+    let icon_is_current = std::fs::read(&icon_path)
+        .map(|bytes| bytes == WINDOWS_NOTIFICATION_ICON)
+        .unwrap_or(false);
+    if !icon_is_current {
+        std::fs::write(&icon_path, WINDOWS_NOTIFICATION_ICON)
+            .map_err(|error| format!("write notification icon: {error}"))?;
+    }
+
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
     let key_path = format!(r"Software\Classes\AppUserModelId\{APP_IDENTIFIER}");
     let (key, _) = current_user
@@ -1326,11 +1349,9 @@ fn register_windows_notification_identity() -> Result<(), String> {
     key.set_value("IconBackgroundColor", &"0")
         .map_err(|error| format!("set notification icon background: {error}"))?;
 
-    if let Ok(executable) = std::env::current_exe() {
-        let icon_path = executable.to_string_lossy().to_string();
-        key.set_value("IconUri", &icon_path)
-            .map_err(|error| format!("set notification icon: {error}"))?;
-    }
+    let icon_uri = icon_path.to_string_lossy().to_string();
+    key.set_value("IconUri", &icon_uri)
+        .map_err(|error| format!("set notification icon: {error}"))?;
 
     Ok(())
 }
@@ -3994,7 +4015,49 @@ async fn enable_appliance_ssh(
     Ok(results.into_iter().flatten().collect())
 }
 
+fn try_prepare_device_simulator_materials() -> Option<i32> {
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().as_deref()
+        != Some(std::ffi::OsStr::new("--prepare-device-simulator-materials"))
+    {
+        return None;
+    }
+    let Some(source) = arguments.next() else {
+        eprintln!("missing source-videos directory");
+        return Some(2);
+    };
+    let Some(output) = arguments.next() else {
+        eprintln!("missing prepared-videos directory");
+        return Some(2);
+    };
+    let default_video = arguments.next();
+    if arguments.next().is_some() {
+        eprintln!("unexpected extra material-builder arguments");
+        return Some(2);
+    }
+    match app_lib::device_simulator::local_materials::prepare_server_video_materials(
+        std::path::Path::new(&source),
+        std::path::Path::new(&output),
+        default_video.as_deref().and_then(std::ffi::OsStr::to_str),
+    ) {
+        Ok(themes) => {
+            eprintln!("prepared {} video themes", themes.len());
+            Some(0)
+        }
+        Err(error) => {
+            eprintln!("failed to prepare video materials: {error}");
+            Some(1)
+        }
+    }
+}
+
 fn main() {
+    // Publisher-only command mode: use the same media compiler as the client
+    // runtime without starting WebView2, the tray, or any desktop subsystem.
+    if let Some(exit_code) = try_prepare_device_simulator_materials() {
+        std::process::exit(exit_code);
+    }
+
     // The elevated simulator worker must branch before WebView2, single-instance,
     // Tauri, tray, clipboard, scheduler, or any other desktop subsystem starts.
     if let Some(exit_code) = app_lib::device_simulator::worker_entry::try_run_from_env() {
@@ -4436,10 +4499,15 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             device_simulator_commands::device_simulator_get_settings,
             device_simulator_commands::device_simulator_save_settings,
+            device_simulator_commands::device_simulator_migrate_local_materials,
             device_simulator_commands::device_simulator_list_interfaces,
             device_simulator_commands::device_simulator_list_profiles,
             device_simulator_commands::device_simulator_list_alarm_types,
             device_simulator_commands::device_simulator_list_media_themes,
+            device_simulator_commands::device_simulator_get_local_materials_path,
+            device_simulator_commands::device_simulator_refresh_local_materials,
+            device_simulator_commands::device_simulator_sync_remote_materials,
+            device_simulator_commands::device_simulator_reset_and_sync_remote_materials,
             device_simulator_commands::device_simulator_get_asset_status,
             device_simulator_commands::device_simulator_prepare_assets,
             device_simulator_commands::device_simulator_cancel_asset_download,

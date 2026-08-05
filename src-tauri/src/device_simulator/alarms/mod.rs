@@ -15,11 +15,11 @@ use base64::Engine;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -128,6 +128,7 @@ pub enum DynamicField {
     Reference,
     SubscriptionId,
     EventId,
+    ImageGroupSequence,
     RelatedId,
     PersonId,
     AlarmState,
@@ -160,6 +161,7 @@ impl DynamicField {
             Self::Reference => "reference",
             Self::SubscriptionId => "subscription_id",
             Self::EventId => "event_id",
+            Self::ImageGroupSequence => "image_group_sequence",
             Self::RelatedId => "related_id",
             Self::PersonId => "person_id",
             Self::AlarmState => "alarm_state",
@@ -192,6 +194,7 @@ impl DynamicField {
             "reference" => Ok(Self::Reference),
             "subscription_id" => Ok(Self::SubscriptionId),
             "event_id" => Ok(Self::EventId),
+            "image_group_sequence" => Ok(Self::ImageGroupSequence),
             "related_id" => Ok(Self::RelatedId),
             "person_id" => Ok(Self::PersonId),
             "alarm_state" => Ok(Self::AlarmState),
@@ -367,13 +370,41 @@ pub struct CachedImage {
     pub content_type: &'static str,
 }
 
+#[derive(Debug, Clone)]
+struct DeclaredImage {
+    path: PathBuf,
+    expected_sha256: String,
+    expected_size: u64,
+    content_type: &'static str,
+    root: PathBuf,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ImageCache {
+    declared: BTreeMap<ImageAssetRef, DeclaredImage>,
     images: BTreeMap<ImageAssetRef, CachedImage>,
+    usage_order: VecDeque<ImageAssetRef>,
     total_bytes: u64,
 }
 
 impl ImageCache {
+    /// Validates image declarations without retaining every image body in RAM.
+    /// Bodies are verified on first use and kept in a bounded in-memory cache.
+    pub fn declare_at_start(
+        references: impl IntoIterator<Item = ImageAssetRef>,
+        pack_root: &Path,
+        user_asset_root: &Path,
+        manifests: &BTreeMap<PackIdentity, PackManifest>,
+    ) -> AlarmResult<Self> {
+        let references = references.into_iter().collect::<BTreeSet<_>>();
+        let mut cache = Self::default();
+        for reference in references {
+            let declared = declared_image(&reference, pack_root, user_asset_root, manifests)?;
+            cache.declared.insert(reference, declared);
+        }
+        Ok(cache)
+    }
+
     /// Reads and verifies every referenced image once at session/job start.
     /// Request construction only clones `Arc`s and never touches the disk.
     pub fn load_at_start(
@@ -383,102 +414,109 @@ impl ImageCache {
         manifests: &BTreeMap<PackIdentity, PackManifest>,
     ) -> AlarmResult<Self> {
         let references = references.into_iter().collect::<BTreeSet<_>>();
+        let mut cache = Self::declare_at_start(
+            references.iter().cloned(),
+            pack_root,
+            user_asset_root,
+            manifests,
+        )?;
+        cache.ensure_cached(references)?;
+        Ok(cache)
+    }
+
+    pub fn ensure_cached(
+        &mut self,
+        references: impl IntoIterator<Item = ImageAssetRef>,
+    ) -> AlarmResult<()> {
+        let references = references.into_iter().collect::<BTreeSet<_>>();
         if references.len() > MAX_ALARM_IMAGES {
             return Err(AlarmError::new(
                 "device_simulator.alarm.image_count_exceeded",
-                "alarm image cache contains more than 256 images",
+                "one alarm request references more than 256 images",
             ));
         }
-        let mut cache = Self::default();
-        for reference in references {
-            let (path, expected_sha256, expected_size, content_type, root) = match &reference {
-                ImageAssetRef::Pack {
-                    pack_id,
-                    version,
-                    path,
-                } => {
-                    validate_pack_identity(pack_id, version)?;
-                    validate_pack_path(path).map_err(|error| {
-                        AlarmError::new("device_simulator.alarm.image_path_invalid", error.message)
-                    })?;
-                    let identity = PackIdentity {
-                        id: pack_id.clone(),
-                        version: version.clone(),
-                    };
-                    let manifest = manifests.get(&identity).ok_or_else(|| {
-                        AlarmError::new(
-                            "device_simulator.alarm.image_manifest_missing",
-                            format!("manifest for {pack_id}@{version} is not active"),
-                        )
-                    })?;
-                    if manifest.id != *pack_id || manifest.version.to_string() != *version {
-                        return Err(AlarmError::new(
-                            "device_simulator.alarm.image_manifest_mismatch",
-                            "active image manifest identity does not match its index",
-                        ));
-                    }
-                    let declared = manifest
-                        .files
-                        .iter()
-                        .find(|file| file.path == *path)
-                        .ok_or_else(|| {
-                            AlarmError::new(
-                                "device_simulator.alarm.image_not_declared",
-                                format!("image '{path}' is not declared by its pack manifest"),
-                            )
-                        })?;
-                    let extension = image_extension(path)?;
-                    (
-                        pack_root.join(pack_id).join(version).join(path),
-                        declared.sha256.clone(),
-                        declared.size,
-                        extension.content_type(),
-                        pack_root.to_path_buf(),
-                    )
-                }
-                ImageAssetRef::UserAsset {
-                    image_id,
-                    extension,
-                    sha256,
-                    size,
-                } => {
-                    validate_user_asset_id(image_id)?;
-                    validate_sha256(sha256)?;
-                    (
-                        user_asset_root.join(format!("{image_id}.{}", extension.as_str())),
-                        sha256.clone(),
-                        *size,
-                        extension.content_type(),
-                        user_asset_root.to_path_buf(),
-                    )
-                }
-            };
-            if expected_size == 0 || expected_size > MAX_ALARM_IMAGE_BYTES {
-                return Err(AlarmError::new(
-                    "device_simulator.alarm.image_size_invalid",
-                    "alarm images must be non-empty and no larger than 16 MiB",
-                ));
-            }
-            cache.total_bytes = cache
-                .total_bytes
-                .checked_add(expected_size)
+        let required_bytes = references.iter().try_fold(0_u64, |total, reference| {
+            let declared = self.declared.get(reference).ok_or_else(|| {
+                AlarmError::new(
+                    "device_simulator.alarm.image_not_declared",
+                    "alarm image was not declared at task start",
+                )
+            })?;
+            total
+                .checked_add(declared.expected_size)
                 .filter(|total| *total <= MAX_ALARM_IMAGE_CACHE_BYTES)
                 .ok_or_else(|| {
                     AlarmError::new(
                         "device_simulator.alarm.image_cache_size_exceeded",
-                        "alarm image cache exceeds 128 MiB",
+                        "images required by one alarm request exceed 128 MiB",
                     )
-                })?;
-            let bytes = read_verified_file(&root, &path, expected_size, &expected_sha256)?;
-            cache.images.insert(
-                reference,
+                })
+        })?;
+        debug_assert!(required_bytes <= MAX_ALARM_IMAGE_CACHE_BYTES);
+
+        for reference in &references {
+            if self.images.contains_key(reference) {
+                self.touch(reference);
+                continue;
+            }
+            let declared = self.declared.get(reference).cloned().ok_or_else(|| {
+                AlarmError::new(
+                    "device_simulator.alarm.image_not_declared",
+                    "alarm image was not declared at task start",
+                )
+            })?;
+            self.make_room(declared.expected_size, &references)?;
+            let bytes = read_verified_file(
+                &declared.root,
+                &declared.path,
+                declared.expected_size,
+                &declared.expected_sha256,
+            )?;
+            self.total_bytes = self.total_bytes.saturating_add(declared.expected_size);
+            self.images.insert(
+                reference.clone(),
                 CachedImage {
                     bytes: Arc::from(bytes),
-                    content_type,
+                    content_type: declared.content_type,
                 },
             );
+            self.touch(reference);
         }
-        Ok(cache)
+        Ok(())
+    }
+
+    fn make_room(
+        &mut self,
+        incoming_bytes: u64,
+        protected: &BTreeSet<ImageAssetRef>,
+    ) -> AlarmResult<()> {
+        while self.images.len() >= MAX_ALARM_IMAGES
+            || self.total_bytes.saturating_add(incoming_bytes) > MAX_ALARM_IMAGE_CACHE_BYTES
+        {
+            let Some(position) = self
+                .usage_order
+                .iter()
+                .position(|reference| !protected.contains(reference))
+            else {
+                return Err(AlarmError::new(
+                    "device_simulator.alarm.image_cache_size_exceeded",
+                    "images required by one alarm request exceed the bounded image cache",
+                ));
+            };
+            let reference = self
+                .usage_order
+                .remove(position)
+                .expect("cache eviction position must exist");
+            if let Some(image) = self.images.remove(&reference) {
+                self.total_bytes = self.total_bytes.saturating_sub(image.bytes.len() as u64);
+            }
+        }
+        Ok(())
+    }
+
+    fn touch(&mut self, reference: &ImageAssetRef) {
+        self.usage_order.retain(|known| known != reference);
+        self.usage_order.push_back(reference.clone());
     }
 
     pub fn get(&self, reference: &ImageAssetRef) -> AlarmResult<&CachedImage> {
@@ -498,27 +536,17 @@ impl ImageCache {
 
     pub fn merged(&self, additional: Self) -> AlarmResult<Self> {
         let mut merged = self.clone();
+        merged.declared.extend(additional.declared);
         for (reference, image) in additional.images {
             if merged.images.contains_key(&reference) {
+                merged.touch(&reference);
                 continue;
             }
-            merged.total_bytes = merged
-                .total_bytes
-                .checked_add(image.bytes.len() as u64)
-                .filter(|total| *total <= MAX_ALARM_IMAGE_CACHE_BYTES)
-                .ok_or_else(|| {
-                    AlarmError::new(
-                        "device_simulator.alarm.image_cache_size_exceeded",
-                        "alarm image cache exceeds 128 MiB",
-                    )
-                })?;
-            if merged.images.len() >= MAX_ALARM_IMAGES {
-                return Err(AlarmError::new(
-                    "device_simulator.alarm.image_count_exceeded",
-                    "alarm image cache contains more than 256 images",
-                ));
-            }
-            merged.images.insert(reference, image);
+            let protected = BTreeSet::from([reference.clone()]);
+            merged.make_room(image.bytes.len() as u64, &protected)?;
+            merged.total_bytes = merged.total_bytes.saturating_add(image.bytes.len() as u64);
+            merged.images.insert(reference.clone(), image);
+            merged.touch(&reference);
         }
         Ok(merged)
     }
@@ -534,6 +562,87 @@ impl ImageCache {
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes
     }
+
+    pub fn declared_len(&self) -> usize {
+        self.declared.len()
+    }
+}
+
+fn declared_image(
+    reference: &ImageAssetRef,
+    pack_root: &Path,
+    user_asset_root: &Path,
+    manifests: &BTreeMap<PackIdentity, PackManifest>,
+) -> AlarmResult<DeclaredImage> {
+    let declared = match reference {
+        ImageAssetRef::Pack {
+            pack_id,
+            version,
+            path,
+        } => {
+            validate_pack_identity(pack_id, version)?;
+            validate_pack_path(path).map_err(|error| {
+                AlarmError::new("device_simulator.alarm.image_path_invalid", error.message)
+            })?;
+            let identity = PackIdentity {
+                id: pack_id.clone(),
+                version: version.clone(),
+            };
+            let manifest = manifests.get(&identity).ok_or_else(|| {
+                AlarmError::new(
+                    "device_simulator.alarm.image_manifest_missing",
+                    format!("manifest for {pack_id}@{version} is not active"),
+                )
+            })?;
+            if manifest.id != *pack_id || manifest.version.to_string() != *version {
+                return Err(AlarmError::new(
+                    "device_simulator.alarm.image_manifest_mismatch",
+                    "active image manifest identity does not match its index",
+                ));
+            }
+            let file = manifest
+                .files
+                .iter()
+                .find(|file| file.path == *path)
+                .ok_or_else(|| {
+                    AlarmError::new(
+                        "device_simulator.alarm.image_not_declared",
+                        format!("image '{path}' is not declared by its pack manifest"),
+                    )
+                })?;
+            let extension = image_extension(path)?;
+            DeclaredImage {
+                path: pack_root.join(pack_id).join(version).join(path),
+                expected_sha256: file.sha256.clone(),
+                expected_size: file.size,
+                content_type: extension.content_type(),
+                root: pack_root.to_path_buf(),
+            }
+        }
+        ImageAssetRef::UserAsset {
+            image_id,
+            extension,
+            sha256,
+            size,
+        } => {
+            validate_user_asset_id(image_id)?;
+            validate_sha256(sha256)?;
+            DeclaredImage {
+                path: user_asset_root.join(format!("{image_id}.{}", extension.as_str())),
+                expected_sha256: sha256.clone(),
+                expected_size: *size,
+                content_type: extension.content_type(),
+                root: user_asset_root.to_path_buf(),
+            }
+        }
+    };
+    if declared.expected_size == 0 || declared.expected_size > MAX_ALARM_IMAGE_BYTES {
+        return Err(AlarmError::new(
+            "device_simulator.alarm.image_size_invalid",
+            "alarm images must be non-empty and no larger than 16 MiB",
+        ));
+    }
+    Ok(declared)
 }
 
 pub type SharedImageCache = Arc<RwLock<ImageCache>>;
@@ -679,6 +788,9 @@ pub struct AlarmHandlerDefinition {
     pub template: CompiledTemplate,
     pub image_policy: ImagePolicy,
     pub images: Vec<ImageAttachmentDefinition>,
+    /// Additional complete image groups for the same alarm type. One group is
+    /// selected per event so related scene/crop/plate pictures never mix.
+    pub alternate_images: Vec<Vec<ImageAttachmentDefinition>>,
     pub transport: TransportDefinition,
     /// Additional HTTP requests emitted after the primary request for one
     /// logical legacy alarm. Their order is part of the migrated contract.
@@ -738,6 +850,7 @@ impl AlarmHandlerRegistry {
                 definition
                     .images
                     .iter()
+                    .chain(definition.alternate_images.iter().flatten())
                     .chain(
                         definition
                             .follow_up_requests
@@ -870,6 +983,7 @@ pub fn build_recovery_request(
             recovery_definition.follow_up_requests.clear();
             if !*include_images {
                 recovery_definition.images.clear();
+                recovery_definition.alternate_images.clear();
                 recovery_definition.image_policy = ImagePolicy::Forbidden;
             }
             build_request_with_template(
@@ -892,16 +1006,65 @@ fn build_request_with_template(
     image_cache: &ImageCache,
 ) -> AlarmResult<HttpAlarmRequest> {
     validate_definition(definition)?;
+    let images = selected_event_images(definition, context);
     build_request_from_parts(
         definition,
         template,
         definition.image_policy,
-        &definition.images,
+        images,
         &definition.transport,
         role,
         context,
         image_cache,
     )
+}
+
+fn selected_event_images<'a>(
+    definition: &'a AlarmHandlerDefinition,
+    context: &AlarmBuildContext,
+) -> &'a [ImageAttachmentDefinition] {
+    let group_count = 1 + definition.alternate_images.len();
+    if group_count == 1 {
+        return &definition.images;
+    }
+    let image_group_sequence = context
+        .fields
+        .get(&DynamicField::ImageGroupSequence)
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            context
+                .fields
+                .get(&DynamicField::EventId)
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|event_id| event_id.saturating_sub(1))
+        })
+        .unwrap_or_default();
+    let group_index = image_group_sequence as usize % group_count;
+    if group_index == 0 {
+        &definition.images
+    } else {
+        &definition.alternate_images[group_index - 1]
+    }
+}
+
+pub(crate) fn event_image_references(
+    definition: &AlarmHandlerDefinition,
+    context: &AlarmBuildContext,
+) -> Vec<ImageAssetRef> {
+    selected_event_images(definition, context)
+        .iter()
+        .chain(
+            definition
+                .follow_up_requests
+                .iter()
+                .flat_map(|request| request.images.iter()),
+        )
+        .flat_map(|image| {
+            std::iter::once(image.reference.clone()).chain(image.url_reference.clone())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1156,6 +1319,14 @@ fn apply_structured_camera_values(
 ) {
     match alarm_type_id {
         "person" => {
+            // Some approved structured-camera templates use PersonID while
+            // others use ID. Update both forms so the platform never keeps the
+            // fixture's static identity when image groups rotate.
+            set_number_create(
+                document,
+                "/StructureInfo/ObjInfo/PersonInfoList/0/PersonID",
+                event_id,
+            );
             set_number_create(
                 document,
                 "/StructureInfo/ObjInfo/PersonInfoList/0/ID",
@@ -1164,7 +1335,7 @@ fn apply_structured_camera_values(
             set_number(
                 document,
                 "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/Gender",
-                values.bounded(10, 0, 2),
+                2,
             );
             set_number(
                 document,
@@ -1178,25 +1349,10 @@ fn apply_structured_camera_values(
                 "/StructureInfo/ObjInfo/FaceInfoList/0/FaceID",
                 event_id,
             );
-            set_number_create(
-                document,
-                "/StructureInfo/ObjInfo/FaceInfoList/0/FaceDoforPersonID",
-                event_id,
-            );
-            set_number_create(
-                document,
-                "/StructureInfo/ObjInfo/PersonInfoList/0/PersonID",
-                event_id,
-            );
-            set_number_create(
-                document,
-                "/StructureInfo/ObjInfo/PersonInfoList/0/PersonDoforFaceID",
-                event_id,
-            );
             set_number(
                 document,
                 "/StructureInfo/ObjInfo/FaceInfoList/0/AttributeInfo/Gender",
-                values.bounded(12, 0, 2),
+                2,
             );
             set_number(
                 document,
@@ -1208,31 +1364,6 @@ fn apply_structured_camera_values(
                 "/StructureInfo/ObjInfo/FaceInfoList/0/AttributeInfo/GlassFlag",
                 values.bounded(14, 0, 3),
             );
-            set_number(
-                document,
-                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/Gender",
-                values.bounded(15, 0, 2),
-            );
-            set_number(
-                document,
-                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/AgeRange",
-                values.bounded(16, 0, 5),
-            );
-            set_number(
-                document,
-                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/SleevesLength",
-                values.bounded(17, 0, 3),
-            );
-            set_number(
-                document,
-                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/HairLength",
-                values.bounded(18, 0, 3),
-            );
-            set_number(
-                document,
-                "/StructureInfo/ObjInfo/PersonInfoList/0/AttributeInfo/BagFlag",
-                values.bounded(19, 0, 3),
-            );
         }
         "car" => {
             set_number_create(
@@ -1240,41 +1371,16 @@ fn apply_structured_camera_values(
                 "/StructureInfo/ObjInfo/VehicleInfoList/0/ID",
                 event_id,
             );
-            set_number_create(
-                document,
-                "/StructureInfo/ObjInfo/FaceInfoList/0/FaceID",
-                event_id,
-            );
-            set_number_create(
-                document,
-                "/StructureInfo/ObjInfo/FaceInfoList/0/FaceDoforVehicleID",
-                event_id,
-            );
             set_number(
                 document,
                 "/StructureInfo/ObjInfo/VehicleInfoList/0/VehicleAttributeInfo/SpeedType",
                 values.bounded(20, 0, 5),
-            );
-            set_json_pointer(
-                document,
-                "/StructureInfo/ObjInfo/VehicleInfoList/0/PlateAttributeInfo/PlateNo",
-                serde_json::Value::String(format!("UV{}", values.bounded(21, 100, 999))),
             );
         }
         "nonmotor" => {
             set_number_create(
                 document,
                 "/StructureInfo/ObjInfo/NonMotorVehicleInfoList/0/ID",
-                event_id,
-            );
-            set_number_create(
-                document,
-                "/StructureInfo/ObjInfo/FaceInfoList/0/FaceID",
-                event_id,
-            );
-            set_number_create(
-                document,
-                "/StructureInfo/ObjInfo/FaceInfoList/0/FaceDoforNonMotorVehicleID",
                 event_id,
             );
             set_number(
@@ -1436,6 +1542,20 @@ fn validate_definition(definition: &AlarmHandlerDefinition) -> AlarmResult<()> {
         &definition.images,
         &definition.transport,
     )?;
+    for images in &definition.alternate_images {
+        if images.len() != definition.images.len() {
+            return Err(AlarmError::new(
+                "device_simulator.alarm.image_group_incomplete",
+                "every alternate alarm image group must contain the same image roles",
+            ));
+        }
+        validate_request_definition(
+            &definition.template,
+            definition.image_policy,
+            images,
+            &definition.transport,
+        )?;
+    }
     for follow_up in &definition.follow_up_requests {
         validate_request_definition(
             &follow_up.template,
@@ -1573,6 +1693,7 @@ pub fn synthetic_unverified_first_release_registry() -> AlarmResult<AlarmHandler
             )?,
             image_policy,
             images: vec![],
+            alternate_images: vec![],
             transport: TransportDefinition {
                 method: HttpMethod::Post,
                 path: "/synthetic-unverified/alarm".into(),
@@ -1848,6 +1969,7 @@ mod tests {
             .unwrap(),
             image_policy: ImagePolicy::Forbidden,
             images: vec![],
+            alternate_images: vec![],
             transport: TransportDefinition {
                 method: HttpMethod::Post,
                 path: "/fixture/alarm".into(),
@@ -1861,6 +1983,182 @@ mod tests {
             recovery: RecoveryDefinition::None,
             evidence: evidence(),
         }
+    }
+
+    #[test]
+    fn structured_object_ids_change_after_the_fifth_image_group() {
+        let values = LegacyAlarmValues::new(7);
+        let cases = [
+            (
+                "person",
+                serde_json::json!({"StructureInfo":{"ObjInfo":{"PersonInfoList":[{"PersonID":41427}]}}}),
+                "/StructureInfo/ObjInfo/PersonInfoList/0/PersonID",
+            ),
+            (
+                "face",
+                serde_json::json!({"StructureInfo":{"ObjInfo":{"FaceInfoList":[{"FaceID":48366}]}}}),
+                "/StructureInfo/ObjInfo/FaceInfoList/0/FaceID",
+            ),
+            (
+                "car",
+                serde_json::json!({"StructureInfo":{"ObjInfo":{"VehicleInfoList":[{"ID":36892}]}}}),
+                "/StructureInfo/ObjInfo/VehicleInfoList/0/ID",
+            ),
+            (
+                "nonmotor",
+                serde_json::json!({"StructureInfo":{"ObjInfo":{"NonMotorVehicleInfoList":[{"ID":36853}]}}}),
+                "/StructureInfo/ObjInfo/NonMotorVehicleInfoList/0/ID",
+            ),
+        ];
+
+        for (alarm_type, mut document, pointer) in cases {
+            apply_structured_camera_values(&mut document, alarm_type, &values, 6);
+            assert_eq!(
+                document
+                    .pointer(pointer)
+                    .and_then(serde_json::Value::as_u64),
+                Some(6)
+            );
+        }
+    }
+
+    #[test]
+    fn complete_alarm_image_groups_rotate_by_event_without_cross_mixing() {
+        let first_ref = ImageAssetRef::UserAsset {
+            image_id: "a".repeat(64),
+            extension: ImageExtension::Jpg,
+            sha256: "a".repeat(64),
+            size: 3,
+        };
+        let second_ref = ImageAssetRef::UserAsset {
+            image_id: "b".repeat(64),
+            extension: ImageExtension::Jpg,
+            sha256: "b".repeat(64),
+            size: 3,
+        };
+        let attachment = |reference: ImageAssetRef| ImageAttachmentDefinition {
+            reference,
+            url_reference: None,
+            field_name: "image".into(),
+            file_name: "alarm.jpg".into(),
+            image_index: None,
+        };
+        let mut definition = raw_definition();
+        definition.template =
+            CompiledTemplate::compile(br#"{"image":"{{image_base64}}"}"#).unwrap();
+        definition.image_policy = ImagePolicy::Required;
+        definition.images = vec![attachment(first_ref.clone())];
+        definition.alternate_images = vec![vec![attachment(second_ref.clone())]];
+        let cache = ImageCache {
+            images: BTreeMap::from([
+                (
+                    first_ref,
+                    CachedImage {
+                        bytes: Arc::from(&b"one"[..]),
+                        content_type: "image/jpeg",
+                    },
+                ),
+                (
+                    second_ref,
+                    CachedImage {
+                        bytes: Arc::from(&b"two"[..]),
+                        content_type: "image/jpeg",
+                    },
+                ),
+            ]),
+            total_bytes: 6,
+            ..Default::default()
+        };
+        let request_for = |event_id: &str| {
+            let context = AlarmBuildContext {
+                source_ip: Some(Ipv4Addr::new(10, 0, 0, 8)),
+                fields: BTreeMap::from([(DynamicField::EventId, event_id.into())]),
+                multipart_boundary: None,
+                legacy_values: None,
+            };
+            build_alarm_request(&definition, &context, &cache).unwrap()
+        };
+
+        assert_eq!(&*request_for("1").body, br#"{"image":"b25l"}"#);
+        assert_eq!(&*request_for("2").body, br#"{"image":"dHdv"}"#);
+        assert_eq!(&*request_for("3").body, br#"{"image":"b25l"}"#);
+    }
+
+    #[test]
+    fn one_hundred_alarm_image_groups_rotate_independently_of_global_event_stride() {
+        let attachment = |index: u64| {
+            let image_id = format!("{index:064x}");
+            ImageAttachmentDefinition {
+                reference: ImageAssetRef::UserAsset {
+                    image_id: image_id.clone(),
+                    extension: ImageExtension::Jpg,
+                    sha256: image_id,
+                    size: 1,
+                },
+                url_reference: None,
+                field_name: "image".into(),
+                file_name: "alarm.jpg".into(),
+                image_index: None,
+            }
+        };
+        let groups = (0..100).map(attachment).collect::<Vec<_>>();
+        let expected = groups
+            .iter()
+            .map(|image| image.reference.clone())
+            .collect::<Vec<_>>();
+        let mut definition = raw_definition();
+        definition.images = vec![groups[0].clone()];
+        definition.alternate_images = groups[1..]
+            .iter()
+            .cloned()
+            .map(|image| vec![image])
+            .collect();
+
+        for sequence in 0..200_u64 {
+            let context = AlarmBuildContext {
+                fields: BTreeMap::from([
+                    (
+                        DynamicField::EventId,
+                        (100_u64 + sequence.saturating_mul(4)).to_string(),
+                    ),
+                    (DynamicField::ImageGroupSequence, sequence.to_string()),
+                ]),
+                ..Default::default()
+            };
+            let selected = selected_event_images(&definition, &context);
+
+            assert_eq!(
+                selected[0].reference,
+                expected[sequence as usize % expected.len()]
+            );
+        }
+    }
+
+    #[test]
+    fn large_material_catalog_is_declared_without_preloading_or_truncation() {
+        // Four categories with 100 groups and all three size variants can
+        // declare thousands of files. Declaration metadata stays cheap; only
+        // the handful needed by the current event enter the bounded RAM cache.
+        let references = (0..2_700_u64).map(|index| {
+            let image_id = format!("{index:064x}");
+            ImageAssetRef::UserAsset {
+                image_id: image_id.clone(),
+                extension: ImageExtension::Jpg,
+                sha256: image_id,
+                size: 1,
+            }
+        });
+        let cache = ImageCache::declare_at_start(
+            references,
+            Path::new("unused-pack-root"),
+            Path::new("unused-user-root"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(cache.declared_len(), 2_700);
+        assert!(cache.is_empty());
+        assert_eq!(cache.total_bytes(), 0);
     }
 
     #[test]

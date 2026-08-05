@@ -1,0 +1,17 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Channels/1/Media/Video/Streams/0/Records",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Nums":	1,
+			"RecordInfos":	[{
+					"FileName":	"",
+					"RecordType":	132,
+					"Begin":	1618228367,
+					"End":	1618228377
+				}]
+		}
+	}
+}

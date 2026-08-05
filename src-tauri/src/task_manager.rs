@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
+const ACTIVE_TASK_CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
 #[derive(Debug, Clone)]
 pub struct TaskStartRequest {
     pub task_config_id: Option<String>,
@@ -67,6 +69,7 @@ pub struct DeployTrackingContext {
 struct TaskManagerInner {
     app_handle: Option<tauri::AppHandle>,
     state: Mutex<TaskState>,
+    persist_lock: Mutex<()>,
     persist_scheduled: AtomicBool,
 }
 
@@ -84,13 +87,14 @@ impl TaskManager {
             inner: Arc::new(TaskManagerInner {
                 app_handle: Some(app_handle.clone()),
                 state: Mutex::new(state),
+                persist_lock: Mutex::new(()),
                 persist_scheduled: AtomicBool::new(false),
             }),
         };
 
-        let snapshot = manager.snapshot_state();
-        let _ = save_task_state(&app_handle, &snapshot);
+        manager.persist_now();
         manager.emit_group_list_snapshot();
+        manager.start_active_task_checkpoint();
         manager
     }
 
@@ -101,8 +105,10 @@ impl TaskManager {
                 app_handle: None,
                 state: Mutex::new(TaskState {
                     version: 1,
+                    last_checkpoint_at: None,
                     groups: vec![],
                 }),
+                persist_lock: Mutex::new(()),
                 persist_scheduled: AtomicBool::new(false),
             }),
         }
@@ -879,6 +885,19 @@ impl TaskManager {
         self.inner.state.lock().unwrap().clone()
     }
 
+    /// Freeze any in-flight task at the current time and persist it before a
+    /// graceful application exit.
+    pub fn interrupt_in_progress_for_exit(&self) {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            state.last_checkpoint_at = None;
+            state.mark_in_progress_as_interrupted();
+        }
+
+        self.emit_group_list_snapshot();
+        self.persist_now();
+    }
+
     fn after_change(&self, task_group_id: Option<&str>) {
         self.emit_group_list_snapshot();
         if let Some(group_id) = task_group_id {
@@ -922,9 +941,9 @@ impl TaskManager {
     }
 
     fn schedule_persist(&self) {
-        let Some(app_handle) = self.inner.app_handle.clone() else {
+        if self.inner.app_handle.is_none() {
             return;
-        };
+        }
 
         if self
             .inner
@@ -938,12 +957,53 @@ impl TaskManager {
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            let snapshot = manager.snapshot_state();
-            let _ = save_task_state(&app_handle, &snapshot);
+            manager.persist_now();
             manager
                 .inner
                 .persist_scheduled
                 .store(false, Ordering::SeqCst);
+        });
+    }
+
+    fn persist_now(&self) {
+        let Some(app_handle) = self.inner.app_handle.as_ref() else {
+            return;
+        };
+        let _persist_guard = self.inner.persist_lock.lock().unwrap();
+        let snapshot = self.snapshot_state();
+        let _ = save_task_state(app_handle, &snapshot);
+    }
+
+    fn start_active_task_checkpoint(&self) {
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(ACTIVE_TASK_CHECKPOINT_INTERVAL).await;
+                let has_active_tasks =
+                    manager
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap()
+                        .groups
+                        .iter()
+                        .any(|group| {
+                            matches!(
+                                group.summary_status,
+                                TaskSummaryStatus::Queued
+                                    | TaskSummaryStatus::Copying
+                                    | TaskSummaryStatus::Paused
+                                    | TaskSummaryStatus::Cancelling
+                                    | TaskSummaryStatus::CopyCompleted
+                                    | TaskSummaryStatus::LocalExecuting
+                                    | TaskSummaryStatus::Deploying
+                            )
+                        });
+
+                if has_active_tasks {
+                    manager.schedule_persist();
+                }
+            }
         });
     }
 }

@@ -1,6 +1,12 @@
+use crate::device_simulator::alarms::ImageAssetRef;
 use crate::device_simulator::api::{MediaThemeSummary, DEFAULT_MEDIA_THEME_ID};
-use crate::device_simulator::assets::catalog::{PackManifest, PackRef};
+use crate::device_simulator::assets::catalog::{
+    non_commercial_usage, PackFile, PackManifest, PackRef,
+};
 use crate::device_simulator::assets::validation::validate_pack_path;
+use crate::device_simulator::local_materials::{
+    load_local_alarm_images, load_local_media_theme, LocalMaterialPaths,
+};
 use crate::device_simulator::media::{MediaPackCache, SharedMediaPack};
 use crate::device_simulator::profiles::loader::load_profile_from_pack;
 use crate::device_simulator::profiles::registry::ProfileRegistry;
@@ -44,6 +50,7 @@ pub struct RuntimeAssetLayout {
     manifests: BTreeMap<String, PackManifest>,
     profiles: ProfileRegistry,
     media: BTreeMap<RuntimeMediaKind, Arc<SharedMediaPack>>,
+    local_alarm_images: BTreeMap<String, BTreeMap<String, Vec<Vec<ImageAssetRef>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +131,30 @@ impl RuntimeAssetLayout {
         selected_profiles: &[String],
         media_theme_id: &str,
     ) -> Result<Self, RuntimeAssetError> {
+        Self::load_for_theme_with_local(pinned, selected_profiles, media_theme_id, None)
+    }
+
+    pub fn load_for_theme_with_local(
+        pinned: &[PinnedPackDirectory],
+        selected_profiles: &[String],
+        media_theme_id: &str,
+        app_data_dir: Option<&Path>,
+    ) -> Result<Self, RuntimeAssetError> {
+        let local_paths = app_data_dir.map(LocalMaterialPaths::from_app_data_dir);
+        Self::load_for_theme_with_local_paths(
+            pinned,
+            selected_profiles,
+            media_theme_id,
+            local_paths.as_ref(),
+        )
+    }
+
+    pub fn load_for_theme_with_local_paths(
+        pinned: &[PinnedPackDirectory],
+        selected_profiles: &[String],
+        media_theme_id: &str,
+        local_paths: Option<&LocalMaterialPaths>,
+    ) -> Result<Self, RuntimeAssetError> {
         if pinned.is_empty() || selected_profiles.is_empty() {
             return Err(error(
                 "device_simulator.assets.pin_empty",
@@ -134,7 +165,6 @@ impl RuntimeAssetLayout {
         let mut manifests = BTreeMap::new();
         for item in pinned {
             validate_pack_id(&item.id)?;
-            let expected = item.pack_ref()?;
             if !item.directory.is_absolute() {
                 return Err(error(
                     "device_simulator.assets.pin_path_invalid",
@@ -153,20 +183,26 @@ impl RuntimeAssetLayout {
                     format!("pinned pack '{}' is not a directory", item.id),
                 ));
             }
-            let manifest_bytes = read_bounded(&item.directory.join("pack.json"))?;
-            let manifest: PackManifest =
-                serde_json::from_slice(&manifest_bytes).map_err(|source| {
-                    error(
-                        "device_simulator.assets.manifest_invalid",
-                        format!("pinned pack '{}' manifest is invalid: {source}", item.id),
-                    )
-                })?;
-            if manifest.id != expected.id || manifest.version != expected.version {
-                return Err(error(
-                    "device_simulator.assets.pin_identity_mismatch",
-                    format!("pinned pack '{}' manifest identity does not match", item.id),
-                ));
-            }
+            let manifest = if item.version.trim().is_empty() {
+                build_loose_manifest(&item.id, &item.directory)?
+            } else {
+                let expected = item.pack_ref()?;
+                let manifest_bytes = read_bounded(&item.directory.join("pack.json"))?;
+                let manifest: PackManifest =
+                    serde_json::from_slice(&manifest_bytes).map_err(|source| {
+                        error(
+                            "device_simulator.assets.manifest_invalid",
+                            format!("pinned pack '{}' manifest is invalid: {source}", item.id),
+                        )
+                    })?;
+                if manifest.id != expected.id || manifest.version != expected.version {
+                    return Err(error(
+                        "device_simulator.assets.pin_identity_mismatch",
+                        format!("pinned pack '{}' manifest identity does not match", item.id),
+                    ));
+                }
+                manifest
+            };
             if packs.insert(item.id.clone(), item.clone()).is_some() {
                 return Err(error(
                     "device_simulator.assets.pin_duplicate",
@@ -201,6 +237,16 @@ impl RuntimeAssetLayout {
         let profiles = ProfileRegistry::from_profiles(profiles)
             .map_err(|source| error(source.code, source.message))?;
 
+        let local_media = local_paths
+            .map(|paths| load_local_media_theme(paths, media_theme_id))
+            .transpose()
+            .map_err(|source| error(source.code, source.message))?
+            .flatten();
+        let local_alarm_images = local_paths
+            .map(load_local_alarm_images)
+            .transpose()
+            .map_err(|source| error(source.code, source.message))?
+            .unwrap_or_default();
         let media_root = &packs
             .get("media-h264-live")
             .expect("required media pack checked")
@@ -208,37 +254,45 @@ impl RuntimeAssetLayout {
         let media_manifest = manifests
             .get("media-h264-live")
             .expect("required media pack manifest checked");
-        let catalog = load_media_theme_catalog(media_root, media_manifest)?;
-        let selected_theme = catalog
-            .themes
-            .iter()
-            .find(|theme| theme.id == media_theme_id)
-            .ok_or_else(|| {
-                error(
-                    "device_simulator.assets.media_theme_missing",
-                    format!("media theme '{media_theme_id}' is not available in the active pack"),
-                )
-            })?;
-        let cache = MediaPackCache::new();
-        let mut media = BTreeMap::new();
-        for kind in [
-            RuntimeMediaKind::Main,
-            RuntimeMediaKind::Sub,
-            RuntimeMediaKind::Third,
-        ] {
-            let manifest_path = selected_theme.streams.manifest_path(kind);
-            ensure_declared_media_path(media_manifest, manifest_path)?;
-            let pack = cache
-                .load(media_root, manifest_path)
-                .map_err(|source| error(source.code, source.message))?;
-            media.insert(kind, pack);
-        }
+        let media = if let Some(media) = local_media {
+            media
+        } else {
+            let catalog = load_media_theme_catalog(media_root, media_manifest)?;
+            let selected_theme = catalog
+                .themes
+                .iter()
+                .find(|theme| theme.id == media_theme_id)
+                .ok_or_else(|| {
+                    error(
+                        "device_simulator.assets.media_theme_missing",
+                        format!(
+                            "media theme '{media_theme_id}' is not available in the active pack"
+                        ),
+                    )
+                })?;
+            let cache = MediaPackCache::new();
+            let mut media = BTreeMap::new();
+            for kind in [
+                RuntimeMediaKind::Main,
+                RuntimeMediaKind::Sub,
+                RuntimeMediaKind::Third,
+            ] {
+                let manifest_path = selected_theme.streams.manifest_path(kind);
+                ensure_declared_media_path(media_manifest, manifest_path)?;
+                let pack = cache
+                    .load(media_root, manifest_path)
+                    .map_err(|source| error(source.code, source.message))?;
+                media.insert(kind, pack);
+            }
+            media
+        };
 
         Ok(Self {
             packs,
             manifests,
             profiles,
             media,
+            local_alarm_images,
         })
     }
 
@@ -251,6 +305,26 @@ impl RuntimeAssetLayout {
 
     pub fn media(&self, kind: RuntimeMediaKind) -> Arc<SharedMediaPack> {
         Arc::clone(self.media.get(&kind).expect("all media kinds are loaded"))
+    }
+
+    pub fn local_alarm_image_groups(
+        &self,
+        alarm_type_id: &str,
+        variant: &str,
+    ) -> Option<&[Vec<ImageAssetRef>]> {
+        self.local_alarm_images
+            .get(alarm_type_id)
+            .and_then(|variants| variants.get(variant))
+            .map(Vec::as_slice)
+    }
+
+    pub fn local_alarm_image_references(&self) -> Vec<ImageAssetRef> {
+        self.local_alarm_images
+            .values()
+            .flat_map(BTreeMap::values)
+            .flat_map(|groups| groups.iter())
+            .flat_map(|images| images.iter().cloned())
+            .collect()
     }
 
     pub fn pack(&self, id: &str) -> Option<&PinnedPackDirectory> {
@@ -327,18 +401,46 @@ impl RuntimeAssetLayout {
 }
 
 pub fn list_media_themes(pack_dir: &Path) -> Result<Vec<MediaThemeSummary>, RuntimeAssetError> {
-    let manifest_bytes = read_bounded(&pack_dir.join("pack.json"))?;
-    let manifest: PackManifest = serde_json::from_slice(&manifest_bytes).map_err(|source| {
-        error(
-            "device_simulator.assets.manifest_invalid",
-            format!("media pack manifest is invalid: {source}"),
-        )
-    })?;
+    let manifest_path = pack_dir.join("pack.json");
+    let manifest: PackManifest = if manifest_path.is_file() {
+        let manifest_bytes = read_bounded(&manifest_path)?;
+        serde_json::from_slice(&manifest_bytes).map_err(|source| {
+            error(
+                "device_simulator.assets.manifest_invalid",
+                format!("media pack manifest is invalid: {source}"),
+            )
+        })?
+    } else {
+        build_loose_manifest("media-h264-live", pack_dir)?
+    };
     if manifest.id != "media-h264-live" {
         return Err(error(
             "device_simulator.assets.pin_identity_mismatch",
             "selected pack is not media-h264-live",
         ));
+    }
+    let has_catalog = manifest
+        .files
+        .iter()
+        .any(|file| file.path == MEDIA_THEME_CATALOG_PATH);
+    let has_legacy_streams = [
+        RuntimeMediaKind::Main,
+        RuntimeMediaKind::Sub,
+        RuntimeMediaKind::Third,
+    ]
+    .into_iter()
+    .all(|kind| {
+        manifest
+            .files
+            .iter()
+            .any(|file| file.path == kind.manifest_path())
+    });
+    // The lightweight built-in media root is intentionally only a runtime
+    // contract marker. All selectable videos are distributed by the upgrade
+    // server, so a build with neither catalog nor legacy streams has no built-in
+    // themes instead of being treated as a corrupt release pack.
+    if !has_catalog && !has_legacy_streams {
+        return Ok(Vec::new());
     }
     let catalog = load_media_theme_catalog(pack_dir, &manifest)?;
     Ok(catalog
@@ -348,8 +450,89 @@ pub fn list_media_themes(pack_dir: &Path) -> Result<Vec<MediaThemeSummary>, Runt
             is_default: theme.id == catalog.default_theme_id,
             id: theme.id,
             display_name_key: theme.display_name_key,
+            display_name: None,
+            is_local: false,
         })
         .collect())
+}
+
+fn build_loose_manifest(id: &str, root: &Path) -> Result<PackManifest, RuntimeAssetError> {
+    let mut files = Vec::new();
+    collect_loose_files(root, root, &mut files)?;
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    if files.is_empty() {
+        return Err(error(
+            "device_simulator.assets.loose_directory_empty",
+            format!("built-in asset directory '{id}' is empty"),
+        ));
+    }
+    Ok(PackManifest {
+        schema_version: 1,
+        id: id.to_owned(),
+        // Loose assets have no release version. This placeholder only satisfies
+        // the legacy in-memory manifest type and is never persisted or exposed.
+        version: Version::new(0, 0, 0),
+        engine_api: 1,
+        usage: non_commercial_usage(),
+        files,
+    })
+}
+
+fn collect_loose_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<PackFile>,
+) -> Result<(), RuntimeAssetError> {
+    if files.len() > 8_192 {
+        return Err(error(
+            "device_simulator.assets.loose_directory_too_large",
+            "built-in asset directory contains too many files",
+        ));
+    }
+    for entry in fs::read_dir(directory).map_err(|source| {
+        error(
+            "device_simulator.assets.file_read_failed",
+            format!("failed to enumerate '{}': {source}", directory.display()),
+        )
+    })? {
+        let entry = entry.map_err(|source| {
+            error(
+                "device_simulator.assets.file_read_failed",
+                format!("failed to enumerate '{}': {source}", directory.display()),
+            )
+        })?;
+        let metadata = entry.metadata().map_err(|source| {
+            error(
+                "device_simulator.assets.file_read_failed",
+                format!("failed to inspect '{}': {source}", entry.path().display()),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(error(
+                "device_simulator.assets.file_read_failed",
+                format!("asset '{}' must not be a symlink", entry.path().display()),
+            ));
+        }
+        if metadata.is_dir() {
+            collect_loose_files(root, &entry.path(), files)?;
+        } else if metadata.is_file() && metadata.len() > 0 {
+            let entry_path = entry.path();
+            let relative = entry_path.strip_prefix(root).map_err(|source| {
+                error(
+                    "device_simulator.assets.file_read_failed",
+                    format!("failed to resolve loose asset path: {source}"),
+                )
+            })?;
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            validate_pack_path(&relative).map_err(|source| error(source.code, source.message))?;
+            files.push(PackFile {
+                path: relative,
+                sha256: String::new(),
+                size: metadata.len(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn load_media_theme_catalog(
@@ -373,7 +556,7 @@ fn load_media_theme_catalog(
             default_theme_id: DEFAULT_MEDIA_THEME_ID.into(),
             themes: vec![MediaThemeDefinition {
                 id: DEFAULT_MEDIA_THEME_ID.into(),
-                display_name_key: "deviceSimulator.mediaThemes.classic".into(),
+                display_name_key: "deviceSimulator.mediaThemes.fanrenXiuxian".into(),
                 streams: MediaThemeStreams {
                     main: RuntimeMediaKind::Main.manifest_path().into(),
                     sub: RuntimeMediaKind::Sub.manifest_path().into(),

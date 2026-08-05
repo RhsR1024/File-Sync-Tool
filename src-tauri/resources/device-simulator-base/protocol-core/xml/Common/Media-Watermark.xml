@@ -1,0 +1,15 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/7/Media/Watermark",
+	"CreatedID": -1,
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Enabled":	1,
+	"Info":	"1256116165"
+}
+	}
+}

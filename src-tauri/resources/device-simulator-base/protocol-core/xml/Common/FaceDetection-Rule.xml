@@ -1,0 +1,40 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/2/Smart/FaceDetection/Rule",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"FaceCount":	{
+		"Enabled":	0
+	},
+	"FaceSnapshot":	{
+		"Mode":	1,
+		"Num":	5,
+		"MarkFace":	0
+	},
+	"FaceQualityAnalysis":	{
+		"Enabled":	0,
+		"Mode":	0,
+		"PreferenceFastNum":	3
+	},
+	"FaceQualityAnalysisEx":	{
+		"Enabled":	0,
+		"Mode":	0,
+		"QualityNum":	1,
+		"PreferenceLastTime":	5,
+		"IntervalTime":	500
+	},
+	"FaceAttributeAnalysis":	{
+		"Enabled":	0,
+		"SexEnabled":	0,
+		"AgeEnabled":	0,
+		"GlassEnabled":	0,
+		"NationEnabled":	0
+	}
+}
+	}
+}

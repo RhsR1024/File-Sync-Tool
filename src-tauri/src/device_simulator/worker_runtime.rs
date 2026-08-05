@@ -9,6 +9,7 @@ use crate::device_simulator::api::{
     SimulatorStatusSnapshot, TargetPlatformServer,
 };
 use crate::device_simulator::errors::SimulatorErrorBody;
+use crate::device_simulator::local_materials::LocalMaterialPaths;
 use crate::device_simulator::models::{AlarmJobState, SessionState};
 use crate::device_simulator::protocol_runtime::{
     ProtocolRuntime, ProtocolRuntimeConfig, ProtocolRuntimeError, ProtocolRuntimeStats,
@@ -370,6 +371,12 @@ impl WorkerRuntime {
                 "Worker app data directory must be absolute",
             ));
         }
+        if !payload.local_materials_root.is_absolute() {
+            return Err(runtime_error(
+                "device_simulator.worker.local_materials_path_invalid",
+                "Worker material directory must be absolute",
+            ));
+        }
         let expected_preview = preview_devices(&payload.request).map_err(|source| {
             runtime_error(
                 "device_simulator.worker.request_invalid",
@@ -393,8 +400,17 @@ impl WorkerRuntime {
         let pins = payload.pinned_packs.clone();
         let selected_for_load = selected_profiles.clone();
         let media_theme_id = payload.request.media_theme_id.clone();
+        let material_app_data_dir = payload.app_data_dir.clone();
+        let local_materials_root = payload.local_materials_root.clone();
         let assets = tokio::task::spawn_blocking(move || {
-            RuntimeAssetLayout::load_for_theme(&pins, &selected_for_load, &media_theme_id)
+            let local_paths =
+                LocalMaterialPaths::from_root(&material_app_data_dir, &local_materials_root);
+            RuntimeAssetLayout::load_for_theme_with_local_paths(
+                &pins,
+                &selected_for_load,
+                &media_theme_id,
+                Some(&local_paths),
+            )
         })
         .await
         .map_err(|source| {
@@ -1447,6 +1463,7 @@ mod tests {
         let preview = preview_devices(&request).unwrap();
         let payload = InitializeSessionPayload {
             app_data_dir: root.path().to_path_buf(),
+            local_materials_root: root.path().join("device-simulator/local-materials"),
             request: request.clone(),
             preview: preview.clone(),
             pinned_packs: vec![],

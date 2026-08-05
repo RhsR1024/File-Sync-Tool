@@ -20,6 +20,9 @@ pub const MIN_RECENT_FILE_GUARD_MINS: u64 = 3;
 #[serde(default)]
 pub struct DeviceSimulatorSettings {
     pub asset_server_url_override: Option<String>,
+    /// Optional absolute directory containing downloaded and locally prepared
+    /// virtual-device materials. `None` keeps the legacy app-data location.
+    pub local_materials_directory: Option<String>,
     pub selected_interface_id: Option<String>,
     pub last_platform: Option<TargetPlatform>,
     pub last_start_ip: Option<std::net::Ipv4Addr>,
@@ -50,6 +53,7 @@ impl Default for DeviceSimulatorSettings {
     fn default() -> Self {
         Self {
             asset_server_url_override: None,
+            local_materials_directory: None,
             selected_interface_id: None,
             last_platform: Some(TargetPlatform::Ums),
             last_start_ip: None,
@@ -304,7 +308,7 @@ pub struct AppConfig {
     #[serde(default = "default_update_server_url")]
     pub update_server_url: String,
 
-    #[serde(default)]
+    #[serde(default = "default_notify_on_new_version")]
     pub notify_on_new_version: bool,
 
     #[serde(default)]
@@ -451,6 +455,10 @@ pub(crate) fn default_update_server_url() -> String {
     "http://192.115.1.3:8080".to_string()
 }
 
+fn default_notify_on_new_version() -> bool {
+    true
+}
+
 pub(crate) fn normalize_update_server_url(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -510,7 +518,7 @@ impl Default for AppConfig {
             disk_cleanup_http_timeout_secs: 5,
             disk_cleanup_linux_mode: DiskCleanupLinuxMode::Componentized,
             update_server_url: default_update_server_url(),
-            notify_on_new_version: false,
+            notify_on_new_version: default_notify_on_new_version(),
             last_update_check_at: None,
             pending_update: None,
             clipboard: default_clipboard_settings(),
@@ -624,6 +632,11 @@ pub fn normalize_device_simulator_settings(
         .map(|value| value.trim().trim_end_matches('/').to_owned())
         .filter(|value| !value.is_empty())
         .filter(|value| validate_asset_server_override(value).is_ok());
+    settings.local_materials_directory = settings
+        .local_materials_directory
+        .take()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     settings.selected_interface_id = settings
         .selected_interface_id
         .take()
@@ -691,6 +704,21 @@ pub fn validate_device_simulator_settings(
 ) -> Result<(), String> {
     if let Some(url) = &settings.asset_server_url_override {
         validate_asset_server_override(url)?;
+    }
+    if let Some(directory) = &settings.local_materials_directory {
+        let path = std::path::Path::new(directory);
+        if directory.len() > 32_767
+            || !path.is_absolute()
+            || path.file_name().is_none()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err("Device simulator material directory must be an absolute path".into());
+        }
     }
     if settings
         .selected_interface_id
@@ -1330,6 +1358,30 @@ mod tests {
         assert_eq!(settings.platform_password, "admin_123");
         assert!(settings.platform_auto_add_devices);
         assert!(!settings.platform_replace_existing_devices);
+        assert!(settings.local_materials_directory.is_none());
+    }
+
+    #[test]
+    fn device_simulator_material_directory_is_optional_normalized_and_absolute() {
+        let absolute = std::env::temp_dir().join("virtual-device-materials");
+        let mut settings = DeviceSimulatorSettings {
+            local_materials_directory: Some(format!("  {}  ", absolute.display())),
+            ..DeviceSimulatorSettings::default()
+        };
+        settings = normalize_device_simulator_settings(settings);
+        assert_eq!(
+            settings.local_materials_directory.as_deref(),
+            absolute.to_str()
+        );
+        assert!(validate_device_simulator_settings(&settings).is_ok());
+
+        settings.local_materials_directory = Some("relative-materials".into());
+        assert!(validate_device_simulator_settings(&settings).is_err());
+
+        settings.local_materials_directory = Some("  ".into());
+        assert!(normalize_device_simulator_settings(settings)
+            .local_materials_directory
+            .is_none());
     }
 
     #[test]
@@ -1426,7 +1478,7 @@ mod tests {
         }"#;
         let cfg: AppConfig = serde_json::from_str(legacy_json).expect("parse");
         assert_eq!(cfg.update_server_url, "http://192.115.1.3:8080");
-        assert!(!cfg.notify_on_new_version);
+        assert!(cfg.notify_on_new_version);
         assert!(cfg.sync_task_notifications_enabled);
         assert_eq!(cfg.copy_mode, CopyMode::BuiltIn);
         assert!(cfg.last_update_check_at.is_none());

@@ -1,0 +1,54 @@
+<?xml version="1.0" ?>
+<Person>
+<CamID>IPC244S-IR9-PF80-DT</CamID>
+<DevID></DevID>
+<DevType></DevType>
+<RecordID>0000000000000484</RecordID>
+<PlaceCode></PlaceCode>
+<PlaceName></PlaceName>
+<TollgateID>Chanl64</TollgateID>
+<TollgateName></TollgateName>
+<PassTime>20190826145148901</PassTime>
+<PicNumber>02</PicNumber>
+<Pictures>
+    <Image>
+<ImageIndex>01</ImageIndex>
+<FaceID>00</FaceID>
+<ImageURL></ImageURL>
+<ImageType>01</ImageType>
+<ImageFormat>01</ImageFormat>
+<ImageWidth>2560</ImageWidth>
+<ImageHeight>1440</ImageHeight>
+<PassTime>20190826145148901</PassTime>
+<ImageData></ImageData>
+</Image>
+    <Image>
+<ImageIndex>02</ImageIndex>
+<FaceID>141</FaceID>
+<ImageURL></ImageURL>
+<ImageType>02</ImageType>
+<ImageFormat>01</ImageFormat>
+<ImageWidth>0400</ImageWidth>
+<ImageHeight>0400</ImageHeight>
+<PassTime>20190826145148901</PassTime>
+<ImageData></ImageData>
+</Image>
+</Pictures>
+<FaceNum>01</FaceNum>
+<Face>
+<AttachIndex>01</AttachIndex>
+<FaceID>0000000000000141</FaceID>
+<Position>04000,06000;03000,09500</Position>
+<Confidence>00</Confidence>
+<DirectionV>00</DirectionV>
+<DirectionH>00</DirectionH>
+<Rotation>00</Rotation>
+<Feature></Feature>
+<Gender>98</Gender>
+<AgeRange>98</AgeRange>
+<Race>99</Race>
+<GlassFlag>98</GlassFlag>
+<GlassesStyle>99</GlassesStyle>
+</Face>
+</Person>
+

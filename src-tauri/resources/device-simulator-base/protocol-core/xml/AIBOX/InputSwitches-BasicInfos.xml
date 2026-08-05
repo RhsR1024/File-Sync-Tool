@@ -1,0 +1,22 @@
+{
+	"Response": {
+		"ResponseURL": "/LAPI/V1.0/IO/InputSwitches/BasicInfos",
+		"CreatedID": -1,
+		"ResponseCode": 0,
+		"SubResponseCode": 0,
+		"ResponseString": "Succeed",
+		"StatusCode": 0,
+		"StatusString": "Succeed",
+		"Data": {
+			"Num": 1,
+			"BasicInfos": [
+				{
+					"ID": 1,
+					"Enabled": 0,
+					"RunMode": 1,
+					"Name": "A<-1"
+				}
+			]
+		}
+	}
+}

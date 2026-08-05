@@ -3,5 +3,9 @@ catalog-v1.json
 catalog-v1.json.sig
 packs/
 staging/
+videos/
+source-videos/
+prepared-videos/
+alarm-images/
 *.key
 *.pem

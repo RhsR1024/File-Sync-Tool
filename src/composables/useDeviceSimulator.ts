@@ -5,12 +5,14 @@ import {
   DEVICE_SIMULATOR_EVENTS,
   deviceSimulatorApi,
   hasBlockingPreflightFailure,
+  isDeviceSimulatorRuntimeActive,
   isDeviceSimulatorTopologyLocked,
   shouldReleaseActiveAlarmJob,
   type AlarmJobRequest,
   type AlarmJobStats,
   type AlarmSubscription,
   type ProfileAlarmTypes,
+  type RemoteMaterialSyncResult,
   type AlarmTriggerResult,
   type AssetProgress,
   type AssetStatus,
@@ -21,6 +23,7 @@ import {
   type DeviceStatusBatch,
   type ImportedAlarmImage,
   type MediaThemeSummary,
+  type LocalMaterialMigrationResult,
   type PreflightReport,
   type PlatformAddDevicesReport,
   type RtspStats,
@@ -61,6 +64,7 @@ const emptyStatus = (): SimulatorStatus => ({
 
 const defaultSettings = (): DeviceSimulatorSettings => ({
   asset_server_url_override: null,
+  local_materials_directory: null,
   selected_interface_id: null,
   last_platform: 'ums',
   last_start_ip: '192.168.1.100',
@@ -77,7 +81,7 @@ const defaultSettings = (): DeviceSimulatorSettings => ({
   }],
   last_http_port: 81,
   last_rtsp_ports: { main: 554, sub: 555, third: 556 },
-  last_media_theme_id: 'classic',
+  last_media_theme_id: 'fanren-xiuxian',
   last_time_watermark_enabled: true,
   auto_check_asset_updates: true,
   manage_firewall: true,
@@ -104,7 +108,7 @@ function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartR
     subnet_prefix: settings.last_subnet_prefix,
     device_http_port: settings.last_http_port,
     rtsp_ports: { ...settings.last_rtsp_ports },
-    media_theme_id: settings.last_media_theme_id || 'classic',
+    media_theme_id: settings.last_media_theme_id || 'fanren-xiuxian',
     groups: settings.last_device_groups.length > 0
       ? settings.last_device_groups.map((group) => ({ ...group }))
       : defaultSettings().last_device_groups,
@@ -124,11 +128,11 @@ function createDeviceSimulator() {
   const interfaces = ref<SimulatorNetworkInterfaceInfo[]>([]);
   const profiles = ref<DeviceProfileSummary[]>([]);
   const alarmTypes = ref<ProfileAlarmTypes[]>([]);
-  const mediaThemes = ref<MediaThemeSummary[]>([{
-    id: 'classic',
-    display_name_key: 'deviceSimulator.mediaThemes.classic',
-    is_default: true,
-  }]);
+  const mediaThemes = ref<MediaThemeSummary[]>([]);
+  const localMaterialsPath = ref('');
+  const savedLocalMaterialsDirectory = ref<string | null>(null);
+  const lastLocalMaterialMigration = ref<LocalMaterialMigrationResult | null>(null);
+  const lastRemoteMaterialSync = ref<RemoteMaterialSyncResult | null>(null);
   const assets = ref<AssetStatus | null>(null);
   const assetProgress = ref<AssetProgress | null>(null);
   const preview = ref<DevicePreview | null>(null);
@@ -169,9 +173,17 @@ function createDeviceSimulator() {
   ));
   const selectedInterface = computed(() => interfaces.value
     .find((item) => item.id === request.interface_id) ?? null);
+  const localMaterialsDirectoryChanged = computed(() => (
+    (settings.value.local_materials_directory?.trim() || null)
+      !== savedLocalMaterialsDirectory.value
+  ));
 
   function applyStatus(next: SimulatorStatus) {
     status.value = next;
+    // A preflight report only describes whether a new session may start. Once
+    // the runtime is active, keeping that report makes addresses owned by this
+    // very session look like unresolved conflicts and contradicts the header.
+    if (isDeviceSimulatorRuntimeActive(next.state)) preflight.value = null;
     if (shouldReleaseActiveAlarmJob(next, alarmStartPending.value)) {
       activeAlarmJobId.value = null;
     }
@@ -395,14 +407,16 @@ function createDeviceSimulator() {
     await subscribeEvents();
     busyAction.value = 'initialize';
     errorMessage.value = '';
-    const [settingsResult, interfaceResult, profileResult, statusResult] = await Promise.allSettled([
+    const [settingsResult, interfaceResult, profileResult, statusResult, materialPathResult] = await Promise.allSettled([
       deviceSimulatorApi.getSettings(),
       deviceSimulatorApi.listInterfaces(),
       deviceSimulatorApi.listProfiles(),
       deviceSimulatorApi.getStatus(),
+      deviceSimulatorApi.getLocalMaterialsPath(),
     ]);
     if (settingsResult.status === 'fulfilled') {
       settings.value = settingsResult.value;
+      savedLocalMaterialsDirectory.value = settingsResult.value.local_materials_directory;
       replaceRequest(requestFromSettings(settingsResult.value));
     }
     if (interfaceResult.status === 'fulfilled') {
@@ -411,7 +425,8 @@ function createDeviceSimulator() {
     }
     if (profileResult.status === 'fulfilled') profiles.value = profileResult.value;
     if (statusResult.status === 'fulfilled') applyStatus(statusResult.value);
-    const failure = [settingsResult, interfaceResult, profileResult, statusResult]
+    if (materialPathResult.status === 'fulfilled') localMaterialsPath.value = materialPathResult.value;
+    const failure = [settingsResult, interfaceResult, profileResult, statusResult, materialPathResult]
       .find((result) => result.status === 'rejected');
     if (failure?.status === 'rejected') errorMessage.value = errorText(failure.reason);
     busyAction.value = null;
@@ -450,10 +465,44 @@ function createDeviceSimulator() {
     initialized.value = false;
   }
 
+  async function refreshAfterSettingsSave() {
+    localMaterialsPath.value = await deviceSimulatorApi.getLocalMaterialsPath();
+    await refreshMediaThemes();
+    if (selectedProfileIds.value.length > 0) await refreshAssets();
+  }
+
   async function saveSettings() {
     const next = settingsFromRequest();
     const saved = await run('save-settings', () => deviceSimulatorApi.saveSettings(next));
-    if (saved) settings.value = saved;
+    if (saved) {
+      settings.value = saved;
+      savedLocalMaterialsDirectory.value = saved.local_materials_directory;
+      try {
+        await refreshAfterSettingsSave();
+      } catch (error) {
+        errorMessage.value = errorText(error);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  async function migrateLocalMaterialsAndSave() {
+    const next = settingsFromRequest();
+    const result = await run(
+      'migrate-local-materials',
+      () => deviceSimulatorApi.migrateLocalMaterials(next),
+    );
+    if (!result) return false;
+    settings.value = result.settings;
+    savedLocalMaterialsDirectory.value = result.settings.local_materials_directory;
+    lastLocalMaterialMigration.value = result;
+    try {
+      await refreshAfterSettingsSave();
+    } catch (error) {
+      errorMessage.value = errorText(error);
+    }
+    return true;
   }
 
   async function applyAssetStatus(status: AssetStatus) {
@@ -508,8 +557,8 @@ function createDeviceSimulator() {
   async function refreshMediaThemes() {
     try {
       const next = await deviceSimulatorApi.listMediaThemes();
-      if (next.length === 0) return;
       mediaThemes.value = next;
+      if (next.length === 0) return;
       if (!next.some((theme) => theme.id === request.media_theme_id)) {
         request.media_theme_id = next.find((theme) => theme.is_default)?.id ?? next[0].id;
       }
@@ -604,6 +653,39 @@ function createDeviceSimulator() {
         platformReplacePromptOpen.value = true;
       }
     }
+  }
+
+  async function refreshLocalMaterials() {
+    const refreshed = await run('refresh-local-materials', () => deviceSimulatorApi.refreshLocalMaterials());
+    if (refreshed === null) return false;
+    await refreshMediaThemes();
+    return true;
+  }
+
+  async function syncRemoteMaterials() {
+    const result = await run('sync-remote-materials', () => deviceSimulatorApi.syncRemoteMaterials());
+    if (result === null) return false;
+    await applyRemoteMaterialSync(result);
+    return true;
+  }
+
+  async function resetAndSyncRemoteMaterials() {
+    const result = await run('reset-and-sync-remote-materials', () => deviceSimulatorApi.resetAndSyncRemoteMaterials());
+    if (result === null) return false;
+    await applyRemoteMaterialSync(result);
+    return true;
+  }
+
+  async function applyRemoteMaterialSync(result: RemoteMaterialSyncResult) {
+    lastRemoteMaterialSync.value = result;
+    const remoteDefault = result.themes.find((theme) => theme.is_default);
+    if (remoteDefault) {
+      request.media_theme_id = remoteDefault.id;
+      const saved = await run('save-settings', () => deviceSimulatorApi.saveSettings(settingsFromRequest()));
+      if (saved) settings.value = saved;
+    }
+    await refreshMediaThemes();
+    await refreshAssets();
   }
 
   async function addDevicesToPlatform(
@@ -749,6 +831,11 @@ function createDeviceSimulator() {
     profiles,
     alarmTypes,
     mediaThemes,
+    localMaterialsPath,
+    savedLocalMaterialsDirectory,
+    localMaterialsDirectoryChanged,
+    lastLocalMaterialMigration,
+    lastRemoteMaterialSync,
     assets,
     assetProgress,
     preview,
@@ -758,6 +845,7 @@ function createDeviceSimulator() {
     alarmStats,
     alarmSubscription,
     activeAlarmJobId,
+    alarmStartPending,
     alarmStopPending,
     cleanupProgress,
     lastAlarmResult,
@@ -779,9 +867,13 @@ function createDeviceSimulator() {
     refreshEnvironment,
     dispose,
     saveSettings,
+    migrateLocalMaterialsAndSave,
     refreshAssets,
     refreshAlarmTypes,
     refreshMediaThemes,
+    refreshLocalMaterials,
+    syncRemoteMaterials,
+    resetAndSyncRemoteMaterials,
     prepareAssets,
     cancelAssetDownload,
     refreshPreview,

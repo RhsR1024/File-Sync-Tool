@@ -72,8 +72,10 @@ test('screen share removes WebCodecs and migrates its saved transport to MSE H.2
   );
 });
 
-test('standard builds compile the WebRTC transport by default', () => {
-  assert.match(cargoSource, /default = \["screen-share-webrtc-prototype"\]/);
+test('standard builds exclude WebRTC while preserving an explicit opt-in feature', () => {
+  assert.match(cargoSource, /default = \[\]/);
+  assert.match(cargoSource, /screen-share-webrtc-prototype = \["dep:webrtc", "dep:rtcp"\]/);
+  assert.match(pageSource, /status\.value\.webrtc_available/);
 });
 
 test('screen share exposes explicit capture backend modes with explanatory helper copy', () => {

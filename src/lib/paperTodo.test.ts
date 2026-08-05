@@ -48,10 +48,20 @@ describe('paper todo core data', () => {
     expect(createTodoItem(' next ')).toMatchObject({ text: 'next', completed: false, linkedNoteId: null });
     const settings = createDefaultSettings();
     expect(settings.hotkeys.toggleAll).toBe('Ctrl+Shift+Space');
-    expect(settings.launcherEnabled).toBe(true);
+    expect(settings.launcherEnabled).toBe(false);
     expect(settings.launcherEdge).toBe('right');
     expect(settings.autoCollapseLauncher).toBe(false);
     expect(settings.paperSkin).toBe('classic');
+  });
+
+  it('keeps the edge launcher enabled for existing papers unless explicitly disabled', () => {
+    const paper = createPaper('note');
+    expect(normalizePaperTodoState({ papers: [paper], settings: {} }).settings.launcherEnabled).toBe(true);
+    expect(normalizePaperTodoState({ papers: [], settings: {} }).settings.launcherEnabled).toBe(false);
+    expect(normalizePaperTodoState({
+      papers: [paper],
+      settings: { launcherEnabled: false },
+    }).settings.launcherEnabled).toBe(false);
   });
 
   it('defaults old and invalid skin settings to classic', () => {
@@ -61,10 +71,12 @@ describe('paper todo core data', () => {
   });
 
   it('starts a fresh profile with one todo and one note paper', () => {
-    const papers = normalizePaperTodoState(null).papers;
+    const state = normalizePaperTodoState(null);
+    const papers = state.papers;
     expect(papers).toHaveLength(2);
     expect(papers.map((paper) => paper.kind)).toEqual(['todo', 'note']);
     expect(papers.every((paper) => !paper.desktopOpen)).toBe(true);
+    expect(state.settings.launcherEnabled).toBe(false);
   });
 
   it('drops legacy per-paper capsule state during normalization', () => {

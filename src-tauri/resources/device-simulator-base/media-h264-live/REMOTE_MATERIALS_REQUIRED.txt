@@ -1,0 +1,2 @@
+Video themes are intentionally distributed by the upgrade server.
+This marker keeps the lightweight runtime media contract root present in the EXE.

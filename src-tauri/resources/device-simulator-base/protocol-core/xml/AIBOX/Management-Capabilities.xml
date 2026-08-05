@@ -1,0 +1,19 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Smart/Management/Capabilities",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"SupportAlarmRelatedData":	1,
+			"SupportSearchByImage":	1,
+			"SupportObjectSearch":	1,
+			"SupportFaceSearch":	1,
+			"SupportPersonSearch":	1,
+			"SupportVehicleSearch":	1,
+			"SupportNonMotorVehicleSearch":	1,
+			"SupportPassengerFlowStatistic":	1,
+			"SupportHeatMapStatistic":	1
+		}
+	}
+}

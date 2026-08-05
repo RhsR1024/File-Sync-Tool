@@ -1,0 +1,41 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/2/Smart/FaceDetection/Areas/Detections",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"EntireImageEnabled":	1,
+	"Num":	1,
+	"Polygons":	[{
+			"Sensitivity":	100,
+			"FaceCalibrationSize":	{
+				"WidthMin":	417,
+				"HeightMin":	743,
+				"WidthMid":	1093,
+				"HeightMid":	1944,
+				"WidthMax":	1562,
+				"HeightMax":	2777
+			},
+			"PupilDistanceMin":	208,
+			"PointNum":	4,
+			"Points":	[{
+					"X":	0,
+					"Y":	2500
+				}, {
+					"X":	0,
+					"Y":	7500
+				}, {
+					"X":	9999,
+					"Y":	7500
+				}, {
+					"X":	9999,
+					"Y":	2500
+				}]
+		}]
+}
+	}
+}

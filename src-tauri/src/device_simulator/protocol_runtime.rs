@@ -16,6 +16,7 @@ use crate::device_simulator::profiles::scope::{FirstReleaseProfileId, TargetPlat
 use crate::device_simulator::rtsp::routes::{
     plan_rtsp_routes, RtspPorts as PlannedRtspPorts, RtspRouteRole, RtspStreamKind,
 };
+use crate::device_simulator::rtsp::scheduler::SharedFrameScheduler;
 use crate::device_simulator::rtsp::service::{
     start_rtsp_server, RtspEndpointConfig, RtspServerHandle, RtspStreamSource,
 };
@@ -190,6 +191,25 @@ impl ProtocolRuntime {
             );
         }
 
+        // One indexed producer per rendition is shared by every virtual camera.
+        // Per-client RTP headers are still generated independently, but 100 idle
+        // cameras no longer create hundreds of media clocks or disk readers.
+        let indexed_schedulers = if runtime.watermark_media.is_none() {
+            let mut schedulers = BTreeMap::new();
+            for kind in [
+                RuntimeMediaKind::Main,
+                RuntimeMediaKind::Sub,
+                RuntimeMediaKind::Third,
+            ] {
+                let scheduler = SharedFrameScheduler::from_media(config.assets.media(kind), 128)
+                    .map_err(|source| runtime_error(source.code, source.message))?;
+                schedulers.insert(kind, scheduler);
+            }
+            Some(schedulers)
+        } else {
+            None
+        };
+
         for device in &config.preview.devices {
             let device_metrics = Arc::new(DeviceProtocolMetrics::default());
             runtime
@@ -272,11 +292,17 @@ impl ProtocolRuntime {
                     } else {
                         let sdp =
                             build_reviewed_static_sdp(device.ip, &route.path, media.as_ref())?;
-                        RtspStreamSource::from_media(
+                        let scheduler = indexed_schedulers
+                            .as_ref()
+                            .and_then(|schedulers| schedulers.get(&media_kind))
+                            .expect("indexed schedulers exist without watermark")
+                            .clone();
+                        RtspStreamSource::from_scheduler(
                             format!("{}:{:?}", device.device_id, plan.stream),
                             Arc::<[u8]>::from(sdp),
-                            Arc::clone(&media),
-                            128,
+                            scheduler,
+                            media.manifest().codec,
+                            media.manifest().payload_type,
                             1_200,
                         )
                     }
@@ -1204,8 +1230,8 @@ fn build_reviewed_static_sdp(
         payload_type,
         clock_rate,
         "64001f",
-        sps,
-        pps,
+        &sps,
+        &pps,
     )
 }
 

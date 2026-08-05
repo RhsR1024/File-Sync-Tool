@@ -1,0 +1,22 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/System/ChannelDetailInfos",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Nums":	1,
+	"DetailInfos":	[{
+			"ID":	0,
+			"Name":	"IP Camera 01",
+			"Status":	1,
+			"StreamNums":	5,
+			"DeviceType":	1,
+			"PtzSupport":	0
+		}]
+}
+	}
+}

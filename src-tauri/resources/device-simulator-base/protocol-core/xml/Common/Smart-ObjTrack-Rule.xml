@@ -1,0 +1,12 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/1/Smart/ObjTrack/Rule",
+	"CreatedID": -1, 
+	"ResponseCode": 1,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Common Error",
+	"StatusCode": 1,
+	"StatusString": "Common Fail",
+	"Data": "null"
+	}
+}

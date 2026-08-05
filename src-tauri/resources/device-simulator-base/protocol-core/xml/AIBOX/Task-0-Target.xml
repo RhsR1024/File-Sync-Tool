@@ -1,0 +1,10 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Smart/SearchByImage/Task/14/Target",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+		}
+	}
+}

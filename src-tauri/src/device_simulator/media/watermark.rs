@@ -56,14 +56,15 @@ pub fn render_time_watermark_nv12(
     let text_width = text_len * advance - scale;
     let text_height = 7 * scale;
     let padding = 2 * scale;
-    let margin = (4 * scale).max(4);
+    // Keep the background anchored to the video top-right corner while
+    // giving the timestamp glyphs an even black inset on all four sides.
     let box_width = text_width + padding * 2;
     let box_height = text_height + padding * 2;
-    if box_width + margin > width || box_height + margin > height {
+    if box_width > width || box_height > height {
         return Err("time watermark does not fit inside the NV12 frame".into());
     }
-    let x = width - margin - box_width;
-    let y = margin;
+    let x = width - box_width;
+    let y = 0;
     let layout = WatermarkLayout {
         x,
         y,
@@ -180,17 +181,41 @@ mod tests {
     }
 
     #[test]
-    fn renders_inside_1080p_and_360p_right_edges() {
+    fn renders_against_1080p_and_360p_top_right_edges() {
         for (width, height) in [(1_920usize, 1_080usize), (640, 360)] {
             let mut frame = vec![128; width * height * 3 / 2];
             let layout =
                 render_time_watermark_nv12(&mut frame, width, height, "2026/07/27 15:00:00")
                     .unwrap();
-            assert!(layout.x + layout.width < width);
+            assert_eq!(layout.x + layout.width, width);
             assert!(layout.y + layout.height < height);
             assert!(layout.x > width / 2);
             assert!(frame[..width * height].iter().any(|value| *value == 235));
             assert!(frame[..width * height].iter().any(|value| *value == 32));
+
+            let text_x = layout.x + 2 * layout.scale;
+            let text_y = layout.y + 2 * layout.scale;
+            assert_eq!(layout.y, 0);
+            assert_eq!(
+                frame[layout.y * width + text_x + layout.scale],
+                32,
+                "the timestamp should retain black padding above the glyphs",
+            );
+            assert_eq!(
+                frame[(text_y + layout.scale) * width + width - 1],
+                32,
+                "the timestamp should retain black padding after the final digit",
+            );
+            assert_eq!(
+                frame[text_y * width + text_x + layout.scale],
+                235,
+                "the first timestamp digit should begin after the left padding",
+            );
+            assert_eq!(
+                frame[(text_y + layout.scale) * width + width - 2 * layout.scale - 1],
+                235,
+                "the final timestamp digit should end before the right padding",
+            );
         }
     }
 

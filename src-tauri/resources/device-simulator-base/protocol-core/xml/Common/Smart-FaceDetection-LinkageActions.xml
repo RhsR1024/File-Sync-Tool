@@ -1,0 +1,19 @@
+{
+"Response": {
+	"ResponseURL": "/LAPI/V1.0/Channels/1/Smart/FaceDetection/LinkageActions",
+	"CreatedID": -1, 
+	"ResponseCode": 0,
+ 	"SubResponseCode": 0,
+ 	"ResponseString": "Succeed",
+	"StatusCode": 0,
+	"StatusString": "Succeed",
+	"Data": {
+	"Num":	2,
+	"Actions":	[{
+			"ActID":	6
+		}, {
+			"ActID":	15
+		}]
+}
+	}
+}

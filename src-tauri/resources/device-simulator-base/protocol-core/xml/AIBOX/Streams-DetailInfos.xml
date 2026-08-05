@@ -1,0 +1,82 @@
+{
+	"Response":	{
+		"ResponseURL":	"/LAPI/V1.0/Channels/1/Media/Video/Streams/DetailInfos",
+		"ResponseCode":	0,
+		"ResponseString":	"Succeed",
+		"StatusCode":	0,
+		"Data":	{
+			"Num":	4,
+			"VideoStreamInfos":	[{
+					"ID":	0,
+					"MainStreamType":	0,
+					"Enabled":	1,
+					"VideoEncodeInfo":	{
+						"EncodeFormat":	2,
+						"Resolution":	{
+							"Width":	2688,
+							"Height":	1520
+						},
+						"BitRateType":	1,
+						"BitRate":	128,
+						"FrameRate":	25,
+						"IFrameInterval":	50,
+						"ImageQuality":	5,
+						"SmoothLevel":	5,
+						"SmartEncodeMode":	2
+					}
+				}, {
+					"ID":	1,
+					"Enabled":	1,
+					"VideoEncodeInfo":	{
+						"EncodeFormat":	2,
+						"Resolution":	{
+							"Width":	720,
+							"Height":	576
+						},
+						"BitRateType":	1,
+						"BitRate":	256,
+						"FrameRate":	25,
+						"IFrameInterval":	50,
+						"ImageQuality":	5,
+						"SmoothLevel":	5,
+						"SmartEncodeMode":	2
+					}
+				}, {
+					"ID":	0,
+					"MainStreamType":	1,
+					"Enabled":	1,
+					"VideoEncodeInfo":	{
+						"EncodeFormat":	2,
+						"Resolution":	{
+							"Width":	2688,
+							"Height":	1520
+						},
+						"BitRateType":	1,
+						"BitRate":	128,
+						"FrameRate":	25,
+						"IFrameInterval":	50,
+						"ImageQuality":	5,
+						"SmoothLevel":	5,
+						"SmartEncodeMode":	2
+					}
+				}, {
+					"ID":	2,
+					"Enabled":	1,
+					"VideoEncodeInfo":	{
+						"EncodeFormat":	2,
+						"Resolution":	{
+							"Width":	352,
+							"Height":	288
+						},
+						"BitRateType":	1,
+						"BitRate":	128,
+						"FrameRate":	25,
+						"IFrameInterval":	50,
+						"ImageQuality":	5,
+						"SmoothLevel":	5,
+						"SmartEncodeMode":	0
+					}
+				}]
+		}
+	}
+}

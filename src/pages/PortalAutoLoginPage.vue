@@ -351,7 +351,7 @@ onBeforeUnmount(() => {
                 </button>
               </div>
               <span v-else class="relative block">
-                <input id="portal-domain-password" v-model="draft.password" autocomplete="new-password" :type="showPassword ? 'text' : 'password'" class="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 pr-12 text-sm text-slate-900 outline-none transition focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/15" :placeholder="t('portalAutoLogin.passwordPlaceholder')" />
+                <input id="portal-domain-password" v-model="draft.password" autocomplete="new-password" :type="showPassword ? 'text' : 'password'" class="portal-password-input min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 pr-12 text-sm text-slate-900 outline-none transition focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/15" :placeholder="t('portalAutoLogin.passwordPlaceholder')" />
                 <button type="button" class="absolute right-1 top-1 inline-flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40" :aria-label="t(showPassword ? 'portalAutoLogin.hidePassword' : 'portalAutoLogin.showPassword')" @click="showPassword = !showPassword">
                   <EyeOff v-if="showPassword" class="h-4 w-4" aria-hidden="true" />
                   <Eye v-else class="h-4 w-4" aria-hidden="true" />
@@ -441,3 +441,12 @@ onBeforeUnmount(() => {
     </main>
   </div>
 </template>
+
+<style scoped>
+/* WebView2 adds its own password reveal control; this page provides the
+   persistent Lucide button above, so keeping both would duplicate the action. */
+.portal-password-input::-ms-reveal,
+.portal-password-input::-ms-clear {
+  display: none;
+}
+</style>
