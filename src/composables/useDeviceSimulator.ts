@@ -36,6 +36,7 @@ import { recommendSimulatorInterface } from '@/lib/deviceSimulatorInterfaceSelec
 
 /** The only simulated device type; the other five profiles were removed. */
 export const STRUCTURED_PROFILE_ID = 'ipc-structured';
+const MAX_SIMULATOR_LOG_ENTRIES = 500;
 
 function newId(prefix: string) {
   const suffix = typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -289,8 +290,15 @@ function createDeviceSimulator() {
     return code || message_key || details ? { code, message_key, details } : null;
   }
 
+  function appendLog(entry: SimulatorLogEvent) {
+    logs.value.push(entry);
+    if (logs.value.length > MAX_SIMULATOR_LOG_ENTRIES) {
+      logs.value.splice(0, logs.value.length - MAX_SIMULATOR_LOG_ENTRIES);
+    }
+  }
+
   function pushLog(entry: Partial<SimulatorLogEvent> & Pick<SimulatorLogEvent, 'level' | 'component' | 'message'>) {
-    logs.value.push({
+    appendLog({
       timestamp: new Date().toISOString(),
       session_id: status.value.session_id,
       profile_id: null,
@@ -302,7 +310,6 @@ function createDeviceSimulator() {
       error_code: null,
       ...entry,
     });
-    if (logs.value.length > 2_000) logs.value.splice(0, logs.value.length - 2_000);
   }
 
   function appendErrorLog(action: string, error: unknown) {
@@ -391,8 +398,7 @@ function createDeviceSimulator() {
       }),
       listen<CleanupProgress>(DEVICE_SIMULATOR_EVENTS.cleanupProgress, ({ payload }) => { cleanupProgress.value = payload; }),
       listen<SimulatorLogEvent>(DEVICE_SIMULATOR_EVENTS.log, ({ payload }) => {
-        logs.value.push(payload);
-        if (logs.value.length > 2_000) logs.value.splice(0, logs.value.length - 2_000);
+        appendLog(payload);
       }),
     ]);
     unlisteners = listeners;

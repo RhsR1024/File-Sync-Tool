@@ -303,6 +303,7 @@ export interface AlarmJobRequest {
   recovery_delay_secs: number | null;
   image_variant: string | null;
   user_image_id: string | null;
+  target_subscription_id: string | null;
 }
 
 export interface AlarmTriggerResult {
@@ -340,6 +341,18 @@ export interface AlarmSubscription {
   learned_at_ms: number | null;
   expires_at_ms: number | null;
   overridden: boolean;
+  subscriptions: AlarmSubscriptionRecord[];
+  selection_required: boolean;
+}
+
+export interface AlarmSubscriptionRecord {
+  id: string;
+  source_ip: string;
+  host: string | null;
+  port: number;
+  duration_secs: number | null;
+  learned_at_ms: number;
+  expires_at_ms: number | null;
 }
 
 export interface RecoveryResult {
@@ -653,6 +666,10 @@ const ALARM_ERROR_MESSAGE_KEYS: Record<string, string> = {
   'device_simulator.alarm.destination_unknown': 'destinationUnknown',
   'device_simulator.alarm.destination_url_invalid': 'destinationUrlInvalid',
   'device_simulator.alarm.destination_missing': 'destinationUnknown',
+  'device_simulator.alarm.destination_selection_required': 'destinationSelectionRequired',
+  'device_simulator.alarm.subscription_unknown': 'subscriptionUnknown',
+  'device_simulator.alarm.subscription_expired': 'subscriptionExpired',
+  'device_simulator.alarm.subscription_override_active': 'subscriptionOverrideActive',
   'device_simulator.alarm.header_invalid': 'headerInvalid',
   'device_simulator.alarm.http_client_failed': 'httpClientFailed',
   'device_simulator.alarm.client_cache_poisoned': 'httpClientFailed',

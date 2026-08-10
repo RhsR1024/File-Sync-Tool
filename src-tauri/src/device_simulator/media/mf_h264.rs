@@ -1,6 +1,9 @@
 use std::time::Duration;
 
 #[cfg(target_os = "windows")]
+const WATERMARK_KEYFRAME_SPACING_FRAMES: u32 = 1;
+
+#[cfg(target_os = "windows")]
 fn win<T>(result: windows::core::Result<T>, context: &'static str) -> Result<T, String> {
     result.map_err(|error| format!("{context}: {error}"))
 }
@@ -25,6 +28,11 @@ pub struct H264WatermarkTranscoder {
     decoder: MfH264Decoder,
     encoder: MfH264Encoder,
     descriptor: H264TranscoderDescriptor,
+    frame_rate_numerator: u32,
+    frame_rate_denominator: u32,
+    profile_idc: u8,
+    level_idc: u8,
+    cabac: bool,
     // Must be dropped after every COM/MFT field. Rust drops fields in
     // declaration order; shutting Media Foundation down first can make the
     // subsequent IMFTransform releases access invalid native state.
@@ -39,7 +47,11 @@ impl H264WatermarkTranscoder {
         frame_rate_numerator: u32,
         frame_rate_denominator: u32,
         bitrate_bps: u32,
+        source_sps: &[u8],
+        source_pps: &[u8],
     ) -> Result<Self, String> {
+        let (profile_idc, level_idc) = h264_sps_profile_level(source_sps)?;
+        let cabac = h264_pps_uses_cabac(source_pps)?;
         let runtime = MediaFoundationRuntime::startup()?;
         let decoder =
             MfH264Decoder::new(width, height, frame_rate_numerator, frame_rate_denominator)?;
@@ -49,6 +61,9 @@ impl H264WatermarkTranscoder {
             frame_rate_numerator,
             frame_rate_denominator,
             bitrate_bps,
+            profile_idc,
+            level_idc,
+            cabac,
         )?;
         let descriptor = H264TranscoderDescriptor {
             width,
@@ -60,6 +75,11 @@ impl H264WatermarkTranscoder {
             decoder,
             encoder,
             descriptor,
+            frame_rate_numerator: frame_rate_numerator.max(1),
+            frame_rate_denominator: frame_rate_denominator.max(1),
+            profile_idc,
+            level_idc,
+            cabac,
             _runtime: runtime,
         })
     }
@@ -80,10 +100,44 @@ impl H264WatermarkTranscoder {
         let mut encoded = Vec::new();
         for mut frame in decoded {
             render(&mut frame.nv12)?;
+            // The target recorder accepts the MF stream live but its recording
+            // parser drops the encoder's standards-compliant P slices. Emit an
+            // IDR for every watermarked frame so recording and live decoding
+            // observe the same complete frame sequence.
+            self.encoder.request_keyframe()?;
             for output in self.encoder.encode(&frame.nv12, frame.sample_time_100ns)? {
-                let nals = split_h264_access_unit(&output.bytes)?;
+                let mut nals = split_h264_access_unit(&output.bytes)?;
                 if nals.is_empty() {
                     continue;
+                }
+                for nal in &mut nals {
+                    if nal.first().is_some_and(|header| header & 0x1f == 7) {
+                        *nal = normalize_h264_sps_frame_rate(
+                            nal,
+                            self.frame_rate_numerator,
+                            self.frame_rate_denominator,
+                        )?;
+                        let (profile_idc, level_idc) = h264_sps_profile_level(nal)?;
+                        let accepted_level_idc = validate_h264_encoder_profile_level(
+                            self.profile_idc,
+                            self.level_idc,
+                            profile_idc,
+                            level_idc,
+                        )?;
+                        if accepted_level_idc > self.level_idc {
+                            log::debug!(
+                                "H.264 watermark encoder promoted level from {} to {} to satisfy the active bitrate budget",
+                                self.level_idc,
+                                accepted_level_idc
+                            );
+                            self.level_idc = accepted_level_idc;
+                            self.encoder.promote_minimum_level(accepted_level_idc);
+                        }
+                    } else if nal.first().is_some_and(|header| header & 0x1f == 8)
+                        && h264_pps_uses_cabac(nal)? != self.cabac
+                    {
+                        return Err("H.264 encoder changed the source entropy coding mode".into());
+                    }
                 }
                 let keyframe = nals
                     .iter()
@@ -114,29 +168,54 @@ impl H264WatermarkTranscoder {
         _frame_rate_numerator: u32,
         _frame_rate_denominator: u32,
         _bitrate_bps: u32,
+        _source_sps: &[u8],
+        _source_pps: &[u8],
     ) -> Result<Self, String> {
         Err("device simulator time watermark requires Windows Media Foundation".into())
     }
 }
 
-pub fn h264_sps_dimensions(sps: &[u8]) -> Result<(u32, u32), String> {
+fn h264_sps_profile_level(sps: &[u8]) -> Result<(u8, u8), String> {
     if sps.len() < 4 || sps[0] & 0x1f != 7 {
         return Err("invalid H.264 SPS".into());
     }
-    let mut rbsp = Vec::with_capacity(sps.len());
-    let mut zero_count = 0u8;
-    for byte in sps.iter().copied().skip(1) {
-        if zero_count >= 2 && byte == 0x03 {
-            zero_count = 0;
-            continue;
-        }
-        rbsp.push(byte);
-        zero_count = if byte == 0 {
-            zero_count.saturating_add(1)
-        } else {
-            0
-        };
+    Ok((sps[1], sps[3]))
+}
+
+fn validate_h264_encoder_profile_level(
+    required_profile_idc: u8,
+    minimum_level_idc: u8,
+    actual_profile_idc: u8,
+    actual_level_idc: u8,
+) -> Result<u8, String> {
+    if actual_profile_idc != required_profile_idc {
+        return Err(format!(
+            "H.264 encoder changed source profile from {required_profile_idc} to {actual_profile_idc}"
+        ));
     }
+    // A higher level does not change the codec profile or picture syntax; it
+    // raises decoder resource limits so the all-IDR bitrate can be represented.
+    // Media Foundation commonly promotes High@L4.0 to L4.1 when the bounded-VBR
+    // peak crosses the L4.0 bitrate budget. The active SPS is published in SDP,
+    // so accept that promotion while still rejecting an unsafe downgrade.
+    if actual_level_idc < minimum_level_idc {
+        return Err(format!(
+            "H.264 encoder downgraded the required level from {minimum_level_idc} to {actual_level_idc}"
+        ));
+    }
+    Ok(actual_level_idc)
+}
+
+fn h264_pps_uses_cabac(pps: &[u8]) -> Result<bool, String> {
+    let rbsp = h264_nal_rbsp(pps, 8)?;
+    let mut bits = BitReader::new(&rbsp);
+    bits.read_ue()?;
+    bits.read_ue()?;
+    Ok(bits.read_bit()? != 0)
+}
+
+pub fn h264_sps_dimensions(sps: &[u8]) -> Result<(u32, u32), String> {
+    let rbsp = h264_sps_rbsp(sps)?;
     let mut bits = BitReader::new(&rbsp);
     let profile_idc = bits.read_bits(8)? as u8;
     bits.read_bits(8)?;
@@ -244,6 +323,228 @@ pub fn h264_sps_dimensions(sps: &[u8]) -> Result<(u32, u32), String> {
         return Err(format!("unsupported H.264 SPS dimensions {width}x{height}"));
     }
     Ok((width, height))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct H264SpsTiming {
+    num_units_in_tick: u32,
+    time_scale: u32,
+    fixed_frame_rate: bool,
+    num_units_in_tick_offset: usize,
+    time_scale_offset: usize,
+    fixed_frame_rate_offset: usize,
+}
+
+/// Media Foundation encoders may leave `fixed_frame_rate_flag` cleared or
+/// expose a hardware-default VUI rate after a stream change. Live clients can
+/// still follow RTP arrival timing, but recorders commonly use SPS timing to
+/// create persisted PTS values. Keep a matching encoder time base intact; when
+/// it disagrees, replace the fixed-width VUI timing fields with the simulator's
+/// configured frame rate, then mark it fixed.
+pub fn normalize_h264_sps_frame_rate(
+    sps: &[u8],
+    frame_rate_numerator: u32,
+    frame_rate_denominator: u32,
+) -> Result<Vec<u8>, String> {
+    if frame_rate_numerator == 0 || frame_rate_denominator == 0 {
+        return Err("H.264 frame rate numerator and denominator must be non-zero".into());
+    }
+    let mut rbsp = h264_sps_rbsp(sps)?;
+    let timing = h264_sps_timing(&rbsp)?;
+    let timing_matches = timing.num_units_in_tick != 0
+        && timing.time_scale != 0
+        && u128::from(timing.time_scale) * u128::from(frame_rate_denominator)
+            == 2 * u128::from(timing.num_units_in_tick) * u128::from(frame_rate_numerator);
+    if timing_matches && timing.fixed_frame_rate {
+        return Ok(sps.to_vec());
+    }
+    if !timing_matches {
+        let divisor = greatest_common_divisor(frame_rate_numerator, frame_rate_denominator);
+        let num_units_in_tick = frame_rate_denominator / divisor;
+        let time_scale = (frame_rate_numerator / divisor)
+            .checked_mul(2)
+            .ok_or_else(|| "H.264 VUI time scale overflow".to_string())?;
+        write_h264_bits(
+            &mut rbsp,
+            timing.num_units_in_tick_offset,
+            32,
+            num_units_in_tick,
+        )?;
+        write_h264_bits(&mut rbsp, timing.time_scale_offset, 32, time_scale)?;
+    }
+    write_h264_bits(&mut rbsp, timing.fixed_frame_rate_offset, 1, 1)?;
+
+    let mut normalized = Vec::with_capacity(sps.len() + 4);
+    normalized.push(sps[0]);
+    let mut zero_count = 0u8;
+    for byte in rbsp {
+        if zero_count >= 2 && byte <= 0x03 {
+            normalized.push(0x03);
+            zero_count = 0;
+        }
+        normalized.push(byte);
+        zero_count = if byte == 0 {
+            zero_count.saturating_add(1)
+        } else {
+            0
+        };
+    }
+    Ok(normalized)
+}
+
+fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left.max(1)
+}
+
+fn write_h264_bits(
+    bytes: &mut [u8],
+    bit_offset: usize,
+    bit_count: usize,
+    value: u32,
+) -> Result<(), String> {
+    if bit_count > 32 || bit_offset.saturating_add(bit_count) > bytes.len().saturating_mul(8) {
+        return Err("truncated H.264 SPS timing field".into());
+    }
+    for index in 0..bit_count {
+        let target_offset = bit_offset + index;
+        let mask = 1 << (7 - target_offset % 8);
+        let source_bit = (value >> (bit_count - index - 1)) & 1;
+        if source_bit == 0 {
+            bytes[target_offset / 8] &= !mask;
+        } else {
+            bytes[target_offset / 8] |= mask;
+        }
+    }
+    Ok(())
+}
+
+fn h264_sps_rbsp(sps: &[u8]) -> Result<Vec<u8>, String> {
+    h264_nal_rbsp(sps, 7)
+}
+
+fn h264_nal_rbsp(nal: &[u8], expected_type: u8) -> Result<Vec<u8>, String> {
+    if nal.len() < 2 || nal[0] & 0x1f != expected_type {
+        return Err(format!("invalid H.264 NAL type {expected_type}"));
+    }
+    let mut rbsp = Vec::with_capacity(nal.len());
+    let mut zero_count = 0u8;
+    for byte in nal.iter().copied().skip(1) {
+        if zero_count >= 2 && byte == 0x03 {
+            zero_count = 0;
+            continue;
+        }
+        rbsp.push(byte);
+        zero_count = if byte == 0 {
+            zero_count.saturating_add(1)
+        } else {
+            0
+        };
+    }
+    Ok(rbsp)
+}
+
+fn h264_sps_timing(rbsp: &[u8]) -> Result<H264SpsTiming, String> {
+    let mut bits = BitReader::new(rbsp);
+    let profile_idc = bits.read_bits(8)? as u8;
+    bits.read_bits(8)?;
+    bits.read_bits(8)?;
+    bits.read_ue()?;
+
+    if matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    ) {
+        let chroma_format_idc = bits.read_ue()?;
+        if chroma_format_idc == 3 {
+            bits.read_bit()?;
+        }
+        bits.read_ue()?;
+        bits.read_ue()?;
+        bits.read_bit()?;
+        if bits.read_bit()? != 0 {
+            let scaling_lists = if chroma_format_idc != 3 { 8 } else { 12 };
+            for index in 0..scaling_lists {
+                if bits.read_bit()? != 0 {
+                    skip_scaling_list(&mut bits, if index < 6 { 16 } else { 64 })?;
+                }
+            }
+        }
+    }
+
+    bits.read_ue()?;
+    let pic_order_cnt_type = bits.read_ue()?;
+    if pic_order_cnt_type == 0 {
+        bits.read_ue()?;
+    } else if pic_order_cnt_type == 1 {
+        bits.read_bit()?;
+        bits.read_se()?;
+        bits.read_se()?;
+        for _ in 0..bits.read_ue()? {
+            bits.read_se()?;
+        }
+    }
+    bits.read_ue()?;
+    bits.read_bit()?;
+    bits.read_ue()?;
+    bits.read_ue()?;
+    let frame_mbs_only_flag = bits.read_bit()?;
+    if frame_mbs_only_flag == 0 {
+        bits.read_bit()?;
+    }
+    bits.read_bit()?;
+    if bits.read_bit()? != 0 {
+        bits.read_ue()?;
+        bits.read_ue()?;
+        bits.read_ue()?;
+        bits.read_ue()?;
+    }
+    if bits.read_bit()? == 0 {
+        return Err("H.264 SPS has no VUI parameters".into());
+    }
+
+    if bits.read_bit()? != 0 {
+        let aspect_ratio_idc = bits.read_bits(8)?;
+        if aspect_ratio_idc == 255 {
+            bits.read_bits(16)?;
+            bits.read_bits(16)?;
+        }
+    }
+    if bits.read_bit()? != 0 {
+        bits.read_bit()?;
+    }
+    if bits.read_bit()? != 0 {
+        bits.read_bits(3)?;
+        bits.read_bit()?;
+        if bits.read_bit()? != 0 {
+            bits.read_bits(24)?;
+        }
+    }
+    if bits.read_bit()? != 0 {
+        bits.read_ue()?;
+        bits.read_ue()?;
+    }
+    if bits.read_bit()? == 0 {
+        return Err("H.264 SPS VUI has no timing information".into());
+    }
+    let num_units_in_tick_offset = bits.bit_offset;
+    let num_units_in_tick = bits.read_bits(32)?;
+    let time_scale_offset = bits.bit_offset;
+    let time_scale = bits.read_bits(32)?;
+    let fixed_frame_rate_offset = bits.bit_offset;
+    let fixed_frame_rate = bits.read_bit()? != 0;
+    Ok(H264SpsTiming {
+        num_units_in_tick,
+        time_scale,
+        fixed_frame_rate,
+        num_units_in_tick_offset,
+        time_scale_offset,
+        fixed_frame_rate_offset,
+    })
 }
 
 fn skip_scaling_list(bits: &mut BitReader<'_>, size: usize) -> Result<(), String> {
@@ -705,6 +1006,9 @@ struct MfH264Encoder {
     async_adapter: Option<AsyncMftAdapter>,
     width: u32,
     height: u32,
+    frame_rate: u64,
+    profile_idc: u32,
+    level_idc: u32,
     output_size: u32,
     output_provides_samples: bool,
     frame_duration_100ns: i64,
@@ -714,12 +1018,20 @@ struct MfH264Encoder {
 
 #[cfg(target_os = "windows")]
 impl MfH264Encoder {
+    fn promote_minimum_level(&mut self, level_idc: u8) {
+        self.level_idc = self.level_idc.max(u32::from(level_idc));
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn new(
         width: u32,
         height: u32,
         frame_rate_numerator: u32,
         frame_rate_denominator: u32,
         bitrate_bps: u32,
+        profile_idc: u8,
+        level_idc: u8,
+        cabac: bool,
     ) -> Result<Self, String> {
         use windows::Win32::Media::MediaFoundation::IMFTransform;
         use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
@@ -746,6 +1058,9 @@ impl MfH264Encoder {
                         frame_rate_numerator,
                         frame_rate_denominator,
                         bitrate_bps,
+                        profile_idc,
+                        level_idc,
+                        cabac,
                     ) {
                         Ok(encoder) => return Ok(encoder),
                         Err(error) => failures.push(format!("{}: {error}", candidate.name)),
@@ -777,6 +1092,9 @@ impl MfH264Encoder {
             frame_rate_numerator,
             frame_rate_denominator,
             bitrate_bps,
+            profile_idc,
+            level_idc,
+            cabac,
         )
         .map_err(|error| {
             format!(
@@ -796,6 +1114,9 @@ impl MfH264Encoder {
         frame_rate_numerator: u32,
         frame_rate_denominator: u32,
         bitrate_bps: u32,
+        profile_idc: u8,
+        level_idc: u8,
+        cabac: bool,
     ) -> Result<Self, String> {
         use windows::core::{Interface, VARIANT};
         use windows::Win32::Media::MediaFoundation::*;
@@ -835,13 +1156,17 @@ impl MfH264Encoder {
                 "H.264 encoder interlace mode setup failed",
             )?;
             win(
-                output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32),
+                output.SetUINT32(&MF_MT_MPEG2_PROFILE, u32::from(profile_idc)),
                 "H.264 encoder profile setup failed",
+            )?;
+            win(
+                output.SetUINT32(&MF_MT_MPEG2_LEVEL, u32::from(level_idc)),
+                "H.264 encoder level setup failed",
             )?;
             win(
                 output.SetUINT32(
                     &MF_MT_MAX_KEYFRAME_SPACING,
-                    frame_rate_numerator.max(1).saturating_mul(2),
+                    WATERMARK_KEYFRAME_SPACING_FRAMES,
                 ),
                 "H.264 encoder keyframe spacing setup failed",
             )?;
@@ -892,13 +1217,32 @@ impl MfH264Encoder {
         }
         let codec_api = transform.cast::<ICodecAPI>().ok();
         if let Some(api) = codec_api.as_ref() {
+            // All-IDR recording compatibility needs substantially more bits
+            // than the source's inter-frame GOP. Prefer a bounded VBR mode so
+            // detailed frames can borrow from the peak budget while preserving
+            // real-time latency; fall back to CBR on older hardware MFTs.
+            for mode in [
+                eAVEncCommonRateControlMode_LowDelayVBR.0 as u32,
+                eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32,
+                eAVEncCommonRateControlMode_CBR.0 as u32,
+            ] {
+                if unsafe { api.IsSupported(&CODECAPI_AVEncCommonRateControlMode) }.is_ok()
+                    && unsafe {
+                        api.SetValue(&CODECAPI_AVEncCommonRateControlMode, &VARIANT::from(mode))
+                    }
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+            let maximum_bitrate_bps = bitrate_bps.saturating_add(bitrate_bps.saturating_div(2));
+            let buffer_size_bits = bitrate_bps.saturating_div(2).max(1);
             for (property, value) in [
                 (&CODECAPI_AVEncMPVDefaultBPictureCount, 0u32),
                 (&CODECAPI_AVEncCommonMeanBitRate, bitrate_bps),
-                (
-                    &CODECAPI_AVEncMPVGOPSize,
-                    frame_rate_numerator.max(1).saturating_mul(2),
-                ),
+                (&CODECAPI_AVEncCommonMaxBitRate, maximum_bitrate_bps),
+                (&CODECAPI_AVEncCommonBufferSize, buffer_size_bits),
+                (&CODECAPI_AVEncMPVGOPSize, WATERMARK_KEYFRAME_SPACING_FRAMES),
             ] {
                 if unsafe { api.IsSupported(property) }.is_ok() {
                     let _ = unsafe { api.SetValue(property, &VARIANT::from(value)) };
@@ -906,6 +1250,12 @@ impl MfH264Encoder {
             }
             if unsafe { api.IsSupported(&CODECAPI_AVLowLatencyMode) }.is_ok() {
                 let _ = unsafe { api.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true)) };
+            }
+            if unsafe { api.IsSupported(&CODECAPI_AVEncH264CABACEnable) }.is_ok() {
+                win(
+                    unsafe { api.SetValue(&CODECAPI_AVEncH264CABACEnable, &VARIANT::from(cabac)) },
+                    "H.264 encoder entropy mode setup failed",
+                )?;
             }
         }
         let info = unsafe { transform.GetOutputStreamInfo(0) }
@@ -932,6 +1282,9 @@ impl MfH264Encoder {
             async_adapter,
             width,
             height,
+            frame_rate,
+            profile_idc: u32::from(profile_idc),
+            level_idc: u32::from(level_idc),
             output_size: info.cbSize.max(width.saturating_mul(height)).max(1),
             output_provides_samples,
             frame_duration_100ns,
@@ -1032,7 +1385,8 @@ impl MfH264Encoder {
     fn renegotiate_output_type(&mut self) -> Result<(), String> {
         use windows::Win32::Media::MediaFoundation::{
             MFVideoFormat_H264, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MF_E_NO_MORE_TYPES,
-            MF_MT_FRAME_SIZE, MF_MT_SUBTYPE,
+            MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MPEG2_LEVEL, MF_MT_MPEG2_PROFILE,
+            MF_MT_SUBTYPE,
         };
 
         let expected_frame_size = (u64::from(self.width) << 32) | u64::from(self.height);
@@ -1060,6 +1414,24 @@ impl MfH264Encoder {
             if !frame_size_matches {
                 continue;
             }
+            // Hardware MFTs may expose a stream-change type with a default or
+            // missing frame rate. Keep the generated SPS/VUI on the simulator's
+            // media clock after renegotiation.
+            win(
+                unsafe { candidate.SetUINT64(&MF_MT_FRAME_RATE, self.frame_rate) },
+                "H.264 encoder renegotiated frame rate setup failed",
+            )?;
+            win(
+                unsafe { candidate.SetUINT32(&MF_MT_MPEG2_PROFILE, self.profile_idc) },
+                "H.264 encoder renegotiated profile setup failed",
+            )?;
+            let candidate_level_idc = unsafe { candidate.GetUINT32(&MF_MT_MPEG2_LEVEL) }
+                .unwrap_or(self.level_idc)
+                .max(self.level_idc);
+            win(
+                unsafe { candidate.SetUINT32(&MF_MT_MPEG2_LEVEL, candidate_level_idc) },
+                "H.264 encoder renegotiated level setup failed",
+            )?;
             win(
                 unsafe { self.transform.SetOutputType(0, &candidate, 0) },
                 "H.264 encoder rejected its own renegotiated output type",
@@ -1073,6 +1445,7 @@ impl MfH264Encoder {
                 .max(1);
             self.output_provides_samples =
                 info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
+            self.level_idc = candidate_level_idc;
             log::debug!(
                 "H.264 encoder '{}' renegotiated its output type: {} byte buffer, provides_samples={}",
                 self.name,
@@ -1470,6 +1843,72 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_encoder_sps_timing_without_changing_dimensions() {
+        let samples: &[&[u8]] = &[
+            &[
+                0x67, 0x42, 0xc0, 0x28, 0x95, 0xa0, 0x1e, 0x00, 0x89, 0xf9, 0x61, 0x00, 0x00, 0x03,
+                0x03, 0xe8, 0x00, 0x00, 0xc3, 0x50, 0x0f, 0x1c, 0x2a, 0xa0,
+            ],
+            &[
+                0x67, 0x42, 0xc0, 0x28, 0x95, 0xa0, 0x1e, 0x00, 0x89, 0xf9, 0x61, 0x00, 0x00, 0x03,
+                0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 0x32, 0x0d, 0xa0, 0x88, 0x46, 0xa0,
+            ],
+        ];
+        for sample in samples {
+            assert_eq!(h264_sps_dimensions(sample).unwrap(), (1920, 1080));
+            let normalized = normalize_h264_sps_frame_rate(sample, 25, 1).unwrap();
+            assert_eq!(h264_sps_dimensions(&normalized).unwrap(), (1920, 1080));
+            let rbsp = h264_sps_rbsp(&normalized).unwrap();
+            let timing = h264_sps_timing(&rbsp).unwrap();
+            assert!(timing.fixed_frame_rate);
+            assert_eq!(
+                u64::from(timing.time_scale),
+                2 * u64::from(timing.num_units_in_tick) * 25
+            );
+            assert_eq!(
+                normalize_h264_sps_frame_rate(&normalized, 25, 1).unwrap(),
+                normalized
+            );
+
+            let corrected = normalize_h264_sps_frame_rate(&normalized, 20, 1).unwrap();
+            assert_eq!(h264_sps_dimensions(&corrected).unwrap(), (1920, 1080));
+            let timing = h264_sps_timing(&h264_sps_rbsp(&corrected).unwrap()).unwrap();
+            assert_eq!(timing.num_units_in_tick, 1);
+            assert_eq!(timing.time_scale, 40);
+            assert!(timing.fixed_frame_rate);
+        }
+    }
+
+    #[test]
+    fn reads_source_profile_level_and_entropy_mode_for_reencoding() {
+        let sps = [
+            0x67, 0x64, 0x00, 0x2a, 0xad, 0x84, 0x01, 0x0c, 0x20, 0x08, 0x61, 0x00, 0x43, 0x08,
+            0x02, 0x18, 0x40, 0x10, 0xc2, 0x00, 0x84, 0x3b, 0x50, 0x3c, 0x01, 0x13, 0xf2, 0xcd,
+            0xc0, 0x40, 0x40, 0x50, 0x00, 0x00, 0x3e, 0x80, 0x00, 0x0c, 0x35, 0x08, 0x40,
+        ];
+        assert_eq!(h264_sps_profile_level(&sps).unwrap(), (100, 42));
+        assert!(h264_pps_uses_cabac(&[0x68, 0xee, 0x31, 0xb2, 0x1b]).unwrap());
+    }
+
+    #[test]
+    fn accepts_level_promotion_but_rejects_profile_changes_and_level_downgrades() {
+        assert_eq!(
+            validate_h264_encoder_profile_level(100, 40, 100, 40).unwrap(),
+            40
+        );
+        assert_eq!(
+            validate_h264_encoder_profile_level(100, 40, 100, 41).unwrap(),
+            41
+        );
+        assert!(validate_h264_encoder_profile_level(100, 40, 77, 41)
+            .unwrap_err()
+            .contains("changed source profile"));
+        assert!(validate_h264_encoder_profile_level(100, 40, 100, 31)
+            .unwrap_err()
+            .contains("downgraded the required level"));
+    }
+
+    #[test]
     fn normalizes_padded_nv12_rows() {
         let mut source = vec![0u8; 8 * 4 * 3 / 2];
         for row in 0..4 {
@@ -1532,7 +1971,8 @@ mod tests {
         let _runtime = MediaFoundationRuntime::startup().unwrap();
         // 主码流通常是 1080p，子码流是 720p，两种尺寸都要能撑过重新协商。
         for (width, height) in [(1920u32, 1080u32), (1280, 720)] {
-            let mut encoder = MfH264Encoder::new(width, height, 25, 1, 4_000_000).unwrap();
+            let mut encoder =
+                MfH264Encoder::new(width, height, 25, 1, 4_000_000, 100, 40, true).unwrap();
             eprintln!(
                 "{width}x{height}: encoder='{}', path={}",
                 encoder.name,
@@ -1582,7 +2022,8 @@ mod tests {
         let _runtime = MediaFoundationRuntime::startup().unwrap();
         for (width, height) in [(1920u32, 1080u32), (640, 360)] {
             let luma_len = (width * height) as usize;
-            let mut encoder = MfH264Encoder::new(width, height, 25, 1, 4_000_000).unwrap();
+            let mut encoder =
+                MfH264Encoder::new(width, height, 25, 1, 4_000_000, 100, 40, true).unwrap();
             let mut nv12 = vec![0u8; luma_len * 3 / 2];
             // 暗亮度配上远离 128 的 U/V：色度平面一旦读到亮度补齐行，取样值会从
             // 200 掉到 16 附近。

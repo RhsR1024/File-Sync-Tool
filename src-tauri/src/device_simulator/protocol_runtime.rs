@@ -1,5 +1,7 @@
 use crate::device_simulator::access_control::PlatformAccessPolicy;
-use crate::device_simulator::alarm_runtime::{LearnedAlarmEndpoint, SharedLearnedAlarmEndpoint};
+use crate::device_simulator::alarm_runtime::{
+    LearnedAlarmEndpoint, SharedLearnedAlarmSubscriptions,
+};
 use crate::device_simulator::alarms::{ImageCache, SharedImageCache};
 use crate::device_simulator::api::{
     DeviceIdentityPreviewDto, DevicePreview, DeviceSimulatorStreamKind, SimulatorStartRequest,
@@ -21,7 +23,7 @@ use crate::device_simulator::rtsp::service::{
     start_rtsp_server, RtspEndpointConfig, RtspServerHandle, RtspStreamSource,
 };
 use crate::device_simulator::runtime_assets::{RuntimeAssetLayout, RuntimeMediaKind};
-use crate::device_simulator::telemetry::ProtocolFailureMetrics;
+use crate::device_simulator::telemetry::{ProtocolDiagnosticSink, ProtocolFailureMetrics};
 use crate::device_simulator::watermark_runtime::WatermarkMediaHub;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -45,14 +47,17 @@ pub struct ProtocolRuntimeConfig {
     pub picture_cache: SharedImageCache,
     /// Written when the platform advertises its alarm receiver endpoint during
     /// subscription; the alarm runtime reads it so dispatch follows the
-    /// platform. See [`SharedLearnedAlarmEndpoint`].
-    pub learned_endpoint: SharedLearnedAlarmEndpoint,
+    /// platform. See [`SharedLearnedAlarmSubscriptions`].
+    pub learned_subscriptions: SharedLearnedAlarmSubscriptions,
     /// Which callers discovery and HTTP answer. Resolved once by the Worker from
     /// [`crate::device_simulator::api::TargetPlatformConfig`]; RTSP is not gated.
     pub access_policy: PlatformAccessPolicy,
     /// Tests may disable the fixed legacy multicast port while still exercising
     /// HTTP and RTSP on loopback. Production Worker sessions always enable it.
     pub enable_discovery: bool,
+    /// Low-volume timing summaries forwarded through the Worker log channel.
+    /// Tests and embedders may omit it without changing protocol behavior.
+    pub diagnostics: Option<ProtocolDiagnosticSink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,7 +184,7 @@ impl ProtocolRuntime {
 
         if config.request.stream.time_watermark_enabled {
             runtime.watermark_media = Some(
-                WatermarkMediaHub::start(Arc::clone(&config.assets))
+                WatermarkMediaHub::start(Arc::clone(&config.assets), config.diagnostics.clone())
                     .await
                     .map_err(|message| {
                         runtime_error("device_simulator.watermark.start_failed", message)
@@ -226,7 +231,7 @@ impl ProtocolRuntime {
             match start_http_task(
                 Arc::clone(&config.assets),
                 Arc::clone(&config.picture_cache),
-                Arc::clone(&config.learned_endpoint),
+                Arc::clone(&config.learned_subscriptions),
                 config.access_policy.clone(),
                 config.request.platform.kind,
                 config.request.device_http_port,
@@ -272,41 +277,52 @@ impl ProtocolRuntime {
                     .filter(|route| route.evidence.runtime_activation_allowed())
                 {
                     let metadata_only = route.role == RtspRouteRole::MetadataControl;
-                    let source = if let Some(watermark) = watermark_source.as_ref() {
-                        let sdp = build_reviewed_sdp(
-                            device.ip,
-                            &route.path,
-                            watermark.payload_type,
-                            watermark.clock_rate,
-                            &watermark.sps,
-                            &watermark.pps,
-                        )?;
-                        RtspStreamSource::from_scheduler(
-                            format!("{}:{:?}", device.device_id, plan.stream),
-                            Arc::<[u8]>::from(sdp),
-                            watermark.scheduler.clone(),
-                            Codec::H264,
-                            watermark.payload_type,
-                            1_200,
-                        )
-                    } else {
-                        let sdp =
-                            build_reviewed_static_sdp(device.ip, &route.path, media.as_ref())?;
-                        let scheduler = indexed_schedulers
-                            .as_ref()
-                            .and_then(|schedulers| schedulers.get(&media_kind))
-                            .expect("indexed schedulers exist without watermark")
-                            .clone();
-                        RtspStreamSource::from_scheduler(
-                            format!("{}:{:?}", device.device_id, plan.stream),
-                            Arc::<[u8]>::from(sdp),
-                            scheduler,
-                            media.manifest().codec,
-                            media.manifest().payload_type,
-                            1_200,
-                        )
-                    }
-                    .map_err(|source| runtime_error(source.code, source.message))?;
+                    let (source, diagnostic_mode) =
+                        if let Some(watermark) = watermark_source.as_ref() {
+                            let sdp = build_reviewed_sdp(
+                                device.ip,
+                                &route.path,
+                                watermark.payload_type,
+                                watermark.clock_rate,
+                                watermark.frame_rate_numerator,
+                                watermark.frame_rate_denominator,
+                                &watermark.sps,
+                                &watermark.pps,
+                            )?;
+                            (
+                                RtspStreamSource::from_scheduler(
+                                    format!("{}:{:?}", device.device_id, plan.stream),
+                                    Arc::<[u8]>::from(sdp),
+                                    watermark.scheduler.clone(),
+                                    Codec::H264,
+                                    watermark.payload_type,
+                                    1_200,
+                                ),
+                                "watermark",
+                            )
+                        } else {
+                            let sdp =
+                                build_reviewed_static_sdp(device.ip, &route.path, media.as_ref())?;
+                            let scheduler = indexed_schedulers
+                                .as_ref()
+                                .and_then(|schedulers| schedulers.get(&media_kind))
+                                .expect("indexed schedulers exist without watermark")
+                                .clone();
+                            (
+                                RtspStreamSource::from_scheduler(
+                                    format!("{}:{:?}", device.device_id, plan.stream),
+                                    Arc::<[u8]>::from(sdp),
+                                    scheduler,
+                                    media.manifest().codec,
+                                    media.manifest().payload_type,
+                                    1_200,
+                                ),
+                                "indexed",
+                            )
+                        };
+                    let source = source
+                        .map_err(|source| runtime_error(source.code, source.message))?
+                        .with_diagnostics(config.diagnostics.clone(), diagnostic_mode);
                     routes.insert(
                         route.path.clone(),
                         RtspStreamSource {
@@ -467,7 +483,7 @@ fn validate_runtime_config(config: &ProtocolRuntimeConfig) -> Result<(), Protoco
 async fn start_http_task(
     assets: Arc<RuntimeAssetLayout>,
     picture_cache: SharedImageCache,
-    learned_endpoint: SharedLearnedAlarmEndpoint,
+    learned_subscriptions: SharedLearnedAlarmSubscriptions,
     access_policy: PlatformAccessPolicy,
     platform: TargetPlatform,
     http_port: u16,
@@ -515,7 +531,7 @@ async fn start_http_task(
                             let listener = Arc::clone(&listener);
                             let assets = Arc::clone(&assets);
                             let picture_cache = Arc::clone(&picture_cache);
-                            let learned_endpoint = Arc::clone(&learned_endpoint);
+                            let learned_subscriptions = Arc::clone(&learned_subscriptions);
                             let device = device.clone();
                             let profile = profile.clone();
                             let device_metrics = Arc::clone(&device_metrics);
@@ -525,7 +541,7 @@ async fn start_http_task(
                                     listener,
                                     assets,
                                     picture_cache,
-                                    learned_endpoint,
+                                    learned_subscriptions,
                                     platform,
                                     http_port,
                                     device,
@@ -562,7 +578,7 @@ async fn serve_http_connection(
     listener: Arc<DeviceHttpListener>,
     assets: Arc<RuntimeAssetLayout>,
     picture_cache: SharedImageCache,
-    learned_endpoint: SharedLearnedAlarmEndpoint,
+    learned_subscriptions: SharedLearnedAlarmSubscriptions,
     platform: TargetPlatform,
     http_port: u16,
     device: DeviceIdentityPreviewDto,
@@ -578,44 +594,45 @@ async fn serve_http_connection(
     // Learn the platform's alarm receiver endpoint from subscription requests so
     // alarm dispatch and the rendered subscription Reference follow it, exactly
     // as the legacy tool wrote picconfig/sendport from the subscription Port.
-    learn_subscription_endpoint(&request, &learned_endpoint);
-    let response =
-        if request.method == HttpMethod::Get && request.path == "/LAPI/V1.0/System/Picture" {
-            picture_response(&request, &picture_cache.read())
-        } else {
-            match resolve_http_template(&request) {
-                Some(selection) => {
-                    let bytes = assets
-                        .read_profile_or_core(profile_id, &selection.path)
-                        .map_err(|source| runtime_error(source.code, source.message))?;
-                    let body = render_legacy_template(
-                        &bytes, &request, peer, platform, http_port, &device, &profile,
-                    )?;
-                    HttpResponse {
-                        status: 200,
-                        content_type: response_content_type(&request, &body),
-                        body,
-                    }
+    learn_subscription_endpoint(&request, peer, &learned_subscriptions);
+    let response = if let Some(response) = live_stream_url_response(&request, &device)? {
+        response
+    } else if request.method == HttpMethod::Get && request.path == "/LAPI/V1.0/System/Picture" {
+        picture_response(&request, &picture_cache.read())
+    } else {
+        match resolve_http_template(&request) {
+            Some(selection) => {
+                let bytes = assets
+                    .read_profile_or_core(profile_id, &selection.path)
+                    .map_err(|source| runtime_error(source.code, source.message))?;
+                let body = render_legacy_template(
+                    &bytes, &request, peer, platform, http_port, &device, &profile,
+                )?;
+                HttpResponse {
+                    status: 200,
+                    content_type: response_content_type(&request, &body),
+                    body,
                 }
-                None if request.path.starts_with("/LAPI/") => {
-                    let bytes = assets
-                        .read_from_pack("protocol-core", "xml/Common/NotSupported-LAPI.xml")
-                        .map_err(|source| runtime_error(source.code, source.message))?;
-                    HttpResponse {
-                        status: 200,
-                        content_type: "application/json; charset=utf-8".into(),
-                        body: render_legacy_template(
-                            &bytes, &request, peer, platform, http_port, &device, &profile,
-                        )?,
-                    }
-                }
-                None => HttpResponse {
-                    status: 404,
-                    content_type: "text/plain; charset=utf-8".into(),
-                    body: b"declared simulator route not found".to_vec(),
-                },
             }
-        };
+            None if request.path.starts_with("/LAPI/") => {
+                let bytes = assets
+                    .read_from_pack("protocol-core", "xml/Common/NotSupported-LAPI.xml")
+                    .map_err(|source| runtime_error(source.code, source.message))?;
+                HttpResponse {
+                    status: 200,
+                    content_type: "application/json; charset=utf-8".into(),
+                    body: render_legacy_template(
+                        &bytes, &request, peer, platform, http_port, &device, &profile,
+                    )?,
+                }
+            }
+            None => HttpResponse {
+                status: 404,
+                content_type: "text/plain; charset=utf-8".into(),
+                body: b"declared simulator route not found".to_vec(),
+            },
+        }
+    };
     listener
         .write_response(&mut stream, &response, now_ms(), PROTOCOL_LOG_INTERVAL_MS)
         .await
@@ -782,7 +799,8 @@ struct HttpTemplateSelection {
 /// leaving alarms pointed at the fallback port.
 fn learn_subscription_endpoint(
     request: &HttpRequest,
-    learned_endpoint: &SharedLearnedAlarmEndpoint,
+    peer: SocketAddr,
+    learned_subscriptions: &SharedLearnedAlarmSubscriptions,
 ) -> Option<u16> {
     if !request.path.contains("Event/Subscription")
         || !matches!(request.method, HttpMethod::Post | HttpMethod::Put)
@@ -790,19 +808,21 @@ fn learn_subscription_endpoint(
         return None;
     }
     let port = extract_subscription_u16(&request.body, "Port").filter(|port| *port != 0)?;
-    *learned_endpoint.write() = Some(LearnedAlarmEndpoint {
-        host: extract_subscription_host(&request.body),
-        port,
-        duration_secs: extract_subscription_u32(&request.body, "Duration")
-            .filter(|duration| *duration != 0),
-        learned_at_ms: now_ms(),
-    });
+    learned_subscriptions
+        .write()
+        .upsert(LearnedAlarmEndpoint::new(
+            peer.ip(),
+            extract_subscription_host(&request.body),
+            port,
+            extract_subscription_u32(&request.body, "Duration").filter(|duration| *duration != 0),
+            now_ms(),
+        ));
     Some(port)
 }
 
 /// Read the `IPAddress` field out of a LAPI subscription body. Unspecified and
-/// broadcast addresses are meaningless as a destination and are ignored so the
-/// configured server host stays in effect.
+/// broadcast addresses are meaningless as a destination and are ignored; the
+/// sender then falls back to the subscription request's TCP peer address.
 fn extract_subscription_host(body: &[u8]) -> Option<Ipv4Addr> {
     let text = std::str::from_utf8(body).ok()?;
     let key = text.find("\"IPAddress\"")?;
@@ -876,6 +896,87 @@ fn resolve_http_template(request: &HttpRequest) -> Option<HttpTemplateSelection>
             })
         }
     }
+}
+
+fn live_stream_url_response(
+    request: &HttpRequest,
+    device: &DeviceIdentityPreviewDto,
+) -> Result<Option<HttpResponse>, ProtocolRuntimeError> {
+    let segments = request
+        .path
+        .trim_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    let is_live_stream_url = segments.len() == 9
+        && segments[0] == "LAPI"
+        && segments[1] == "V1.0"
+        && segments[2] == "Channels"
+        && segments[4] == "Media"
+        && segments[5] == "Video"
+        && segments[6] == "Streams"
+        && segments[8] == "LiveStreamURL";
+    if request.method != HttpMethod::Get || !is_live_stream_url {
+        return Ok(None);
+    }
+
+    let stream = match segments[7] {
+        "0" => Some(DeviceSimulatorStreamKind::Main),
+        "1" => Some(DeviceSimulatorStreamKind::Sub),
+        "2" => Some(DeviceSimulatorStreamKind::Third),
+        _ => None,
+    };
+    let address = stream.and_then(|kind| {
+        device
+            .streams
+            .iter()
+            .find(|candidate| candidate.stream == kind)
+    });
+    let Some(address) = address else {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "Response": {
+                "ResponseURL": request.path,
+                "ResponseCode": -1,
+                "ResponseString": "Stream not found"
+            }
+        }))
+        .map_err(|source| {
+            runtime_error(
+                "device_simulator.protocol.live_stream_url_render_failed",
+                format!("live stream URL error response could not be rendered: {source}"),
+            )
+        })?;
+        return Ok(Some(HttpResponse {
+            status: 404,
+            content_type: "application/json; charset=utf-8".into(),
+            body,
+        }));
+    };
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "Response": {
+            "ResponseURL": request.path,
+            "CreatedID": -1,
+            "ResponseCode": 0,
+            "SubResponseCode": 0,
+            "ResponseString": "Succeed",
+            "StatusCode": 0,
+            "StatusString": "Succeed",
+            "Data": {
+                "URL": address.url
+            }
+        }
+    }))
+    .map_err(|source| {
+        runtime_error(
+            "device_simulator.protocol.live_stream_url_render_failed",
+            format!("live stream URL response could not be rendered: {source}"),
+        )
+    })?;
+    Ok(Some(HttpResponse {
+        status: 200,
+        content_type: "application/json; charset=utf-8".into(),
+        body,
+    }))
 }
 
 fn picture_response(request: &HttpRequest, cache: &ImageCache) -> HttpResponse {
@@ -1230,16 +1331,20 @@ fn build_reviewed_static_sdp(
         payload_type,
         clock_rate,
         "64001f",
+        None,
         &sps,
         &pps,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_reviewed_sdp(
     device_ip: Ipv4Addr,
     route: &str,
     payload_type: u8,
     clock_rate: u32,
+    frame_rate_numerator: u32,
+    frame_rate_denominator: u32,
     sps: &[u8],
     pps: &[u8],
 ) -> Result<Vec<u8>, ProtocolRuntimeError> {
@@ -1250,12 +1355,14 @@ fn build_reviewed_sdp(
         ));
     }
     let profile_level_id = format!("{:02x}{:02x}{:02x}", sps[1], sps[2], sps[3]);
+    let frame_rate = format_sdp_frame_rate(frame_rate_numerator, frame_rate_denominator)?;
     build_reviewed_sdp_body(
         device_ip,
         route,
         payload_type,
         clock_rate,
         &profile_level_id,
+        Some(&frame_rate),
         sps,
         pps,
     )
@@ -1268,6 +1375,7 @@ fn build_reviewed_sdp_body(
     payload_type: u8,
     clock_rate: u32,
     profile_level_id: &str,
+    frame_rate: Option<&str>,
     sps: &[u8],
     pps: &[u8],
 ) -> Result<Vec<u8>, ProtocolRuntimeError> {
@@ -1281,12 +1389,45 @@ fn build_reviewed_sdp_body(
     };
     let control_url = format!("rtsp://{device_ip}{control_route}");
     let metadata_url = format!("rtsp://{device_ip}/media/video1/metadata");
+    let frame_rate_attribute = frame_rate
+        .map(|value| format!("a=framerate:{value}\r\n"))
+        .unwrap_or_default();
     let body = format!(
-        "v=0\r\no=- 1001 1 IN IP4 {device_ip}\r\ns=VCP IPC Realtime stream\r\nm=video 0 RTP/AVP {payload_type}\r\nc=IN IP4 {device_ip}\r\na=control:{control_url}\r\na=rtpmap:{payload_type} H264/{clock_rate}\r\na=fmtp:{payload_type} profile-level-id={profile_level_id}; packetization-mode=1; sprop-parameter-sets={},{}\r\na=recvonly\r\nm=application 0 RTP/AVP 107\r\nc=IN IP4 {device_ip}\r\na=control:{metadata_url}\r\na=rtpmap:107 vnd.onvif.metadata/90000\r\na=fmtp:107 DecoderTag=h3c-v3 RTCP=0\r\na=recvonly\r\n",
+        "v=0\r\no=- 1001 1 IN IP4 {device_ip}\r\ns=VCP IPC Realtime stream\r\nm=video 0 RTP/AVP {payload_type}\r\nc=IN IP4 {device_ip}\r\na=control:{control_url}\r\na=rtpmap:{payload_type} H264/{clock_rate}\r\n{frame_rate_attribute}a=fmtp:{payload_type} profile-level-id={profile_level_id}; packetization-mode=1; sprop-parameter-sets={},{}\r\na=recvonly\r\nm=application 0 RTP/AVP 107\r\nc=IN IP4 {device_ip}\r\na=control:{metadata_url}\r\na=rtpmap:107 vnd.onvif.metadata/90000\r\na=fmtp:107 DecoderTag=h3c-v3 RTCP=0\r\na=recvonly\r\n",
         BASE64_STANDARD.encode(sps),
         BASE64_STANDARD.encode(pps),
     );
     Ok(body.into_bytes())
+}
+
+fn format_sdp_frame_rate(numerator: u32, denominator: u32) -> Result<String, ProtocolRuntimeError> {
+    if numerator == 0 || denominator == 0 {
+        return Err(runtime_error(
+            "device_simulator.rtsp.frame_rate_invalid",
+            "H.264 SDP frame rate must be non-zero",
+        ));
+    }
+    if numerator % denominator == 0 {
+        return Ok((numerator / denominator).to_string());
+    }
+    let scaled = u64::from(numerator)
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(u64::from(denominator / 2)))
+        .ok_or_else(|| {
+            runtime_error(
+                "device_simulator.rtsp.frame_rate_invalid",
+                "H.264 SDP frame rate is too large",
+            )
+        })?
+        / u64::from(denominator);
+    let whole = scaled / 1_000_000;
+    let fraction = format!("{:06}", scaled % 1_000_000);
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        Ok(whole.to_string())
+    } else {
+        Ok(format!("{whole}.{fraction}"))
+    }
 }
 
 fn gateway_candidate(address: Ipv4Addr) -> Ipv4Addr {
@@ -1513,6 +1654,60 @@ mod tests {
     }
 
     #[test]
+    fn live_stream_url_returns_the_requested_configured_stream() {
+        let mut device = device("ipc-structured");
+        device.streams = vec![
+            crate::device_simulator::api::DeviceStreamAddress {
+                device_id: device.device_id.clone(),
+                channel_id: None,
+                stream: DeviceSimulatorStreamKind::Main,
+                url: "rtsp://192.0.2.10:554/media/video1".into(),
+            },
+            crate::device_simulator::api::DeviceStreamAddress {
+                device_id: device.device_id.clone(),
+                channel_id: None,
+                stream: DeviceSimulatorStreamKind::Sub,
+                url: "rtsp://192.0.2.10:555/media/video2".into(),
+            },
+            crate::device_simulator::api::DeviceStreamAddress {
+                device_id: device.device_id.clone(),
+                channel_id: None,
+                stream: DeviceSimulatorStreamKind::Third,
+                url: "rtsp://192.0.2.10:556/media/video3".into(),
+            },
+        ];
+
+        for (index, expected_url) in [
+            ("0", "rtsp://192.0.2.10:554/media/video1"),
+            ("1", "rtsp://192.0.2.10:555/media/video2"),
+            ("2", "rtsp://192.0.2.10:556/media/video3"),
+        ] {
+            let path = format!("/LAPI/V1.0/Channels/1/Media/Video/Streams/{index}/LiveStreamURL");
+            let response =
+                live_stream_url_response(&request(HttpMethod::Get, &path, None, b""), &device)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(response.status, 200);
+            let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["Response"]["ResponseURL"], path);
+            assert_eq!(body["Response"]["Data"]["URL"], expected_url);
+        }
+
+        let invalid = live_stream_url_response(
+            &request(
+                HttpMethod::Get,
+                "/LAPI/V1.0/Channels/1/Media/Video/Streams/9/LiveStreamURL",
+                None,
+                b"",
+            ),
+            &device,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(invalid.status, 404);
+    }
+
+    #[test]
     fn serves_only_content_addressed_cached_alarm_pictures() {
         let root = TempDir::new().unwrap();
         let user_root = root.path().join("user");
@@ -1582,8 +1777,9 @@ mod tests {
 
     #[test]
     fn subscription_learning_accepts_any_advertised_port_and_captures_the_endpoint() {
-        let learned: SharedLearnedAlarmEndpoint =
-            std::sync::Arc::new(parking_lot::RwLock::new(None));
+        let learned: SharedLearnedAlarmSubscriptions =
+            std::sync::Arc::new(parking_lot::RwLock::new(Default::default()));
+        let peer: SocketAddr = "192.115.1.10:40000".parse().unwrap();
         // Captured from a real UMS deployment: the receiver port sits far
         // outside the legacy 55000..55999 range, and the platform names the
         // receiver host explicitly.
@@ -1593,9 +1789,13 @@ mod tests {
             None,
             b"{\"AddressType\":0,\"IPAddress\":\"192.115.1.55\",\"Port\":22815,\"Duration\":600}",
         );
-        assert_eq!(learn_subscription_endpoint(&post, &learned), Some(22815));
-        let endpoint = learned.read().clone().unwrap();
+        assert_eq!(
+            learn_subscription_endpoint(&post, peer, &learned),
+            Some(22815)
+        );
+        let endpoint = learned.read().entries()[0].clone();
         assert_eq!(endpoint.port, 22815);
+        assert_eq!(endpoint.source_ip, peer.ip());
         assert_eq!(endpoint.host, Some(Ipv4Addr::new(192, 115, 1, 55)));
         assert_eq!(endpoint.duration_secs, Some(600));
         assert_eq!(
@@ -1610,8 +1810,8 @@ mod tests {
             None,
             b"{\"Port\":0,\"Duration\":600}",
         );
-        assert_eq!(learn_subscription_endpoint(&zero, &learned), None);
-        assert_eq!(learned.read().as_ref().unwrap().port, 22815);
+        assert_eq!(learn_subscription_endpoint(&zero, peer, &learned), None);
+        assert_eq!(learned.read().entries()[0].port, 22815);
 
         // Non-subscription traffic never touches the learned endpoint.
         let unrelated = request(
@@ -1620,10 +1820,13 @@ mod tests {
             None,
             b"{\"Port\":9000}",
         );
-        assert_eq!(learn_subscription_endpoint(&unrelated, &learned), None);
-        assert_eq!(learned.read().as_ref().unwrap().port, 22815);
+        assert_eq!(
+            learn_subscription_endpoint(&unrelated, peer, &learned),
+            None
+        );
+        assert_eq!(learned.read().entries()[0].port, 22815);
 
-        // An unspecified receiver address leaves the configured host in effect.
+        // An unspecified receiver address falls back to the subscription peer.
         let unspecified = request(
             HttpMethod::Post,
             "/LAPI/V1.0/System/Event/Subscription",
@@ -1631,12 +1834,18 @@ mod tests {
             b"{\"IPAddress\":\"0.0.0.0\",\"Port\":30000}",
         );
         assert_eq!(
-            learn_subscription_endpoint(&unspecified, &learned),
+            learn_subscription_endpoint(&unspecified, peer, &learned),
             Some(30000)
         );
-        let endpoint = learned.read().clone().unwrap();
+        let endpoint = learned
+            .read()
+            .entries()
+            .into_iter()
+            .find(|endpoint| endpoint.port == 30000)
+            .unwrap();
         assert_eq!(endpoint.host, None);
         assert_eq!(endpoint.duration_secs, None);
+        assert_eq!(learned.read().entries().len(), 2);
     }
 
     #[tokio::test]
@@ -1702,9 +1911,10 @@ mod tests {
             preview,
             assets,
             picture_cache: Arc::new(parking_lot::RwLock::new(ImageCache::default())),
-            learned_endpoint: Arc::new(parking_lot::RwLock::new(None)),
+            learned_subscriptions: Arc::new(parking_lot::RwLock::new(Default::default())),
             access_policy: PlatformAccessPolicy::open(),
             enable_discovery: false,
+            diagnostics: None,
         })
         .await
         .unwrap();
@@ -1752,6 +1962,7 @@ mod tests {
         let describe = String::from_utf8_lossy(&describe);
         assert!(describe.contains("sprop-parameter-sets="));
         assert!(describe.contains("profile-level-id="));
+        assert!(describe.contains("a=framerate:25\r\n"));
 
         rtsp.write_all(b"SETUP rtsp://127.0.0.1/media/video1/video RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n")
             .await
@@ -1827,6 +2038,8 @@ mod tests {
             "/media/video1",
             96,
             90_000,
+            25,
+            1,
             &[0x67, 0x42, 0xc0, 0x1f],
             &[0x68, 0xce, 0x06],
         )
@@ -1834,6 +2047,7 @@ mod tests {
         let sdp = String::from_utf8(sdp).unwrap();
         assert!(sdp.contains("profile-level-id=42c01f"));
         assert!(sdp.contains("sprop-parameter-sets=Z0LAHw==,aM4G"));
+        assert!(sdp.contains("a=framerate:25\r\n"));
     }
 
     #[test]
@@ -1843,11 +2057,23 @@ mod tests {
             "/media/video1",
             96,
             90_000,
+            25,
+            1,
             &[0x68, 0x42, 0xc0, 0x1f],
             &[0x68],
         )
         .unwrap_err();
         assert_eq!(error.code, "device_simulator.rtsp.parameter_sets_invalid");
+    }
+
+    #[test]
+    fn reviewed_sdp_formats_fractional_frame_rates_without_a_ratio_extension() {
+        assert_eq!(format_sdp_frame_rate(25, 1).unwrap(), "25");
+        assert_eq!(format_sdp_frame_rate(30_000, 1_001).unwrap(), "29.97003");
+        assert_eq!(
+            format_sdp_frame_rate(0, 1).unwrap_err().code,
+            "device_simulator.rtsp.frame_rate_invalid"
+        );
     }
 
     #[test]

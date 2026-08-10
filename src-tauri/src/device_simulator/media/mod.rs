@@ -16,5 +16,5 @@ pub use loader::{
 pub use manifest::{
     Codec, EvidenceDifference, EvidenceResolution, EvidenceSourceKind, FrameIndex,
     MediaCompatibility, MediaEvidence, MediaManifestV1, NalIndex, ParameterSetKind,
-    ParameterSetRef, MEDIA_MANIFEST_SCHEMA_VERSION, VIDEO_CLOCK_RATE,
+    ParameterSetRef, MAX_RECOMMENDED_BITRATE_BPS, MEDIA_MANIFEST_SCHEMA_VERSION, VIDEO_CLOCK_RATE,
 };

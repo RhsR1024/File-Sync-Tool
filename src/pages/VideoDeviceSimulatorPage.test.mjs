@@ -98,7 +98,21 @@ assert.match(page, /v-model="selectedAlarmTypeId"[^>]*:disabled="availableAlarmT
 assert.match(page, /<option value="configured" :disabled="availableAlarmTypes\.length === 0"/, 'configured dispatch must be selectable whenever alarm types are available');
 assert.match(page, /watch\(\(\) => alarm\.mode,[\s\S]*mode === 'configured'[\s\S]*availableAlarmTypes\.value\[0\]\?\.id/, 'configured dispatch must automatically select an available alarm type');
 assert.match(page, /!alarmTypeId && alarm\.mode === 'configured'/, 'clearing the alarm type must leave configured mode, which requires exactly one type');
-assert.match(page, /downloadJson\('device-simulator-logs\.json'/, 'logs must be exportable');
+assert.match(page, /async function exportLogs\(\)[\s\S]*saveTextFile\([\s\S]*filteredLogs\.value\.map\(formatLogEntry\)\.join\([\s\S]*logExportDefaultFilename\(\)[\s\S]*\['log'\]/, 'logs must use the native Save As flow with one plain-text record per entry');
+assert.doesNotMatch(page, /JSON\.stringify\(filteredLogs\.value/, 'run logs must not be expanded as JSON');
+assert.match(page, /device-simulator-logs-\$\{timestamp\}\.log/, 'log exports must offer a timestamped .log filename that the user can edit');
+assert.ok(page.includes('return `${formatLogTimestamp(entry.timestamp)} [${entry.level}] [${entry.component}] ${entry.message}${errorCode}`;'), 'plain-text entries must match the timestamp, level, component, and message shown on the page');
+assert.match(page, /:disabled="filteredLogs\.length === 0 \|\| logExportBusy \|\| logExportFolderBusy"[\s\S]*:aria-busy="logExportBusy"[\s\S]*@click="exportLogs"/, 'the log export action must expose and enforce its async busy state');
+assert.match(page, /id="simulator-log-export-status"[\s\S]*role="logExportStatus\.kind === 'error' \? 'alert' : 'status'"[\s\S]*aria-live="polite"/, 'log export completion and failures must be announced accessibly');
+assert.match(page, /async function openLogExportFolder\(\)[\s\S]*logExportStatus\.value\?\.path[\s\S]*await openPathParent\(path\)[\s\S]*deviceSimulator\.logs\.openExportPathFailed/, 'the saved export folder must open through the native path helper and keep a retryable error');
+assert.match(page, /v-if="logExportStatus\.path"[\s\S]*:aria-busy="logExportFolderBusy"[\s\S]*@click="openLogExportFolder"[\s\S]*deviceSimulator\.logs\.openExportFolder/, 'successful exports must expose an accessible open-folder action');
+assert.match(messages, /exportSuccess: 'Exported \{count\} log entries to \{path\}'/, 'English export feedback must identify the saved path');
+assert.match(composable, /MAX_SIMULATOR_LOG_ENTRIES = 500/, 'simulator logs must keep a bounded in-memory history');
+assert.match(composable, /function appendLog[\s\S]*logs\.value\.length - MAX_SIMULATOR_LOG_ENTRIES/, 'all simulator log sources must share the same pruning path');
+assert.equal((composable.match(/appendLog\(/g) ?? []).length, 3, 'local and worker logs must both use the bounded append helper');
+assert.match(messages, /exportSuccess: '已将 \{count\} 条日志导出到 \{path\}'/, 'Chinese export feedback must identify the saved path');
+assert.match(messages, /openExportFolder: 'Open Export Folder'/, 'English export feedback must label the folder action');
+assert.match(messages, /openExportFolder: '打开导出文件夹'/, 'Chinese export feedback must label the folder action');
 
 assert.match(composable, /DEVICE_SIMULATOR_EVENTS\.status/);
 assert.match(composable, /DEVICE_SIMULATOR_EVENTS\.cleanupProgress/);
@@ -158,7 +172,7 @@ assert.doesNotMatch(platformRegistration, /let response = client\s*\.get\(url\)/
 assert.match(platformRegistration, /HTTP response: \{method\} \{url\}[\s\S]*body=\{\}/, 'HTTP status and response bodies must reach the run log');
 assert.match(platformRegistration, /authorization=<redacted>/, 'authorization values must be redacted in diagnostics');
 assert.match(page, /whitespace-pre-wrap break-all[^>]*>\{\{ entry\.message \}\}/, 'long JSON response logs must wrap instead of being visually truncated');
-assert.match(page, /downloadJson\('device-simulator-logs\.json'[\s\S]*whitespace-nowrap[\s\S]*common\.export/, 'the log export label must stay on one line');
+assert.match(page, /@click="exportLogs"[\s\S]*whitespace-nowrap[\s\S]*deviceSimulator\.logs\.exporting[\s\S]*common\.export/, 'the log export label must stay on one line and show progress');
 assert.match(page, /function formatLogTimestamp\(timestamp: string\)[\s\S]*getFullYear\(\)[\s\S]*getHours\(\)[\s\S]*getMilliseconds\(\)/, 'log timestamps must be formatted in the current computer local time');
 assert.match(page, /lg:grid-cols-\[190px_76px_190px_minmax\(0,1fr\)\]/, 'the local timestamp column must have a fixed width');
 assert.match(page, /w-\[190px\] whitespace-nowrap[\s\S]*formatLogTimestamp\(entry\.timestamp\)/, 'the complete millisecond timestamp must remain on one line');

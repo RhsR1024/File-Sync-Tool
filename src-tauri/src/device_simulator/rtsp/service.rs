@@ -1,4 +1,6 @@
-use super::rtp::{tcp_interleaved_frame, RtpPacketizer};
+use super::rtp::{
+    rtcp_compound_sender_report, tcp_interleaved_frame, RtpPacketizer, RTP_HEADER_BYTES,
+};
 use super::scheduler::{ScheduledAccessUnit, SharedFrameScheduler};
 use super::state::{
     build_rtsp_response, declared_body_length, parse_rtsp_request, RtspDecision, RtspSession,
@@ -8,15 +10,18 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::device_simulator::media::{Codec, SharedMediaPack};
+use crate::device_simulator::telemetry::ProtocolDiagnosticSink;
 
 static NEXT_RTP_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
 const LEGACY_RTP_SSRC: u32 = 0x0c8c_750a;
+const RTCP_CNAME: &[u8] = b"file-sync-tool@virtual-device";
+const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RtspServerStats {
@@ -69,6 +74,203 @@ struct ClientRtpState {
     timestamp_offset: u32,
 }
 
+#[derive(Debug)]
+struct RtspTimingDiagnostics {
+    window_started_at: Instant,
+    received_aus: u64,
+    sent_aus: u64,
+    sent_packets: u64,
+    sent_bytes: u64,
+    keyframes: u64,
+    skipped_waiting_keyframe: u64,
+    lag_events: u64,
+    lagged_aus: u64,
+    sender_reports: u64,
+    timestamp_gap_count: u64,
+    short_timestamp_step_count: u64,
+    max_timestamp_step: u32,
+    previous_timestamp: Option<u32>,
+    first_timestamp: Option<u32>,
+    last_timestamp: Option<u32>,
+    first_send_at: Option<Instant>,
+    last_send_at: Option<Instant>,
+    minimum_queue_capacity: Option<usize>,
+}
+
+impl RtspTimingDiagnostics {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_started_at: now,
+            received_aus: 0,
+            sent_aus: 0,
+            sent_packets: 0,
+            sent_bytes: 0,
+            keyframes: 0,
+            skipped_waiting_keyframe: 0,
+            lag_events: 0,
+            lagged_aus: 0,
+            sender_reports: 0,
+            timestamp_gap_count: 0,
+            short_timestamp_step_count: 0,
+            max_timestamp_step: 0,
+            previous_timestamp: None,
+            first_timestamp: None,
+            last_timestamp: None,
+            first_send_at: None,
+            last_send_at: None,
+            minimum_queue_capacity: None,
+        }
+    }
+
+    fn record_received(&mut self) {
+        self.received_aus = self.received_aus.saturating_add(1);
+    }
+
+    fn record_skipped_waiting_keyframe(&mut self) {
+        self.skipped_waiting_keyframe = self.skipped_waiting_keyframe.saturating_add(1);
+    }
+
+    fn record_lag(&mut self, skipped: u64) {
+        self.lag_events = self.lag_events.saturating_add(1);
+        self.lagged_aus = self.lagged_aus.saturating_add(skipped);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_sent(
+        &mut self,
+        timestamp: u32,
+        packet_count: usize,
+        byte_count: usize,
+        keyframe: bool,
+        sender_report: bool,
+        expected_timestamp_step: u32,
+        queue_capacity: usize,
+        sent_at: Instant,
+    ) {
+        self.sent_aus = self.sent_aus.saturating_add(1);
+        self.sent_packets = self.sent_packets.saturating_add(packet_count as u64);
+        self.sent_bytes = self.sent_bytes.saturating_add(byte_count as u64);
+        self.keyframes += u64::from(keyframe);
+        self.sender_reports += u64::from(sender_report);
+        self.first_timestamp.get_or_insert(timestamp);
+        self.last_timestamp = Some(timestamp);
+        self.first_send_at.get_or_insert(sent_at);
+        self.last_send_at = Some(sent_at);
+        self.minimum_queue_capacity = Some(
+            self.minimum_queue_capacity
+                .map_or(queue_capacity, |minimum| minimum.min(queue_capacity)),
+        );
+
+        if let Some(previous) = self.previous_timestamp {
+            let step = timestamp.wrapping_sub(previous);
+            self.max_timestamp_step = self.max_timestamp_step.max(step);
+            if step > expected_timestamp_step.saturating_add(expected_timestamp_step / 2) {
+                self.timestamp_gap_count = self.timestamp_gap_count.saturating_add(1);
+            } else if step.saturating_add(expected_timestamp_step / 2) < expected_timestamp_step {
+                self.short_timestamp_step_count = self.short_timestamp_step_count.saturating_add(1);
+            }
+        }
+        self.previous_timestamp = Some(timestamp);
+    }
+
+    fn has_anomaly(&self, source: &RtspStreamSource, reason: &str) -> bool {
+        self.lag_events > 0
+            || self.timestamp_gap_count > 0
+            || self.short_timestamp_step_count > 0
+            || (source.diagnostic_mode == "watermark"
+                && self.sent_aus > 0
+                && self.keyframes != self.sent_aus)
+            || matches!(
+                reason,
+                "packetize_error"
+                    | "rtp_interleaved_frame_error"
+                    | "sender_report_error"
+                    | "rtcp_interleaved_frame_error"
+                    | "write_queue_full"
+            )
+    }
+
+    fn message(
+        &self,
+        source: &RtspStreamSource,
+        session_id: &str,
+        reason: &str,
+        now: Instant,
+    ) -> String {
+        let window = now.saturating_duration_since(self.window_started_at);
+        let window_secs = window.as_secs_f64().max(f64::EPSILON);
+        let clock_rate = source.scheduler.clock_rate().max(1);
+        let rtp_media_ms = self
+            .first_timestamp
+            .zip(self.last_timestamp)
+            .map_or(0.0, |(first, last)| {
+                f64::from(last.wrapping_sub(first)) * 1_000.0 / f64::from(clock_rate)
+            });
+        let send_wall_ms = self
+            .first_send_at
+            .zip(self.last_send_at)
+            .map_or(0.0, |(first, last)| {
+                last.saturating_duration_since(first).as_secs_f64() * 1_000.0
+            });
+        let rtp_wall_ratio = if send_wall_ms > 0.0 {
+            rtp_media_ms / send_wall_ms
+        } else {
+            0.0
+        };
+        let expected_fps = f64::from(source.scheduler.clock_rate())
+            / f64::from(source.scheduler.frame_duration_ticks().max(1));
+        format!(
+            "RTSP_DIAG mode={} stream={} session={} reason={reason} window_ms={} clock_rate={} expected_rtp_step={} expected_fps={expected_fps:.3} received_aus={} receive_fps={:.2} sent_aus={} send_fps={:.2} sent_packets={} sent_bytes={} keyframes={} skipped_waiting_keyframe={} lag_events={} lagged_aus={} sender_reports={} timestamp_gap_count={} short_timestamp_step_count={} max_timestamp_step={} first_rtp={} last_rtp={} rtp_media_ms={:.3} send_wall_ms={:.3} rtp_wall_ratio={:.4} min_queue_remaining={}",
+            source.diagnostic_mode,
+            source.stream_id,
+            session_id,
+            window.as_millis(),
+            source.scheduler.clock_rate(),
+            source.scheduler.frame_duration_ticks(),
+            self.received_aus,
+            self.received_aus as f64 / window_secs,
+            self.sent_aus,
+            self.sent_aus as f64 / window_secs,
+            self.sent_packets,
+            self.sent_bytes,
+            self.keyframes,
+            self.skipped_waiting_keyframe,
+            self.lag_events,
+            self.lagged_aus,
+            self.sender_reports,
+            self.timestamp_gap_count,
+            self.short_timestamp_step_count,
+            self.max_timestamp_step,
+            self.first_timestamp.unwrap_or(0),
+            self.last_timestamp.unwrap_or(0),
+            rtp_media_ms,
+            send_wall_ms,
+            rtp_wall_ratio,
+            self.minimum_queue_capacity.unwrap_or(0),
+        )
+    }
+}
+
+fn flush_rtsp_diagnostics(
+    source: &RtspStreamSource,
+    session_id: &str,
+    window: &mut RtspTimingDiagnostics,
+    reason: &str,
+    now: Instant,
+) {
+    if window.has_anomaly(source, reason) {
+        if let Some(diagnostics) = source.diagnostics.as_ref() {
+            diagnostics.info(
+                "rtsp_timing",
+                window.message(source, session_id, reason, now),
+            );
+        }
+    }
+    let previous_timestamp = window.previous_timestamp;
+    *window = RtspTimingDiagnostics::new(now);
+    window.previous_timestamp = previous_timestamp;
+}
+
 fn next_client_rtp_state() -> ClientRtpState {
     let id = NEXT_RTP_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     ClientRtpState {
@@ -88,6 +290,8 @@ pub struct RtspStreamSource {
     pub payload_type: u8,
     pub max_rtp_payload_bytes: usize,
     pub metadata_only: bool,
+    pub(crate) diagnostics: Option<ProtocolDiagnosticSink>,
+    pub(crate) diagnostic_mode: &'static str,
 }
 
 impl RtspStreamSource {
@@ -138,7 +342,19 @@ impl RtspStreamSource {
             payload_type,
             max_rtp_payload_bytes,
             metadata_only: false,
+            diagnostics: None,
+            diagnostic_mode: "unspecified",
         })
+    }
+
+    pub fn with_diagnostics(
+        mut self,
+        diagnostics: Option<ProtocolDiagnosticSink>,
+        mode: &'static str,
+    ) -> Self {
+        self.diagnostics = diagnostics;
+        self.diagnostic_mode = mode;
+        self
     }
 }
 
@@ -578,7 +794,9 @@ async fn serve_client(
                 if stream_task.is_none() && !selected.metadata_only {
                     stream_task = Some(AbortTaskOnDrop::new(tokio::spawn(stream_frames(
                         selected,
+                        session_id.clone(),
                         channels.0,
+                        channels.1,
                         outgoing.clone(),
                         client_rtp_state,
                     ))));
@@ -602,7 +820,9 @@ async fn serve_client(
                 if stream_task.is_none() && !selected.metadata_only {
                     stream_task = Some(AbortTaskOnDrop::new(tokio::spawn(stream_frames(
                         selected,
+                        session_id.clone(),
                         channels.0,
+                        channels.1,
                         outgoing.clone(),
                         client_rtp_state,
                     ))));
@@ -656,7 +876,9 @@ async fn serve_client(
 
 async fn stream_frames(
     source: RtspStreamSource,
-    channel: u8,
+    session_id: String,
+    rtp_channel: u8,
+    rtcp_channel: u8,
     outgoing: mpsc::Sender<Vec<u8>>,
     client_state: ClientRtpState,
 ) {
@@ -668,49 +890,125 @@ async fn stream_frames(
         max_payload_bytes: source.max_rtp_payload_bytes,
     };
     let mut waiting_for_keyframe = true;
-    loop {
-        match receiver.recv().await {
-            Ok(ScheduledAccessUnit {
-                timestamp,
-                access_unit,
-                ..
-            }) => {
-                if waiting_for_keyframe && !access_unit.keyframe {
-                    continue;
-                }
-                waiting_for_keyframe = false;
-                let nals = access_unit
-                    .nals
-                    .iter()
-                    .map(AsRef::as_ref)
-                    .collect::<Vec<_>>();
-                let Ok(packets) = packetizer.packetize_access_unit(
-                    source.codec,
-                    &nals,
-                    timestamp.wrapping_add(client_state.timestamp_offset),
-                ) else {
-                    break;
-                };
-                let mut batch = Vec::new();
-                for packet in packets {
-                    let Ok(frame) = tcp_interleaved_frame(channel, &packet.bytes) else {
-                        return;
+    let mut sender_packet_count = 0u32;
+    let mut sender_octet_count = 0u32;
+    let mut last_sender_report_at = None::<Instant>;
+    let mut diagnostics = RtspTimingDiagnostics::new(Instant::now());
+    let mut diagnostic_interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + DIAGNOSTIC_INTERVAL,
+        DIAGNOSTIC_INTERVAL,
+    );
+    diagnostic_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let exit_reason = 'stream: loop {
+        tokio::select! {
+            _ = diagnostic_interval.tick() => {
+                flush_rtsp_diagnostics(
+                    &source,
+                    &session_id,
+                    &mut diagnostics,
+                    "periodic",
+                    Instant::now(),
+                );
+            }
+            received = receiver.recv() => match received {
+                Ok(ScheduledAccessUnit {
+                    timestamp,
+                    access_unit,
+                    ..
+                }) => {
+                    diagnostics.record_received();
+                    if waiting_for_keyframe && !access_unit.keyframe {
+                        diagnostics.record_skipped_waiting_keyframe();
+                        continue;
+                    }
+                    waiting_for_keyframe = false;
+                    let nals = access_unit
+                        .nals
+                        .iter()
+                        .map(AsRef::as_ref)
+                        .collect::<Vec<_>>();
+                    let Ok(packets) = packetizer.packetize_access_unit(
+                        source.codec,
+                        &nals,
+                        timestamp.wrapping_add(client_state.timestamp_offset),
+                    ) else {
+                        break 'stream "packetize_error";
                     };
-                    batch.extend_from_slice(&frame);
+                    let mut batch = Vec::new();
+                    for packet in &packets {
+                        sender_packet_count = sender_packet_count.wrapping_add(1);
+                        sender_octet_count = sender_octet_count
+                            .wrapping_add(packet.bytes.len().saturating_sub(RTP_HEADER_BYTES) as u32);
+                        let Ok(frame) = tcp_interleaved_frame(rtp_channel, &packet.bytes) else {
+                            break 'stream "rtp_interleaved_frame_error";
+                        };
+                        batch.extend_from_slice(&frame);
+                    }
+                    let Some(last_rtp_timestamp) = packets.last().map(|packet| packet.timestamp) else {
+                        continue;
+                    };
+                    let send_sender_report = last_sender_report_at
+                        .map(|sent| sent.elapsed() >= Duration::from_secs(5))
+                        .unwrap_or(true);
+                    if send_sender_report {
+                        let Ok(report) = rtcp_compound_sender_report(
+                            client_state.ssrc,
+                            last_rtp_timestamp,
+                            sender_packet_count,
+                            sender_octet_count,
+                            SystemTime::now(),
+                            RTCP_CNAME,
+                        ) else {
+                            break 'stream "sender_report_error";
+                        };
+                        let Ok(frame) = tcp_interleaved_frame(rtcp_channel, &report) else {
+                            break 'stream "rtcp_interleaved_frame_error";
+                        };
+                        batch.extend_from_slice(&frame);
+                    }
+                    let batch_bytes = batch.len();
+                    match outgoing.try_send(batch) {
+                        Ok(()) => {
+                            let sent_at = Instant::now();
+                            if send_sender_report {
+                                last_sender_report_at = Some(sent_at);
+                            }
+                            diagnostics.record_sent(
+                                timestamp,
+                                packets.len(),
+                                batch_bytes,
+                                access_unit.keyframe,
+                                send_sender_report,
+                                source.scheduler.frame_duration_ticks(),
+                                outgoing.capacity(),
+                                sent_at,
+                            );
+                        }
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            break 'stream "write_queue_full";
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            break 'stream "write_queue_closed";
+                        }
+                    }
                 }
-                if outgoing.try_send(batch).is_err() {
-                    // A complete access unit is queued atomically. Slow or
-                    // disconnected clients cannot block or receive a partial frame.
-                    return;
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    diagnostics.record_lag(skipped);
+                    waiting_for_keyframe = true;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    break 'stream "broadcast_closed";
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                waiting_for_keyframe = true;
-                continue;
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
         }
-    }
+    };
+    flush_rtsp_diagnostics(
+        &source,
+        &session_id,
+        &mut diagnostics,
+        exit_reason,
+        Instant::now(),
+    );
 }
 
 async fn send_response(
@@ -849,7 +1147,56 @@ mod tests {
             payload_type: 105,
             max_rtp_payload_bytes: 1_200,
             metadata_only: false,
+            diagnostics: None,
+            diagnostic_mode: "test",
         }
+    }
+
+    #[test]
+    fn rtsp_diagnostics_expose_timestamp_gaps_and_queue_state_as_text() {
+        let source = source().with_diagnostics(None, "watermark");
+        let started_at = Instant::now();
+        let mut diagnostics = RtspTimingDiagnostics::new(started_at);
+        diagnostics.record_received();
+        diagnostics.record_sent(0, 3, 1_000, true, true, 3_600, 15, started_at);
+        diagnostics.record_received();
+        diagnostics.record_lag(2);
+        diagnostics.record_sent(
+            10_800,
+            2,
+            800,
+            false,
+            false,
+            3_600,
+            12,
+            started_at + Duration::from_millis(120),
+        );
+
+        assert_eq!(diagnostics.timestamp_gap_count, 1);
+        assert_eq!(diagnostics.lag_events, 1);
+        assert_eq!(diagnostics.lagged_aus, 2);
+        assert!(diagnostics.has_anomaly(&source, "test"));
+        let message = diagnostics.message(
+            &source,
+            "session-1",
+            "test",
+            started_at + Duration::from_secs(5),
+        );
+        assert!(message.contains("RTSP_DIAG mode=watermark stream=main"));
+        assert!(message.contains("timestamp_gap_count=1"));
+        assert!(message.contains("lagged_aus=2"));
+        assert!(message.contains("min_queue_remaining=12"));
+    }
+
+    #[test]
+    fn rtsp_diagnostics_keep_healthy_periodic_windows_silent() {
+        let source = source().with_diagnostics(None, "watermark");
+        let started_at = Instant::now();
+        let mut diagnostics = RtspTimingDiagnostics::new(started_at);
+        diagnostics.record_received();
+        diagnostics.record_sent(0, 3, 1_000, true, true, 3_600, 15, started_at);
+
+        assert!(!diagnostics.has_anomaly(&source, "periodic"));
     }
 
     /// `read_request` already drains a declared body, so the response comes
@@ -862,16 +1209,27 @@ mod tests {
     }
 
     async fn read_interleaved_rtp(client: &mut TcpStream) -> (u8, u16, u32, u32) {
-        let mut interleaved = [0_u8; 4];
-        client.read_exact(&mut interleaved).await.unwrap();
-        assert_eq!(interleaved[0], b'$');
-        let length = u16::from_be_bytes([interleaved[2], interleaved[3]]) as usize;
-        let mut rtp = vec![0_u8; length];
-        client.read_exact(&mut rtp).await.unwrap();
-        let sequence = u16::from_be_bytes([rtp[2], rtp[3]]);
-        let timestamp = u32::from_be_bytes([rtp[4], rtp[5], rtp[6], rtp[7]]);
-        let ssrc = u32::from_be_bytes([rtp[8], rtp[9], rtp[10], rtp[11]]);
-        (interleaved[1], sequence, timestamp, ssrc)
+        loop {
+            let mut interleaved = [0_u8; 4];
+            client.read_exact(&mut interleaved).await.unwrap();
+            assert_eq!(interleaved[0], b'$');
+            let length = u16::from_be_bytes([interleaved[2], interleaved[3]]) as usize;
+            let mut packet = vec![0_u8; length];
+            client.read_exact(&mut packet).await.unwrap();
+            // The stream now carries RTCP Sender Reports on the negotiated
+            // companion channel. Keep this RTP-only test helper focused on RTP.
+            if packet
+                .get(1)
+                .copied()
+                .is_some_and(|kind| (200..=207).contains(&kind))
+            {
+                continue;
+            }
+            let sequence = u16::from_be_bytes([packet[2], packet[3]]);
+            let timestamp = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+            let ssrc = u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]);
+            return (interleaved[1], sequence, timestamp, ssrc);
+        }
     }
 
     async fn connect_and_play(address: SocketAddr) -> (TcpStream, u16, u32, u32) {
@@ -900,6 +1258,45 @@ mod tests {
         let (channel, sequence, timestamp, ssrc) = read_interleaved_rtp(&mut client).await;
         assert_eq!(channel, 2);
         (client, sequence, timestamp, ssrc)
+    }
+
+    #[tokio::test]
+    async fn negotiated_rtcp_channel_receives_a_sender_report() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let shared_source = source();
+        let server = start_rtsp_server(RtspEndpointConfig {
+            bind_addr: SocketAddr::new(IpAddr::from([127, 0, 0, 1]), port),
+            routes: BTreeMap::from([
+                ("/media/video1".into(), shared_source.clone()),
+                ("/media/video1/video".into(), shared_source),
+            ]),
+            client_write_queue: 16,
+        })
+        .await
+        .unwrap();
+
+        let (mut client, _, rtp_timestamp, ssrc) = connect_and_play(server.local_addr()).await;
+        let mut interleaved = [0_u8; 4];
+        client.read_exact(&mut interleaved).await.unwrap();
+        assert_eq!(&interleaved[..2], b"$\x03");
+        let report_len = u16::from_be_bytes([interleaved[2], interleaved[3]]) as usize;
+        assert!(report_len > 28);
+        let mut report = vec![0_u8; report_len];
+        client.read_exact(&mut report).await.unwrap();
+        assert_eq!(&report[..4], &[0x80, 200, 0, 6]);
+        assert_eq!(u32::from_be_bytes(report[4..8].try_into().unwrap()), ssrc);
+        assert_eq!(
+            u32::from_be_bytes(report[16..20].try_into().unwrap()),
+            rtp_timestamp
+        );
+        assert_eq!(u32::from_be_bytes(report[20..24].try_into().unwrap()), 1);
+        assert_eq!(u32::from_be_bytes(report[24..28].try_into().unwrap()), 3);
+        assert_eq!(&report[28..30], &[0x81, 202]);
+
+        drop(client);
+        server.stop(Duration::from_secs(2)).await.unwrap();
     }
 
     #[test]

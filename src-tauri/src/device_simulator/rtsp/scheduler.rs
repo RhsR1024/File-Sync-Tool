@@ -205,6 +205,10 @@ impl SharedFrameScheduler {
         self.clock_rate
     }
 
+    pub fn frame_duration_ticks(&self) -> u32 {
+        self.frame_duration_ticks
+    }
+
     pub(crate) fn shares_channel_with(&self, other: &Self) -> bool {
         self.sender.same_channel(&other.sender)
     }

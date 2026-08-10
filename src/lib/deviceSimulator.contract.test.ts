@@ -75,6 +75,7 @@ export const alarmJobRequestContract: AlarmJobRequest = {
   recovery_delay_secs: 5,
   image_variant: 'normal',
   user_image_id: null,
+  target_subscription_id: null,
 };
 
 export const importedAlarmImageContract: ImportedAlarmImage = {
@@ -117,4 +118,14 @@ export const alarmSubscriptionEventContract: DeviceSimulatorEventPayloads[
   learned_at_ms: 1_784_773_245_000,
   expires_at_ms: 1_784_773_845_000,
   overridden: false,
+  subscriptions: [{
+    id: '192.115.1.10|192.115.1.55',
+    source_ip: '192.115.1.10',
+    host: '192.115.1.55',
+    port: 22815,
+    duration_secs: 600,
+    learned_at_ms: 1_784_773_245_000,
+    expires_at_ms: 1_784_773_845_000,
+  }],
+  selection_required: false,
 };

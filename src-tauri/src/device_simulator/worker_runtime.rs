@@ -1,12 +1,10 @@
 use crate::device_simulator::access_control::PlatformAccessPolicy;
-use crate::device_simulator::alarm_runtime::{
-    AlarmRuntime, AlarmRuntimeConfig, AlarmRuntimeError, LearnedAlarmEndpoint,
-};
+use crate::device_simulator::alarm_runtime::{AlarmRuntime, AlarmRuntimeConfig, AlarmRuntimeError};
 use crate::device_simulator::api::{
-    preview_devices, AlarmJobRequest, AlarmJobStatsSnapshot, AlarmSubscriptionSnapshot,
-    AlarmTriggerResult, DevicePreview, DeviceRuntimeStatusSnapshot, PlatformAccessMode,
-    RtspStatsSnapshot, RuntimeEventBatcher, RuntimeTelemetrySnapshot, SimulatorMetricsSnapshot,
-    SimulatorStatusSnapshot, TargetPlatformServer,
+    preview_devices, AlarmJobRequest, AlarmJobStatsSnapshot, AlarmSubscriptionRecordSnapshot,
+    AlarmSubscriptionSnapshot, AlarmTriggerResult, DevicePreview, DeviceRuntimeStatusSnapshot,
+    PlatformAccessMode, RtspStatsSnapshot, RuntimeEventBatcher, RuntimeTelemetrySnapshot,
+    SimulatorMetricsSnapshot, SimulatorStatusSnapshot, TargetPlatformServer,
 };
 use crate::device_simulator::errors::SimulatorErrorBody;
 use crate::device_simulator::local_materials::LocalMaterialPaths;
@@ -21,6 +19,7 @@ use crate::device_simulator::session_journal::{
     OwnedPack, OwnedResources, ResourceOwnershipState, SessionJournalStore, SessionJournalV1,
     WorkerProcessIdentity, SESSION_JOURNAL_SCHEMA_VERSION,
 };
+use crate::device_simulator::telemetry::ProtocolDiagnosticSink;
 use crate::device_simulator::windows::firewall::{
     plan_firewall_rules, FirewallBackend, FirewallProtocol, FirewallRemoteScope, FirewallRuleSpec,
     FirewallServiceIntent, SystemFirewallBackend,
@@ -122,6 +121,16 @@ pub trait WorkerServiceRuntime: Send {
 pub struct SystemWorkerServices {
     protocol: Option<ProtocolRuntime>,
     alarms: Option<AlarmRuntime>,
+    diagnostics: Option<ProtocolDiagnosticSink>,
+}
+
+impl SystemWorkerServices {
+    fn with_diagnostics(diagnostics: ProtocolDiagnosticSink) -> Self {
+        Self {
+            diagnostics: Some(diagnostics),
+            ..Self::default()
+        }
+    }
 }
 
 impl WorkerServiceRuntime for SystemWorkerServices {
@@ -160,15 +169,16 @@ impl WorkerServiceRuntime for SystemWorkerServices {
                 })?
                 .map_err(alarm_runtime_error)?;
             let picture_cache = alarms.image_cache();
-            let learned_endpoint = alarms.learned_endpoint();
+            let learned_subscriptions = alarms.learned_subscriptions_handle();
             let protocol = ProtocolRuntime::start(ProtocolRuntimeConfig {
                 request: config.request,
                 preview: config.preview,
                 assets,
                 picture_cache,
-                learned_endpoint,
+                learned_subscriptions,
                 access_policy: config.access_policy,
                 enable_discovery: true,
+                diagnostics: self.diagnostics.clone(),
             })
             .await
             .map_err(protocol_runtime_error)?;
@@ -273,9 +283,26 @@ impl WorkerServiceRuntime for SystemWorkerServices {
     fn alarm_subscription(&self) -> Option<AlarmSubscriptionSnapshot> {
         let alarms = self.alarms.as_ref()?;
         let learned = alarms.learned_subscription();
+        let learned_subscriptions = alarms.learned_subscriptions();
+        let learned_any = !learned_subscriptions.is_empty();
+        let subscriptions = learned_subscriptions
+            .into_iter()
+            .map(|endpoint| {
+                let expires_at_ms = endpoint.expires_at_ms();
+                AlarmSubscriptionRecordSnapshot {
+                    id: endpoint.id,
+                    source_ip: endpoint.source_ip.to_string(),
+                    host: endpoint.host.map(|host| host.to_string()),
+                    port: endpoint.port,
+                    duration_secs: endpoint.duration_secs,
+                    learned_at_ms: endpoint.learned_at_ms,
+                    expires_at_ms,
+                }
+            })
+            .collect();
         Some(AlarmSubscriptionSnapshot {
             destinations: alarms.effective_destinations(),
-            learned: learned.is_some(),
+            learned: learned_any,
             host: learned
                 .as_ref()
                 .and_then(|endpoint| endpoint.host.map(|host| host.to_string())),
@@ -284,8 +311,10 @@ impl WorkerServiceRuntime for SystemWorkerServices {
             learned_at_ms: learned.as_ref().map(|endpoint| endpoint.learned_at_ms),
             expires_at_ms: learned
                 .as_ref()
-                .and_then(LearnedAlarmEndpoint::expires_at_ms),
+                .and_then(|endpoint| endpoint.expires_at_ms()),
             overridden: !alarms.follows_platform_subscription(),
+            subscriptions,
+            selection_required: alarms.subscription_selection_required(),
         })
     }
 }
@@ -324,6 +353,20 @@ impl WorkerRuntime {
             Arc::new(SystemIpAliasBackend),
             Arc::new(SystemFirewallBackend),
             Box::<SystemWorkerServices>::default(),
+        )
+    }
+
+    pub fn system_with_diagnostics(
+        session_id: impl Into<String>,
+        worker_process: Option<WorkerProcessIdentity>,
+        diagnostics: ProtocolDiagnosticSink,
+    ) -> Self {
+        Self::new(
+            session_id,
+            worker_process,
+            Arc::new(SystemIpAliasBackend),
+            Arc::new(SystemFirewallBackend),
+            Box::new(SystemWorkerServices::with_diagnostics(diagnostics)),
         )
     }
 

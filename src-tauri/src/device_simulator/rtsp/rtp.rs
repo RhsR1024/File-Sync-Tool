@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::device_simulator::media::Codec;
 
@@ -159,6 +160,78 @@ pub fn tcp_interleaved_frame(channel: u8, rtp_packet: &[u8]) -> Result<Vec<u8>, 
     Ok(frame)
 }
 
+/// Builds an RFC 3550 RTCP Sender Report for the RTP stream identified by
+/// `ssrc`. The report deliberately uses the timestamp of the most recently
+/// queued RTP packet so the NTP/RTP clock mapping describes the same media
+/// point the receiver has just seen.
+pub fn rtcp_sender_report(
+    ssrc: u32,
+    rtp_timestamp: u32,
+    sender_packet_count: u32,
+    sender_octet_count: u32,
+    now: SystemTime,
+) -> [u8; 28] {
+    let duration = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let ntp_seconds = duration.as_secs().saturating_add(2_208_988_800);
+    let ntp_fraction = ((u64::from(duration.subsec_nanos()) << 32) / 1_000_000_000) as u32;
+    let mut report = [0u8; 28];
+    report[0] = 0x80; // Version 2, no padding, zero report blocks.
+    report[1] = 200; // SR packet type.
+    report[2..4].copy_from_slice(&6u16.to_be_bytes());
+    report[4..8].copy_from_slice(&ssrc.to_be_bytes());
+    report[8..12].copy_from_slice(&(ntp_seconds as u32).to_be_bytes());
+    report[12..16].copy_from_slice(&ntp_fraction.to_be_bytes());
+    report[16..20].copy_from_slice(&rtp_timestamp.to_be_bytes());
+    report[20..24].copy_from_slice(&sender_packet_count.to_be_bytes());
+    report[24..28].copy_from_slice(&sender_octet_count.to_be_bytes());
+    report
+}
+
+/// RFC 3550 requires an SR/RR to be sent as part of a compound RTCP packet
+/// containing an SDES CNAME. The legacy camera capture follows that layout, and
+/// some recorders discard a standalone SR even though its 28-byte body parses.
+pub fn rtcp_compound_sender_report(
+    ssrc: u32,
+    rtp_timestamp: u32,
+    sender_packet_count: u32,
+    sender_octet_count: u32,
+    now: SystemTime,
+    cname: &[u8],
+) -> Result<Vec<u8>, RtpPacketError> {
+    if cname.is_empty() || cname.len() > u8::MAX as usize {
+        return Err(error(
+            "device_simulator.rtcp.cname_invalid",
+            "RTCP SDES CNAME must contain 1..=255 bytes",
+        ));
+    }
+
+    let sender_report = rtcp_sender_report(
+        ssrc,
+        rtp_timestamp,
+        sender_packet_count,
+        sender_octet_count,
+        now,
+    );
+    let unpadded_sdes_len = 4 + 4 + 2 + cname.len() + 1;
+    let sdes_len = unpadded_sdes_len.div_ceil(4) * 4;
+    let length_words_minus_one = u16::try_from(sdes_len / 4 - 1).map_err(|_| {
+        error(
+            "device_simulator.rtcp.sdes_too_large",
+            "RTCP SDES packet is too large",
+        )
+    })?;
+    let mut compound = Vec::with_capacity(sender_report.len() + sdes_len);
+    compound.extend_from_slice(&sender_report);
+    compound.extend_from_slice(&[0x81, 202]); // Version 2, one SDES chunk.
+    compound.extend_from_slice(&length_words_minus_one.to_be_bytes());
+    compound.extend_from_slice(&ssrc.to_be_bytes());
+    compound.extend_from_slice(&[1, cname.len() as u8]); // CNAME item.
+    compound.extend_from_slice(cname);
+    compound.push(0); // End of SDES items.
+    compound.resize(sender_report.len() + sdes_len, 0);
+    Ok(compound)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaClock {
     timestamp: u32,
@@ -313,6 +386,51 @@ mod tests {
             tcp_interleaved_frame(2, &packet).unwrap(),
             vec![b'$', 2, 0, 3, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn builds_rfc3550_sender_report_with_ntp_and_sender_counters() {
+        let report = rtcp_sender_report(
+            0x0102_0304,
+            90_000,
+            12,
+            34_567,
+            UNIX_EPOCH + std::time::Duration::new(1, 500_000_000),
+        );
+        assert_eq!(report[0], 0x80);
+        assert_eq!(report[1], 200);
+        assert_eq!(&report[2..4], &6u16.to_be_bytes());
+        assert_eq!(&report[4..8], &0x0102_0304u32.to_be_bytes());
+        assert_eq!(&report[8..12], &2_208_988_801u32.to_be_bytes());
+        assert_eq!(&report[12..16], &0x8000_0000u32.to_be_bytes());
+        assert_eq!(&report[16..20], &90_000u32.to_be_bytes());
+        assert_eq!(&report[20..24], &12u32.to_be_bytes());
+        assert_eq!(&report[24..28], &34_567u32.to_be_bytes());
+    }
+
+    #[test]
+    fn builds_compound_sender_report_with_sdes_cname() {
+        let compound = rtcp_compound_sender_report(
+            0x0102_0304,
+            90_000,
+            12,
+            34_567,
+            UNIX_EPOCH + std::time::Duration::from_secs(1),
+            b"file-sync-tool@virtual-device",
+        )
+        .unwrap();
+        assert_eq!(&compound[..4], &[0x80, 200, 0, 6]);
+        assert_eq!(&compound[28..30], &[0x81, 202]);
+        let sdes_len = (usize::from(u16::from_be_bytes([compound[30], compound[31]])) + 1) * 4;
+        assert_eq!(compound.len(), 28 + sdes_len);
+        assert_eq!(&compound[32..36], &0x0102_0304u32.to_be_bytes());
+        assert_eq!(compound[36], 1);
+        let cname_len = compound[37] as usize;
+        assert_eq!(
+            &compound[38..38 + cname_len],
+            b"file-sync-tool@virtual-device"
+        );
+        assert!(compound[38 + cname_len..].iter().all(|byte| *byte == 0));
     }
 
     #[test]

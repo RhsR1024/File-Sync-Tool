@@ -1,4 +1,27 @@
+use crate::device_simulator::events::{WorkerEventPayload, WorkerLogLevel};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::mpsc;
+
+#[derive(Debug, Clone)]
+pub struct ProtocolDiagnosticSink {
+    sender: mpsc::UnboundedSender<WorkerEventPayload>,
+}
+
+impl ProtocolDiagnosticSink {
+    pub fn new(sender: mpsc::UnboundedSender<WorkerEventPayload>) -> Self {
+        Self { sender }
+    }
+
+    pub fn info(&self, component: &str, message: String) {
+        log::info!("[{component}] {message}");
+        let _ = self.sender.send(WorkerEventPayload::Log {
+            level: WorkerLogLevel::Info,
+            component: component.to_string(),
+            message,
+            error_code: None,
+        });
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct ProtocolFailureMetrics {
@@ -69,6 +92,23 @@ mod tests {
             ProtocolFailureSnapshot {
                 parse_failures: 2,
                 send_failures: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn diagnostic_sink_forwards_copyable_worker_log_text() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let sink = ProtocolDiagnosticSink::new(sender);
+        sink.info("watermark_timing", "WM_DIAG input_fps=25.00".into());
+
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            WorkerEventPayload::Log {
+                level: WorkerLogLevel::Info,
+                component: "watermark_timing".into(),
+                message: "WM_DIAG input_fps=25.00".into(),
+                error_code: None,
             }
         );
     }

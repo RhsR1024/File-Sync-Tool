@@ -1,6 +1,7 @@
 use crate::device_simulator::errors::SimulatorErrorBody;
 use crate::device_simulator::events::{WorkerEvent, WorkerEventPayload};
 use crate::device_simulator::session_journal::WorkerProcessIdentity;
+use crate::device_simulator::telemetry::ProtocolDiagnosticSink;
 use crate::device_simulator::worker_protocol::{
     read_frame, write_frame, AlarmJobCommandPayload, HandshakeRequest, InitializeSessionPayload,
     RecoverSessionPayload, StopAlarmJobPayload, WorkerCommandName, WorkerHeartbeat, WorkerHello,
@@ -11,6 +12,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{to_value, Value};
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const WORKER_FLAG: &str = "--simulator-worker";
@@ -147,7 +150,12 @@ async fn run_windows_worker(launch: WorkerLaunchArgs) -> Result<(), String> {
     let worker_process = tokio::task::spawn_blocking(current_worker_identity)
         .await
         .map_err(|error| format!("worker identity task failed: {error}"))??;
-    let mut runtime = WorkerRuntime::system(launch.session_id.clone(), Some(worker_process));
+    let (diagnostic_tx, mut diagnostic_rx) = mpsc::unbounded_channel();
+    let mut runtime = WorkerRuntime::system_with_diagnostics(
+        launch.session_id.clone(),
+        Some(worker_process),
+        ProtocolDiagnosticSink::new(diagnostic_tx),
+    );
     let (mut reader, mut writer) = tokio::io::split(pipe);
     let (outgoing, mut outgoing_rx) = mpsc::channel::<WorkerMessage>(256);
     let writer_task = tokio::spawn(async move {
@@ -157,6 +165,29 @@ async fn run_windows_worker(launch: WorkerLaunchArgs) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
         }
         Ok::<(), String>(())
+    });
+    let event_sequence = Arc::new(AtomicU64::new(0));
+    let diagnostic_outgoing = outgoing.clone();
+    let diagnostic_session = launch.session_id.clone();
+    let diagnostic_sequence = Arc::clone(&event_sequence);
+    let diagnostic_task = tokio::spawn(async move {
+        while let Some(payload) = diagnostic_rx.recv().await {
+            let sequence = diagnostic_sequence
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            if diagnostic_outgoing
+                .send(WorkerMessage::Event(WorkerEvent::new(
+                    diagnostic_session.clone(),
+                    sequence,
+                    now_ms(),
+                    payload,
+                )))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
     });
     let heartbeat_tx = outgoing.clone();
     let heartbeat_session = launch.session_id.clone();
@@ -180,7 +211,6 @@ async fn run_windows_worker(launch: WorkerLaunchArgs) -> Result<(), String> {
             }
         }
     });
-    let mut event_sequence = 0_u64;
     let loop_result = loop {
         let message = match read_frame::<_, WorkerMessage>(&mut reader).await {
             Ok(Some(message)) => message,
@@ -208,11 +238,13 @@ async fn run_windows_worker(launch: WorkerLaunchArgs) -> Result<(), String> {
                 let response = handle_worker_request(&mut runtime, request).await;
                 let current = runtime.state();
                 if current != previous {
-                    event_sequence = event_sequence.saturating_add(1);
+                    let sequence = event_sequence
+                        .fetch_add(1, Ordering::Relaxed)
+                        .saturating_add(1);
                     let _ = outgoing
                         .send(WorkerMessage::Event(WorkerEvent::new(
                             launch.session_id.clone(),
-                            event_sequence,
+                            sequence,
                             now_ms(),
                             WorkerEventPayload::StatusChanged { previous, current },
                         )))
@@ -236,6 +268,8 @@ async fn run_windows_worker(launch: WorkerLaunchArgs) -> Result<(), String> {
     ) {
         let _ = runtime.stop_services().await;
     }
+    drop(runtime);
+    let _ = diagnostic_task.await;
     heartbeat_task.abort();
     drop(outgoing);
     let writer_result = writer_task

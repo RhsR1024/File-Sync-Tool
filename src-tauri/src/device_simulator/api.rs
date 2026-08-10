@@ -390,6 +390,11 @@ pub struct AlarmJobRequest {
     pub recovery_delay_secs: Option<u64>,
     pub image_variant: Option<String>,
     pub user_image_id: Option<String>,
+    /// Learned subscription endpoint selected by the operator. When omitted,
+    /// a single active subscription is used for backwards compatibility;
+    /// multiple active subscriptions require an explicit selection.
+    #[serde(default)]
+    pub target_subscription_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +486,24 @@ pub struct AlarmSubscriptionSnapshot {
     /// `true` when an explicit receiver URL is configured, which deliberately
     /// pins the destination and suppresses subscription learning.
     pub overridden: bool,
+    /// Every subscription endpoint observed during this simulator session.
+    #[serde(default)]
+    pub subscriptions: Vec<AlarmSubscriptionRecordSnapshot>,
+    /// True when more than one non-expired subscription needs operator choice.
+    #[serde(default)]
+    pub selection_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlarmSubscriptionRecordSnapshot {
+    pub id: String,
+    pub source_ip: String,
+    pub host: Option<String>,
+    pub port: u16,
+    pub duration_secs: Option<u32>,
+    pub learned_at_ms: u64,
+    pub expires_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

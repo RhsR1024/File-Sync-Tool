@@ -52,8 +52,9 @@ import {
   type MediaThemeSummary,
   type PlatformAccessMode,
   type PreflightCheck,
+  type SimulatorLogEvent,
 } from '@/lib/deviceSimulator';
-import { openDirectory } from '@/lib/tauri';
+import { openDirectory, openPathParent, saveTextFile } from '@/lib/tauri';
 
 const { t, te } = useI18n();
 const router = useRouter();
@@ -62,6 +63,13 @@ const activeTab = ref<'configuration' | 'runtime' | 'alarms' | 'logs'>('configur
 const configSection = ref<'server' | 'network' | 'media' | 'devices'>('server');
 const logLevel = ref('all');
 const logQuery = ref('');
+const logExportBusy = ref(false);
+const logExportFolderBusy = ref(false);
+const logExportStatus = ref<{
+  kind: 'success' | 'cancelled' | 'error';
+  message: string;
+  path?: string;
+} | null>(null);
 const copiedValue = ref('');
 const continuousAlarm = ref(true);
 const now = ref(Date.now());
@@ -165,7 +173,9 @@ const alarm = reactive<AlarmJobRequest>({
   recovery_delay_secs: null,
   image_variant: null,
   user_image_id: null,
+  target_subscription_id: null,
 });
+const selectedAlarmSubscriptionId = ref<string | null>(null);
 
 const fieldClass = 'h-9 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-800 shadow-sm transition-colors placeholder:text-slate-400 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/25 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500';
 const buttonFocus = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/45 focus-visible:ring-offset-2';
@@ -301,8 +311,21 @@ const alarmErrorSummary = computed(() => {
 });
 
 const subscription = computed(() => simulator.alarmSubscription.value);
+const subscriptionRecords = computed(() => subscription.value?.subscriptions ?? []);
+const activeSubscriptionRecords = computed(() => subscriptionRecords.value.filter(
+  (record) => !subscriptionRecordExpired(record),
+));
+const selectedAlarmSubscription = computed(() => subscriptionRecords.value.find(
+  (record) => record.id === selectedAlarmSubscriptionId.value,
+) ?? null);
+const selectedAlarmSubscriptionUsable = computed(() => selectedAlarmSubscription.value !== null
+  && !subscriptionRecordExpired(selectedAlarmSubscription.value));
+const subscriptionSelectionRequired = computed(() => Boolean(
+  subscription.value?.selection_required && !selectedAlarmSubscriptionUsable.value,
+));
 const subscriptionExpired = computed(() => {
   const current = subscription.value;
+  if (subscriptionRecords.value.length > 0) return activeSubscriptionRecords.value.length === 0;
   return current !== null && current.learned && isAlarmSubscriptionExpired(current, now.value);
 });
 const subscriptionTone = computed(() => {
@@ -357,6 +380,20 @@ const subscriptionLifetime = computed(() => {
   const remaining = Math.max(0, Math.round((current.expires_at_ms - now.value) / 1_000));
   return t('deviceSimulator.subscription.remaining', { seconds: current.duration_secs, remaining });
 });
+const subscriptionCountLabel = computed(() => t('deviceSimulator.subscription.count', { count: subscriptionRecords.value.length }));
+function subscriptionEndpointLabel(record: (typeof subscriptionRecords.value)[number]) {
+  const host = record.host || record.source_ip;
+  return [host, record.port].filter(Boolean).join(':') || t('deviceSimulator.subscription.unknownAddress');
+}
+function subscriptionRecordExpired(record: (typeof subscriptionRecords.value)[number]) {
+  return record.expires_at_ms !== null && record.expires_at_ms <= now.value;
+}
+function subscriptionRecordLifetime(record: (typeof subscriptionRecords.value)[number]) {
+  if (record.duration_secs === null) return t('deviceSimulator.subscription.noExpiry');
+  if (record.expires_at_ms === null) return t('deviceSimulator.subscription.duration', { seconds: record.duration_secs });
+  const remaining = Math.max(0, Math.round((record.expires_at_ms - now.value) / 1_000));
+  return t('deviceSimulator.subscription.remaining', { seconds: record.duration_secs, remaining });
+}
 
 watch(
   () => simulator.request.groups.map((group) => group.profile_id).join(','),
@@ -374,6 +411,17 @@ watch(alarmProfileOptions, (profiles) => {
 
 watch(() => simulator.busyAction.value, (action) => {
   if (action === 'add-to-platform') activeTab.value = 'runtime';
+});
+
+watch(subscriptionRecords, (records) => {
+  if (!records.some((record) => record.id === selectedAlarmSubscriptionId.value)) {
+    selectedAlarmSubscriptionId.value = null;
+  }
+  if (subscription.value?.overridden) selectedAlarmSubscriptionId.value = null;
+});
+
+watch(() => simulator.status.value.session_id, () => {
+  selectedAlarmSubscriptionId.value = null;
 });
 
 watch(selectedAlarmProfileId, () => {
@@ -669,6 +717,73 @@ function downloadJson(filename: string, value: unknown) {
   URL.revokeObjectURL(link.href);
 }
 
+function logExportDefaultFilename(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const timestamp = [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    '-',
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join('');
+  return `device-simulator-logs-${timestamp}.log`;
+}
+
+async function exportLogs() {
+  if (logExportBusy.value || logExportFolderBusy.value || filteredLogs.value.length === 0) return;
+  logExportBusy.value = true;
+  logExportStatus.value = null;
+  try {
+    const count = filteredLogs.value.length;
+    const savedPath = await saveTextFile(
+      `${filteredLogs.value.map(formatLogEntry).join('\n')}\n`,
+      logExportDefaultFilename(),
+      t('deviceSimulator.logs.logFilter'),
+      ['log'],
+    );
+    logExportStatus.value = savedPath
+      ? {
+          kind: 'success',
+          message: t('deviceSimulator.logs.exportSuccess', { count, path: savedPath }),
+          path: savedPath,
+        }
+      : {
+          kind: 'cancelled',
+          message: t('deviceSimulator.logs.exportCancelled'),
+        };
+  } catch (error) {
+    logExportStatus.value = {
+      kind: 'error',
+      message: t('deviceSimulator.logs.exportFailed', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    };
+  } finally {
+    logExportBusy.value = false;
+  }
+}
+
+async function openLogExportFolder() {
+  const path = logExportStatus.value?.path;
+  if (!path || logExportBusy.value || logExportFolderBusy.value) return;
+  logExportFolderBusy.value = true;
+  try {
+    await openPathParent(path);
+  } catch (error) {
+    logExportStatus.value = {
+      kind: 'error',
+      message: t('deviceSimulator.logs.openExportPathFailed', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+      path,
+    };
+  } finally {
+    logExportFolderBusy.value = false;
+  }
+}
+
 function syncAlarmTypes() {
   alarm.alarm_profile_id = selectedAlarmProfileId.value;
   alarm.alarm_type_ids = selectedAlarmTypeId.value ? [selectedAlarmTypeId.value] : [];
@@ -689,6 +804,9 @@ function alarmRequest(): AlarmJobRequest {
     send_count: continuousAlarm.value ? null : Math.max(1, sendCount || 1),
     recovery_delay_secs: Number.isFinite(recoveryDelay) && recoveryDelay >= 0
       ? recoveryDelay
+      : null,
+    target_subscription_id: selectedAlarmSubscriptionUsable.value
+      ? selectedAlarmSubscriptionId.value
       : null,
   };
 }
@@ -732,6 +850,11 @@ function formatLogTimestamp(timestamp: string) {
   if (Number.isNaN(value.getTime())) return timestamp;
   const pad = (part: number, width = 2) => String(part).padStart(width, '0');
   return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}.${pad(value.getMilliseconds(), 3)}`;
+}
+
+function formatLogEntry(entry: SimulatorLogEvent) {
+  const errorCode = entry.error_code ? ` [${entry.error_code}]` : '';
+  return `${formatLogTimestamp(entry.timestamp)} [${entry.level}] [${entry.component}] ${entry.message}${errorCode}`;
 }
 
 function setIpAllocationMode(mode: 'continuous' | 'explicit') {
@@ -1131,6 +1254,55 @@ function revealPreflightDetails() {
                 </div>
               </div>
 
+              <fieldset v-if="subscriptionRecords.length > 0" class="mt-5 rounded-xl border border-slate-200 bg-white p-4" aria-describedby="alarm-subscription-selection-hint">
+                <legend class="px-1 text-sm font-bold text-slate-900">{{ t('deviceSimulator.subscription.targetTitle') }}</legend>
+                <p id="alarm-subscription-selection-hint" class="mt-1 text-xs leading-5 text-slate-600">
+                  {{ subscriptionSelectionRequired ? t('deviceSimulator.subscription.selectionRequired') : t('deviceSimulator.subscription.targetDescription') }}
+                </p>
+                <div class="mt-3 flex items-center justify-between gap-3 text-xs text-slate-500">
+                  <span>{{ subscriptionCountLabel }}</span>
+                  <span v-if="selectedAlarmSubscriptionUsable" class="font-semibold text-emerald-700">{{ t('deviceSimulator.subscription.selected') }}</span>
+                </div>
+                <div class="mt-2 max-h-64 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50" role="radiogroup" :aria-label="t('deviceSimulator.subscription.targetTitle')">
+                  <label
+                    v-for="record in subscriptionRecords"
+                    :key="record.id"
+                    class="flex min-h-11 cursor-pointer items-start gap-3 border-b border-slate-200 px-3 py-2.5 last:border-b-0 transition-colors hover:bg-white"
+                    :class="[
+                      selectedAlarmSubscriptionId === record.id ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : '',
+                      subscriptionRecordExpired(record) ? 'opacity-60' : '',
+                    ]"
+                  >
+                    <input
+                      v-model="selectedAlarmSubscriptionId"
+                      type="radio"
+                      name="alarm-subscription-target"
+                      :value="record.id"
+                      :disabled="subscriptionRecordExpired(record) || Boolean(subscription?.overridden)"
+                      class="mt-1 h-4 w-4 shrink-0 border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45"
+                    >
+                    <span class="min-w-0 flex-1">
+                      <span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-slate-800">
+                        <span class="font-mono">{{ subscriptionEndpointLabel(record) }}</span>
+                        <span v-if="subscriptionRecordExpired(record)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-bold text-amber-800">{{ t('deviceSimulator.subscription.expired') }}</span>
+                      </span>
+                      <span class="mt-1 block text-[11px] leading-4 text-slate-500">
+                        {{ t('deviceSimulator.subscription.source') }}: <span class="font-mono">{{ record.source_ip }}</span>
+                        <span class="mx-1" aria-hidden="true">/</span>{{ subscriptionRecordLifetime(record) }}
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+              <p v-else-if="subscription && !subscription.overridden" class="mt-5 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-medium leading-5 text-amber-900" role="status">
+                <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                {{ t('deviceSimulator.subscription.noSubscriptions') }}
+              </p>
+              <p v-if="subscriptionSelectionRequired" class="mt-3 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-semibold leading-5 text-rose-800" role="alert">
+                <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                {{ t('deviceSimulator.subscription.selectionRequired') }}
+              </p>
+
               <details class="mt-5 rounded-xl border border-slate-200 bg-slate-50">
                 <summary class="min-h-11 cursor-pointer list-none px-4 py-3 text-sm font-semibold text-slate-700">
                   {{ t('deviceSimulator.configuration.advanced') }}
@@ -1447,8 +1619,48 @@ function revealPreflightDetails() {
                 </div>
               </div>
             </fieldset>
+            <fieldset v-if="subscriptionRecords.length > 0" class="mt-5 border-t border-slate-200 pt-4" aria-describedby="alarm-send-target-hint">
+              <legend class="pr-2 text-sm font-bold text-slate-900">{{ t('deviceSimulator.subscription.targetTitle') }}</legend>
+              <p id="alarm-send-target-hint" class="mt-1 text-xs leading-5" :class="subscriptionSelectionRequired ? 'text-rose-700' : 'text-slate-600'">
+                {{ subscriptionSelectionRequired ? t('deviceSimulator.subscription.selectionRequired') : t('deviceSimulator.subscription.targetDescription') }}
+              </p>
+              <div class="mt-3 max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50" role="radiogroup" :aria-label="t('deviceSimulator.subscription.targetTitle')">
+                <label
+                  v-for="record in subscriptionRecords"
+                  :key="record.id"
+                  class="flex min-h-11 cursor-pointer items-start gap-3 border-b border-slate-200 px-3 py-2.5 last:border-b-0 transition-colors hover:bg-white"
+                  :class="[
+                    selectedAlarmSubscriptionId === record.id ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : '',
+                    subscriptionRecordExpired(record) ? 'opacity-60' : '',
+                  ]"
+                >
+                  <input
+                    v-model="selectedAlarmSubscriptionId"
+                    type="radio"
+                    name="alarm-send-subscription-target"
+                    :value="record.id"
+                    :disabled="subscriptionRecordExpired(record) || Boolean(subscription?.overridden)"
+                    class="mt-1 h-4 w-4 shrink-0 border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45"
+                  >
+                  <span class="min-w-0 flex-1">
+                    <span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-slate-800">
+                      <span class="font-mono">{{ subscriptionEndpointLabel(record) }}</span>
+                      <span v-if="subscriptionRecordExpired(record)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-bold text-amber-800">{{ t('deviceSimulator.subscription.expired') }}</span>
+                    </span>
+                    <span class="mt-1 block text-[11px] leading-4 text-slate-500">
+                      {{ t('deviceSimulator.subscription.source') }}: <span class="font-mono">{{ record.source_ip }}</span>
+                      <span class="mx-1" aria-hidden="true">/</span>{{ subscriptionRecordLifetime(record) }}
+                    </span>
+                  </span>
+                </label>
+              </div>
+            </fieldset>
+            <p v-else-if="subscription && !subscription.overridden" class="mt-5 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-medium leading-5 text-amber-900" role="status">
+              <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              {{ t('deviceSimulator.subscription.noSubscriptions') }}
+            </p>
             <div class="mt-5 flex flex-wrap gap-2">
-              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running || alarmSending" @click="triggerAlarm"><BellRing class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.triggerOnce') }}</button>
+              <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running || alarmSending || subscriptionSelectionRequired" @click="triggerAlarm"><BellRing class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.triggerOnce') }}</button>
               <button
                 type="button"
                 class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-60"
@@ -1456,7 +1668,7 @@ function revealPreflightDetails() {
                   buttonFocus,
                   alarmSending ? 'bg-rose-700 hover:bg-rose-800' : 'bg-sky-600 hover:bg-sky-700',
                 ]"
-                :disabled="simulator.busyAction.value !== null || !running || simulator.alarmStopPending.value"
+                :disabled="simulator.busyAction.value !== null || !running || simulator.alarmStopPending.value || (!alarmSending && subscriptionSelectionRequired)"
                 :aria-pressed="alarmSending"
                 @click="toggleAlarmSending"
               >
@@ -1500,7 +1712,7 @@ function revealPreflightDetails() {
                 <h2 id="logs-title" class="font-bold text-slate-900">{{ t('deviceSimulator.logs.title') }}</h2>
                 <HintTip :text="t('deviceSimulator.logs.description')" />
               </div>
-              <div class="ml-auto flex min-w-0 flex-1 items-center justify-end gap-2">
+              <div class="ml-auto flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
                 <label class="sr-only" for="simulator-log-level">{{ t('deviceSimulator.logs.level') }}</label>
                 <select id="simulator-log-level" v-model="logLevel" :class="[fieldClass, 'w-32 shrink-0']">
                   <option value="all">{{ t('common.all') }}</option>
@@ -1508,11 +1720,52 @@ function revealPreflightDetails() {
                 </select>
                 <label class="sr-only" for="simulator-log-search">{{ t('common.search') }}</label>
                 <input id="simulator-log-search" v-model="logQuery" :class="[fieldClass, 'min-w-36 max-w-60 flex-1']" type="search" :placeholder="t('deviceSimulator.logs.search')" />
-                <button type="button" class="inline-flex min-h-9 shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-300 px-3.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-50" :class="buttonFocus" :disabled="filteredLogs.length === 0" @click="downloadJson('device-simulator-logs.json', filteredLogs)">
-                  <FileDown class="h-4 w-4 shrink-0" aria-hidden="true" />
-                  <span class="whitespace-nowrap">{{ t('common.export') }}</span>
+                <button
+                  type="button"
+                  class="inline-flex min-h-11 shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-slate-300 px-3.5 text-xs font-semibold text-slate-700 transition-colors duration-200 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+                  :class="buttonFocus"
+                  :disabled="filteredLogs.length === 0 || logExportBusy || logExportFolderBusy"
+                  :aria-busy="logExportBusy"
+                  :aria-describedby="logExportStatus ? 'simulator-log-export-status' : undefined"
+                  @click="exportLogs"
+                >
+                  <LoaderCircle v-if="logExportBusy" class="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                  <FileDown v-else class="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span class="whitespace-nowrap">{{ t(logExportBusy ? 'deviceSimulator.logs.exporting' : 'common.export') }}</span>
                 </button>
               </div>
+            </div>
+            <div
+              v-if="logExportStatus"
+              class="flex flex-none flex-wrap items-center gap-2 border-b px-4 py-2 text-xs leading-5"
+              :class="logExportStatus.kind === 'error'
+                ? 'border-rose-200 bg-rose-50 text-rose-800'
+                : logExportStatus.kind === 'success'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                  : 'border-slate-200 bg-slate-50 text-slate-700'"
+            >
+              <AlertTriangle v-if="logExportStatus.kind === 'error'" class="h-4 w-4 shrink-0" aria-hidden="true" />
+              <CheckCircle2 v-else-if="logExportStatus.kind === 'success'" class="h-4 w-4 shrink-0" aria-hidden="true" />
+              <FileDown v-else class="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span
+                id="simulator-log-export-status"
+                :role="logExportStatus.kind === 'error' ? 'alert' : 'status'"
+                aria-live="polite"
+                class="min-w-0 flex-1 break-all"
+              >{{ logExportStatus.message }}</span>
+              <button
+                v-if="logExportStatus.path"
+                type="button"
+                class="ml-auto inline-flex min-h-11 shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-current/20 bg-white/70 px-3.5 font-semibold transition-colors duration-200 hover:bg-white disabled:cursor-not-allowed disabled:opacity-60 motion-reduce:transition-none"
+                :class="buttonFocus"
+                :disabled="logExportBusy || logExportFolderBusy"
+                :aria-busy="logExportFolderBusy"
+                @click="openLogExportFolder"
+              >
+                <LoaderCircle v-if="logExportFolderBusy" class="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                <FolderOpen v-else class="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>{{ t('deviceSimulator.logs.openExportFolder') }}</span>
+              </button>
             </div>
             <ol class="min-h-0 flex-1 divide-y divide-slate-100 overflow-auto font-mono text-xs">
               <li v-for="(entry, index) in filteredLogs" :key="`${entry.timestamp}-${index}`" class="grid min-h-8.5 items-start gap-2 px-4 py-1 lg:grid-cols-[190px_76px_190px_minmax(0,1fr)]">
