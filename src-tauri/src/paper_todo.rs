@@ -30,9 +30,6 @@ const LAUNCHER_MIN_CAPSULE_WIDTH: u32 = 48;
 const LAUNCHER_EXPANDED_WIDTH: u32 = 184;
 const LAUNCHER_COLLAPSED_HEIGHT: u32 = 37;
 const LAUNCHER_EXPANDED_HEIGHT: u32 = 360;
-/// Logical width of the capsule's flat side parked past the display edge, so
-/// its outline never draws a seam against the screen border.
-const LAUNCHER_EDGE_OVERHANG: u32 = 8;
 const LAUNCHER_CAPSULE_HEIGHT: u32 = 34;
 /// Headroom added to the expanded window. Without it the reserved height is
 /// exactly the sum of the rows, and the logical-to-physical rounding at
@@ -503,10 +500,9 @@ pub fn dispatch_background(app: AppHandle, action: &'static str) {
 fn launcher_position(
     window: &tauri::WebviewWindow,
     settings: &Value,
-    expanded: bool,
     logical_width: u32,
     logical_height: u32,
-) -> Result<PhysicalPosition<i32>, String> {
+) -> Result<(PhysicalPosition<i32>, tauri::PhysicalSize<u32>), String> {
     let monitor = window
         .primary_monitor()
         .map_err(|error| error.to_string())?
@@ -517,10 +513,6 @@ fn launcher_position(
     let scale_factor = monitor.scale_factor();
     let window_width = (logical_width as f64 * scale_factor).round() as i32;
     let window_height = (logical_height as f64 * scale_factor).round() as i32;
-    // Only the capsule's flat side is parked outside the display, so whatever
-    // width the window carries stays visible apart from that overhang.
-    let overhang = (LAUNCHER_EDGE_OVERHANG as f64 * scale_factor).round() as i32;
-    let visible_width = (window_width - overhang).max(1);
     let edge = settings
         .get("launcherEdge")
         .and_then(Value::as_str)
@@ -539,36 +531,75 @@ fn launcher_position(
     let anchored_y = monitor_position.y + collapsed_available_height.max(0) * offset / 100;
     let max_y = monitor_position.y + (monitor_size.height as i32 - window_height).max(0);
     let y = anchored_y.min(max_y);
+    // Keep the whole native window inside the selected monitor. Parking a
+    // transparent strip beyond the display edge works only on a single-screen
+    // desktop; with an adjacent monitor that strip becomes visible there.
     let x = if edge == "left" {
-        if expanded {
-            monitor_position.x
-        } else {
-            monitor_position.x - (window_width - visible_width)
-        }
-    } else if expanded {
-        monitor_position.x + monitor_size.width as i32 - window_width
+        monitor_position.x
     } else {
-        monitor_position.x + monitor_size.width as i32 - visible_width
+        monitor_position.x + monitor_size.width as i32 - window_width
     };
-    Ok(PhysicalPosition::new(x, y))
+    Ok((
+        PhysicalPosition::new(x, y),
+        tauri::PhysicalSize::new(window_width as u32, window_height as u32),
+    ))
 }
 
-/// Collapsed window width: the capsule's own measured width plus the overhang
-/// that hides its flat side past the display edge.
+/// Apply position and size together on Windows. Two separate native calls leave
+/// an observable intermediate frame: growing first crosses onto the adjacent
+/// display, while moving first makes the capsule jump inward before it grows.
+#[cfg(target_os = "windows")]
+fn set_launcher_geometry(
+    window: &tauri::WebviewWindow,
+    position: PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+    };
+
+    let handle = window.hwnd().map_err(|error| error.to_string())?;
+    unsafe {
+        SetWindowPos(
+            HWND(handle.0 as *mut _),
+            HWND::default(),
+            position.x,
+            position.y,
+            size.width as i32,
+            size.height as i32,
+            SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER,
+        )
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_launcher_geometry(
+    window: &tauri::WebviewWindow,
+    position: PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+) -> Result<(), String> {
+    window.set_size(size).map_err(|error| error.to_string())?;
+    window
+        .set_position(position)
+        .map_err(|error| error.to_string())
+}
+
+/// Collapsed window width: the capsule's own measured width. Keeping the native
+/// bounds equal to the visible control prevents it leaking onto an adjacent
+/// monitor in a multi-display desktop.
 fn collapsed_launcher_width(app: &AppHandle) -> u32 {
     let measured = app
         .state::<PaperTodoRuntime>()
         .launcher_capsule_width
         .load(Ordering::Relaxed) as u32;
     let capsule = if measured == 0 {
-        LAUNCHER_COLLAPSED_WIDTH.saturating_sub(LAUNCHER_EDGE_OVERHANG)
+        LAUNCHER_COLLAPSED_WIDTH
     } else {
         measured
     };
-    capsule.clamp(
-        LAUNCHER_MIN_CAPSULE_WIDTH,
-        LAUNCHER_EXPANDED_WIDTH - LAUNCHER_EDGE_OVERHANG,
-    ) + LAUNCHER_EDGE_OVERHANG
+    capsule.clamp(LAUNCHER_MIN_CAPSULE_WIDTH, LAUNCHER_EXPANDED_WIDTH)
 }
 
 fn sync_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), String> {
@@ -604,14 +635,8 @@ fn sync_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), String>
     } else {
         collapsed_launcher_width(app)
     };
-    window
-        .set_size(tauri::LogicalSize::new(width as f64, height as f64))
-        .map_err(|error| error.to_string())?;
-    window
-        .set_position(launcher_position(
-            &window, settings, expanded, width, height,
-        )?)
-        .map_err(|error| error.to_string())?;
+    let (position, physical_size) = launcher_position(&window, settings, width, height)?;
+    set_launcher_geometry(&window, position, physical_size)?;
     window.show().map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -630,7 +655,7 @@ fn ensure_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), Strin
             LAUNCHER_COLLAPSED_HEIGHT as f64,
         )
         .min_inner_size(
-            (LAUNCHER_MIN_CAPSULE_WIDTH + LAUNCHER_EDGE_OVERHANG) as f64,
+            LAUNCHER_MIN_CAPSULE_WIDTH as f64,
             LAUNCHER_COLLAPSED_HEIGHT as f64,
         )
         .max_inner_size(

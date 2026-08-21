@@ -17,6 +17,10 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PREWARM_FRAME_LIMIT: usize = 300;
 const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5);
 const ALL_IDR_BITRATE_MULTIPLIER: u64 = 4;
+const MAIN_ALL_IDR_MINIMUM_BITRATE_BPS: u64 = 18_000_000;
+const SECONDARY_ALL_IDR_MINIMUM_BITRATE_BPS: u64 = 2_500_000;
+const ALL_IDR_PEAK_BITRATE_NUMERATOR: u64 = 3;
+const ALL_IDR_PEAK_BITRATE_DENOMINATOR: u64 = 2;
 #[cfg(target_os = "windows")]
 const H264_ACCESS_UNIT_DELIMITER: [u8; 2] = [0x09, 0xf0];
 
@@ -30,8 +34,13 @@ pub struct WatermarkStreamSource {
     pub frame_rate_numerator: u32,
     pub frame_rate_denominator: u32,
     pub bitrate_bps: u64,
+    pub maximum_bitrate_bps: u64,
+    pub buffer_size_bits: u64,
+    pub encoder_backend: Arc<str>,
     pub encoder_name: Arc<str>,
     pub hardware: bool,
+    pub rate_control_mode: Arc<str>,
+    pub all_idr: bool,
 }
 
 #[derive(Debug)]
@@ -39,8 +48,13 @@ struct PipelineReady {
     sps: Arc<[u8]>,
     pps: Arc<[u8]>,
     bitrate_bps: u32,
+    maximum_bitrate_bps: u32,
+    buffer_size_bits: u32,
+    encoder_backend: Arc<str>,
     encoder_name: Arc<str>,
     hardware: bool,
+    rate_control_mode: Arc<str>,
+    all_idr: bool,
 }
 
 pub struct WatermarkMediaHub {
@@ -74,11 +88,16 @@ impl WatermarkMediaHub {
             {
                 Ok((source, task)) => {
                     log::info!(
-                        "device simulator time watermark {:?} stream ready: encoder='{}', path={}, {} bps",
+                        "device simulator time watermark {:?} stream ready: backend={}, encoder='{}', implementation={}, rate_control={}, target_average={}bps, target_maximum={}bps, buffer={}bits, all_idr={}",
                         kind,
+                        source.encoder_backend,
                         source.encoder_name,
                         if source.hardware { "hardware" } else { "software" },
-                        source.bitrate_bps
+                        source.rate_control_mode,
+                        source.bitrate_bps,
+                        source.maximum_bitrate_bps,
+                        source.buffer_size_bits,
+                        source.all_idr
                     );
                     hub.streams.insert(kind, source);
                     hub.tasks.push(task);
@@ -192,8 +211,13 @@ async fn start_pipeline(
             frame_rate_numerator: media.manifest().frame_rate_numerator,
             frame_rate_denominator: media.manifest().frame_rate_denominator,
             bitrate_bps: u64::from(ready.bitrate_bps),
+            maximum_bitrate_bps: u64::from(ready.maximum_bitrate_bps),
+            buffer_size_bits: u64::from(ready.buffer_size_bits),
+            encoder_backend: ready.encoder_backend,
             encoder_name: ready.encoder_name,
             hardware: ready.hardware,
+            rate_control_mode: ready.rate_control_mode,
+            all_idr: ready.all_idr,
         },
         task,
     ))
@@ -231,11 +255,31 @@ fn constant_frame_duration(media: &SharedMediaPack) -> Result<u32, String> {
     Ok(duration)
 }
 
-fn watermark_encoder_bitrate_bps(recommended_bitrate_bps: u64) -> u32 {
-    recommended_bitrate_bps
+fn watermark_encoder_rate_control(
+    kind: RuntimeMediaKind,
+    recommended_bitrate_bps: u64,
+) -> crate::device_simulator::media::mf_h264::H264EncoderRateControl {
+    let minimum_bitrate_bps = match kind {
+        RuntimeMediaKind::Main => MAIN_ALL_IDR_MINIMUM_BITRATE_BPS,
+        RuntimeMediaKind::Sub | RuntimeMediaKind::Third => SECONDARY_ALL_IDR_MINIMUM_BITRATE_BPS,
+    };
+    let average_bitrate_bps = recommended_bitrate_bps
         .saturating_mul(ALL_IDR_BITRATE_MULTIPLIER)
+        .max(minimum_bitrate_bps)
         .min(MAX_RECOMMENDED_BITRATE_BPS)
-        .min(u64::from(u32::MAX)) as u32
+        .min(u64::from(u32::MAX));
+    let maximum_bitrate_bps = average_bitrate_bps
+        .saturating_mul(ALL_IDR_PEAK_BITRATE_NUMERATOR)
+        .saturating_div(ALL_IDR_PEAK_BITRATE_DENOMINATOR)
+        .min(MAX_RECOMMENDED_BITRATE_BPS)
+        .min(u64::from(u32::MAX));
+    crate::device_simulator::media::mf_h264::H264EncoderRateControl {
+        average_bitrate_bps: average_bitrate_bps as u32,
+        maximum_bitrate_bps: maximum_bitrate_bps as u32,
+        // One second of buffering lets complex IDR frames use the negotiated
+        // peak budget without changing capture cadence or RTP timestamps.
+        buffer_size_bits: average_bitrate_bps.max(1) as u32,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -529,13 +573,14 @@ fn initialize_pipeline(
     // Every watermarked frame is an IDR for compatibility with the target
     // recorder. Intra-only H.264 cannot reuse neighbouring frames, so the
     // source stream's inter-frame bitrate is not enough to retain its detail.
-    let bitrate = watermark_encoder_bitrate_bps(media.manifest().recommended_bitrate_bps);
+    let rate_control =
+        watermark_encoder_rate_control(kind, media.manifest().recommended_bitrate_bps);
     let mut transcoder = H264WatermarkTranscoder::new(
         width,
         height,
         media.manifest().frame_rate_numerator,
         media.manifest().frame_rate_denominator,
-        bitrate,
+        rate_control,
         &input_sps,
         &input_pps,
     )?;
@@ -590,9 +635,14 @@ fn initialize_pipeline(
             let ready = PipelineReady {
                 sps: Arc::from(state.sps.clone()),
                 pps: Arc::from(state.pps.clone()),
-                bitrate_bps: bitrate,
+                bitrate_bps: descriptor.average_bitrate_bps,
+                maximum_bitrate_bps: descriptor.maximum_bitrate_bps,
+                buffer_size_bits: descriptor.buffer_size_bits,
+                encoder_backend: Arc::from(descriptor.backend),
                 encoder_name: Arc::from(descriptor.encoder_name),
                 hardware: descriptor.hardware,
+                rate_control_mode: Arc::from(descriptor.rate_control_mode),
+                all_idr: descriptor.all_idr,
             };
             return Ok((transcoder, state, ready));
         }
@@ -1067,10 +1117,29 @@ mod tests {
     }
 
     #[test]
-    fn all_idr_watermark_bitrate_has_quality_headroom_and_a_hard_cap() {
-        assert_eq!(watermark_encoder_bitrate_bps(4_000_000), 16_000_000);
-        assert_eq!(watermark_encoder_bitrate_bps(30_000_000), 100_000_000);
-        assert_eq!(watermark_encoder_bitrate_bps(100_000_000), 100_000_000);
+    fn all_idr_watermark_rate_control_has_per_stream_quality_headroom_and_a_hard_cap() {
+        let legacy_main = watermark_encoder_rate_control(RuntimeMediaKind::Main, 3_400_000);
+        assert_eq!(legacy_main.average_bitrate_bps, 18_000_000);
+        assert_eq!(legacy_main.maximum_bitrate_bps, 27_000_000);
+        assert_eq!(legacy_main.buffer_size_bits, 18_000_000);
+
+        let improved_main = watermark_encoder_rate_control(RuntimeMediaKind::Main, 6_000_000);
+        assert_eq!(improved_main.average_bitrate_bps, 24_000_000);
+        assert_eq!(improved_main.maximum_bitrate_bps, 36_000_000);
+
+        for kind in [RuntimeMediaKind::Sub, RuntimeMediaKind::Third] {
+            let legacy = watermark_encoder_rate_control(kind, 500_000);
+            assert_eq!(legacy.average_bitrate_bps, 2_500_000);
+            assert_eq!(legacy.maximum_bitrate_bps, 3_750_000);
+            let improved = watermark_encoder_rate_control(kind, 1_000_000);
+            assert_eq!(improved.average_bitrate_bps, 4_000_000);
+            assert_eq!(improved.maximum_bitrate_bps, 6_000_000);
+        }
+
+        let capped = watermark_encoder_rate_control(RuntimeMediaKind::Main, 100_000_000);
+        assert_eq!(capped.average_bitrate_bps, 100_000_000);
+        assert_eq!(capped.maximum_bitrate_bps, 100_000_000);
+        assert_eq!(capped.buffer_size_bits, 100_000_000);
     }
 
     #[test]
@@ -1212,6 +1281,9 @@ mod tests {
             };
             let media = crate::device_simulator::media::load_media_pack(&pack, &manifest).unwrap();
             let input_sps = media.parameter_set(ParameterSetKind::Sps).unwrap();
+            let frame_duration_ticks = constant_frame_duration(&media).unwrap();
+            let expected_rate_control =
+                watermark_encoder_rate_control(kind, media.manifest().recommended_bitrate_bps);
             let started = start_pipeline(kind, media, Arc::clone(&shutdown), None).await;
             let (source, task) = match started {
                 Ok(started) => started,
@@ -1223,6 +1295,41 @@ mod tests {
                     panic!("{name} High Profile watermark encoder failed: {error}");
                 }
             };
+            assert_eq!(
+                source.bitrate_bps,
+                u64::from(expected_rate_control.average_bitrate_bps)
+            );
+            assert_eq!(
+                source.maximum_bitrate_bps,
+                u64::from(expected_rate_control.maximum_bitrate_bps)
+            );
+            assert_eq!(
+                source.buffer_size_bits,
+                u64::from(expected_rate_control.buffer_size_bits)
+            );
+            assert_eq!(source.encoder_backend.as_ref(), "media-foundation");
+            assert!(source.all_idr);
+
+            let mut receiver = source.scheduler.subscribe();
+            let capture_started_at = Instant::now();
+            let mut captured = Vec::with_capacity(11);
+            while captured.len() < 11 {
+                captured.push(
+                    tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+                        .await
+                        .expect("watermark stream stopped producing at its declared cadence")
+                        .unwrap(),
+                );
+            }
+            assert!(
+                capture_started_at.elapsed() >= Duration::from_millis(300),
+                "{name} emitted 11 watermarked frames too quickly"
+            );
+            assert!(captured.iter().all(|frame| frame.access_unit.keyframe));
+            assert!(captured.windows(2).all(|pair| {
+                pair[1].timestamp.wrapping_sub(pair[0].timestamp) % frame_duration_ticks == 0
+            }));
+            drop(receiver);
             observed.push((
                 name,
                 (input_sps[1], input_sps[3]),
@@ -1429,9 +1536,13 @@ mod tests {
                 .unwrap();
         assert_eq!(
             source.bitrate_bps,
-            u64::from(watermark_encoder_bitrate_bps(source_bitrate_bps)),
+            u64::from(
+                watermark_encoder_rate_control(RuntimeMediaKind::Main, source_bitrate_bps)
+                    .average_bitrate_bps
+            ),
             "the all-IDR watermark stream must expose its increased encoder bitrate"
         );
+        assert!(source.all_idr);
         let watermark_probe = record_and_probe_rtsp_source(
             "watermark",
             source.scheduler.clone(),

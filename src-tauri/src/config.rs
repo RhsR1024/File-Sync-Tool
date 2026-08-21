@@ -6,8 +6,8 @@ use tauri::Manager;
 
 use crate::clipboard::models::ClipboardSettings;
 use app_lib::device_simulator::api::{
-    DeviceGroupDraft, PlatformAccessMode, RtspPorts, TargetPlatformServer,
-    DEFAULT_ALARM_RECEIVER_PORT, DEFAULT_MEDIA_THEME_ID,
+    DeviceGroupDraft, PlatformAccessMode, RtspPorts, DEFAULT_ALARM_RECEIVER_PORT,
+    DEFAULT_MEDIA_THEME_ID,
 };
 use app_lib::device_simulator::profiles::identity::MAX_PREVIEW_DEVICES;
 use app_lib::device_simulator::profiles::scope::TargetPlatform;
@@ -15,6 +15,31 @@ use app_lib::device_simulator::profiles::scope::TargetPlatform;
 pub const MIN_SCAN_INTERVAL_MINS: u64 = 5;
 pub const MIN_STABILITY_CHECK_SECS: u64 = 60;
 pub const MIN_RECENT_FILE_GUARD_MINS: u64 = 3;
+
+/// Persisted UMS connection details. Login credentials deliberately stay out of
+/// `TargetPlatformServer`, which crosses the virtual-device Worker boundary.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlatformServerSettings {
+    pub id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    /// Intentionally persisted as clear text so the settings UI can reveal it on demand.
+    pub password: String,
+}
+
+impl Default for PlatformServerSettings {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            host: String::new(),
+            port: 80,
+            username: String::new(),
+            password: String::new(),
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
@@ -28,7 +53,7 @@ pub struct DeviceSimulatorSettings {
     pub last_start_ip: Option<std::net::Ipv4Addr>,
     pub last_device_ips: Vec<std::net::Ipv4Addr>,
     pub last_subnet_prefix: u8,
-    pub last_platform_servers: Vec<TargetPlatformServer>,
+    pub last_platform_servers: Vec<PlatformServerSettings>,
     pub last_platform_access_mode: PlatformAccessMode,
     pub last_alarm_receiver_url: Option<String>,
     pub last_alarm_receiver_port: Option<u16>,
@@ -39,9 +64,11 @@ pub struct DeviceSimulatorSettings {
     pub last_time_watermark_enabled: bool,
     pub auto_check_asset_updates: bool,
     pub manage_firewall: bool,
-    /// UMS platform login account used only by the main process when registering devices.
+    /// Legacy global UMS account. Normalization migrates it into every saved server and clears it.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub platform_username: String,
-    /// Intentionally persisted as clear text so the settings UI can reveal it on demand.
+    /// Legacy global UMS password retained only for upgrading existing settings.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub platform_password: String,
     /// Register all devices with every configured UMS after the simulator reaches Running.
     pub platform_auto_add_devices: bool,
@@ -258,6 +285,11 @@ pub struct AppConfig {
     #[serde(default = "default_recent_file_guard_mins")]
     pub recent_file_guard_mins: u64,
 
+    /// When today's date folder has no matching package, search the previous three days
+    /// and copy only the newest package from the first date that contains one.
+    #[serde(default = "default_fallback_recent_package_enabled")]
+    pub fallback_recent_package_enabled: bool,
+
     #[serde(default)]
     pub launch_and_auto_scan: bool,
 
@@ -346,6 +378,7 @@ pub struct SyncConfigPatch {
     pub local_command_groups: Vec<LocalCommandGroup>,
     pub stability_check_secs: u64,
     pub recent_file_guard_mins: u64,
+    pub fallback_recent_package_enabled: bool,
     pub copy_buffer_size_kb: u32,
     pub copy_mode: CopyMode,
 }
@@ -382,6 +415,7 @@ pub fn apply_sync_patch(config: &mut AppConfig, patch: SyncConfigPatch) {
     config.local_command_groups = patch.local_command_groups;
     config.stability_check_secs = patch.stability_check_secs;
     config.recent_file_guard_mins = patch.recent_file_guard_mins;
+    config.fallback_recent_package_enabled = patch.fallback_recent_package_enabled;
     config.copy_buffer_size_kb = patch.copy_buffer_size_kb;
     config.copy_mode = patch.copy_mode;
 }
@@ -429,6 +463,9 @@ fn default_stability_secs() -> u64 {
 }
 fn default_recent_file_guard_mins() -> u64 {
     MIN_RECENT_FILE_GUARD_MINS
+}
+fn default_fallback_recent_package_enabled() -> bool {
+    true
 }
 fn default_max_log_lines() -> u32 {
     200
@@ -505,6 +542,7 @@ impl Default for AppConfig {
             local_command_groups: vec![],
             stability_check_secs: 120,
             recent_file_guard_mins: MIN_RECENT_FILE_GUARD_MINS,
+            fallback_recent_package_enabled: true,
             launch_and_auto_scan: false,
             launch_and_auto_start_file_share: false,
             close_to_tray: false,
@@ -650,17 +688,27 @@ pub fn normalize_device_simulator_settings(
     settings
         .last_device_ips
         .retain(|address| seen_ips.insert(*address));
+    let legacy_platform_username = settings.platform_username.trim().to_owned();
+    let legacy_platform_password = settings.platform_password.clone();
     settings.last_platform_servers.truncate(8);
     settings.last_platform_servers.retain_mut(|server| {
         server.id = server.id.trim().to_owned();
         server.host = server.host.trim().to_owned();
+        server.username = server.username.trim().to_owned();
+        if server.username.is_empty() && !legacy_platform_username.is_empty() {
+            server.username.clone_from(&legacy_platform_username);
+        }
+        if server.password.is_empty() && !legacy_platform_password.is_empty() {
+            server.password.clone_from(&legacy_platform_password);
+        }
         !server.id.is_empty()
             && server.id.len() <= 128
             && !server.host.is_empty()
             && server.host.len() <= 253
             && server.port > 0
     });
-    settings.platform_username = settings.platform_username.trim().to_owned();
+    settings.platform_username.clear();
+    settings.platform_password.clear();
     settings.last_alarm_receiver_url = settings
         .last_alarm_receiver_url
         .take()
@@ -738,9 +786,14 @@ pub fn validate_device_simulator_settings(
         return Err("Device simulator subnet prefix must be between 1 and 30".into());
     }
     if settings.platform_auto_add_devices && !settings.last_platform_servers.is_empty() {
-        if settings.platform_username.is_empty() || settings.platform_password.is_empty() {
+        if settings
+            .last_platform_servers
+            .iter()
+            .any(|server| server.username.is_empty() || server.password.is_empty())
+        {
             return Err(
-                "Automatic platform registration requires a UMS username and password".into(),
+                "Automatic platform registration requires a UMS username and password for every server"
+                    .into(),
             );
         }
     }
@@ -1174,6 +1227,7 @@ mod tests {
             "local_command_groups": config.local_command_groups,
             "stability_check_secs": config.stability_check_secs,
             "recent_file_guard_mins": config.recent_file_guard_mins,
+            "fallback_recent_package_enabled": config.fallback_recent_package_enabled,
             "copy_buffer_size_kb": config.copy_buffer_size_kb,
             "copy_mode": config.copy_mode,
         })
@@ -1231,6 +1285,7 @@ mod tests {
                 local_command_groups: vec![],
                 stability_check_secs: 180,
                 recent_file_guard_mins: 5,
+                fallback_recent_package_enabled: false,
                 copy_buffer_size_kb: 8192,
                 copy_mode: CopyMode::WindowsShell,
             },
@@ -1239,6 +1294,7 @@ mod tests {
         assert_eq!(config.local_path, r"D:\sync");
         assert_eq!(config.interval_minutes, 15);
         assert!(config.deploy_enabled);
+        assert!(!config.fallback_recent_package_enabled);
         assert_eq!(config.copy_mode, CopyMode::WindowsShell);
         assert_eq!(app_and_backend_domain_snapshot(&config), preserved);
     }
@@ -1420,18 +1476,59 @@ mod tests {
         };
         assert!(validate_device_simulator_settings(&settings).is_ok());
 
-        settings.last_platform_servers.push(TargetPlatformServer {
+        settings.last_platform_servers.push(PlatformServerSettings {
             id: "ums-1".into(),
             host: "192.115.1.17".into(),
             port: 80,
+            username: "loadmin".into(),
+            password: "admin_123".into(),
         });
         assert!(validate_device_simulator_settings(&settings).is_ok());
 
-        settings.platform_password.clear();
+        settings.last_platform_servers[0].password.clear();
         assert!(validate_device_simulator_settings(&settings).is_err());
 
         settings.last_platform_servers.clear();
         assert!(validate_device_simulator_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn legacy_global_platform_credentials_migrate_to_each_server() {
+        let settings: DeviceSimulatorSettings = serde_json::from_value(serde_json::json!({
+            "last_platform_servers": [
+                { "id": "ums-1", "host": "192.115.1.17", "port": 80 },
+                { "id": "ums-2", "host": "192.115.1.18", "port": 80 }
+            ],
+            "platform_username": " loadmin ",
+            "platform_password": "admin_123"
+        }))
+        .unwrap();
+
+        let normalized = normalize_device_simulator_settings(settings);
+        assert!(normalized.platform_username.is_empty());
+        assert!(normalized.platform_password.is_empty());
+        assert!(normalized
+            .last_platform_servers
+            .iter()
+            .all(|server| server.username == "loadmin" && server.password == "admin_123"));
+        let serialized = serde_json::to_value(normalized).unwrap();
+        assert!(serialized.get("platform_username").is_none());
+        assert!(serialized.get("platform_password").is_none());
+    }
+
+    #[test]
+    fn older_server_settings_without_registration_fields_receive_legacy_defaults() {
+        let settings: DeviceSimulatorSettings = serde_json::from_value(serde_json::json!({
+            "last_platform_servers": [
+                { "id": "ums-1", "host": "192.115.1.17", "port": 80 }
+            ]
+        }))
+        .unwrap();
+
+        let normalized = normalize_device_simulator_settings(settings);
+        assert_eq!(normalized.last_platform_servers[0].username, "loadmin");
+        assert_eq!(normalized.last_platform_servers[0].password, "admin_123");
+        assert!(validate_device_simulator_settings(&normalized).is_ok());
     }
 
     #[test]
@@ -1480,6 +1577,7 @@ mod tests {
         assert_eq!(cfg.update_server_url, "http://192.115.1.3:8080");
         assert!(cfg.notify_on_new_version);
         assert!(cfg.sync_task_notifications_enabled);
+        assert!(cfg.fallback_recent_package_enabled);
         assert_eq!(cfg.copy_mode, CopyMode::BuiltIn);
         assert!(cfg.last_update_check_at.is_none());
         assert!(cfg.pending_update.is_none());

@@ -16,6 +16,7 @@ const config = {
   local_command_groups: [{ id: 'local-group' }],
   stability_check_secs: 180,
   recent_file_guard_mins: 5,
+  fallback_recent_package_enabled: true,
   copy_buffer_size_kb: 8192,
   copy_mode: 'windows_shell',
   launch_and_auto_scan: true,
@@ -84,6 +85,7 @@ test('config domain patches preserve the exact values owned by each domain', () 
   assert.equal(syncPatch.tasks, config.tasks);
   assert.equal(syncPatch.copy_buffer_size_kb, 8192);
   assert.equal(syncPatch.copy_mode, 'windows_shell');
+  assert.equal(syncPatch.fallback_recent_package_enabled, true);
   assert.equal(appPatch.clipboard, config.clipboard);
   assert.equal(appPatch.device_simulator, config.device_simulator);
   assert.equal(appPatch.portal_login, config.portal_login);

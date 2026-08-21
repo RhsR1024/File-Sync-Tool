@@ -5,7 +5,7 @@ use crate::config::{
 };
 use crate::deploy::deploy_to_remote;
 use crate::local_exec::{self, LocalExecContext, LocalExecResult};
-use crate::task_domain::{TaskSourceType, TaskTriggerSource};
+use crate::task_domain::{CopyState, TaskSourceType, TaskTriggerSource};
 use crate::task_manager::{TaskManager, TaskRunHandle, TaskStartRequest};
 use crate::task_runtime::{ActiveRunExecution, TaskRuntimeRegistry};
 use crate::windows_copy::{copy_files_with_dialog, WindowsCopyError, WindowsCopyRequest};
@@ -108,6 +108,138 @@ struct Candidate {
     datetime: NaiveDateTime,
 }
 
+#[derive(Debug, Clone)]
+struct DateBuildCandidate {
+    path: PathBuf,
+    name: String,
+    latest_modified: SystemTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileFilterResult {
+    Match,
+    Extension,
+    Keyword,
+}
+
+fn file_filter_result(
+    file_name: &str,
+    extensions: &[String],
+    includes: &[String],
+) -> FileFilterResult {
+    if !extensions.is_empty() {
+        let name_lower = file_name.to_lowercase();
+        let extension_matches = extensions.iter().any(|configured_ext| {
+            let configured_ext = configured_ext.to_lowercase();
+            let suffix = if configured_ext.starts_with('.') {
+                configured_ext
+            } else {
+                format!(".{configured_ext}")
+            };
+            name_lower.ends_with(&suffix)
+        });
+        if !extension_matches {
+            return FileFilterResult::Extension;
+        }
+    }
+
+    if !includes.is_empty() && !includes.iter().any(|include| file_name.contains(include)) {
+        return FileFilterResult::Keyword;
+    }
+
+    FileFilterResult::Match
+}
+
+fn latest_matching_file_modified(
+    root: &Path,
+    extensions: &[String],
+    includes: &[String],
+) -> Option<SystemTime> {
+    let mut latest = None;
+    let mut dirs_to_visit = vec![root.to_path_buf()];
+
+    while let Some(current_dir) = dirs_to_visit.pop() {
+        let Ok(entries) = std::fs::read_dir(current_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                dirs_to_visit.push(entry.path());
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_filter_result(&file_name, extensions, includes) != FileFilterResult::Match {
+                continue;
+            }
+
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            latest = Some(latest.map_or(modified, |current: SystemTime| current.max(modified)));
+        }
+    }
+
+    latest
+}
+
+fn sort_date_build_candidates(candidates: &mut [DateBuildCandidate]) {
+    candidates.sort_by(|left, right| {
+        right
+            .latest_modified
+            .cmp(&left.latest_modified)
+            .then_with(|| right.name.cmp(&left.name))
+    });
+}
+
+/// Return `None` when the date path does not exist or is not a directory. Existing date
+/// directories return their build folders that contain at least one file matching the active
+/// copy filters, newest product-file timestamp first.
+fn scan_date_build_candidates(
+    date_path: &Path,
+    extensions: &[String],
+    includes: &[String],
+) -> std::io::Result<Option<Vec<DateBuildCandidate>>> {
+    let metadata = match std::fs::metadata(date_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() {
+        return Ok(None);
+    }
+
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(date_path)?.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(latest_modified) = latest_matching_file_modified(&path, extensions, includes)
+        else {
+            continue;
+        };
+        candidates.push(DateBuildCandidate {
+            path,
+            name: entry.file_name().to_string_lossy().to_string(),
+            latest_modified,
+        });
+    }
+
+    sort_date_build_candidates(&mut candidates);
+    Ok(Some(candidates))
+}
+
 // Global mutex to serialize log rotation + write, preventing concurrent rotation races
 static LOG_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 fn get_log_mutex() -> &'static Mutex<()> {
@@ -208,6 +340,45 @@ fn copy_was_cancelled(
     task_manager.last_copy_was_cancelled(
         &source_path.to_string_lossy(),
         &local_target_path.to_string_lossy(),
+    )
+}
+
+fn fallback_copy_skip_state(
+    task_manager: &TaskManager,
+    source_path: &Path,
+    local_target_path: &Path,
+) -> Option<CopyState> {
+    task_manager
+        .latest_fallback_copy_state(
+            &source_path.to_string_lossy(),
+            &local_target_path.to_string_lossy(),
+        )
+        .filter(copy_state_blocks_fallback)
+}
+
+fn copy_state_blocks_fallback(state: &CopyState) -> bool {
+    matches!(
+        state,
+        CopyState::Pending
+            | CopyState::Running
+            | CopyState::Completed
+            | CopyState::Cancelled
+            | CopyState::Interrupted
+    )
+}
+
+fn fallback_skip_message(folder_name: &str, state: &CopyState) -> String {
+    let reason = match state {
+        CopyState::Pending => "is already queued",
+        CopyState::Running => "is already copying",
+        CopyState::Completed => "was already copied",
+        CopyState::Cancelled => "was cancelled by the user",
+        CopyState::Interrupted => "was interrupted",
+        CopyState::Failed => "failed previously",
+    };
+    format!(
+        "Skipping fallback package '{}' because its latest copy {}. Older packages will not be selected.",
+        folder_name, reason
     )
 }
 
@@ -1299,51 +1470,20 @@ async fn perform_copy<R: tauri::Runtime>(
                         total_files_scanned += 1;
                         // File Check
                         let file_name = entry.file_name().to_string_lossy().to_string();
-                        let mut ext_match = true;
-                        if !extensions.is_empty() {
-                            let name_lower = file_name.to_lowercase();
-                            let mut any_match = false;
-                            for configured_ext in &extensions {
-                                let conf_lower = configured_ext.to_lowercase();
-                                let suffix = if conf_lower.starts_with('.') {
-                                    conf_lower.clone()
-                                } else {
-                                    format!(".{}", conf_lower)
-                                };
-
-                                if name_lower.ends_with(&suffix) {
-                                    any_match = true;
-                                    break;
+                        match file_filter_result(&file_name, &extensions, &includes) {
+                            FileFilterResult::Match => {}
+                            FileFilterResult::Extension => {
+                                if skipped_by_ext.len() < 20 {
+                                    skipped_by_ext.push(file_name.clone());
                                 }
+                                continue;
                             }
-
-                            if !any_match {
-                                ext_match = false;
-                            }
-                        }
-
-                        let mut inc_match = true;
-                        if !includes.is_empty() {
-                            inc_match = false;
-                            for inc in &includes {
-                                if file_name.contains(inc) {
-                                    inc_match = true;
-                                    break;
+                            FileFilterResult::Keyword => {
+                                if skipped_by_keyword.len() < 20 {
+                                    skipped_by_keyword.push(file_name.clone());
                                 }
+                                continue;
                             }
-                        }
-
-                        if !ext_match {
-                            if skipped_by_ext.len() < 20 {
-                                skipped_by_ext.push(file_name.clone());
-                            }
-                            continue;
-                        }
-                        if !inc_match {
-                            if skipped_by_keyword.len() < 20 {
-                                skipped_by_keyword.push(file_name.clone());
-                            }
-                            continue;
                         }
 
                         let rel_path = path.strip_prefix(&source_path_clone).unwrap_or(&path);
@@ -2844,61 +2984,80 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                 let today_name = now_local.format(fmt).to_string();
                 let yesterday_name = (now_local - Duration::days(1)).format(fmt).to_string();
 
-                // Only check yesterday during the first hour of a new day (00:00–01:00),
-                // to catch files that were generated near midnight but missed by the last
-                // scan of the previous day. perform_copy is incremental so re-scanning
-                // yesterday costs nothing once all files have already been copied.
                 let is_first_hour = now_local.hour() == 0;
-                let dirs_to_check: Vec<String> = if is_first_hour && yesterday_name != today_name {
-                    vec![today_name.clone(), yesterday_name]
+                let fallback_enabled = config.fallback_recent_package_enabled;
+                let mut dirs_to_check: Vec<(i64, String)> = if fallback_enabled {
+                    (0..=3)
+                        .map(|offset| {
+                            (
+                                offset,
+                                (now_local - Duration::days(offset)).format(fmt).to_string(),
+                            )
+                        })
+                        .collect()
+                } else if is_first_hour && yesterday_name != today_name {
+                    vec![(0, today_name.clone()), (1, yesterday_name)]
                 } else {
-                    vec![today_name.clone()]
+                    vec![(0, today_name.clone())]
                 };
+                let mut seen_date_names = HashSet::new();
+                dirs_to_check.retain(|(_, name)| seen_date_names.insert(name.clone()));
 
                 emit_log(
                     app_handle,
                     format!(
                         "Checking date-based folder(s): {}",
-                        dirs_to_check.join(", ")
+                        dirs_to_check
+                            .iter()
+                            .map(|(_, name)| name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                     "info",
                 );
 
-                for target_name in dirs_to_check {
+                for (day_offset, target_name) in dirs_to_check {
                     if should_cancel.load(Ordering::SeqCst) {
                         emit_log(app_handle, "Scan cancelled by user".to_string(), "info");
                         return result;
                     }
 
                     let target_path = path.join(&target_name);
-
-                    if !target_path.exists() || !target_path.is_dir() {
-                        emit_log(
-                            app_handle,
-                            format!(
-                                "Folder {} does not exist in {}",
-                                target_name, task.remote_path
-                            ),
-                            "info",
-                        );
-                        continue;
-                    }
-
-                    emit_log(
-                        app_handle,
-                        format!("Found candidate folder: {}", target_name),
-                        "success",
-                    );
-
-                    let local_target_base = local_parent.join(&target_name);
-
-                    let mut sub_entries = match fs::read_dir(&target_path).await {
-                        Ok(e) => e,
-                        Err(e) => {
+                    let scan_target_path = target_path.clone();
+                    let extensions = config.file_extensions.clone();
+                    let includes = config.filename_includes.clone();
+                    let mut candidates = match tauri::async_runtime::spawn_blocking(move || {
+                        scan_date_build_candidates(&scan_target_path, &extensions, &includes)
+                    })
+                    .await
+                    {
+                        Ok(Ok(Some(candidates))) => candidates,
+                        Ok(Ok(None)) => {
+                            emit_log(
+                                app_handle,
+                                format!(
+                                    "Folder {} does not exist in {}",
+                                    target_name, task.remote_path
+                                ),
+                                "info",
+                            );
+                            continue;
+                        }
+                        Ok(Err(error)) => {
                             let err = format!(
                                 "Failed to list contents of {}: {}",
                                 target_path.display(),
-                                e
+                                error
+                            );
+                            emit_log(app_handle, err.clone(), "error");
+                            result.errors.push(err);
+                            continue;
+                        }
+                        Err(error) => {
+                            let err = format!(
+                                "Failed to inspect date folder {}: {}",
+                                target_path.display(),
+                                error
                             );
                             emit_log(app_handle, err.clone(), "error");
                             result.errors.push(err);
@@ -2906,32 +3065,52 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         }
                     };
 
-                    // Pass 1: Collect all subdirectories
-                    let mut sub_dirs: Vec<(PathBuf, String)> = Vec::new();
-                    while let Ok(Some(entry)) = sub_entries.next_entry().await {
-                        let sub_path = entry.path();
-                        if sub_path.is_dir() {
-                            let sub_name = entry.file_name().to_string_lossy().to_string();
-                            sub_dirs.push((sub_path, sub_name));
-                        }
-                    }
-
-                    if sub_dirs.is_empty() {
+                    if candidates.is_empty() {
                         emit_log(
                             app_handle,
-                            format!("No build directories found in {}", target_name),
+                            format!(
+                                "No product packages matching the active copy rules were found in {}",
+                                target_name
+                            ),
                             "info",
                         );
                         continue;
                     }
 
-                    // Pass 2: Process each folder
-                    for (sub_path, sub_name) in sub_dirs {
+                    let is_fallback = fallback_enabled && day_offset > 0;
+                    if is_fallback {
+                        candidates.truncate(1);
+                        emit_log(
+                            app_handle,
+                            format!(
+                                "Today's folder has no matching package. Using newest fallback package '{}' from {}.",
+                                candidates[0].name, target_name
+                            ),
+                            "success",
+                        );
+                    } else {
+                        // Preserve today's existing incremental behavior: every matching build
+                        // remains eligible. Only a previous-date fallback is narrowed to one.
+                        emit_log(
+                            app_handle,
+                            format!(
+                                "Found {} matching product package(s) in {}",
+                                candidates.len(),
+                                target_name
+                            ),
+                            "success",
+                        );
+                    }
+
+                    let local_target_base = local_parent.join(&target_name);
+                    for candidate in candidates {
                         if should_cancel.load(Ordering::SeqCst) {
                             emit_log(app_handle, "Scan cancelled by user".to_string(), "info");
                             return result;
                         }
 
+                        let sub_path = candidate.path;
+                        let sub_name = candidate.name;
                         let local_target_path = local_target_base.join(&sub_name);
                         if task_record_ignored_in(
                             &cached_task_records,
@@ -2946,7 +3125,20 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             continue;
                         }
 
-                        if copy_was_cancelled(&task_manager, &sub_path, &local_target_path) {
+                        if is_fallback {
+                            if let Some(state) = fallback_copy_skip_state(
+                                &task_manager,
+                                &sub_path,
+                                &local_target_path,
+                            ) {
+                                emit_log(
+                                    app_handle,
+                                    fallback_skip_message(&sub_name, &state),
+                                    "info",
+                                );
+                                continue;
+                            }
+                        } else if copy_was_cancelled(&task_manager, &sub_path, &local_target_path) {
                             emit_log(app_handle, cancelled_skip_message(&sub_name), "info");
                             continue;
                         }
@@ -3001,6 +3193,13 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         )
                         .await;
                         should_skip.store(false, Ordering::SeqCst);
+                    }
+
+                    // With fallback enabled, the first date containing a usable package wins.
+                    // If its newest package was already handled or stopped by the user, do not
+                    // silently select an older package from this or another date.
+                    if fallback_enabled {
+                        break;
                     }
                 }
             }
@@ -3100,5 +3299,95 @@ mod tests {
             "Release_01",
             Path::new("D:/target/Release_01")
         ));
+    }
+
+    #[test]
+    fn file_filter_result_matches_copy_filter_semantics() {
+        let extensions = vec!["exe".to_string(), ".tar.gz".to_string()];
+        let includes = vec!["UNV_Guard".to_string()];
+
+        assert_eq!(
+            file_filter_result("UNV_Guard-WIN.EXE", &extensions, &includes),
+            FileFilterResult::Match
+        );
+        assert_eq!(
+            file_filter_result("UNV_Guard-linux.zip", &extensions, &includes),
+            FileFilterResult::Extension
+        );
+        assert_eq!(
+            file_filter_result("unv_guard-WIN.EXE", &extensions, &includes),
+            FileFilterResult::Keyword
+        );
+        assert_eq!(
+            file_filter_result("anything.bin", &[], &[]),
+            FileFilterResult::Match
+        );
+    }
+
+    #[test]
+    fn date_candidate_scan_ignores_empty_and_nonmatching_builds() {
+        let dir = tempdir().expect("temp dir");
+        let date_dir = dir.path().join("260819");
+        let empty_build = date_dir.join("C100");
+        let unrelated_build = date_dir.join("C200");
+        let matching_build = date_dir.join("C300");
+        fs::create_dir_all(&empty_build).unwrap();
+        fs::create_dir_all(&unrelated_build).unwrap();
+        fs::create_dir_all(matching_build.join("nested")).unwrap();
+        fs::write(unrelated_build.join("notes.txt"), b"notes").unwrap();
+        fs::write(matching_build.join("nested/UNV_Guard-win.EXE"), b"package").unwrap();
+
+        let candidates =
+            scan_date_build_candidates(&date_dir, &["exe".to_string()], &["UNV_Guard".to_string()])
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "C300");
+    }
+
+    #[test]
+    fn date_candidates_sort_by_latest_product_time_then_name() {
+        let mut candidates = vec![
+            DateBuildCandidate {
+                path: PathBuf::from("C100"),
+                name: "C100".to_string(),
+                latest_modified: UNIX_EPOCH + StdDuration::from_secs(10),
+            },
+            DateBuildCandidate {
+                path: PathBuf::from("C200"),
+                name: "C200".to_string(),
+                latest_modified: UNIX_EPOCH + StdDuration::from_secs(20),
+            },
+            DateBuildCandidate {
+                path: PathBuf::from("C300"),
+                name: "C300".to_string(),
+                latest_modified: UNIX_EPOCH + StdDuration::from_secs(20),
+            },
+        ];
+
+        sort_date_build_candidates(&mut candidates);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["C300", "C200", "C100"]
+        );
+    }
+
+    #[test]
+    fn failed_copy_remains_retryable_but_other_recorded_states_block_fallback() {
+        for state in [
+            CopyState::Pending,
+            CopyState::Running,
+            CopyState::Completed,
+            CopyState::Cancelled,
+            CopyState::Interrupted,
+        ] {
+            assert!(copy_state_blocks_fallback(&state), "state: {state:?}");
+        }
+        assert!(!copy_state_blocks_fallback(&CopyState::Failed));
     }
 }

@@ -17,6 +17,7 @@ function makeConfig(overrides = {}) {
     local_command_groups: [],
     stability_check_secs: 180,
     recent_file_guard_mins: 5,
+    fallback_recent_package_enabled: true,
     copy_buffer_size_kb: 4096,
     copy_mode: 'built_in',
     launch_and_auto_scan: false,
@@ -105,6 +106,7 @@ test('saveSync sends only the sync patch, refreshes, then restarts the scheduler
 
   assert.equal('pending_update' in calls[0][1], false);
   assert.equal(calls[0][1].interval_minutes, 15);
+  assert.equal(calls[0][1].fallback_recent_package_enabled, true);
   assert.deepEqual(calls.slice(1), [['restart']]);
   assert.equal(store.config?.interval_minutes, 20);
 });

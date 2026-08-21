@@ -67,7 +67,7 @@ export interface DeviceGroupDraft {
   count: number;
 }
 
-/** Persisted application-domain settings. Worker/session credentials never belong here. */
+/** Persisted application-domain settings. UMS credentials remain in the main process. */
 export interface DeviceSimulatorSettings {
   asset_server_url_override: string | null;
   local_materials_directory: string | null;
@@ -76,7 +76,7 @@ export interface DeviceSimulatorSettings {
   last_start_ip: string | null;
   last_device_ips: string[];
   last_subnet_prefix: number;
-  last_platform_servers: TargetPlatformServer[];
+  last_platform_servers: PlatformServerSettings[];
   last_platform_access_mode: PlatformAccessMode;
   last_alarm_receiver_url: string | null;
   last_alarm_receiver_port: number | null;
@@ -87,11 +87,14 @@ export interface DeviceSimulatorSettings {
   last_time_watermark_enabled: boolean;
   auto_check_asset_updates: boolean;
   manage_firewall: boolean;
-  /** UMS login credentials stay in the main process and are never sent to the Worker. */
-  platform_username: string;
-  platform_password: string;
   platform_auto_add_devices: boolean;
   platform_replace_existing_devices: boolean;
+}
+
+/** Per-server registration credentials; never copied into SimulatorStartRequest. */
+export interface PlatformServerSettings extends TargetPlatformServer {
+  username: string;
+  password: string;
 }
 
 export interface TargetPlatformServer {

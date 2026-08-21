@@ -466,10 +466,14 @@ impl TaskManager {
 
     /// Whether the newest recorded copy for this source/target pair was cancelled.
     ///
-    /// Matching on the paths rather than on the merge key means a manual re-copy of the
-    /// same folder counts too, even though it lands in its own group: a manual retry is
-    /// how the user takes a cancelled candidate off the skip list again.
-    pub fn last_copy_was_cancelled(&self, source_path: &str, local_target_path: &str) -> bool {
+    /// Return the latest copy state for an exact source/target pair across scheduled and
+    /// manual groups. Matching on paths rather than merge keys lets a successful manual
+    /// retry supersede an earlier cancelled scheduled run.
+    pub fn latest_copy_state(
+        &self,
+        source_path: &str,
+        local_target_path: &str,
+    ) -> Option<CopyState> {
         let source = normalize_path_for_merge(source_path);
         let target = normalize_path_for_merge(local_target_path);
         let state = self.inner.state.lock().unwrap();
@@ -482,7 +486,39 @@ impl TaskManager {
             })
             .flat_map(|group| group.runs.iter())
             .max_by_key(|run| run_start_millis(&run.started_at))
-            .is_some_and(|run| run.copy_phase == CopyState::Cancelled)
+            .map(|run| run.copy_phase.clone())
+    }
+
+    /// Return the latest state that represents the same fallback package. Scheduled runs
+    /// still require the exact source/target pair, while a manual run of the build directory
+    /// or any file below it also counts even when the user chose a different local target.
+    pub fn latest_fallback_copy_state(
+        &self,
+        candidate_source_path: &str,
+        local_target_path: &str,
+    ) -> Option<CopyState> {
+        let candidate_source = normalize_path_for_merge(candidate_source_path);
+        let target = normalize_path_for_merge(local_target_path);
+        let state = self.inner.state.lock().unwrap();
+        state
+            .groups
+            .iter()
+            .filter(|group| {
+                let group_source = normalize_path_for_merge(&group.source_path);
+                let exact_scheduled_pair = group_source == candidate_source
+                    && normalize_path_for_merge(&group.local_target_path) == target;
+                let manual_source_within_candidate = group.source_type == TaskSourceType::Manual
+                    && normalized_path_is_same_or_descendant(&group_source, &candidate_source);
+                exact_scheduled_pair || manual_source_within_candidate
+            })
+            .flat_map(|group| group.runs.iter())
+            .max_by_key(|run| run_start_millis(&run.started_at))
+            .map(|run| run.copy_phase.clone())
+    }
+
+    pub fn last_copy_was_cancelled(&self, source_path: &str, local_target_path: &str) -> bool {
+        self.latest_copy_state(source_path, local_target_path)
+            .is_some_and(|state| state == CopyState::Cancelled)
     }
 
     // Drop a scheduled run that produced no real work (0 files matched the copy rules).
@@ -1113,6 +1149,16 @@ fn run_start_millis(started_at: &str) -> i64 {
         .unwrap_or(i64::MIN)
 }
 
+fn normalized_path_is_same_or_descendant(path: &str, parent: &str) -> bool {
+    if parent.is_empty() {
+        return false;
+    }
+    path == parent
+        || path
+            .strip_prefix(parent)
+            .is_some_and(|suffix| suffix.starts_with('\\'))
+}
+
 fn compute_elapsed_seconds(started_at: &str, finished_at: Option<&str>) -> u64 {
     let Ok(start) = chrono::DateTime::parse_from_rfc3339(started_at) else {
         return 0;
@@ -1198,6 +1244,10 @@ mod tests {
         let source = request.source_path.clone();
         let target = request.local_target_path.clone();
         let handle = manager.begin_scheduled_copy(request);
+        assert_eq!(
+            manager.latest_copy_state(&source, &target),
+            Some(CopyState::Pending)
+        );
         assert!(!manager.last_copy_was_cancelled(&source, &target));
 
         manager
@@ -1205,6 +1255,10 @@ mod tests {
             .unwrap();
 
         assert!(manager.last_copy_was_cancelled(&source, &target));
+        assert_eq!(
+            manager.latest_copy_state(&source, &target),
+            Some(CopyState::Cancelled)
+        );
         // Path spelling differences must not let a cancelled candidate slip back in.
         assert!(manager.last_copy_was_cancelled(&source.to_lowercase(), &target.replace('\\', "/")));
         assert!(!manager.last_copy_was_cancelled(&source, "E:\\target\\Other"));
@@ -1227,6 +1281,10 @@ mod tests {
             .unwrap();
 
         assert!(!manager.last_copy_was_cancelled(&source, &target));
+        assert_eq!(
+            manager.latest_copy_state(&source, &target),
+            Some(CopyState::Failed)
+        );
     }
 
     #[test]
@@ -1256,6 +1314,77 @@ mod tests {
             .unwrap();
 
         assert!(!manager.last_copy_was_cancelled(&source, &target));
+        assert_eq!(
+            manager.latest_copy_state(&source, &target),
+            Some(CopyState::Completed)
+        );
+    }
+
+    #[test]
+    fn manual_file_under_build_blocks_that_fallback_candidate_only() {
+        let manager = TaskManager::new_in_memory();
+        let candidate = r"\\nt03\product\260819\C100";
+        let manual_file = format!(r"{candidate}\UNV_Guard-win.exe");
+        let manual = manager
+            .begin_manual_copy_run(StartManualCopyRequest {
+                display_name: "UNV_Guard-win.exe".to_string(),
+                folder_name: "UNV_Guard-win.exe".to_string(),
+                source_path: manual_file,
+                local_target_path: r"E:\UMS_TEMP\UNV_Guard-win.exe".to_string(),
+                trigger_source: TaskTriggerSource::Manual,
+            })
+            .unwrap();
+        manager
+            .mark_copy_completed(&manual.task_group_id, &manual.run_id, false)
+            .unwrap();
+
+        assert_eq!(
+            manager.latest_fallback_copy_state(candidate, r"E:\UMS_TEMP\GoProcess\260819\C100"),
+            Some(CopyState::Completed)
+        );
+        assert_eq!(
+            manager.latest_fallback_copy_state(
+                r"\\nt03\product\260819\C10",
+                r"E:\UMS_TEMP\GoProcess\260819\C10"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn descendant_path_matching_respects_component_boundaries() {
+        assert!(normalized_path_is_same_or_descendant(
+            r"\\nt03\product\c100\package.exe",
+            r"\\nt03\product\c100"
+        ));
+        assert!(!normalized_path_is_same_or_descendant(
+            r"\\nt03\product\c1000\package.exe",
+            r"\\nt03\product\c100"
+        ));
+    }
+
+    #[test]
+    fn interrupted_copy_is_reported_by_latest_copy_state() {
+        let manager = TaskManager::new_in_memory();
+        let request = TaskStartRequest::sample();
+        let source = request.source_path.clone();
+        let target = request.local_target_path.clone();
+        let handle = manager.begin_scheduled_copy(request);
+        manager
+            .mark_copy_started(&handle.task_group_id, &handle.run_id)
+            .unwrap();
+
+        assert_eq!(
+            manager.latest_copy_state(&source, &target),
+            Some(CopyState::Running)
+        );
+
+        manager.interrupt_in_progress_for_exit();
+
+        assert_eq!(
+            manager.latest_copy_state(&source, &target),
+            Some(CopyState::Interrupted)
+        );
     }
 
     #[test]

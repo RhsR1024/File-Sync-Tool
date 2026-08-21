@@ -27,7 +27,7 @@ defineOptions({ name: 'PaperTodoLauncherPage' });
 const { t, locale } = useI18n();
 const store = usePaperTodo();
 const expanded = ref(false);
-const masterCapsule = ref<HTMLElement | null>(null);
+const collapsedCapsuleMeasure = ref<HTMLElement | null>(null);
 const openingPaperId = ref<string | null>(null);
 const creatingKind = ref<'todo' | 'note' | null>(null);
 const deletingPaperId = ref<string | null>(null);
@@ -39,6 +39,9 @@ let collapseTimer: ReturnType<typeof setTimeout> | null = null;
 // them in user-action order so a slow startup sync cannot finish after a
 // later expand and leave the Vue state out of sync with the native window size.
 let launcherSyncQueue: Promise<void> = Promise.resolve();
+// Only the newest requested state may commit visible DOM. This coalesces rapid
+// keyboard activations and any refresh-driven sync that overlaps a user click.
+let launcherStateVersion = 0;
 let draggingLauncher = false;
 let paperDragFinished = false;
 // Last known pointer state, kept explicitly because the webview reports the
@@ -96,7 +99,7 @@ function noteLauncherHovered(): void {
  * native window is currently narrower than it.
  */
 function measureCapsuleWidth(): number | null {
-  const element = masterCapsule.value;
+  const element = collapsedCapsuleMeasure.value;
   if (!element) return null;
   const width = element.getBoundingClientRect().width;
   return width > 0 ? Math.ceil(width) : null;
@@ -120,7 +123,7 @@ function queueLauncherSync(
 
 async function setExpanded(value: boolean): Promise<void> {
   cancelCollapse();
-  expanded.value = value;
+  const stateVersion = ++launcherStateVersion;
   // Expanding both grows the window and slides it along the edge, and the
   // webview reports that reposition as a `mouseleave` the user never made.
   // Hold auto-collapse off for a fixed period so the list cannot fold itself
@@ -134,10 +137,14 @@ async function setExpanded(value: boolean): Promise<void> {
   // Reserve the creation row and, when there are no papers, the empty-state
   // row above it so both creation buttons remain inside the native window.
   const itemCount = expandedRowCount.value;
-  // Measure after the label has switched, so a collapse reports the width of
-  // the count it is about to show rather than the one it is leaving.
-  await nextTick();
+  // The hidden collapsed-state copy provides its width without changing the
+  // visible label first. Both directions can therefore update native geometry
+  // before committing DOM, eliminating the reverse-path flash under rapid
+  // expand/collapse clicks.
   await queueLauncherSync(value, itemCount, value ? null : measureCapsuleWidth());
+  if (stateVersion !== launcherStateVersion) return;
+  expanded.value = value;
+  await nextTick();
 }
 
 /** Re-report the collapsed capsule width after its label changed. */
@@ -359,7 +366,6 @@ onBeforeUnmount(() => {
     @contextmenu.prevent
   >
     <button
-      ref="masterCapsule"
       type="button"
       class="launcher-master-capsule launcher-drag-handle"
       :title="t('paperTodo.launcher.moveHint')"
@@ -375,6 +381,18 @@ onBeforeUnmount(() => {
         ? t('paperTodo.launcher.expandedLabel')
         : t('paperTodo.launcher.collapsedCount', { count: paperCount })
       }}</span>
+    </button>
+
+    <button
+      ref="collapsedCapsuleMeasure"
+      type="button"
+      class="launcher-master-capsule launcher-capsule-measurer"
+      tabindex="-1"
+      aria-hidden="true"
+      disabled
+    >
+      <ChevronRight class="launcher-chevron" aria-hidden="true" />
+      <span>{{ t('paperTodo.launcher.collapsedCount', { count: paperCount }) }}</span>
     </button>
 
     <ol
@@ -483,22 +501,18 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 2px rgb(94 70 29 / 0.08);
   transition: background-color 160ms ease, border-color 160ms ease, opacity 160ms ease;
 }
-/* `max-content` rather than a fixed width: the capsule is the whole control
-   now, so any slack past its label would be dead window hanging off the count.
-   It also keeps the measured width honest while the native window is still the
-   previous label's size. */
+/* `max-content` rather than a fixed width keeps the native collapsed window
+   matched to the rendered label instead of leaving transparent dead space. */
 .launcher-master-capsule {
   /* Deliberately uncapped: `max-width` would clamp the measurement to the
      window the capsule is trying to outgrow, so a longer label could never
-     report the width it needs. The surface clips the one frame of overflow. */
+     report the width it needs. */
   width: max-content;
   height: 31px;
   flex: 0 0 31px;
   cursor: grab;
   gap: 3px;
-  /* The flat side sits `LAUNCHER_EDGE_OVERHANG` past the screen border, so the
-     padding on that side is inflated to keep the visible inset even. */
-  padding: 0 14px 0 10px;
+  padding: 0 6px 0 10px;
   border-radius: 13px 0 0 13px;
   font-weight: 500;
   white-space: nowrap;
@@ -506,8 +520,15 @@ onBeforeUnmount(() => {
   text-align: left;
 }
 .launcher-master-capsule:active { cursor: grabbing; }
+.launcher-capsule-measurer {
+  position: fixed;
+  top: 0;
+  left: -10000px;
+  visibility: hidden;
+  pointer-events: none;
+}
 .launcher-left .launcher-master-capsule {
-  padding: 0 10px 0 14px;
+  padding: 0 10px 0 6px;
   border-radius: 0 13px 13px 0;
 }
 .launcher-master-capsule span {

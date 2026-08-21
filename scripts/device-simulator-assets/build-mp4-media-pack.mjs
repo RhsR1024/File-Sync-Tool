@@ -20,10 +20,18 @@ const NON_COMMERCIAL_USAGE = {
 };
 
 export const DEFAULT_STREAMS = [
-  { kind: "main", id: "mp4-main", width: 1920, height: 1080, fps: 25, bitrate: 3_400_000, pathIndex: 1 },
-  { kind: "sub", id: "mp4-sub", width: 640, height: 360, fps: 20, bitrate: 500_000, pathIndex: 2 },
-  { kind: "third", id: "mp4-third", width: 640, height: 360, fps: 20, bitrate: 500_000, pathIndex: 3 },
+  { kind: "main", id: "mp4-main", width: 1920, height: 1080, fps: 25, bitrate: 6_000_000, pathIndex: 1 },
+  { kind: "sub", id: "mp4-sub", width: 640, height: 360, fps: 20, bitrate: 1_000_000, pathIndex: 2 },
+  { kind: "third", id: "mp4-third", width: 640, height: 360, fps: 20, bitrate: 1_000_000, pathIndex: 3 },
 ];
+
+export const OFFLINE_H264_QUALITY = Object.freeze({
+  preset: "medium",
+  scaleFlags: "lanczos",
+  peakBitrateNumerator: 3,
+  peakBitrateDenominator: 2,
+  bufferSeconds: 2,
+});
 
 function fail(code, message) {
   const error = new Error(message);
@@ -124,23 +132,37 @@ async function inspectInput(ffprobe, input) {
   return { stream, format: document.format };
 }
 
-async function encodeStream(ffmpeg, input, output, config) {
+export function buildEncodeArguments(input, output, config) {
   const gop = config.fps * 2;
-  const scale = `scale=${config.width}:${config.height}:force_original_aspect_ratio=decrease,` +
+  const peakBitrate = Math.floor(
+    config.bitrate * OFFLINE_H264_QUALITY.peakBitrateNumerator /
+      OFFLINE_H264_QUALITY.peakBitrateDenominator,
+  );
+  const scale = `scale=${config.width}:${config.height}:force_original_aspect_ratio=decrease:` +
+    `flags=${OFFLINE_H264_QUALITY.scaleFlags},` +
     `pad=${config.width}:${config.height}:(ow-iw)/2:(oh-ih)/2:black,fps=${config.fps}`;
-  await run(ffmpeg, [
+  return [
     "-hide_banner", "-loglevel", "warning", "-y",
     "-i", input,
     "-map", "0:v:0", "-an",
     "-vf", scale,
-    "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-pix_fmt", "yuv420p",
+    "-c:v", "libx264", "-preset", OFFLINE_H264_QUALITY.preset, "-profile:v", "high", "-pix_fmt", "yuv420p",
     "-threads", "1",
-    "-b:v", String(config.bitrate), "-maxrate", String(config.bitrate), "-bufsize", String(config.bitrate * 2),
+    "-b:v", String(config.bitrate), "-maxrate", String(peakBitrate),
+    "-bufsize", String(config.bitrate * OFFLINE_H264_QUALITY.bufferSeconds),
     "-g", String(gop), "-keyint_min", String(gop), "-sc_threshold", "0", "-bf", "0",
     "-x264-params", "repeat-headers=1:aud=1:open-gop=0",
     "-fps_mode", "cfr", "-f", "h264",
     output,
-  ], `FFmpeg ${config.kind} encode`);
+  ];
+}
+
+async function encodeStream(ffmpeg, input, output, config) {
+  await run(
+    ffmpeg,
+    buildEncodeArguments(input, output, config),
+    `FFmpeg ${config.kind} encode`,
+  );
 }
 
 async function readAccessUnits(ffprobe, mediaPath, fps) {

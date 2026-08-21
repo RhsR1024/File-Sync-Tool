@@ -131,15 +131,31 @@ describe('paper todo standalone window lifecycle', () => {
     expect(dragLoop).not.toContain('start_dragging');
   });
 
-  it('sizes the collapsed launcher window to the capsule label', () => {
+  it('sizes the collapsed launcher to its label without crossing a display edge', () => {
     expect(backendSource).toContain('fn collapsed_launcher_width');
-    expect(backendSource).toContain('const LAUNCHER_EDGE_OVERHANG: u32 = 8;');
+    expect(backendSource).not.toContain('LAUNCHER_EDGE_OVERHANG');
     expect(backendSource).not.toContain('LAUNCHER_VISIBLE_WIDTH');
-    expect(backendSource).toContain('let visible_width = (window_width - overhang).max(1);');
+    expect(backendSource).toContain('monitor_position.x + monitor_size.width as i32 - window_width');
+    expect(backendSource).not.toContain('monitor_position.x - (window_width - visible_width)');
+    expect(backendSource).toContain('fn set_launcher_geometry');
+    expect(backendSource).toContain('SetWindowPos(');
     // Expanding shows a different label, so no width is reported then and the
     // last collapsed measurement stands.
     expect(launcherSource).toContain('value ? null : measureCapsuleWidth()');
     expect(launcherSource).toContain('width: max-content');
+  });
+
+  it('resizes the native launcher before rendering either visible state', () => {
+    const toggleHandler = launcherSource.slice(
+      launcherSource.indexOf('async function setExpanded'),
+      launcherSource.indexOf('async function syncCollapsedWidth'),
+    );
+    expect(toggleHandler.indexOf('await queueLauncherSync(value, itemCount')).toBeLessThan(
+      toggleHandler.indexOf('expanded.value = value'),
+    );
+    expect(launcherSource).toContain('ref="collapsedCapsuleMeasure"');
+    expect(launcherSource).toContain('class="launcher-master-capsule launcher-capsule-measurer"');
+    expect(launcherSource).toContain('if (stateVersion !== launcherStateVersion) return;');
   });
 
   it('reserves height for the creation row instead of clipping its bottom edge', () => {

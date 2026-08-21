@@ -15,12 +15,42 @@ pub struct EncodedH264AccessUnit {
     pub sample_time_100ns: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct H264EncoderRateControl {
+    pub average_bitrate_bps: u32,
+    pub maximum_bitrate_bps: u32,
+    pub buffer_size_bits: u32,
+}
+
+impl H264EncoderRateControl {
+    fn validate(self) -> Result<Self, String> {
+        if self.average_bitrate_bps == 0 {
+            return Err("H.264 encoder average bitrate must be greater than zero".into());
+        }
+        if self.maximum_bitrate_bps < self.average_bitrate_bps {
+            return Err(
+                "H.264 encoder maximum bitrate must not be lower than average bitrate".into(),
+            );
+        }
+        if self.buffer_size_bits == 0 {
+            return Err("H.264 encoder buffer size must be greater than zero".into());
+        }
+        Ok(self)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct H264TranscoderDescriptor {
     pub width: u32,
     pub height: u32,
+    pub backend: String,
     pub encoder_name: String,
     pub hardware: bool,
+    pub rate_control_mode: String,
+    pub average_bitrate_bps: u32,
+    pub maximum_bitrate_bps: u32,
+    pub buffer_size_bits: u32,
+    pub all_idr: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -46,12 +76,15 @@ impl H264WatermarkTranscoder {
         height: u32,
         frame_rate_numerator: u32,
         frame_rate_denominator: u32,
-        bitrate_bps: u32,
+        rate_control: H264EncoderRateControl,
         source_sps: &[u8],
         source_pps: &[u8],
     ) -> Result<Self, String> {
         let (profile_idc, level_idc) = h264_sps_profile_level(source_sps)?;
         let cabac = h264_pps_uses_cabac(source_pps)?;
+        let rate_control = rate_control.validate()?;
+        let encoder_level_idc =
+            h264_level_for_bitrate_budget(profile_idc, level_idc, rate_control.maximum_bitrate_bps);
         let runtime = MediaFoundationRuntime::startup()?;
         let decoder =
             MfH264Decoder::new(width, height, frame_rate_numerator, frame_rate_denominator)?;
@@ -60,16 +93,22 @@ impl H264WatermarkTranscoder {
             height,
             frame_rate_numerator,
             frame_rate_denominator,
-            bitrate_bps,
+            rate_control,
             profile_idc,
-            level_idc,
+            encoder_level_idc,
             cabac,
         )?;
         let descriptor = H264TranscoderDescriptor {
             width,
             height,
+            backend: "media-foundation".into(),
             encoder_name: encoder.name.clone(),
             hardware: encoder.hardware,
+            rate_control_mode: encoder.rate_control_mode.clone(),
+            average_bitrate_bps: rate_control.average_bitrate_bps,
+            maximum_bitrate_bps: rate_control.maximum_bitrate_bps,
+            buffer_size_bits: rate_control.buffer_size_bits,
+            all_idr: true,
         };
         Ok(Self {
             decoder,
@@ -142,6 +181,12 @@ impl H264WatermarkTranscoder {
                 let keyframe = nals
                     .iter()
                     .any(|nal| nal.first().is_some_and(|header| header & 0x1f == 5));
+                if !keyframe {
+                    return Err(
+                        "H.264 watermark encoder did not emit an IDR after a forced-keyframe request"
+                            .into(),
+                    );
+                }
                 encoded.push(EncodedH264AccessUnit {
                     nals,
                     keyframe,
@@ -167,7 +212,7 @@ impl H264WatermarkTranscoder {
         _height: u32,
         _frame_rate_numerator: u32,
         _frame_rate_denominator: u32,
-        _bitrate_bps: u32,
+        _rate_control: H264EncoderRateControl,
         _source_sps: &[u8],
         _source_pps: &[u8],
     ) -> Result<Self, String> {
@@ -204,6 +249,53 @@ fn validate_h264_encoder_profile_level(
         ));
     }
     Ok(actual_level_idc)
+}
+
+fn h264_level_for_bitrate_budget(
+    profile_idc: u8,
+    source_level_idc: u8,
+    maximum_bitrate_bps: u32,
+) -> u8 {
+    // Annex A MaxBR values use a 1.25 multiplier for the common High profile.
+    // The source level already covers resolution and macroblock rate, so only
+    // raise it when the bounded-VBR peak requires a larger bitrate envelope.
+    let (scale_numerator, scale_denominator) = if profile_idc == 100 {
+        (5u64, 4u64)
+    } else {
+        (1u64, 1u64)
+    };
+    const LEVEL_MAX_BITRATE_KBPS: [(u8, u64); 16] = [
+        (10, 64),
+        (11, 192),
+        (12, 384),
+        (13, 768),
+        (20, 2_000),
+        (21, 4_000),
+        (22, 4_000),
+        (30, 10_000),
+        (31, 14_000),
+        (32, 20_000),
+        (40, 20_000),
+        (41, 50_000),
+        (42, 50_000),
+        (50, 135_000),
+        (51, 240_000),
+        (52, 240_000),
+    ];
+    let required_bitrate_bps = u64::from(maximum_bitrate_bps);
+    LEVEL_MAX_BITRATE_KBPS
+        .into_iter()
+        .find_map(|(level_idc, base_kbps)| {
+            if level_idc < source_level_idc {
+                return None;
+            }
+            let capacity_bps = base_kbps
+                .saturating_mul(1_000)
+                .saturating_mul(scale_numerator)
+                / scale_denominator;
+            (capacity_bps >= required_bitrate_bps).then_some(level_idc)
+        })
+        .unwrap_or(source_level_idc.max(52))
 }
 
 fn h264_pps_uses_cabac(pps: &[u8]) -> Result<bool, String> {
@@ -1014,6 +1106,7 @@ struct MfH264Encoder {
     frame_duration_100ns: i64,
     name: String,
     hardware: bool,
+    rate_control_mode: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -1028,7 +1121,7 @@ impl MfH264Encoder {
         height: u32,
         frame_rate_numerator: u32,
         frame_rate_denominator: u32,
-        bitrate_bps: u32,
+        rate_control: H264EncoderRateControl,
         profile_idc: u8,
         level_idc: u8,
         cabac: bool,
@@ -1057,7 +1150,7 @@ impl MfH264Encoder {
                         height,
                         frame_rate_numerator,
                         frame_rate_denominator,
-                        bitrate_bps,
+                        rate_control,
                         profile_idc,
                         level_idc,
                         cabac,
@@ -1091,7 +1184,7 @@ impl MfH264Encoder {
             height,
             frame_rate_numerator,
             frame_rate_denominator,
-            bitrate_bps,
+            rate_control,
             profile_idc,
             level_idc,
             cabac,
@@ -1113,7 +1206,7 @@ impl MfH264Encoder {
         height: u32,
         frame_rate_numerator: u32,
         frame_rate_denominator: u32,
-        bitrate_bps: u32,
+        rate_control: H264EncoderRateControl,
         profile_idc: u8,
         level_idc: u8,
         cabac: bool,
@@ -1148,7 +1241,7 @@ impl MfH264Encoder {
                 "H.264 encoder output frame rate setup failed",
             )?;
             win(
-                output.SetUINT32(&MF_MT_AVG_BITRATE, bitrate_bps),
+                output.SetUINT32(&MF_MT_AVG_BITRATE, rate_control.average_bitrate_bps),
                 "H.264 encoder bitrate setup failed",
             )?;
             win(
@@ -1216,15 +1309,22 @@ impl MfH264Encoder {
             )?;
         }
         let codec_api = transform.cast::<ICodecAPI>().ok();
+        let mut rate_control_mode = "encoder-default".to_string();
         if let Some(api) = codec_api.as_ref() {
             // All-IDR recording compatibility needs substantially more bits
             // than the source's inter-frame GOP. Prefer a bounded VBR mode so
             // detailed frames can borrow from the peak budget while preserving
             // real-time latency; fall back to CBR on older hardware MFTs.
-            for mode in [
-                eAVEncCommonRateControlMode_LowDelayVBR.0 as u32,
-                eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32,
-                eAVEncCommonRateControlMode_CBR.0 as u32,
+            for (mode, label) in [
+                (
+                    eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32,
+                    "peak-constrained-vbr",
+                ),
+                (
+                    eAVEncCommonRateControlMode_LowDelayVBR.0 as u32,
+                    "low-delay-vbr",
+                ),
+                (eAVEncCommonRateControlMode_CBR.0 as u32, "cbr"),
             ] {
                 if unsafe { api.IsSupported(&CODECAPI_AVEncCommonRateControlMode) }.is_ok()
                     && unsafe {
@@ -1232,16 +1332,24 @@ impl MfH264Encoder {
                     }
                     .is_ok()
                 {
+                    rate_control_mode = label.to_string();
                     break;
                 }
             }
-            let maximum_bitrate_bps = bitrate_bps.saturating_add(bitrate_bps.saturating_div(2));
-            let buffer_size_bits = bitrate_bps.saturating_div(2).max(1);
             for (property, value) in [
                 (&CODECAPI_AVEncMPVDefaultBPictureCount, 0u32),
-                (&CODECAPI_AVEncCommonMeanBitRate, bitrate_bps),
-                (&CODECAPI_AVEncCommonMaxBitRate, maximum_bitrate_bps),
-                (&CODECAPI_AVEncCommonBufferSize, buffer_size_bits),
+                (
+                    &CODECAPI_AVEncCommonMeanBitRate,
+                    rate_control.average_bitrate_bps,
+                ),
+                (
+                    &CODECAPI_AVEncCommonMaxBitRate,
+                    rate_control.maximum_bitrate_bps,
+                ),
+                (
+                    &CODECAPI_AVEncCommonBufferSize,
+                    rate_control.buffer_size_bits,
+                ),
                 (&CODECAPI_AVEncMPVGOPSize, WATERMARK_KEYFRAME_SPACING_FRAMES),
             ] {
                 if unsafe { api.IsSupported(property) }.is_ok() {
@@ -1290,6 +1398,7 @@ impl MfH264Encoder {
             frame_duration_100ns,
             name,
             hardware,
+            rate_control_mode,
         })
     }
 
@@ -1828,6 +1937,40 @@ fn normalize_nv12(
 mod tests {
     use super::*;
 
+    fn test_rate_control() -> H264EncoderRateControl {
+        H264EncoderRateControl {
+            average_bitrate_bps: 4_000_000,
+            maximum_bitrate_bps: 6_000_000,
+            buffer_size_bits: 4_000_000,
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_encoder_rate_control_budgets() {
+        assert!(H264EncoderRateControl {
+            average_bitrate_bps: 0,
+            maximum_bitrate_bps: 1,
+            buffer_size_bits: 1,
+        }
+        .validate()
+        .is_err());
+        assert!(H264EncoderRateControl {
+            average_bitrate_bps: 2,
+            maximum_bitrate_bps: 1,
+            buffer_size_bits: 1,
+        }
+        .validate()
+        .is_err());
+        assert!(H264EncoderRateControl {
+            average_bitrate_bps: 1,
+            maximum_bitrate_bps: 1,
+            buffer_size_bits: 0,
+        }
+        .validate()
+        .is_err());
+        assert_eq!(test_rate_control().validate().unwrap(), test_rate_control());
+    }
+
     #[test]
     fn splits_annex_b_and_length_prefixed_access_units() {
         let annex_b = [0, 0, 0, 1, 0x67, 1, 0, 0, 1, 0x65, 2, 3];
@@ -1909,6 +2052,15 @@ mod tests {
     }
 
     #[test]
+    fn promotes_the_requested_level_when_the_peak_bitrate_exceeds_annex_a() {
+        assert_eq!(h264_level_for_bitrate_budget(100, 40, 25_000_000), 40);
+        assert_eq!(h264_level_for_bitrate_budget(100, 40, 25_000_001), 41);
+        assert_eq!(h264_level_for_bitrate_budget(100, 42, 36_000_000), 42);
+        assert_eq!(h264_level_for_bitrate_budget(77, 40, 20_000_000), 40);
+        assert_eq!(h264_level_for_bitrate_budget(77, 40, 20_000_001), 41);
+    }
+
+    #[test]
     fn normalizes_padded_nv12_rows() {
         let mut source = vec![0u8; 8 * 4 * 3 / 2];
         for row in 0..4 {
@@ -1972,7 +2124,8 @@ mod tests {
         // 主码流通常是 1080p，子码流是 720p，两种尺寸都要能撑过重新协商。
         for (width, height) in [(1920u32, 1080u32), (1280, 720)] {
             let mut encoder =
-                MfH264Encoder::new(width, height, 25, 1, 4_000_000, 100, 40, true).unwrap();
+                MfH264Encoder::new(width, height, 25, 1, test_rate_control(), 100, 40, true)
+                    .unwrap();
             eprintln!(
                 "{width}x{height}: encoder='{}', path={}",
                 encoder.name,
@@ -2023,7 +2176,8 @@ mod tests {
         for (width, height) in [(1920u32, 1080u32), (640, 360)] {
             let luma_len = (width * height) as usize;
             let mut encoder =
-                MfH264Encoder::new(width, height, 25, 1, 4_000_000, 100, 40, true).unwrap();
+                MfH264Encoder::new(width, height, 25, 1, test_rate_control(), 100, 40, true)
+                    .unwrap();
             let mut nv12 = vec![0u8; luma_len * 3 / 2];
             // 暗亮度配上远离 128 的 U/V：色度平面一旦读到亮度补齐行，取样值会从
             // 200 掉到 16 附近。

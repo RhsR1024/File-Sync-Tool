@@ -16,6 +16,8 @@
     "test:screen-share-web": "vitest run --config vitest.screen-share-web.config.ts",
     "test:paper-todo": "vitest run --config vitest.paper-todo.config.ts",
     "test:device-simulator-assets": "node --test scripts/device-simulator-assets/*.test.mjs",
+    "test:release-server-media": "python -m unittest scripts/release-server/test_prepare_device_simulator_materials.py",
+    "quality:device-simulator-assets": "node scripts/device-simulator-assets/verify-media-quality.mjs",
     "test:screen-share-benchmark": "node --test scripts/screen-share-benchmark.test.mjs scripts/screen-share-browser-probe.test.mjs",
     "test:screen-share-qualification-aggregate": "node --test scripts/screen-share-qualification-aggregate.test.mjs",
     "test:screen-share-spec-evidence-audit": "node --test scripts/screen-share-spec-evidence-audit.test.mjs",

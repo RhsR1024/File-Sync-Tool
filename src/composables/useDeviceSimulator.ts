@@ -26,6 +26,7 @@ import {
   type LocalMaterialMigrationResult,
   type PreflightReport,
   type PlatformAddDevicesReport,
+  type PlatformServerSettings,
   type RtspStats,
   type SimulatorLogEvent,
   type SimulatorNetworkInterfaceInfo,
@@ -37,12 +38,40 @@ import { recommendSimulatorInterface } from '@/lib/deviceSimulatorInterfaceSelec
 /** The only simulated device type; the other five profiles were removed. */
 export const STRUCTURED_PROFILE_ID = 'ipc-structured';
 const MAX_SIMULATOR_LOG_ENTRIES = 500;
+const DEFAULT_PLATFORM_USERNAME = 'loadmin';
+const DEFAULT_PLATFORM_PASSWORD = 'admin_123';
 
 function newId(prefix: string) {
   const suffix = typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `${prefix}-${suffix}`;
+}
+
+function newPlatformServer(): PlatformServerSettings {
+  return {
+    id: newId('server'),
+    host: '',
+    port: 80,
+    username: DEFAULT_PLATFORM_USERNAME,
+    password: DEFAULT_PLATFORM_PASSWORD,
+  };
+}
+
+function platformServerDrafts(settings: DeviceSimulatorSettings): PlatformServerSettings[] {
+  return settings.last_platform_servers.length > 0
+    ? settings.last_platform_servers.map((server) => ({ ...server }))
+    : [newPlatformServer()];
+}
+
+function platformServerSignature(servers: PlatformServerSettings[]): string {
+  return JSON.stringify(servers.map((server) => ({
+    id: server.id,
+    host: server.host.trim(),
+    port: server.port,
+    username: server.username.trim(),
+    password: server.password,
+  })));
 }
 
 const emptyStatus = (): SimulatorStatus => ({
@@ -86,8 +115,6 @@ const defaultSettings = (): DeviceSimulatorSettings => ({
   last_time_watermark_enabled: true,
   auto_check_asset_updates: true,
   manage_firewall: true,
-  platform_username: 'loadmin',
-  platform_password: 'admin_123',
   platform_auto_add_devices: true,
   platform_replace_existing_devices: false,
 });
@@ -97,7 +124,7 @@ function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartR
     platform: {
       kind: 'ums',
       servers: settings.last_platform_servers.length > 0
-        ? settings.last_platform_servers.map((server) => ({ ...server }))
+        ? settings.last_platform_servers.map(({ id, host, port }) => ({ id, host, port }))
         : [{ id: newId('server'), host: '', port: 80 }],
       access_mode: settings.last_platform_access_mode ?? 'open',
       alarm_receiver_url: settings.last_alarm_receiver_url,
@@ -124,6 +151,8 @@ function requestFromSettings(settings: DeviceSimulatorSettings): SimulatorStartR
 
 function createDeviceSimulator() {
   const settings = ref(defaultSettings());
+  const platformServers = ref(platformServerDrafts(settings.value));
+  const savedPlatformServerSignature = ref(platformServerSignature(platformServers.value));
   const request = reactive<SimulatorStartRequest>(requestFromSettings(settings.value));
   const status = ref<SimulatorStatus>(emptyStatus());
   const interfaces = ref<SimulatorNetworkInterfaceInfo[]>([]);
@@ -160,6 +189,9 @@ function createDeviceSimulator() {
   let previewTimer: number | null = null;
 
   const topologyLocked = computed(() => isDeviceSimulatorTopologyLocked(status.value.state));
+  const platformServersDirty = computed(() => (
+    platformServerSignature(platformServers.value) !== savedPlatformServerSignature.value
+  ));
   const selectedProfileIds = computed(() => [...new Set(request.groups.map((group) => group.profile_id))]);
   const blockingPreflight = computed(() => preflight.value
     ? hasBlockingPreflightFailure(preflight.value)
@@ -245,6 +277,30 @@ function createDeviceSimulator() {
     request.stream = next.stream;
   }
 
+  function syncRequestPlatformServers() {
+    request.platform.servers = platformServers.value.map(({ id, host, port }) => ({ id, host, port }));
+  }
+
+  function applySavedSettings(saved: DeviceSimulatorSettings) {
+    settings.value = saved;
+    platformServers.value = platformServerDrafts(saved);
+    savedPlatformServerSignature.value = platformServerSignature(platformServers.value);
+    syncRequestPlatformServers();
+  }
+
+  function addPlatformServer() {
+    if (topologyLocked.value) return;
+    platformServers.value.push(newPlatformServer());
+    syncRequestPlatformServers();
+  }
+
+  function removePlatformServer(serverId: string) {
+    if (topologyLocked.value) return;
+    platformServers.value = platformServers.value.filter((server) => server.id !== serverId);
+    if (platformServers.value.length === 0) platformServers.value.push(newPlatformServer());
+    syncRequestPlatformServers();
+  }
+
   function settingsFromRequest(): DeviceSimulatorSettings {
     return {
       ...settings.value,
@@ -253,7 +309,7 @@ function createDeviceSimulator() {
       last_start_ip: request.start_ip || null,
       last_device_ips: [...request.device_ips],
       last_subnet_prefix: request.subnet_prefix,
-      last_platform_servers: request.platform.servers.map((server) => ({ ...server })),
+      last_platform_servers: platformServers.value.map((server) => ({ ...server })),
       last_platform_access_mode: request.platform.access_mode,
       last_alarm_receiver_url: request.platform.alarm_receiver_url,
       last_alarm_receiver_port: request.platform.alarm_receiver_port,
@@ -264,6 +320,13 @@ function createDeviceSimulator() {
       last_time_watermark_enabled: request.stream.time_watermark_enabled,
     };
   }
+
+  watch(
+    () => platformServers.value.map((server) => `${server.id}\u0000${server.host}\u0000${server.port}`).join('\u0001'),
+    () => {
+      if (!topologyLocked.value) syncRequestPlatformServers();
+    },
+  );
 
   function errorText(error: unknown): string {
     const info = errorInfo(error);
@@ -421,7 +484,7 @@ function createDeviceSimulator() {
       deviceSimulatorApi.getLocalMaterialsPath(),
     ]);
     if (settingsResult.status === 'fulfilled') {
-      settings.value = settingsResult.value;
+      applySavedSettings(settingsResult.value);
       savedLocalMaterialsDirectory.value = settingsResult.value.local_materials_directory;
       replaceRequest(requestFromSettings(settingsResult.value));
     }
@@ -478,10 +541,11 @@ function createDeviceSimulator() {
   }
 
   async function saveSettings() {
+    syncRequestPlatformServers();
     const next = settingsFromRequest();
     const saved = await run('save-settings', () => deviceSimulatorApi.saveSettings(next));
     if (saved) {
-      settings.value = saved;
+      applySavedSettings(saved);
       savedLocalMaterialsDirectory.value = saved.local_materials_directory;
       try {
         await refreshAfterSettingsSave();
@@ -493,6 +557,17 @@ function createDeviceSimulator() {
     return false;
   }
 
+  async function savePlatformServers() {
+    syncRequestPlatformServers();
+    const saved = await run(
+      'save-platform-servers',
+      () => deviceSimulatorApi.saveSettings(settingsFromRequest()),
+    );
+    if (!saved) return false;
+    applySavedSettings(saved);
+    return true;
+  }
+
   async function migrateLocalMaterialsAndSave() {
     const next = settingsFromRequest();
     const result = await run(
@@ -500,7 +575,7 @@ function createDeviceSimulator() {
       () => deviceSimulatorApi.migrateLocalMaterials(next),
     );
     if (!result) return false;
-    settings.value = result.settings;
+    applySavedSettings(result.settings);
     savedLocalMaterialsDirectory.value = result.settings.local_materials_directory;
     lastLocalMaterialMigration.value = result;
     try {
@@ -628,6 +703,7 @@ function createDeviceSimulator() {
   );
 
   async function runPreflight() {
+    syncRequestPlatformServers();
     const result = await run('preflight', () => deviceSimulatorApi.preflight(request));
     if (result) {
       preflight.value = result;
@@ -636,6 +712,7 @@ function createDeviceSimulator() {
   }
 
   async function start() {
+    syncRequestPlatformServers();
     platformAddReport.value = null;
     platformReplacePromptOpen.value = false;
     platformReplaceRetryError.value = '';
@@ -645,7 +722,7 @@ function createDeviceSimulator() {
       preview.value = report.device_preview;
       if (hasBlockingPreflightFailure(report)) throw new Error('deviceSimulator.errors.preflightBlocked');
       const saved = await deviceSimulatorApi.saveSettings(settingsFromRequest());
-      settings.value = saved;
+      applySavedSettings(saved);
       return deviceSimulatorApi.start(request);
     });
     if (!result) return;
@@ -688,7 +765,7 @@ function createDeviceSimulator() {
     if (remoteDefault) {
       request.media_theme_id = remoteDefault.id;
       const saved = await run('save-settings', () => deviceSimulatorApi.saveSettings(settingsFromRequest()));
-      if (saved) settings.value = saved;
+      if (saved) applySavedSettings(saved);
     }
     await refreshMediaThemes();
     await refreshAssets();
@@ -831,6 +908,8 @@ function createDeviceSimulator() {
 
   return {
     settings,
+    platformServers,
+    platformServersDirty,
     request,
     status,
     interfaces,
@@ -873,6 +952,7 @@ function createDeviceSimulator() {
     refreshEnvironment,
     dispose,
     saveSettings,
+    savePlatformServers,
     migrateLocalMaterialsAndSave,
     refreshAssets,
     refreshAlarmTypes,
@@ -897,6 +977,8 @@ function createDeviceSimulator() {
     stopAlarm,
     addGroup,
     removeGroup,
+    addPlatformServer,
+    removePlatformServer,
     selectInterfaceManually,
     applyAutomaticInterfaceSelection,
   };

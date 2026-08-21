@@ -1133,6 +1133,28 @@ onMounted(load);
         </div>
       </div>
 
+      <div class="flex items-start justify-between gap-5 border-t border-slate-100 pt-5">
+        <div class="min-w-0">
+          <label for="settings-fallback-recent-package" class="text-sm font-semibold text-slate-700">
+            {{ t('settings.fallbackRecentPackage') }}
+          </label>
+          <p id="settings-fallback-recent-package-desc" class="mt-1 max-w-3xl text-xs leading-5 text-slate-500">
+            {{ t('settings.fallbackRecentPackageDesc') }}
+          </p>
+        </div>
+        <label class="relative inline-flex h-11 shrink-0 cursor-pointer items-center">
+          <input
+            id="settings-fallback-recent-package"
+            v-model="config.fallback_recent_package_enabled"
+            type="checkbox"
+            class="peer sr-only"
+            :aria-label="t('settings.fallbackRecentPackage')"
+            aria-describedby="settings-fallback-recent-package-desc"
+          >
+          <span class="h-6 w-11 rounded-full bg-slate-200 peer-focus-visible:ring-4 peer-focus-visible:ring-blue-200 peer-checked:bg-blue-600 after:absolute after:left-[2px] after:top-[10px] after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-transform after:content-[''] peer-checked:after:translate-x-full motion-reduce:after:transition-none"></span>
+        </label>
+      </div>
+
       <fieldset class="space-y-3 border-t border-slate-100 pt-5" aria-describedby="settings-copy-mode-desc">
         <legend class="text-sm font-semibold text-slate-700">{{ t('settings.copyMode') }}</legend>
         <p id="settings-copy-mode-desc" class="text-xs leading-5 text-slate-500">{{ t('settings.copyModeDesc') }}</p>

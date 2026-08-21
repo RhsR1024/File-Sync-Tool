@@ -149,6 +149,9 @@ export interface AppConfig {
   /** If a file was modified within the last N minutes, it must pass the stability wait. Minimum: 3. */
   recent_file_guard_mins: number;
 
+  /** Search the previous three days when today's date folder has no matching package. Default: true. */
+  fallback_recent_package_enabled: boolean;
+
   /** One switch: launch on startup + auto start scheduler scan after app launch */
   launch_and_auto_scan: boolean;
 
@@ -221,6 +224,7 @@ export interface SyncConfigPatch extends Pick<
   | 'local_command_groups'
   | 'stability_check_secs'
   | 'recent_file_guard_mins'
+  | 'fallback_recent_package_enabled'
   | 'copy_buffer_size_kb'
   | 'copy_mode'
 > {}

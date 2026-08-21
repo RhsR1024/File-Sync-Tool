@@ -78,7 +78,8 @@ const assetDetailsOpen = ref(false);
 const interfaceSelectorOpen = ref(false);
 const ipAllocationMode = ref<'continuous' | 'explicit'>('continuous');
 const deviceIpText = ref('');
-const platformPasswordVisible = ref(false);
+const visiblePlatformPasswordIds = reactive(new Set<string>());
+const platformServerSaveStatus = ref<'success' | 'error' | null>(null);
 const materialResetPromptOpen = ref(false);
 const materialResetError = ref('');
 const materialMigrationPromptOpen = ref(false);
@@ -559,17 +560,26 @@ onUnmounted(() => {
 });
 
 function addServer() {
-  if (simulator.topologyLocked.value) return;
-  simulator.request.platform.servers.push({
-    id: `server-${Date.now()}`,
-    host: '',
-    port: 80,
-  });
+  simulator.addPlatformServer();
 }
 
 function removeServer(id: string) {
-  if (simulator.topologyLocked.value) return;
-  simulator.request.platform.servers = simulator.request.platform.servers.filter((server) => server.id !== id);
+  visiblePlatformPasswordIds.delete(id);
+  simulator.removePlatformServer(id);
+}
+
+function platformPasswordVisible(serverId: string) {
+  return visiblePlatformPasswordIds.has(serverId);
+}
+
+function togglePlatformPassword(serverId: string) {
+  if (visiblePlatformPasswordIds.has(serverId)) visiblePlatformPasswordIds.delete(serverId);
+  else visiblePlatformPasswordIds.add(serverId);
+}
+
+async function savePlatformServerInfo() {
+  platformServerSaveStatus.value = null;
+  platformServerSaveStatus.value = await simulator.savePlatformServers() ? 'success' : 'error';
 }
 
 function setPlatformAccessMode(mode: PlatformAccessMode) {
@@ -586,15 +596,23 @@ const platformAccessNeedsServer = computed(
 );
 const platformAutoAddNeedsConfig = computed(() => {
   if (!simulator.settings.value.platform_auto_add_devices) return false;
-  const hasServer = simulator.request.platform.servers
-    .some((server) => server.host.trim() !== '' && server.port > 0);
-  const hasCredentials = simulator.settings.value.platform_username.trim() !== ''
-    && simulator.settings.value.platform_password !== '';
-  return !hasServer || !hasCredentials;
+  const configuredServers = simulator.platformServers.value
+    .filter((server) => server.host.trim() !== '' && server.port > 0);
+  return configuredServers.length === 0 || configuredServers.some(
+    (server) => server.username.trim() === '' || server.password === '',
+  );
 });
+const platformServerCredentialsInvalid = computed(() => simulator.platformServers.value.some(
+  (server) => server.host.trim() !== ''
+    && (server.username.trim() === '' || server.password === ''),
+));
 const platformAddIncomplete = computed(() => {
   const report = simulator.platformAddReport.value;
   return report !== null && report.addedDevices < report.totalDevices;
+});
+
+watch(() => simulator.platformServersDirty.value, (dirty) => {
+  if (dirty) platformServerSaveStatus.value = null;
 });
 
 function profileLabel(profileId: string) {
@@ -1149,8 +1167,7 @@ function revealPreflightDetails() {
             </button>
           </aside>
 
-          <fieldset :disabled="simulator.topologyLocked.value" class="min-h-0 min-w-0 flex-1">
-          <div class="h-full min-h-0">
+          <div class="h-full min-h-0 min-w-0 flex-1">
             <section v-if="configSection === 'server'" class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="platform-title">
               <div class="flex h-13 flex-none items-center gap-3 border-b border-slate-100 px-[22px]"><Server class="h-[17px] w-[17px] text-sky-700" aria-hidden="true" /><h2 id="platform-title" class="text-[15px] font-bold text-slate-900">{{ t('deviceSimulator.sections.server') }}</h2><HintTip :text="t('deviceSimulator.configuration.serversHint')" /></div>
               <div class="min-h-0 flex-1 overflow-auto p-[22px]">
@@ -1159,25 +1176,36 @@ function revealPreflightDetails() {
                   <div :class="[fieldClass, 'mt-2', 'flex items-center bg-slate-100 font-semibold']" aria-readonly="true">UMS</div>
                 </label>
                 <label class="block text-sm font-semibold text-slate-700"><span class="flex items-center gap-2">{{ t('deviceSimulator.fields.alarmReceiverPort') }}<HintTip :text="t('deviceSimulator.fields.alarmReceiverPortHint')" /></span>
-                  <input v-model.number="simulator.request.platform.alarm_receiver_port" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" />
+                  <input v-model.number="simulator.request.platform.alarm_receiver_port" :class="[fieldClass, 'mt-2']" type="number" min="1" max="65535" inputmode="numeric" :disabled="simulator.topologyLocked.value" />
                 </label>
                 <div>
                   <p class="flex items-center gap-2 text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.accessMode') }}<HintTip :text="t(`deviceSimulator.fields.accessModeHints.${simulator.request.platform.access_mode}`)" /></p>
                   <div class="mt-2 inline-flex h-9 rounded-lg border border-slate-300 bg-slate-100 p-0.5" role="group" :aria-label="t('deviceSimulator.fields.accessMode')">
-                    <button v-for="mode in (['open', 'configured_servers_only'] as const)" :key="mode" type="button" class="inline-flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors" :class="simulator.request.platform.access_mode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'" :aria-pressed="simulator.request.platform.access_mode === mode" @click="setPlatformAccessMode(mode)"><ShieldCheck v-if="mode === 'configured_servers_only'" class="h-3.5 w-3.5" aria-hidden="true" /><Globe v-else class="h-3.5 w-3.5" aria-hidden="true" />{{ t(`deviceSimulator.fields.accessModes.${mode}`) }}</button>
+                    <button v-for="mode in (['open', 'configured_servers_only'] as const)" :key="mode" type="button" class="inline-flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50" :class="simulator.request.platform.access_mode === mode ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'" :disabled="simulator.topologyLocked.value" :aria-pressed="simulator.request.platform.access_mode === mode" @click="setPlatformAccessMode(mode)"><ShieldCheck v-if="mode === 'configured_servers_only'" class="h-3.5 w-3.5" aria-hidden="true" /><Globe v-else class="h-3.5 w-3.5" aria-hidden="true" />{{ t(`deviceSimulator.fields.accessModes.${mode}`) }}</button>
                   </div>
                   <p v-if="platformAccessNeedsServer" class="mt-2 flex items-start gap-2 text-xs leading-5 text-amber-800"><AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{{ t('deviceSimulator.fields.accessModeServerRequired') }}</p>
                 </div>
               </div>
               <div class="mt-5 space-y-3">
                 <div class="flex items-center gap-2"><h3 class="text-xs font-bold text-slate-800">{{ t('deviceSimulator.configuration.servers') }}</h3><HintTip :text="t('deviceSimulator.configuration.serversHint')" /><span class="h-px flex-1 bg-slate-100" /></div>
-                <div class="grid grid-cols-[minmax(0,1fr)_130px_36px] gap-2.5 px-1 text-[11px] font-semibold text-slate-500"><span>{{ t('deviceSimulator.fields.serverHost') }}</span><span>{{ t('deviceSimulator.fields.port') }}</span><span /></div>
-                <div v-for="serverItem in simulator.request.platform.servers" :key="serverItem.id" class="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:grid-cols-[1fr_8rem_2.75rem]">
-                  <label class="sr-only">{{ t('deviceSimulator.fields.serverHost') }}</label><input v-model="serverItem.host" :class="fieldClass" type="text" :aria-label="t('deviceSimulator.fields.serverHost')" />
-                  <input v-model.number="serverItem.port" :class="fieldClass" type="number" min="1" max="65535" inputmode="numeric" :aria-label="t('deviceSimulator.fields.port')" />
-                  <button type="button" class="inline-flex min-h-9 cursor-pointer items-center justify-center rounded-lg text-rose-700 hover:bg-rose-100" :class="buttonFocus" :aria-label="t('deviceSimulator.actions.removeServer')" @click="removeServer(serverItem.id)"><Trash2 class="h-4 w-4" aria-hidden="true" /></button>
+                <p v-if="simulator.topologyLocked.value" class="flex items-start gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-900"><KeyRound class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{{ t('deviceSimulator.platformAdd.credentialsEditableWhileRunning') }}</p>
+                <div v-for="serverItem in simulator.platformServers.value" :key="serverItem.id" class="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-2 xl:grid-cols-[minmax(11rem,1.2fr)_7rem_minmax(10rem,1fr)_minmax(12rem,1fr)_2.75rem]">
+                  <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.serverHost') }}<input v-model="serverItem.host" :class="[fieldClass, 'mt-1']" type="text" :disabled="simulator.topologyLocked.value" /></label>
+                  <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.port') }}<input v-model.number="serverItem.port" :class="[fieldClass, 'mt-1']" type="number" min="1" max="65535" inputmode="numeric" :disabled="simulator.topologyLocked.value" /></label>
+                  <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.platformUsername') }}<input v-model="serverItem.username" :class="[fieldClass, 'mt-1 bg-white']" type="text" autocomplete="username" spellcheck="false" /></label>
+                  <div class="text-xs font-semibold text-slate-600">
+                    <label :for="`platform-password-${serverItem.id}`">{{ t('deviceSimulator.fields.platformPassword') }}</label>
+                    <span class="relative mt-1 block">
+                      <input :id="`platform-password-${serverItem.id}`" v-model="serverItem.password" :class="[fieldClass, 'bg-white pr-12']" :type="platformPasswordVisible(serverItem.id) ? 'text' : 'password'" autocomplete="current-password" />
+                      <button type="button" class="absolute inset-y-0 right-0 inline-flex min-h-9 min-w-11 cursor-pointer items-center justify-center rounded-r-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800" :class="buttonFocus" :aria-label="t(platformPasswordVisible(serverItem.id) ? 'deviceSimulator.fields.hidePlatformPassword' : 'deviceSimulator.fields.showPlatformPassword')" :aria-pressed="platformPasswordVisible(serverItem.id)" @click="togglePlatformPassword(serverItem.id)">
+                        <EyeOff v-if="platformPasswordVisible(serverItem.id)" class="h-4 w-4" aria-hidden="true" />
+                        <Eye v-else class="h-4 w-4" aria-hidden="true" />
+                      </button>
+                    </span>
+                  </div>
+                  <button type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center self-end rounded-lg text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40" :class="buttonFocus" :disabled="simulator.topologyLocked.value" :aria-label="t('deviceSimulator.actions.removeServer')" @click="removeServer(serverItem.id)"><Trash2 class="h-4 w-4" aria-hidden="true" /></button>
                 </div>
-                <button type="button" class="inline-flex min-h-9 cursor-pointer items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-sky-400 hover:bg-sky-50" :class="buttonFocus" @click="addServer"><Plus class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.addServer') }}</button>
+                <button type="button" class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-sky-400 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40" :class="buttonFocus" :disabled="simulator.topologyLocked.value" @click="addServer"><Plus class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.addServer') }}</button>
               </div>
 
               <section class="mt-5 rounded-xl border border-sky-200 bg-sky-50/60 p-4" aria-labelledby="platform-auto-add-title">
@@ -1210,24 +1238,14 @@ function revealPreflightDetails() {
                     <span id="platform-replace-existing-description" class="mt-0.5 block text-xs font-normal leading-5 text-slate-600">{{ t('deviceSimulator.platformAdd.replaceExistingDescription') }}</span>
                   </span>
                 </label>
-                <div class="mt-4 grid gap-4 md:grid-cols-2">
-                  <label class="block text-sm font-semibold text-slate-700" for="platform-username">
-                    <span class="flex items-center gap-2"><KeyRound class="h-4 w-4 text-slate-500" aria-hidden="true" />{{ t('deviceSimulator.fields.platformUsername') }}</span>
-                    <input id="platform-username" v-model="simulator.settings.value.platform_username" :class="[fieldClass, 'mt-2 h-11 bg-white']" type="text" autocomplete="username" spellcheck="false">
-                  </label>
-                  <div class="block text-sm font-semibold text-slate-700">
-                    <label class="flex items-center gap-2" for="platform-password"><KeyRound class="h-4 w-4 text-slate-500" aria-hidden="true" />{{ t('deviceSimulator.fields.platformPassword') }}</label>
-                    <span class="relative mt-2 block">
-                      <input id="platform-password" v-model="simulator.settings.value.platform_password" :class="[fieldClass, 'h-11 bg-white pr-12']" :type="platformPasswordVisible ? 'text' : 'password'" autocomplete="current-password" aria-describedby="platform-credentials-hint">
-                      <button type="button" class="absolute inset-y-0 right-0 inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-r-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800" :class="buttonFocus" :aria-label="t(platformPasswordVisible ? 'deviceSimulator.fields.hidePlatformPassword' : 'deviceSimulator.fields.showPlatformPassword')" :aria-pressed="platformPasswordVisible" @click="platformPasswordVisible = !platformPasswordVisible">
-                        <EyeOff v-if="platformPasswordVisible" class="h-4 w-4" aria-hidden="true" />
-                        <Eye v-else class="h-4 w-4" aria-hidden="true" />
-                      </button>
-                    </span>
-                  </div>
-                </div>
                 <p id="platform-credentials-hint" class="mt-3 text-xs leading-5 text-slate-600">{{ t('deviceSimulator.fields.platformCredentialsHint') }}</p>
                 <p v-if="platformAutoAddNeedsConfig" class="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium leading-5 text-amber-900" role="alert"><AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />{{ t('deviceSimulator.fields.autoAddNeedsConfig') }}</p>
+                <div class="mt-4 flex flex-wrap items-center gap-3 border-t border-sky-200 pt-4">
+                  <button type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl bg-sky-700 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || platformServerCredentialsInvalid" :aria-busy="simulator.busyAction.value === 'save-platform-servers'" @click="savePlatformServerInfo"><LoaderCircle v-if="simulator.busyAction.value === 'save-platform-servers'" class="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /><KeyRound v-else class="h-4 w-4" aria-hidden="true" />{{ t(simulator.busyAction.value === 'save-platform-servers' ? 'deviceSimulator.platformAdd.savingServerInfo' : 'deviceSimulator.platformAdd.saveServerInfo') }}</button>
+                  <button v-if="running && platformAddIncomplete" type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-900 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || simulator.platformServersDirty.value || platformServerCredentialsInvalid" @click="simulator.addDevicesToPlatform()"><RotateCcw class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.platformAdd.retry') }}</button>
+                  <p v-if="platformServerSaveStatus" class="flex items-center gap-2 text-xs font-semibold" :class="platformServerSaveStatus === 'success' ? 'text-emerald-700' : 'text-rose-700'" :role="platformServerSaveStatus === 'error' ? 'alert' : 'status'" aria-live="polite"><CheckCircle2 v-if="platformServerSaveStatus === 'success'" class="h-4 w-4" aria-hidden="true" /><XCircle v-else class="h-4 w-4" aria-hidden="true" />{{ t(platformServerSaveStatus === 'success' ? 'deviceSimulator.platformAdd.serverInfoSaved' : 'deviceSimulator.platformAdd.serverInfoSaveFailed') }}</p>
+                  <p v-else-if="running && simulator.platformServersDirty.value" class="text-xs font-medium text-amber-800" role="status">{{ t('deviceSimulator.platformAdd.saveBeforeRetry') }}</p>
+                </div>
               </section>
 
               <div v-if="subscription" class="mt-5 rounded-xl border p-4" :class="subscriptionTone.container">
@@ -1309,17 +1327,18 @@ function revealPreflightDetails() {
                 </summary>
                 <div class="grid gap-4 border-t border-slate-200 p-4">
                   <label class="block text-sm font-semibold text-slate-700"><span class="flex items-center gap-2">{{ t('deviceSimulator.fields.alarmReceiver') }}<HintTip :text="t('deviceSimulator.fields.alarmReceiverHint')" /></span>
-                    <input v-model="simulator.request.platform.alarm_receiver_url" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://192.168.1.10/alarm" />
+                    <input v-model="simulator.request.platform.alarm_receiver_url" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://192.168.1.10/alarm" :disabled="simulator.topologyLocked.value" />
                   </label>
                   <label class="block text-sm font-semibold text-slate-700"><span class="flex items-center gap-2">{{ t('deviceSimulator.fields.assetServer') }}<HintTip :text="t('deviceSimulator.fields.assetServerHint')" /></span>
-                    <input v-model="simulator.settings.value.asset_server_url_override" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://127.0.0.1:3000/virtual-device-assets" />
+                    <input v-model="simulator.settings.value.asset_server_url_override" :class="[fieldClass, 'mt-2']" type="url" placeholder="http://127.0.0.1:3000/virtual-device-assets" :disabled="simulator.topologyLocked.value" />
                   </label>
                 </div>
               </details>
               </div>
             </section>
 
-            <section v-else-if="configSection === 'network'" class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="network-title">
+            <fieldset v-else :disabled="simulator.topologyLocked.value" class="h-full min-h-0 min-w-0">
+            <section v-if="configSection === 'network'" class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="network-title">
               <div class="flex h-13 flex-none items-center gap-3 border-b border-slate-100 px-[22px]"><RadioTower class="h-[17px] w-[17px] text-sky-700" aria-hidden="true" /><h2 id="network-title" class="text-[15px] font-bold text-slate-900">{{ t('deviceSimulator.sections.network') }}</h2><HintTip :text="t('deviceSimulator.sections.networkHint')" /></div>
               <div class="min-h-0 flex-1 overflow-auto p-[22px]">
               <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5">
@@ -1447,9 +1466,8 @@ function revealPreflightDetails() {
               <p class="mt-4 text-xs text-slate-500">{{ t('deviceSimulator.launch.channelsPerDevice', { profile: profileLabel(simulator.request.groups[0]?.profile_id ?? STRUCTURED_PROFILE_ID) }) }}</p>
               </div>
             </section>
+            </fieldset>
           </div>
-
-          </fieldset>
         </div>
       </template>
 
@@ -1481,7 +1499,7 @@ function revealPreflightDetails() {
                 </p>
               </div>
             </div>
-            <button v-if="simulator.platformAddReport.value && platformAddIncomplete" type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-900 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running" @click="simulator.addDevicesToPlatform()"><RotateCcw class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.platformAdd.retry') }}</button>
+            <button v-if="simulator.platformAddReport.value && platformAddIncomplete" type="button" class="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-900 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.busyAction.value !== null || !running || simulator.platformServersDirty.value || platformServerCredentialsInvalid" :title="simulator.platformServersDirty.value ? t('deviceSimulator.platformAdd.saveBeforeRetry') : undefined" @click="simulator.addDevicesToPlatform()"><RotateCcw class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.platformAdd.retry') }}</button>
           </div>
           <ul v-if="simulator.platformAddReport.value" class="divide-y divide-slate-100">
             <li v-for="serverResult in simulator.platformAddReport.value.servers" :key="serverResult.serverId" class="px-4 py-3">

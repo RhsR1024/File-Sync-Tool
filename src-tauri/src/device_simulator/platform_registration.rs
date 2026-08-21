@@ -3,7 +3,7 @@
 //! Passwords and access tokens stay in the main process and are never emitted
 //! to the simulator run log or forwarded to the elevated Worker.
 
-use crate::config::DeviceSimulatorSettings;
+use crate::config::{DeviceSimulatorSettings, PlatformServerSettings};
 use crate::ums_init_password::{rsa_pkcs1v15_encrypt_base64, ums_acquire_access_token};
 use crate::AppState;
 use app_lib::device_simulator::api::DEVICE_SIMULATOR_EVENT_LOG;
@@ -227,16 +227,8 @@ pub async fn device_simulator_add_devices_to_platform(
                 devices.len()
             ),
         );
-        let result = register_server(
-            &app_handle,
-            &client,
-            server,
-            &settings.platform_username,
-            &settings.platform_password,
-            &devices,
-            replace_existing,
-        )
-        .await;
+        let result =
+            register_server(&app_handle, &client, server, &devices, replace_existing).await;
         added_devices = added_devices.saturating_add(
             result
                 .devices
@@ -296,11 +288,15 @@ fn validate_registration_settings(
             "请先配置至少一台 UMS 服务器",
         ));
     }
-    if settings.platform_username.trim().is_empty() || settings.platform_password.is_empty() {
+    if settings
+        .last_platform_servers
+        .iter()
+        .any(|server| server.username.trim().is_empty() || server.password.is_empty())
+    {
         return Err(platform_error(
             "device_simulator.platform.credentials_missing",
             "deviceSimulator.errors.platformCredentialsMissing",
-            "UMS 用户名或密码为空",
+            "至少一台 UMS 服务器的用户名或密码为空",
         ));
     }
     Ok(())
@@ -309,9 +305,7 @@ fn validate_registration_settings(
 async fn register_server(
     app_handle: &AppHandle,
     client: &reqwest::Client,
-    server: &app_lib::device_simulator::api::TargetPlatformServer,
-    username: &str,
-    password: &str,
+    server: &PlatformServerSettings,
     devices: &[PlatformDeviceEntry],
     replace_existing: bool,
 ) -> PlatformServerAddResult {
@@ -338,8 +332,8 @@ async fn register_server(
         client,
         &server.host,
         server.port,
-        username,
-        password,
+        &server.username,
+        &server.password,
     )
     .await
     {
@@ -517,7 +511,7 @@ fn build_query_request(page_no: u32) -> QueryDeviceRequest {
 async fn query_existing_device_ids(
     app_handle: &AppHandle,
     client: &reqwest::Client,
-    server: &app_lib::device_simulator::api::TargetPlatformServer,
+    server: &PlatformServerSettings,
     token: &str,
     devices: &[PlatformDeviceEntry],
 ) -> Result<Vec<String>, String> {
@@ -610,7 +604,7 @@ async fn query_existing_device_ids(
 async fn delete_existing_devices(
     app_handle: &AppHandle,
     client: &reqwest::Client,
-    server: &app_lib::device_simulator::api::TargetPlatformServer,
+    server: &PlatformServerSettings,
     token: &str,
     device_ids: &[String],
 ) -> Result<(), String> {
@@ -967,6 +961,33 @@ mod tests {
                 port: 80,
             },
         ]
+    }
+
+    #[test]
+    fn registration_requires_credentials_for_every_server() {
+        let mut settings = DeviceSimulatorSettings {
+            last_platform_servers: vec![
+                PlatformServerSettings {
+                    id: "ums-1".into(),
+                    host: "192.115.1.17".into(),
+                    port: 80,
+                    username: "loadmin".into(),
+                    password: "admin_123".into(),
+                },
+                PlatformServerSettings {
+                    id: "ums-2".into(),
+                    host: "192.115.1.18".into(),
+                    port: 80,
+                    username: "loadmin-2".into(),
+                    password: String::new(),
+                },
+            ],
+            ..DeviceSimulatorSettings::default()
+        };
+
+        assert!(validate_registration_settings(&settings).is_err());
+        settings.last_platform_servers[1].password = "server-2-password".into();
+        assert!(validate_registration_settings(&settings).is_ok());
     }
 
     #[test]

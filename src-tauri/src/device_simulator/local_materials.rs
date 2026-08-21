@@ -411,13 +411,18 @@ struct Rendition {
     payload_type: u8,
 }
 
+const OFFLINE_H264_PRESET: &str = "medium";
+const OFFLINE_H264_PEAK_BITRATE_NUMERATOR: u64 = 3;
+const OFFLINE_H264_PEAK_BITRATE_DENOMINATOR: u64 = 2;
+const OFFLINE_H264_BUFFER_SECONDS: u64 = 2;
+
 const RENDITIONS: [Rendition; 3] = [
     Rendition {
         kind: "main",
         width: 1920,
         height: 1080,
         fps: 25,
-        bitrate: 3_400_000,
+        bitrate: 6_000_000,
         payload_type: 105,
     },
     Rendition {
@@ -425,7 +430,7 @@ const RENDITIONS: [Rendition; 3] = [
         width: 640,
         height: 360,
         fps: 20,
-        bitrate: 500_000,
+        bitrate: 1_000_000,
         payload_type: 105,
     },
     Rendition {
@@ -433,7 +438,7 @@ const RENDITIONS: [Rendition; 3] = [
         width: 640,
         height: 360,
         fps: 20,
-        bitrate: 500_000,
+        bitrate: 1_000_000,
         payload_type: 105,
     },
 ];
@@ -969,10 +974,14 @@ fn encode_rendition(
     config: Rendition,
 ) -> Result<(), LocalMaterialError> {
     let scale = format!(
-        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={}",
+        "scale={}:{}:force_original_aspect_ratio=decrease:flags=lanczos,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={}",
         config.width, config.height, config.width, config.height, config.fps
     );
     let gop = config.fps * 2;
+    let peak_bitrate = config
+        .bitrate
+        .saturating_mul(OFFLINE_H264_PEAK_BITRATE_NUMERATOR)
+        / OFFLINE_H264_PEAK_BITRATE_DENOMINATOR;
     let status = Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "warning", "-y", "-i"])
         .arg(input)
@@ -982,7 +991,7 @@ fn encode_rendition(
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            OFFLINE_H264_PRESET,
             "-profile:v",
             "high",
             "-pix_fmt",
@@ -992,9 +1001,12 @@ fn encode_rendition(
             "-b:v",
             &config.bitrate.to_string(),
             "-maxrate",
-            &config.bitrate.to_string(),
+            &peak_bitrate.to_string(),
             "-bufsize",
-            &(config.bitrate * 2).to_string(),
+            &config
+                .bitrate
+                .saturating_mul(OFFLINE_H264_BUFFER_SECONDS)
+                .to_string(),
         ])
         .args([
             "-g",
@@ -1407,6 +1419,34 @@ fn local_error(code: &'static str, message: impl Into<String>) -> LocalMaterialE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_renditions_raise_quality_without_changing_stream_timing() {
+        assert_eq!(OFFLINE_H264_PRESET, "medium");
+        assert_eq!(
+            RENDITIONS.map(|rendition| (
+                rendition.kind,
+                rendition.width,
+                rendition.height,
+                rendition.fps,
+                rendition.bitrate,
+            )),
+            [
+                ("main", 1920, 1080, 25, 6_000_000),
+                ("sub", 640, 360, 20, 1_000_000),
+                ("third", 640, 360, 20, 1_000_000),
+            ]
+        );
+        assert_eq!(
+            RENDITIONS[0]
+                .bitrate
+                .saturating_mul(OFFLINE_H264_PEAK_BITRATE_NUMERATOR)
+                / OFFLINE_H264_PEAK_BITRATE_DENOMINATOR,
+            9_000_000
+        );
+        assert_eq!(RENDITIONS[0].fps * 2, 50);
+        assert_eq!(RENDITIONS[1].fps * 2, 40);
+    }
 
     #[test]
     fn configured_directory_changes_only_the_material_root() {

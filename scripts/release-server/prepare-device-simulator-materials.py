@@ -20,6 +20,10 @@ from pathlib import Path
 
 VIDEO_CLOCK_RATE = 90_000
 MAX_MEDIA_BYTES = 1024 * 1024 * 1024
+OFFLINE_H264_PRESET = "medium"
+OFFLINE_H264_PEAK_BITRATE_NUMERATOR = 3
+OFFLINE_H264_PEAK_BITRATE_DENOMINATOR = 2
+OFFLINE_H264_BUFFER_SECONDS = 2
 DEFAULT_VIDEO = "车流测试视频.mp4"
 RENDITIONS = (
     {
@@ -27,7 +31,7 @@ RENDITIONS = (
         "width": 1920,
         "height": 1080,
         "fps": 25,
-        "bitrate": 3_400_000,
+        "bitrate": 6_000_000,
         "payload_type": 105,
     },
     {
@@ -35,7 +39,7 @@ RENDITIONS = (
         "width": 640,
         "height": 360,
         "fps": 20,
-        "bitrate": 500_000,
+        "bitrate": 1_000_000,
         "payload_type": 105,
     },
     {
@@ -43,7 +47,7 @@ RENDITIONS = (
         "width": 640,
         "height": 360,
         "fps": 20,
-        "bitrate": 500_000,
+        "bitrate": 1_000_000,
         "payload_type": 105,
     },
 )
@@ -250,12 +254,16 @@ def normalize_annex_b(raw_path, target_directory, theme_id, rendition):
     )
 
 
-def encode_rendition(ffmpeg, source, raw_path, rendition):
+def build_encode_command(ffmpeg, source, raw_path, rendition):
     scale = (
-        "scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        "scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
         "pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={fps}"
     ).format(**rendition)
     gop = rendition["fps"] * 2
+    peak_bitrate = (
+        rendition["bitrate"] * OFFLINE_H264_PEAK_BITRATE_NUMERATOR
+        // OFFLINE_H264_PEAK_BITRATE_DENOMINATOR
+    )
     command = [
         ffmpeg,
         "-hide_banner",
@@ -272,7 +280,7 @@ def encode_rendition(ffmpeg, source, raw_path, rendition):
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        OFFLINE_H264_PRESET,
         "-profile:v",
         "high",
         "-pix_fmt",
@@ -280,9 +288,9 @@ def encode_rendition(ffmpeg, source, raw_path, rendition):
         "-b:v",
         str(rendition["bitrate"]),
         "-maxrate",
-        str(rendition["bitrate"]),
+        str(peak_bitrate),
         "-bufsize",
-        str(rendition["bitrate"] * 2),
+        str(rendition["bitrate"] * OFFLINE_H264_BUFFER_SECONDS),
         "-g",
         str(gop),
         "-keyint_min",
@@ -302,7 +310,13 @@ def encode_rendition(ffmpeg, source, raw_path, rendition):
         "h264",
         str(raw_path),
     ]
-    subprocess.run(command, check=True)
+    return command
+
+
+def encode_rendition(ffmpeg, source, raw_path, rendition):
+    subprocess.run(
+        build_encode_command(ffmpeg, source, raw_path, rendition), check=True
+    )
 
 
 def prepare_theme(ffmpeg, source, output, theme_id):
