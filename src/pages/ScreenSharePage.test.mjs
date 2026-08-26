@@ -100,3 +100,12 @@ test('screen share no longer offers the host local preview', () => {
   const tauriSource = readFileSync(join(__dirname, '..', 'lib', 'tauri.ts'), 'utf8');
   assert.doesNotMatch(tauriSource, /screen_share_(open|close)_local_preview/);
 });
+
+test('screen share overlaps independent bootstrap work and loads QR support on demand', () => {
+  assert.match(
+    pageSource,
+    /const interfacesPromise = loadInterfaces\(\);\s+await loadSettings\(\);\s+await Promise\.all\(\[loadMonitors\(\), interfacesPromise\]\);/,
+  );
+  assert.doesNotMatch(pageSource, /import QRCode from 'qrcode'/);
+  assert.match(pageSource, /const \{ default: QRCode \} = await import\('qrcode'\);/);
+});

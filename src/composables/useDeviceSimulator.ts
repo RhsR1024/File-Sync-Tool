@@ -55,6 +55,8 @@ function newPlatformServer(): PlatformServerSettings {
     port: 80,
     username: DEFAULT_PLATFORM_USERNAME,
     password: DEFAULT_PLATFORM_PASSWORD,
+    auto_register_devices: true,
+    replace_existing_devices: false,
   };
 }
 
@@ -71,6 +73,8 @@ function platformServerSignature(servers: PlatformServerSettings[]): string {
     port: server.port,
     username: server.username.trim(),
     password: server.password,
+    auto_register_devices: server.auto_register_devices,
+    replace_existing_devices: server.replace_existing_devices,
   })));
 }
 
@@ -153,6 +157,7 @@ function createDeviceSimulator() {
   const settings = ref(defaultSettings());
   const platformServers = ref(platformServerDrafts(settings.value));
   const savedPlatformServerSignature = ref(platformServerSignature(platformServers.value));
+  const platformServersApplyPending = ref(false);
   const request = reactive<SimulatorStartRequest>(requestFromSettings(settings.value));
   const status = ref<SimulatorStatus>(emptyStatus());
   const interfaces = ref<SimulatorNetworkInterfaceInfo[]>([]);
@@ -178,7 +183,10 @@ function createDeviceSimulator() {
   const lastAlarmResult = ref<AlarmTriggerResult | null>(null);
   const importedAlarmImage = ref<ImportedAlarmImage | null>(null);
   const platformAddReport = ref<PlatformAddDevicesReport | null>(null);
+  const platformServerRegistrationResults = ref<Record<string, PlatformAddDevicesReport['servers'][number]>>({});
+  const platformRegistrationTargetId = ref<string | null>(null);
   const platformReplacePromptOpen = ref(false);
+  const platformReplaceTargetServerId = ref<string | null>(null);
   const platformReplaceRetryError = ref('');
   const logs = ref<SimulatorLogEvent[]>([]);
   const busyAction = ref<string | null>(null);
@@ -189,9 +197,14 @@ function createDeviceSimulator() {
   let previewTimer: number | null = null;
 
   const topologyLocked = computed(() => isDeviceSimulatorTopologyLocked(status.value.state));
-  const platformServersDirty = computed(() => (
-    platformServerSignature(platformServers.value) !== savedPlatformServerSignature.value
-  ));
+  const platformServersEditable = computed(() => new Set([
+    'idle',
+    'stopped',
+    'failed',
+    'running',
+  ]).has(status.value.state));
+  const platformServersDirty = computed(() => platformServersApplyPending.value
+    || platformServerSignature(platformServers.value) !== savedPlatformServerSignature.value);
   const selectedProfileIds = computed(() => [...new Set(request.groups.map((group) => group.profile_id))]);
   const blockingPreflight = computed(() => preflight.value
     ? hasBlockingPreflightFailure(preflight.value)
@@ -285,20 +298,34 @@ function createDeviceSimulator() {
     settings.value = saved;
     platformServers.value = platformServerDrafts(saved);
     savedPlatformServerSignature.value = platformServerSignature(platformServers.value);
+    platformServersApplyPending.value = false;
     syncRequestPlatformServers();
   }
 
   function addPlatformServer() {
-    if (topologyLocked.value) return;
+    if (!platformServersEditable.value) return;
     platformServers.value.push(newPlatformServer());
     syncRequestPlatformServers();
   }
 
   function removePlatformServer(serverId: string) {
-    if (topologyLocked.value) return;
+    if (!platformServersEditable.value) return;
     platformServers.value = platformServers.value.filter((server) => server.id !== serverId);
+    delete platformServerRegistrationResults.value[serverId];
     if (platformServers.value.length === 0) platformServers.value.push(newPlatformServer());
     syncRequestPlatformServers();
+  }
+
+  function platformServerDirty(serverId: string): boolean {
+    if (platformServersApplyPending.value) return true;
+    const current = platformServers.value.find((server) => server.id === serverId);
+    const saved = settings.value.last_platform_servers.find((server) => server.id === serverId);
+    if (!current || !saved) return true;
+    return platformServerSignature([current]) !== platformServerSignature([saved]);
+  }
+
+  function platformServerRegistrationResult(serverId: string) {
+    return platformServerRegistrationResults.value[serverId] ?? null;
   }
 
   function settingsFromRequest(): DeviceSimulatorSettings {
@@ -324,7 +351,7 @@ function createDeviceSimulator() {
   watch(
     () => platformServers.value.map((server) => `${server.id}\u0000${server.host}\u0000${server.port}`).join('\u0001'),
     () => {
-      if (!topologyLocked.value) syncRequestPlatformServers();
+      if (platformServersEditable.value) syncRequestPlatformServers();
     },
   );
 
@@ -559,12 +586,43 @@ function createDeviceSimulator() {
 
   async function savePlatformServers() {
     syncRequestPlatformServers();
+    const changedServerIds = platformServersApplyPending.value
+      ? platformServers.value.map((server) => server.id)
+      : platformServers.value
+        .filter((server) => platformServerDirty(server.id))
+        .map((server) => server.id);
+    const runtimeRunning = status.value.state === 'running';
     const saved = await run(
       'save-platform-servers',
-      () => deviceSimulatorApi.saveSettings(settingsFromRequest()),
+      async () => {
+        const persisted = await deviceSimulatorApi.saveSettings(settingsFromRequest());
+        applySavedSettings(persisted);
+        if (runtimeRunning) {
+          platformServersApplyPending.value = true;
+          const nextStatus = await deviceSimulatorApi.updatePlatformServers(
+            persisted.last_platform_servers.map(({ id, host, port }) => ({ id, host, port })),
+          );
+          applyStatus(nextStatus);
+          platformServersApplyPending.value = false;
+        }
+        return persisted;
+      },
     );
     if (!saved) return false;
     applySavedSettings(saved);
+    if (runtimeRunning && changedServerIds.length > 0) {
+      const report = await addDevicesToPlatform({
+        serverIds: changedServerIds,
+        automaticOnly: true,
+      });
+      const failed = report?.servers.find((server) => (
+        !server.success && server.failedAt === 'add'
+      ));
+      if (failed) {
+        platformReplaceTargetServerId.value = failed.serverId;
+        platformReplacePromptOpen.value = true;
+      }
+    }
     return true;
   }
 
@@ -727,14 +785,13 @@ function createDeviceSimulator() {
     });
     if (!result) return;
     applyStatus(result);
-    if (settings.value.platform_auto_add_devices) {
-      const replaceExisting = settings.value.platform_replace_existing_devices;
-      const report = await addDevicesToPlatform(replaceExisting);
-      if (!replaceExisting && report?.servers.some((server) => (
-        !server.success && server.failedAt === 'add'
-      ))) {
-        platformReplacePromptOpen.value = true;
-      }
+    const report = await addDevicesToPlatform({ automaticOnly: true });
+    const failed = report?.servers.find((server) => (
+      !server.success && server.failedAt === 'add'
+    ));
+    if (failed) {
+      platformReplaceTargetServerId.value = failed.serverId;
+      platformReplacePromptOpen.value = true;
     }
   }
 
@@ -771,32 +828,73 @@ function createDeviceSimulator() {
     await refreshAssets();
   }
 
-  async function addDevicesToPlatform(
-    replaceExisting = settings.value.platform_replace_existing_devices,
-  ): Promise<PlatformAddDevicesReport | null> {
+  async function addDevicesToPlatform(options: {
+    serverIds?: string[];
+    automaticOnly?: boolean;
+    replaceExisting?: boolean;
+  } = {}): Promise<PlatformAddDevicesReport | null> {
     const devices = (preview.value?.devices ?? []).map((device) => ({
       address: device.ip,
       port: request.device_http_port,
     }));
     if (devices.length === 0) return null;
+    platformRegistrationTargetId.value = options.serverIds?.length === 1
+      ? options.serverIds[0]
+      : null;
     const report = await run('add-to-platform', () => (
-      deviceSimulatorApi.addDevicesToPlatform(devices, replaceExisting)
+      deviceSimulatorApi.addDevicesToPlatform({
+        devices,
+        serverIds: options.serverIds ?? [],
+        automaticOnly: options.automaticOnly ?? false,
+        ...(options.replaceExisting === undefined
+          ? {}
+          : { replaceExisting: options.replaceExisting }),
+      })
     ));
-    if (report) platformAddReport.value = report;
+    platformRegistrationTargetId.value = null;
+    if (report && report.servers.length > 0) {
+      platformAddReport.value = report;
+      for (const result of report.servers) {
+        platformServerRegistrationResults.value[result.serverId] = result;
+      }
+    }
+    return report;
+  }
+
+  async function requestPlatformServerRegistration(serverId: string) {
+    const server = platformServers.value.find((item) => item.id === serverId);
+    if (!server || platformServerDirty(serverId)) return null;
+    if (server.replace_existing_devices) {
+      platformReplaceTargetServerId.value = serverId;
+      platformReplaceRetryError.value = '';
+      platformReplacePromptOpen.value = true;
+      return null;
+    }
+    const report = await addDevicesToPlatform({ serverIds: [serverId] });
+    if (report?.servers.some((result) => !result.success && result.failedAt === 'add')) {
+      platformReplaceTargetServerId.value = serverId;
+      platformReplacePromptOpen.value = true;
+    }
     return report;
   }
 
   function cancelPlatformReplaceRetry() {
     if (busyAction.value !== null) return;
     platformReplacePromptOpen.value = false;
+    platformReplaceTargetServerId.value = null;
     platformReplaceRetryError.value = '';
   }
 
   async function confirmPlatformReplaceRetry() {
     platformReplaceRetryError.value = '';
-    const report = await addDevicesToPlatform(true);
+    const serverId = platformReplaceTargetServerId.value;
+    const report = await addDevicesToPlatform({
+      serverIds: serverId ? [serverId] : [],
+      replaceExisting: true,
+    });
     if (report && report.addedDevices === report.totalDevices) {
       platformReplacePromptOpen.value = false;
+      platformReplaceTargetServerId.value = null;
       return;
     }
     const details = report?.servers
@@ -813,7 +911,9 @@ function createDeviceSimulator() {
     activeAlarmJobId.value = null;
     alarmSubscription.value = null;
     platformAddReport.value = null;
+    platformServerRegistrationResults.value = {};
     platformReplacePromptOpen.value = false;
+    platformReplaceTargetServerId.value = null;
     platformReplaceRetryError.value = '';
     lastLoggedAlarmError = '';
     const next = await run('status', () => deviceSimulatorApi.getStatus());
@@ -910,6 +1010,7 @@ function createDeviceSimulator() {
     settings,
     platformServers,
     platformServersDirty,
+    platformServersApplyPending,
     request,
     status,
     interfaces,
@@ -936,12 +1037,14 @@ function createDeviceSimulator() {
     lastAlarmResult,
     importedAlarmImage,
     platformAddReport,
+    platformRegistrationTargetId,
     platformReplacePromptOpen,
     platformReplaceRetryError,
     logs,
     busyAction,
     errorMessage,
     topologyLocked,
+    platformServersEditable,
     blockingPreflight,
     recoverySessionId,
     selectedProfileIds,
@@ -966,6 +1069,9 @@ function createDeviceSimulator() {
     runPreflight,
     start,
     addDevicesToPlatform,
+    requestPlatformServerRegistration,
+    platformServerDirty,
+    platformServerRegistrationResult,
     cancelPlatformReplaceRetry,
     confirmPlatformReplaceRetry,
     stop,

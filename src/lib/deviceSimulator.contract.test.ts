@@ -22,6 +22,8 @@ export const deviceSimulatorSettingsContract: DeviceSimulatorSettings = {
     port: 80,
     username: 'loadmin',
     password: 'admin_123',
+    auto_register_devices: true,
+    replace_existing_devices: false,
   }],
   last_platform_access_mode: 'configured_servers_only',
   last_alarm_receiver_url: 'http://192.168.50.2/alarm',

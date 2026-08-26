@@ -16,6 +16,7 @@ import {
   closePaperWindow,
   createDesktopPaper,
   dragPaperLauncher,
+  finishPaperLauncherTransition,
   openPaperWindow,
   movePaperId,
   setPaperLauncherExpanded,
@@ -27,6 +28,7 @@ defineOptions({ name: 'PaperTodoLauncherPage' });
 const { t, locale } = useI18n();
 const store = usePaperTodo();
 const expanded = ref(false);
+const transitioning = ref(false);
 const collapsedCapsuleMeasure = ref<HTMLElement | null>(null);
 const openingPaperId = ref<string | null>(null);
 const creatingKind = ref<'todo' | 'note' | null>(null);
@@ -42,6 +44,10 @@ let launcherSyncQueue: Promise<void> = Promise.resolve();
 // Only the newest requested state may commit visible DOM. This coalesces rapid
 // keyboard activations and any refresh-driven sync that overlaps a user click.
 let launcherStateVersion = 0;
+// Clicks toggle the latest requested state, not the last DOM state. During a
+// native resize the DOM intentionally lags behind, so using `expanded` here
+// would enqueue the same direction more than once under rapid input.
+let requestedExpanded = false;
 let draggingLauncher = false;
 let paperDragFinished = false;
 // Last known pointer state, kept explicitly because the webview reports the
@@ -57,6 +63,7 @@ const SETTLE_MS = 400;
 const COLLAPSE_DELAY_MS = 700;
 
 const edge = computed(() => store.settings.value.launcherEdge);
+const docked = computed(() => store.settings.value.launcherDocked);
 const paperCount = computed(() => store.papers.value.length);
 const expandedRowCount = computed(() => (
   paperCount.value === 0 ? 2 : paperCount.value + 1
@@ -114,16 +121,36 @@ function queueLauncherSync(
   value: boolean,
   itemCount: number,
   capsuleWidth: number | null,
+  deferDisplay = false,
+  transitionId = launcherStateVersion,
 ): Promise<void> {
-  const run = () => setPaperLauncherExpanded(value, itemCount, capsuleWidth);
+  const run = () => setPaperLauncherExpanded(
+    value,
+    itemCount,
+    capsuleWidth,
+    deferDisplay,
+    transitionId,
+  );
   const sync = launcherSyncQueue.then(run, run);
   launcherSyncQueue = sync.catch(() => undefined);
   return sync;
 }
 
+/** Let WebView2 submit two compositor frames before native geometry changes. */
+async function waitForLauncherPaint(): Promise<void> {
+  await nextTick();
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+}
+
 async function setExpanded(value: boolean): Promise<void> {
   cancelCollapse();
+  if (value === requestedExpanded) {
+    return;
+  }
   const stateVersion = ++launcherStateVersion;
+  requestedExpanded = value;
   // Expanding both grows the window and slides it along the edge, and the
   // webview reports that reposition as a `mouseleave` the user never made.
   // Hold auto-collapse off for a fixed period so the list cannot fold itself
@@ -137,21 +164,58 @@ async function setExpanded(value: boolean): Promise<void> {
   // Reserve the creation row and, when there are no papers, the empty-state
   // row above it so both creation buttons remain inside the native window.
   const itemCount = expandedRowCount.value;
-  // The hidden collapsed-state copy provides its width without changing the
-  // visible label first. Both directions can therefore update native geometry
-  // before committing DOM, eliminating the reverse-path flash under rapid
-  // expand/collapse clicks.
-  await queueLauncherSync(value, itemCount, value ? null : measureCapsuleWidth());
-  if (stateVersion !== launcherStateVersion) return;
-  expanded.value = value;
-  await nextTick();
+  // Native hide/show lets WebView2 briefly reuse its previous composition
+  // surface when toggled quickly. First paint this surface fully transparent,
+  // then resize it while it stays visible, replace the DOM behind that clear
+  // frame, and only let the newest request restore opacity.
+  transitioning.value = true;
+  await waitForLauncherPaint();
+  try {
+    await queueLauncherSync(
+      value,
+      itemCount,
+      value ? null : measureCapsuleWidth(),
+      true,
+      stateVersion,
+    );
+    if (stateVersion !== launcherStateVersion) return;
+    expanded.value = value;
+    await waitForLauncherPaint();
+    if (stateVersion !== launcherStateVersion) return;
+  } catch (reason) {
+    if (stateVersion === launcherStateVersion) {
+      requestedExpanded = expanded.value;
+    }
+    throw reason;
+  } finally {
+    if (stateVersion === launcherStateVersion) {
+      transitioning.value = false;
+      await waitForLauncherPaint();
+      if (stateVersion === launcherStateVersion) {
+        await finishPaperLauncherTransition(stateVersion);
+      }
+    }
+  }
+}
+
+/** Refresh list geometry without introducing another visible state request. */
+async function syncExpandedGeometry(): Promise<void> {
+  if (!expanded.value || transitioning.value) return;
+  const stateVersion = launcherStateVersion;
+  await queueLauncherSync(true, expandedRowCount.value, null, true, stateVersion);
 }
 
 /** Re-report the collapsed capsule width after its label changed. */
 async function syncCollapsedWidth(): Promise<void> {
   if (expanded.value) return;
   await nextTick();
-  await queueLauncherSync(false, expandedRowCount.value, measureCapsuleWidth());
+  await queueLauncherSync(
+    false,
+    expandedRowCount.value,
+    measureCapsuleWidth(),
+    true,
+    launcherStateVersion,
+  );
 }
 
 async function startLauncherDrag(event: MouseEvent): Promise<void> {
@@ -161,15 +225,15 @@ async function startLauncherDrag(event: MouseEvent): Promise<void> {
   draggingLauncher = true;
   try {
     // The capsule is the whole drag handle now, so a press is ambiguous: the
-    // native loop pins it to the display edge, clamps it to the primary
-    // monitor, and reports whether it ever travelled. A press that did not move
-    // is the expand/collapse click.
+    // native loop moves it across the virtual desktop, snaps it near any
+    // display edge, and reports whether it ever travelled. A press that did not
+    // move is the expand/collapse click.
     const moved = await dragPaperLauncher();
     if (moved) {
       settleUntil = Date.now() + SETTLE_MS;
       await store.refreshFromDisk();
     } else {
-      await setExpanded(!expanded.value);
+      await setExpanded(!requestedExpanded);
     }
   } catch (reason) {
     store.error.value = String(reason);
@@ -184,7 +248,7 @@ async function startLauncherDrag(event: MouseEvent): Promise<void> {
  */
 function toggleFromKeyboard(event: MouseEvent): void {
   if (event.detail !== 0) return;
-  void setExpanded(!expanded.value);
+  void setExpanded(!requestedExpanded);
 }
 
 function scheduleCollapse(): void {
@@ -327,7 +391,7 @@ function finishPaperDrag(): void {
 // The collapsed label carries the count, so both the paper list and the active
 // locale change how wide the capsule has to be.
 watch([paperCount, locale], () => {
-  if (expanded.value) void setExpanded(true);
+  if (expanded.value) void syncExpandedGeometry();
   else void syncCollapsedWidth();
 });
 
@@ -358,7 +422,9 @@ onBeforeUnmount(() => {
     class="launcher-surface"
     :class="[
       edge === 'left' ? 'launcher-left' : 'launcher-right',
+      docked ? 'launcher-docked' : 'launcher-free',
       useDarkTheme ? 'launcher-dark' : 'launcher-light',
+      transitioning && 'launcher-transitioning',
     ]"
     @mouseenter="noteLauncherHovered"
     @mousemove="noteLauncherHovered"
@@ -520,6 +586,12 @@ onBeforeUnmount(() => {
   text-align: left;
 }
 .launcher-master-capsule:active { cursor: grabbing; }
+.launcher-free .launcher-master-capsule {
+  justify-content: center;
+  padding-inline: 8px;
+  border-radius: 13px;
+  text-align: center;
+}
 .launcher-capsule-measurer {
   position: fixed;
   top: 0;
@@ -527,7 +599,12 @@ onBeforeUnmount(() => {
   visibility: hidden;
   pointer-events: none;
 }
-.launcher-left .launcher-master-capsule {
+.launcher-transitioning {
+  opacity: 0;
+  pointer-events: none;
+}
+.launcher-transitioning * { pointer-events: none !important; }
+.launcher-left.launcher-docked .launcher-master-capsule {
   padding: 0 10px 0 6px;
   border-radius: 0 13px 13px 0;
 }

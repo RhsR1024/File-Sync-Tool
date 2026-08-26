@@ -18,7 +18,6 @@ import {
 } from 'lucide-vue-next';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import QRCode from 'qrcode';
 import { LAN_SHARE_STATUS_REFRESH_INTERVAL_MS } from '../lib/lanShareStatus';
 import {
   fileShareGetStatus,
@@ -497,6 +496,7 @@ const toggleQr = async (url: string) => {
     await nextTick();
     const canvas = qrCanvases.value[url];
     if (canvas) {
+      const { default: QRCode } = await import('qrcode');
       await QRCode.toCanvas(canvas, url, { width: 128, margin: 1, color: { dark: '#0f766e', light: '#ffffff' } });
     }
   }

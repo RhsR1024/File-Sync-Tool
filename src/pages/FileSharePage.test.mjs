@@ -51,3 +51,8 @@ test('file share header keeps the product description while sharing is active', 
   assert.match(pageSource, /\{\{ t\('tools\.fileShare\.consoleDescription'\) \}\}/);
   assert.doesNotMatch(pageSource, /isActive \? serverUrl : t\('tools\.fileShare\.consoleDescription'\)/);
 });
+
+test('file share keeps QR generation out of the initial route chunk', () => {
+  assert.doesNotMatch(pageSource, /import QRCode from 'qrcode'/);
+  assert.match(pageSource, /const \{ default: QRCode \} = await import\('qrcode'\);/);
+});

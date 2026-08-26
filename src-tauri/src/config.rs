@@ -27,6 +27,11 @@ pub struct PlatformServerSettings {
     pub username: String,
     /// Intentionally persisted as clear text so the settings UI can reveal it on demand.
     pub password: String,
+    /// `None` only while decoding a pre-per-server configuration. Normalization
+    /// replaces it with the legacy global preference before settings are used.
+    pub auto_register_devices: Option<bool>,
+    /// Per-UMS replacement strategy; see [`Self::auto_register_devices`].
+    pub replace_existing_devices: Option<bool>,
 }
 
 impl Default for PlatformServerSettings {
@@ -37,6 +42,8 @@ impl Default for PlatformServerSettings {
             port: 80,
             username: String::new(),
             password: String::new(),
+            auto_register_devices: None,
+            replace_existing_devices: None,
         }
     }
 }
@@ -70,9 +77,11 @@ pub struct DeviceSimulatorSettings {
     /// Legacy global UMS password retained only for upgrading existing settings.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub platform_password: String,
-    /// Register all devices with every configured UMS after the simulator reaches Running.
+    /// Legacy global registration preference retained for one-way migration to
+    /// [`PlatformServerSettings::auto_register_devices`].
     pub platform_auto_add_devices: bool,
-    /// Remove UMS resources whose IP matches a virtual device before registering it.
+    /// Legacy global replacement preference retained for one-way migration to
+    /// [`PlatformServerSettings::replace_existing_devices`].
     pub platform_replace_existing_devices: bool,
 }
 
@@ -690,6 +699,9 @@ pub fn normalize_device_simulator_settings(
         .retain(|address| seen_ips.insert(*address));
     let legacy_platform_username = settings.platform_username.trim().to_owned();
     let legacy_platform_password = settings.platform_password.clone();
+    let legacy_auto_register = settings.platform_auto_add_devices;
+    let legacy_replace_existing = settings.platform_replace_existing_devices;
+    let mut seen_server_ids = HashSet::new();
     settings.last_platform_servers.truncate(8);
     settings.last_platform_servers.retain_mut(|server| {
         server.id = server.id.trim().to_owned();
@@ -701,8 +713,15 @@ pub fn normalize_device_simulator_settings(
         if server.password.is_empty() && !legacy_platform_password.is_empty() {
             server.password.clone_from(&legacy_platform_password);
         }
+        if server.auto_register_devices.is_none() {
+            server.auto_register_devices = Some(legacy_auto_register);
+        }
+        if server.replace_existing_devices.is_none() {
+            server.replace_existing_devices = Some(legacy_replace_existing);
+        }
         !server.id.is_empty()
             && server.id.len() <= 128
+            && seen_server_ids.insert(server.id.clone())
             && !server.host.is_empty()
             && server.host.len() <= 253
             && server.port > 0
@@ -785,17 +804,27 @@ pub fn validate_device_simulator_settings(
     if !(1..=30).contains(&settings.last_subnet_prefix) {
         return Err("Device simulator subnet prefix must be between 1 and 30".into());
     }
-    if settings.platform_auto_add_devices && !settings.last_platform_servers.is_empty() {
-        if settings
-            .last_platform_servers
-            .iter()
-            .any(|server| server.username.is_empty() || server.password.is_empty())
-        {
-            return Err(
-                "Automatic platform registration requires a UMS username and password for every server"
-                    .into(),
-            );
-        }
+    if settings.last_platform_servers.iter().any(|server| {
+        server
+            .auto_register_devices
+            .unwrap_or(settings.platform_auto_add_devices)
+            && (server.username.is_empty() || server.password.is_empty())
+    }) {
+        return Err(
+            "Automatic platform registration requires a UMS username and password for every enabled server"
+                .into(),
+        );
+    }
+    let mut server_ids = HashSet::new();
+    if settings.last_platform_servers.iter().any(|server| {
+        server.id.is_empty()
+            || server.id.len() > 128
+            || !server_ids.insert(server.id.as_str())
+            || server.host.is_empty()
+            || server.host.len() > 253
+            || server.port == 0
+    }) {
+        return Err("Device simulator UMS server settings are invalid or duplicated".into());
     }
     let mut ids = HashSet::new();
     let mut total = 0_u32;
@@ -1482,6 +1511,8 @@ mod tests {
             port: 80,
             username: "loadmin".into(),
             password: "admin_123".into(),
+            auto_register_devices: Some(true),
+            replace_existing_devices: Some(false),
         });
         assert!(validate_device_simulator_settings(&settings).is_ok());
 
@@ -1528,6 +1559,78 @@ mod tests {
         let normalized = normalize_device_simulator_settings(settings);
         assert_eq!(normalized.last_platform_servers[0].username, "loadmin");
         assert_eq!(normalized.last_platform_servers[0].password, "admin_123");
+        assert_eq!(
+            normalized.last_platform_servers[0].auto_register_devices,
+            Some(true)
+        );
+        assert_eq!(
+            normalized.last_platform_servers[0].replace_existing_devices,
+            Some(false)
+        );
+        assert!(validate_device_simulator_settings(&normalized).is_ok());
+    }
+
+    #[test]
+    fn legacy_global_registration_preferences_migrate_per_server() {
+        let settings: DeviceSimulatorSettings = serde_json::from_value(serde_json::json!({
+            "last_platform_servers": [
+                { "id": "ums-1", "host": "192.115.1.17", "port": 80 }
+            ],
+            "platform_auto_add_devices": false,
+            "platform_replace_existing_devices": true
+        }))
+        .unwrap();
+
+        let normalized = normalize_device_simulator_settings(settings);
+        assert_eq!(
+            normalized.last_platform_servers[0].auto_register_devices,
+            Some(false)
+        );
+        assert_eq!(
+            normalized.last_platform_servers[0].replace_existing_devices,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn explicit_per_server_registration_preferences_win_over_legacy_globals() {
+        let settings: DeviceSimulatorSettings = serde_json::from_value(serde_json::json!({
+            "last_platform_servers": [{
+                "id": "ums-1",
+                "host": "192.115.1.17",
+                "port": 80,
+                "auto_register_devices": false,
+                "replace_existing_devices": false
+            }],
+            "platform_auto_add_devices": true,
+            "platform_replace_existing_devices": true
+        }))
+        .unwrap();
+
+        let normalized = normalize_device_simulator_settings(settings);
+        assert_eq!(
+            normalized.last_platform_servers[0].auto_register_devices,
+            Some(false)
+        );
+        assert_eq!(
+            normalized.last_platform_servers[0].replace_existing_devices,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn duplicate_platform_server_ids_are_removed_during_normalization() {
+        let settings: DeviceSimulatorSettings = serde_json::from_value(serde_json::json!({
+            "last_platform_servers": [
+                { "id": "ums-1", "host": "192.115.1.17", "port": 80 },
+                { "id": "ums-1", "host": "192.115.1.18", "port": 80 }
+            ]
+        }))
+        .unwrap();
+
+        let normalized = normalize_device_simulator_settings(settings);
+        assert_eq!(normalized.last_platform_servers.len(), 1);
+        assert_eq!(normalized.last_platform_servers[0].host, "192.115.1.17");
         assert!(validate_device_simulator_settings(&normalized).is_ok());
     }
 

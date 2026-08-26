@@ -1,4 +1,6 @@
-use crate::device_simulator::api::{AlarmJobRequest, DevicePreview, SimulatorStartRequest};
+use crate::device_simulator::api::{
+    AlarmJobRequest, DevicePreview, SimulatorStartRequest, TargetPlatformServer,
+};
 use crate::device_simulator::errors::{
     worker_io_error, worker_json_error, SimulatorError, SimulatorErrorBody, SimulatorResult,
     WORKER_FRAME_TOO_LARGE, WORKER_FRAME_TRUNCATED, WORKER_HELLO_INVALID, WORKER_NOT_ELEVATED,
@@ -109,6 +111,7 @@ pub enum WorkerCommandName {
     InitializeSession,
     RunPreflight,
     StartServices,
+    UpdatePlatformServers,
     StopServices,
     StartAlarmJob,
     StopAlarmJob,
@@ -128,6 +131,12 @@ pub struct InitializeSessionPayload {
     pub preview: DevicePreview,
     pub pinned_packs: Vec<PinnedPackDirectory>,
     pub manage_firewall: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatePlatformServersPayload {
+    pub servers: Vec<TargetPlatformServer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

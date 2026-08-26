@@ -27,7 +27,9 @@ use crate::device_simulator::windows::firewall::{
 use crate::device_simulator::windows::ip_alias::{
     IpAliasBackend, Ipv4Subnet, SystemIpAliasBackend,
 };
-use crate::device_simulator::worker_protocol::InitializeSessionPayload;
+use crate::device_simulator::worker_protocol::{
+    InitializeSessionPayload, UpdatePlatformServersPayload,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -99,6 +101,10 @@ pub trait WorkerServiceRuntime: Send {
     ) -> WorkerServiceFuture<'a, ProtocolRuntimeSummary>;
     fn stop_alarms<'a>(&'a mut self) -> WorkerServiceFuture<'a, ()>;
     fn stop_protocol<'a>(&'a mut self) -> WorkerServiceFuture<'a, ()>;
+    fn update_access_policy(
+        &mut self,
+        policy: PlatformAccessPolicy,
+    ) -> Result<(), WorkerRuntimeError>;
     fn start_alarm_job<'a>(
         &'a mut self,
         request: AlarmJobRequest,
@@ -206,6 +212,22 @@ impl WorkerServiceRuntime for SystemWorkerServices {
             }
             Ok(())
         })
+    }
+
+    fn update_access_policy(
+        &mut self,
+        policy: PlatformAccessPolicy,
+    ) -> Result<(), WorkerRuntimeError> {
+        self.protocol
+            .as_ref()
+            .ok_or_else(|| {
+                runtime_error(
+                    "device_simulator.worker.services_not_started",
+                    "Worker protocol services are not active",
+                )
+            })?
+            .update_access_policy(policy);
+        Ok(())
     }
 
     fn start_alarm_job<'a>(
@@ -736,6 +758,124 @@ impl WorkerRuntime {
         }
         self.cleanup_resources(SessionState::Stopped).await?;
         Ok(self.status_snapshot().await)
+    }
+
+    pub async fn update_platform_servers(
+        &mut self,
+        payload: UpdatePlatformServersPayload,
+    ) -> Result<SimulatorStatusSnapshot, WorkerRuntimeError> {
+        self.ensure_running()?;
+        let initialized = self.initialized.as_ref().expect("initialized session");
+        let access_mode = initialized.payload.request.platform.access_mode;
+        let manage_firewall = initialized.payload.manage_firewall;
+        let servers = payload.servers;
+        let platform_addresses =
+            if manage_firewall || access_mode == PlatformAccessMode::ConfiguredServersOnly {
+                let servers_for_resolution = servers.clone();
+                Some(
+                    tokio::task::spawn_blocking(move || {
+                        resolve_platform_ipv4_addresses(&servers_for_resolution)
+                    })
+                    .await
+                    .map_err(|source| {
+                        runtime_error(
+                            "device_simulator.worker.firewall_scope_task_failed",
+                            format!("platform address resolution task failed: {source}"),
+                        )
+                    })??,
+                )
+            } else {
+                None
+            };
+        let next_policy = PlatformAccessPolicy::resolve(
+            access_mode,
+            platform_addresses.clone().unwrap_or_default(),
+        )
+        .map_err(|source| runtime_error(source.code, source.message))?;
+
+        let mut applied_firewall_rules = None;
+        if manage_firewall {
+            let addresses = platform_addresses.unwrap_or_default();
+            if addresses.is_empty() {
+                return Err(runtime_error(
+                    "device_simulator.worker.firewall_scope_empty",
+                    "Managed firewall scope requires at least one resolved UMS address",
+                ));
+            }
+            let previous_rules = initialized.firewall_rules.clone();
+            let next_rules = previous_rules
+                .iter()
+                .cloned()
+                .map(|mut rule| {
+                    rule.remote_scope = FirewallRemoteScope::Addresses(addresses.clone());
+                    rule
+                })
+                .collect::<Vec<_>>();
+            let mut updated = 0_usize;
+            for rule in &next_rules {
+                let backend = Arc::clone(&self.firewall);
+                let rule = rule.clone();
+                let result = tokio::task::spawn_blocking(move || backend.update_rule(&rule))
+                    .await
+                    .map_err(|source| {
+                        runtime_error(
+                            "device_simulator.worker.firewall_task_failed",
+                            format!("firewall update task failed: {source}"),
+                        )
+                    })?
+                    .map_err(|source| {
+                        runtime_error(
+                            "device_simulator.worker.firewall_update_failed",
+                            source.to_string(),
+                        )
+                    });
+                if let Err(source) = result {
+                    // Include the current rule as well: a native setter may
+                    // have changed the property before reporting an error.
+                    self.restore_firewall_rules(&previous_rules[..=updated])
+                        .await;
+                    return Err(source);
+                }
+                updated += 1;
+            }
+            applied_firewall_rules = Some(next_rules);
+        }
+
+        if let Err(source) = self.services.update_access_policy(next_policy.clone()) {
+            if manage_firewall {
+                let previous_rules = self
+                    .initialized
+                    .as_ref()
+                    .expect("initialized session")
+                    .firewall_rules
+                    .clone();
+                self.restore_firewall_rules(&previous_rules).await;
+            }
+            return Err(source);
+        }
+        let initialized = self.initialized.as_mut().expect("initialized session");
+        if let Some(rules) = applied_firewall_rules {
+            initialized.firewall_rules = rules;
+        }
+        initialized.access_policy = next_policy;
+        initialized.payload.request.platform.servers = servers;
+        Ok(self.status_snapshot().await)
+    }
+
+    async fn restore_firewall_rules(&self, rules: &[FirewallRuleSpec]) {
+        for previous in rules.iter().rev() {
+            let backend = Arc::clone(&self.firewall);
+            let previous = previous.clone();
+            match tokio::task::spawn_blocking(move || backend.update_rule(&previous)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(rollback)) => {
+                    log::error!("device simulator firewall rollback failed: {rollback}")
+                }
+                Err(rollback) => {
+                    log::error!("device simulator firewall rollback task failed: {rollback}")
+                }
+            }
+        }
     }
 
     pub async fn start_alarm_job(
@@ -1352,6 +1492,8 @@ mod tests {
     #[derive(Default)]
     struct FakeFirewallBackend {
         rules: TestMutex<HashMap<String, FirewallRuleSpec>>,
+        update_calls: TestMutex<usize>,
+        fail_update_at: TestMutex<Option<usize>>,
     }
 
     impl FirewallBackend for FakeFirewallBackend {
@@ -1364,6 +1506,24 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(rule.rule_id.clone(), rule.clone());
+            Ok(())
+        }
+
+        fn update_rule(&self, rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError> {
+            let mut rules = self.rules.lock().unwrap();
+            if !rules.contains_key(&rule.rule_id) {
+                return Err(FirewallBackendError::Native(
+                    "cannot update a missing fake firewall rule".into(),
+                ));
+            }
+            rules.insert(rule.rule_id.clone(), rule.clone());
+            let mut calls = self.update_calls.lock().unwrap();
+            *calls += 1;
+            if *self.fail_update_at.lock().unwrap() == Some(*calls) {
+                return Err(FirewallBackendError::Native(
+                    "injected update failure after mutation".into(),
+                ));
+            }
             Ok(())
         }
 
@@ -1410,6 +1570,19 @@ mod tests {
                 self.started = false;
                 Ok(())
             })
+        }
+
+        fn update_access_policy(
+            &mut self,
+            _policy: PlatformAccessPolicy,
+        ) -> Result<(), WorkerRuntimeError> {
+            if !self.started {
+                return Err(runtime_error(
+                    "device_simulator.worker.services_not_started",
+                    "fake services are not active",
+                ));
+            }
+            Ok(())
         }
 
         fn start_alarm_job<'a>(
@@ -1620,6 +1793,72 @@ mod tests {
             .load("session-test")
             .unwrap();
         assert!(journal.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn running_server_update_replaces_firewall_scope_without_restarting_services() {
+        let root = TempDir::new().unwrap();
+        let ip = Arc::new(FakeIpBackend::default());
+        let firewall = Arc::new(FakeFirewallBackend::default());
+        let mut runtime = seed_runtime(&root, Arc::clone(&ip), Arc::clone(&firewall));
+        runtime.save_journal().await.unwrap();
+        runtime.start_services().await.unwrap();
+
+        let next_address = "203.0.113.25".parse::<Ipv4Addr>().unwrap();
+        runtime
+            .update_platform_servers(UpdatePlatformServersPayload {
+                servers: vec![TargetPlatformServer {
+                    id: "replacement".into(),
+                    host: next_address.to_string(),
+                    port: 80,
+                }],
+            })
+            .await
+            .unwrap();
+
+        assert!(firewall.rules.lock().unwrap().values().all(|rule| {
+            rule.remote_scope == FirewallRemoteScope::Addresses(vec![next_address])
+        }));
+        assert_eq!(
+            runtime
+                .initialized
+                .as_ref()
+                .unwrap()
+                .payload
+                .request
+                .platform
+                .servers[0]
+                .id,
+            "replacement"
+        );
+        assert_eq!(runtime.state(), SessionState::Running);
+    }
+
+    #[tokio::test]
+    async fn partial_firewall_scope_update_restores_every_mutated_rule() {
+        let root = TempDir::new().unwrap();
+        let ip = Arc::new(FakeIpBackend::default());
+        let firewall = Arc::new(FakeFirewallBackend::default());
+        let mut runtime = seed_runtime(&root, Arc::clone(&ip), Arc::clone(&firewall));
+        runtime.save_journal().await.unwrap();
+        runtime.start_services().await.unwrap();
+        let previous = firewall.rules.lock().unwrap().clone();
+        *firewall.fail_update_at.lock().unwrap() = Some(2);
+
+        let error = runtime
+            .update_platform_servers(UpdatePlatformServersPayload {
+                servers: vec![TargetPlatformServer {
+                    id: "replacement".into(),
+                    host: "203.0.113.25".into(),
+                    port: 80,
+                }],
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "device_simulator.worker.firewall_update_failed");
+        assert_eq!(*firewall.rules.lock().unwrap(), previous);
+        assert_eq!(runtime.state(), SessionState::Running);
     }
 
     #[tokio::test]

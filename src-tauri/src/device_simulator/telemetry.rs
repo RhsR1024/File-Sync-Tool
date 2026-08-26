@@ -12,10 +12,10 @@ impl ProtocolDiagnosticSink {
         Self { sender }
     }
 
-    pub fn info(&self, component: &str, message: String) {
-        log::info!("[{component}] {message}");
+    pub fn debug(&self, component: &str, message: String) {
+        log::debug!("[{component}] {message}");
         let _ = self.sender.send(WorkerEventPayload::Log {
-            level: WorkerLogLevel::Info,
+            level: WorkerLogLevel::Debug,
             component: component.to_string(),
             message,
             error_code: None,
@@ -97,15 +97,15 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_sink_forwards_copyable_worker_log_text() {
+    fn diagnostic_sink_forwards_copyable_debug_log_text() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let sink = ProtocolDiagnosticSink::new(sender);
-        sink.info("watermark_timing", "WM_DIAG input_fps=25.00".into());
+        sink.debug("watermark_timing", "WM_DIAG input_fps=25.00".into());
 
         assert_eq!(
             receiver.try_recv().unwrap(),
             WorkerEventPayload::Log {
-                level: WorkerLogLevel::Info,
+                level: WorkerLogLevel::Debug,
                 component: "watermark_timing".into(),
                 message: "WM_DIAG input_fps=25.00".into(),
                 error_code: None,

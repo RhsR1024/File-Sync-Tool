@@ -89,6 +89,14 @@ function setSetting<K extends keyof PaperTodoSettings>(key: K, value: PaperTodoS
   store.updateSettings((current) => { current[key] = value; });
 }
 
+function setLauncherEdge(edge: PaperTodoSettings['launcherEdge']): void {
+  store.updateSettings((current) => {
+    current.launcherEdge = edge;
+    current.launcherDocked = true;
+    current.launcherX = edge === 'left' ? 0 : 100;
+  });
+}
+
 function setBoolean(key: keyof PaperTodoSettings, event: Event): void {
   setSetting(key, (event.target as HTMLInputElement).checked as never);
 }
@@ -204,8 +212,8 @@ onBeforeUnmount(() => systemThemeQuery?.removeEventListener('change', onSystemTh
           <div class="settings-row">
             <span><strong>{{ t('paperTodo.settings.launcherEdge') }}</strong><small>{{ t('paperTodo.settings.launcherEdgeHint') }}</small></span>
             <div class="settings-segmented">
-              <button type="button" :class="settings.launcherEdge === 'left' && 'is-active'" :disabled="!settings.launcherEnabled" @click="setSetting('launcherEdge', 'left')">{{ t('paperTodo.settings.leftEdge') }}</button>
-              <button type="button" :class="settings.launcherEdge === 'right' && 'is-active'" :disabled="!settings.launcherEnabled" @click="setSetting('launcherEdge', 'right')">{{ t('paperTodo.settings.rightEdge') }}</button>
+              <button type="button" :class="settings.launcherDocked && settings.launcherEdge === 'left' && 'is-active'" :disabled="!settings.launcherEnabled" @click="setLauncherEdge('left')">{{ t('paperTodo.settings.leftEdge') }}</button>
+              <button type="button" :class="settings.launcherDocked && settings.launcherEdge === 'right' && 'is-active'" :disabled="!settings.launcherEnabled" @click="setLauncherEdge('right')">{{ t('paperTodo.settings.rightEdge') }}</button>
             </div>
           </div>
           <label class="settings-row">

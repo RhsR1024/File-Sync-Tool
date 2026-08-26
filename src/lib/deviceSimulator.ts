@@ -87,7 +87,9 @@ export interface DeviceSimulatorSettings {
   last_time_watermark_enabled: boolean;
   auto_check_asset_updates: boolean;
   manage_firewall: boolean;
+  /** @deprecated Migrated into each PlatformServerSettings entry. */
   platform_auto_add_devices: boolean;
+  /** @deprecated Migrated into each PlatformServerSettings entry. */
   platform_replace_existing_devices: boolean;
 }
 
@@ -95,6 +97,8 @@ export interface DeviceSimulatorSettings {
 export interface PlatformServerSettings extends TargetPlatformServer {
   username: string;
   password: string;
+  auto_register_devices: boolean;
+  replace_existing_devices: boolean;
 }
 
 export interface TargetPlatformServer {
@@ -446,6 +450,13 @@ export interface PlatformDeviceEntry {
   port: number;
 }
 
+export interface PlatformAddDevicesRequest {
+  devices: PlatformDeviceEntry[];
+  serverIds: string[];
+  automaticOnly: boolean;
+  replaceExisting?: boolean;
+}
+
 export interface PlatformAddDeviceOutcome {
   address: string;
   added: boolean;
@@ -472,6 +483,7 @@ export interface PlatformAddDevicesReport {
 export const DEVICE_SIMULATOR_COMMANDS = {
   getSettings: 'device_simulator_get_settings',
   saveSettings: 'device_simulator_save_settings',
+  updatePlatformServers: 'device_simulator_update_platform_servers',
   migrateLocalMaterials: 'device_simulator_migrate_local_materials',
   listInterfaces: 'device_simulator_list_interfaces',
   listProfiles: 'device_simulator_list_profiles',
@@ -527,6 +539,7 @@ export type DeviceSimulatorInvoke = <T>(
 export interface DeviceSimulatorApi {
   getSettings(): Promise<DeviceSimulatorSettings>;
   saveSettings(settings: DeviceSimulatorSettings): Promise<DeviceSimulatorSettings>;
+  updatePlatformServers(servers: TargetPlatformServer[]): Promise<SimulatorStatus>;
   migrateLocalMaterials(settings: DeviceSimulatorSettings): Promise<LocalMaterialMigrationResult>;
   listInterfaces(): Promise<SimulatorNetworkInterfaceInfo[]>;
   listProfiles(): Promise<DeviceProfileSummary[]>;
@@ -549,16 +562,17 @@ export interface DeviceSimulatorApi {
   triggerAlarmOnce(request: AlarmJobRequest): Promise<AlarmTriggerResult>;
   stopAlarm(jobId: string): Promise<void>;
   recover(sessionId: string): Promise<RecoveryResult>;
-  addDevicesToPlatform(
-    devices: PlatformDeviceEntry[],
-    replaceExisting: boolean,
-  ): Promise<PlatformAddDevicesReport>;
+  addDevicesToPlatform(request: PlatformAddDevicesRequest): Promise<PlatformAddDevicesReport>;
 }
 
 export function createDeviceSimulatorApi(invokeCommand: DeviceSimulatorInvoke): DeviceSimulatorApi {
   return {
     getSettings: () => invokeCommand(DEVICE_SIMULATOR_COMMANDS.getSettings),
     saveSettings: (settings) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.saveSettings, { settings }),
+    updatePlatformServers: (servers) => invokeCommand(
+      DEVICE_SIMULATOR_COMMANDS.updatePlatformServers,
+      { servers },
+    ),
     migrateLocalMaterials: (settings) => invokeCommand(
       DEVICE_SIMULATOR_COMMANDS.migrateLocalMaterials,
       { settings },
@@ -584,9 +598,9 @@ export function createDeviceSimulatorApi(invokeCommand: DeviceSimulatorInvoke): 
     triggerAlarmOnce: (request) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.triggerAlarmOnce, { request }),
     stopAlarm: (jobId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.stopAlarm, { jobId }),
     recover: (sessionId) => invokeCommand(DEVICE_SIMULATOR_COMMANDS.recover, { sessionId }),
-    addDevicesToPlatform: (devices, replaceExisting) => invokeCommand(
+    addDevicesToPlatform: (request) => invokeCommand(
       DEVICE_SIMULATOR_COMMANDS.addDevicesToPlatform,
-      { devices, replaceExisting },
+      { request },
     ),
   };
 }

@@ -16,3 +16,11 @@ test('sidebar keeps defensive truncation and exposes the full translated label',
   assert.match(sidebarSource, /:title="item\.label"/);
   assert.match(sidebarSource, /truncate[^\"]*">\s*\{\{ item\.label \}\}/);
 });
+
+test('sidebar warms lazy routes before activation and during browser idle time', () => {
+  assert.match(sidebarSource, /@pointerenter="warmRoute\(item\.path\)"/);
+  assert.match(sidebarSource, /@focus="warmRoute\(item\.path\)"/);
+  assert.match(sidebarSource, /@pointerdown="warmRoute\(item\.path\)"/);
+  assert.match(sidebarSource, /window\.requestIdleCallback/);
+  assert.match(sidebarSource, /await preloadRoute\(path\)/);
+});

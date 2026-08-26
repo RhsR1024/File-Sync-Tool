@@ -47,15 +47,27 @@ const defaultApi: TaskStateStoreApi = {
   retryTaskGroupDeploy,
 };
 
+const MAX_TASK_LOG_ENTRIES = 10_000;
+
+export interface ManualDeploySession {
+  task_group_id: string;
+  run_id: string;
+  display_name: string;
+  server_ids: string[];
+  started_at: string;
+}
+
 export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = {}) {
   const api = { ...defaultApi, ...apiOverrides };
   const state = reactive({
     groups: [] as TaskGroupListItem[],
     selectedTaskGroupId: null as string | null,
     selectedGroupDetail: null as TaskGroup | null,
+    groupDetails: {} as Record<string, TaskGroup>,
     isHydrated: false,
     isLoadingDetail: false,
     taskLogs: [] as TaskLogEntry[],
+    latestManualDeploy: null as ManualDeploySession | null,
   });
 
   async function hydrateTaskState() {
@@ -67,7 +79,9 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
     state.selectedTaskGroupId = taskGroupId;
     state.isLoadingDetail = true;
     try {
-      state.selectedGroupDetail = await api.getTaskGroupDetail(taskGroupId);
+      const detail = await api.getTaskGroupDetail(taskGroupId);
+      state.selectedGroupDetail = detail;
+      state.groupDetails[taskGroupId] = detail;
     } finally {
       state.isLoadingDetail = false;
     }
@@ -85,6 +99,7 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
   }
 
   function applyDetailSnapshot(payload: { task_group_id: string; group: TaskGroup }) {
+    state.groupDetails[payload.task_group_id] = payload.group;
     if (payload.task_group_id === state.selectedTaskGroupId) {
       state.selectedGroupDetail = payload.group;
     }
@@ -92,6 +107,9 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
 
   function appendTaskLog(entry: TaskLogEntry) {
     state.taskLogs.push(entry);
+    if (state.taskLogs.length > MAX_TASK_LOG_ENTRIES) {
+      state.taskLogs.splice(0, state.taskLogs.length - MAX_TASK_LOG_ENTRIES);
+    }
   }
 
   async function startManualCopy(request: StartManualCopyTaskRequest) {
@@ -102,7 +120,19 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
 
   async function startManualDeploy(request: StartManualDeployTaskRequest) {
     const handle = await api.startManualDeployTask(request);
+    state.latestManualDeploy = {
+      task_group_id: handle.task_group_id,
+      run_id: handle.run_id,
+      display_name: request.display_name?.trim() || request.folder_name?.trim() || 'manual-deploy',
+      server_ids: [...new Set(request.bindings.map(binding => binding.server_id))],
+      started_at: new Date().toISOString(),
+    };
     await hydrateTaskState();
+    try {
+      state.groupDetails[handle.task_group_id] = await api.getTaskGroupDetail(handle.task_group_id);
+    } catch {
+      // The global detail-snapshot listener will populate this as the run advances.
+    }
     return handle;
   }
 

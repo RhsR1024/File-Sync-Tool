@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw, Cpu, Monitor, Check } from 'lucide-vue-next';
-import { testSshConnection, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure } from '@/lib/tauri';
+import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw, Cpu, Monitor, Check, Search, ShieldCheck } from 'lucide-vue-next';
+import { preflightManualDeploy, testSshConnection, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type ManualDeployTransferPolicy, type ManualDeployExtractPolicy, type ManualDeployPreflightResult, type StartManualDeployTaskRequest } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { configStore } from '@/lib/configStore';
 import DirectoryPathInput from '@/components/settings/DirectoryPathInput.vue';
 import Empty from '@/components/Empty.vue';
+import AppConfirmDialog from '@/components/AppConfirmDialog.vue';
+import ManualDeployLogDialog from '@/components/sync/ManualDeployLogDialog.vue';
 import { getDirectoryInputValue, getTaskLocalPathHint, getTaskLocalPathPlaceholder, toOptionalDirectoryValue } from '@/lib/settingsDirectoryPathState';
 import { useI18n } from 'vue-i18n';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -32,6 +34,39 @@ const isServerManagerOpen = ref(false);
 const isSaving = ref(false);
 const serverManagerCloseBtn = ref<HTMLButtonElement | null>(null);
 let serverManagerOpenerEl: HTMLElement | null = null;
+
+interface PendingConfirmation {
+    title: string;
+    description: string;
+    confirmLabel: string;
+    tone: 'danger' | 'warning';
+    action: () => void | Promise<void>;
+}
+
+const pendingConfirmation = ref<PendingConfirmation | null>(null);
+const confirmationBusy = ref(false);
+
+function requestConfirmation(confirmation: PendingConfirmation) {
+    pendingConfirmation.value = confirmation;
+}
+
+function closeConfirmation() {
+    if (!confirmationBusy.value) pendingConfirmation.value = null;
+}
+
+async function confirmPendingAction() {
+    const confirmation = pendingConfirmation.value;
+    if (!confirmation || confirmationBusy.value) return;
+    confirmationBusy.value = true;
+    try {
+        await confirmation.action();
+        pendingConfirmation.value = null;
+    } catch (error) {
+        pushToast(String(error), 'error', { ttlMs: 5000 });
+    } finally {
+        confirmationBusy.value = false;
+    }
+}
 
 const enabledServerCount = computed(() => config.value.servers.filter(server => server.enabled).length);
 const intervalError = computed(() => config.value.interval_minutes < 5 ? t('settings.minIntervalError', { min: 5 }) : '');
@@ -159,17 +194,24 @@ const commandGroupForm = ref<CommandGroup>({ id: '', name: '', commands: [] });
 const newGroupCommand = ref('');
 
 function restoreBuiltinCommandGroups() {
-    if (!confirm(t('settings.confirmRestoreBuiltin'))) return;
-    const existing = config.value.command_groups;
-    for (const builtin of builtinCommandGroups.value) {
-        const idx = existing.findIndex(g => g.id === builtin.id);
-        if (idx >= 0) {
-            existing[idx] = { ...builtin, commands: [...builtin.commands] };
-        } else {
-            existing.push({ ...builtin, commands: [...builtin.commands] });
-        }
-    }
-    save();
+    requestConfirmation({
+        title: t('settings.restoreBuiltinTitle'),
+        description: t('settings.confirmRestoreBuiltin'),
+        confirmLabel: t('settings.restoreBuiltin'),
+        tone: 'warning',
+        action: async () => {
+            const existing = config.value.command_groups;
+            for (const builtin of builtinCommandGroups.value) {
+                const idx = existing.findIndex(g => g.id === builtin.id);
+                if (idx >= 0) {
+                    existing[idx] = { ...builtin, commands: [...builtin.commands] };
+                } else {
+                    existing.push({ ...builtin, commands: [...builtin.commands] });
+                }
+            }
+            await save();
+        },
+    });
 }
 
 function resetCommandGroupForm() {
@@ -203,10 +245,16 @@ function saveCommandGroup() {
 }
 
 function removeCommandGroup(index: number) {
-    if (confirm(t('settings.confirmDeleteCommandGroup'))) {
-        config.value.command_groups.splice(index, 1);
-        save();
-    }
+    requestConfirmation({
+        title: t('settings.deleteCommandGroupTitle'),
+        description: t('settings.confirmDeleteCommandGroup'),
+        confirmLabel: t('settings.deleteTitle'),
+        tone: 'danger',
+        action: async () => {
+            config.value.command_groups.splice(index, 1);
+            await save();
+        },
+    });
 }
 
 function addGroupCommand() {
@@ -279,10 +327,16 @@ async function saveLocalGroup() {
 }
 
 function removeLocalGroup(index: number) {
-  if (confirm(t('settings.confirmDeleteCommandGroup'))) {
-    config.value.local_command_groups.splice(index, 1);
-    save();
-  }
+  requestConfirmation({
+    title: t('settings.deleteCommandGroupTitle'),
+    description: t('settings.confirmDeleteCommandGroup'),
+    confirmLabel: t('settings.deleteTitle'),
+    tone: 'danger',
+    action: async () => {
+      config.value.local_command_groups.splice(index, 1);
+      await save();
+    },
+  });
 }
 
 function addLocalGroupCommand() {
@@ -373,10 +427,16 @@ function saveTask() {
 }
 
 function removeTask(index: number) {
-    if (confirm(t('settings.confirmDeleteTask'))) {
-        config.value.tasks.splice(index, 1);
-        save();
-    }
+    requestConfirmation({
+        title: t('settings.deleteTaskTitle'),
+        description: t('settings.confirmDeleteTask'),
+        confirmLabel: t('settings.deleteTitle'),
+        tone: 'danger',
+        action: async () => {
+            config.value.tasks.splice(index, 1);
+            await save();
+        },
+    });
 }
 
 // Server bindings management within task form
@@ -462,6 +522,16 @@ function removeLocalScriptGroupFromBinding(groupId: string) {
 // ── Server Management ─────────────────────────────────────────────────────────
 const isEditingServer = ref(false);
 const editingServerIndex = ref(-1);
+const serverEditorDialog = ref<HTMLElement | null>(null);
+const serverEditorCancelBtn = ref<HTMLButtonElement | null>(null);
+const serverEditorTargetBindingIndex = ref<number | null>(null);
+const reopenManualDeployLogAfterServerEdit = ref(false);
+const serverFormError = ref('');
+const serverFormTestStatus = ref<{ state: 'idle' | 'testing' | 'ok' | 'error'; message: string }>({
+    state: 'idle',
+    message: '',
+});
+let serverEditorOpenerEl: HTMLElement | null = null;
 const serverForm = ref({
     id: '',
     enabled: true,
@@ -488,40 +558,148 @@ function resetServerForm() {
     };
     isEditingServer.value = false;
     editingServerIndex.value = -1;
+    serverFormError.value = '';
+    serverFormTestStatus.value = { state: 'idle', message: '' };
 }
 
 function addServer() {
+    serverEditorOpenerEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    serverEditorTargetBindingIndex.value = null;
+    reopenManualDeployLogAfterServerEdit.value = false;
     resetServerForm();
     isServerManagerOpen.value = true;
     isEditingServer.value = true;
 }
 
-function editServer(index: number) {
+function editServer(index: number, targetBindingIndex: number | null = null) {
+    serverEditorOpenerEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     editingServerIndex.value = index;
     serverForm.value = { ...config.value.servers[index] };
-    isServerManagerOpen.value = true;
+    serverEditorTargetBindingIndex.value = targetBindingIndex;
+    serverFormError.value = '';
+    serverFormTestStatus.value = { state: 'idle', message: '' };
+    if (targetBindingIndex === null) isServerManagerOpen.value = true;
     isEditingServer.value = true;
 }
 
-function saveServer() {
-    if (!serverForm.value.host.trim()) {
-        alert(t('settings.hostRequired'));
+function closeServerEditor() {
+    if (isSaving.value || serverFormTestStatus.value.state === 'testing') return;
+    isEditingServer.value = false;
+    serverEditorTargetBindingIndex.value = null;
+    serverFormError.value = '';
+    if (reopenManualDeployLogAfterServerEdit.value) {
+        reopenManualDeployLogAfterServerEdit.value = false;
+        nextTick(() => { manualDeployDialogOpen.value = true; });
+    }
+}
+
+function handleServerEditorKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closeServerEditor();
         return;
     }
-    if (editingServerIndex.value > -1) {
-        config.value.servers[editingServerIndex.value] = { ...serverForm.value };
-    } else {
-        config.value.servers.push({ ...serverForm.value });
+    if (event.key !== 'Tab' || !serverEditorDialog.value) return;
+    const focusable = serverEditorDialog.value.querySelectorAll<HTMLElement>(
+        'input:not([disabled]), select:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    );
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
     }
-    save();
+}
+
+watch(isEditingServer, async open => {
+    if (open) {
+        await nextTick();
+        serverEditorCancelBtn.value?.focus();
+    } else {
+        await nextTick();
+        serverEditorOpenerEl?.focus?.();
+        serverEditorOpenerEl = null;
+    }
+});
+
+function validateServerForm() {
+    if (!serverForm.value.host.trim()) {
+        serverFormError.value = t('settings.hostRequired');
+        pushToast(serverFormError.value, 'warning');
+        return false;
+    }
+    if (!Number.isInteger(serverForm.value.port) || serverForm.value.port < 1 || serverForm.value.port > 65535) {
+        serverFormError.value = t('settings.invalidServerPort');
+        pushToast(serverFormError.value, 'warning');
+        return false;
+    }
+    serverFormError.value = '';
+    return true;
+}
+
+async function testServerFormConnection() {
+    if (!validateServerForm() || serverFormTestStatus.value.state === 'testing') return;
+    serverFormTestStatus.value = { state: 'testing', message: '' };
+    try {
+        const message = await testSshConnection({ ...serverForm.value });
+        serverFormTestStatus.value = { state: 'ok', message };
+    } catch (error) {
+        serverFormTestStatus.value = { state: 'error', message: String(error) };
+    }
+}
+
+async function saveServer() {
+    if (!validateServerForm()) return;
+    const previousServers = config.value.servers.map(server => ({ ...server }));
+    const savedServer = { ...serverForm.value };
+    if (editingServerIndex.value > -1) {
+        config.value.servers[editingServerIndex.value] = savedServer;
+    } else {
+        config.value.servers.push(savedServer);
+    }
+    const saved = await save();
+    if (!saved) {
+        config.value.servers.splice(0, config.value.servers.length, ...previousServers);
+        serverFormError.value = t('settings.serverSaveFailedInline');
+        return;
+    }
+    const targetBindingIndex = serverEditorTargetBindingIndex.value;
+    if (targetBindingIndex !== null && manualServerBindings.value[targetBindingIndex]) {
+        manualServerBindings.value[targetBindingIndex].server_id = savedServer.id;
+    }
+    invalidateManualPreflight();
+    pushToast(
+        targetBindingIndex !== null ? t('settings.serverSavedAndSelected') : t('settings.serverSaved'),
+        'success',
+        { ttlMs: 2500 },
+    );
     isEditingServer.value = false;
+    serverEditorTargetBindingIndex.value = null;
+    if (reopenManualDeployLogAfterServerEdit.value) {
+        reopenManualDeployLogAfterServerEdit.value = false;
+        nextTick(() => { manualDeployDialogOpen.value = true; });
+    }
 }
 
 function removeServer(index: number) {
-    if (confirm(t('settings.confirmDeleteServer'))) {
-        config.value.servers.splice(index, 1);
-        save();
-    }
+    requestConfirmation({
+        title: t('settings.deleteServerTitle'),
+        description: t('settings.confirmDeleteServer'),
+        confirmLabel: t('settings.deleteTitle'),
+        tone: 'danger',
+        action: async () => {
+            const serverId = config.value.servers[index]?.id;
+            config.value.servers.splice(index, 1);
+            if (serverId) {
+                manualServerBindings.value = manualServerBindings.value.filter(binding => binding.server_id !== serverId);
+            }
+            await save();
+        },
+    });
 }
 
 const serverTestStatus = ref<Record<string, { state: 'idle' | 'testing' | 'ok' | 'error'; msg: string }>>({});
@@ -557,26 +735,114 @@ async function testAllServers() {
 }
 
 // ── Manual Deploy ─────────────────────────────────────────────────────────────
+interface ManualDeployBindingState extends TaskServerBinding {
+    extract_command_group_id: string | null;
+}
+
 const manualLocalPath = ref('');
 const manualRemotePath = ref('/root');
-const manualServerBindings = ref<TaskServerBinding[]>([]);
+const manualTransferPolicies: ManualDeployTransferPolicy[] = ['smart', 'always', 'remote_only'];
+const manualExtractPolicies: ManualDeployExtractPolicy[] = ['auto', 'force', 'skip'];
+const manualTransferPolicy = ref<ManualDeployTransferPolicy>('smart');
+const manualExtractPolicy = ref<ManualDeployExtractPolicy>('auto');
+const manualExtractDir = ref('${remote_target}/${filename}');
+const manualServerBindings = ref<ManualDeployBindingState[]>([]);
 const manualDeployMsgType = ref<'info' | 'error' | ''>('');
+const manualDeployDialogOpen = ref(false);
+const isManualPreflighting = ref(false);
+const manualPreflightResults = ref<ManualDeployPreflightResult[]>([]);
+
+const latestManualDeployGroup = computed(() => {
+    const session = taskStateStore.latestManualDeploy;
+    return session ? taskStateStore.groupDetails[session.task_group_id] ?? null : null;
+});
+
+const latestManualDeployRun = computed(() => {
+    const session = taskStateStore.latestManualDeploy;
+    return latestManualDeployGroup.value?.runs.find(run => run.run_id === session?.run_id) ?? null;
+});
+
+const isLatestManualDeployRunning = computed(() => {
+    const session = taskStateStore.latestManualDeploy;
+    if (!session) return false;
+    if (latestManualDeployRun.value) return !latestManualDeployRun.value.finished_at;
+    const summary = taskStateStore.groups.find(group => group.task_group_id === session.task_group_id);
+    return Boolean(summary && !summary.finished_at);
+});
+
+const hasDuplicateManualServers = computed(() => {
+    const ids = manualServerBindings.value.map(binding => binding.server_id).filter(Boolean);
+    return new Set(ids).size !== ids.length;
+});
+
+const hasUnavailableManualServer = computed(() => manualServerBindings.value.some(binding => {
+    if (!binding.server_id) return false;
+    return !config.value.servers.some(server => server.id === binding.server_id && server.enabled);
+}));
 
 function addManualBinding() {
-    manualServerBindings.value.push({ server_id: '', command_group_ids: [] });
+    manualServerBindings.value.push({ server_id: '', command_group_ids: [], extract_command_group_id: null });
+    invalidateManualPreflight();
+}
+
+function invalidateManualPreflight() {
+    manualPreflightResults.value = [];
+}
+
+function addManualServer() {
+    const targetBindingIndex = manualServerBindings.value.length;
+    addManualBinding();
+    serverEditorOpenerEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    resetServerForm();
+    serverEditorTargetBindingIndex.value = targetBindingIndex;
+    isEditingServer.value = true;
+}
+
+function editManualBindingServer(binding: TaskServerBinding, bindingIndex: number) {
+    const serverIndex = config.value.servers.findIndex(server => server.id === binding.server_id);
+    if (serverIndex >= 0) editServer(serverIndex, bindingIndex);
+}
+
+async function editManualDeployServer(serverId: string) {
+    manualDeployDialogOpen.value = false;
+    await nextTick();
+    const serverIndex = config.value.servers.findIndex(server => server.id === serverId);
+    const bindingIndex = manualServerBindings.value.findIndex(binding => binding.server_id === serverId);
+    if (serverIndex >= 0) {
+        reopenManualDeployLogAfterServerEdit.value = true;
+        editServer(serverIndex, bindingIndex >= 0 ? bindingIndex : -1);
+    }
+}
+
+function availableManualServers(bindingIndex: number) {
+    const currentId = manualServerBindings.value[bindingIndex]?.server_id;
+    const selectedElsewhere = new Set(
+        manualServerBindings.value
+            .filter((_, index) => index !== bindingIndex)
+            .map(binding => binding.server_id)
+            .filter(Boolean),
+    );
+    return config.value.servers.filter(server => (
+        (server.enabled || server.id === currentId)
+        && (server.id === currentId || !selectedElsewhere.has(server.id))
+    ));
 }
 
 function removeManualBinding(index: number) {
     manualServerBindings.value.splice(index, 1);
+    invalidateManualPreflight();
 }
 
-function toggleManualBindingGroup(binding: TaskServerBinding, groupId: string) {
+function toggleManualBindingGroup(binding: ManualDeployBindingState, groupId: string) {
     const idx = binding.command_group_ids.indexOf(groupId);
     if (idx > -1) {
         binding.command_group_ids.splice(idx, 1);
+        if (binding.extract_command_group_id === groupId) binding.extract_command_group_id = null;
     } else {
         binding.command_group_ids.push(groupId);
+        if (!binding.extract_command_group_id) binding.extract_command_group_id = groupId;
     }
+    invalidateManualPreflight();
 }
 
 function manualBindingGroupOrder(binding: TaskServerBinding, groupId: string) {
@@ -584,25 +850,86 @@ function manualBindingGroupOrder(binding: TaskServerBinding, groupId: string) {
     return idx > -1 ? idx + 1 : null;
 }
 
-function moveManualBindingGroup(binding: TaskServerBinding, index: number, direction: -1 | 1) {
+function moveManualBindingGroup(binding: ManualDeployBindingState, index: number, direction: -1 | 1) {
     const targetIndex = index + direction;
     if (targetIndex < 0 || targetIndex >= binding.command_group_ids.length) return;
     const [groupId] = binding.command_group_ids.splice(index, 1);
     binding.command_group_ids.splice(targetIndex, 0, groupId);
+    invalidateManualPreflight();
 }
 
-function removeManualBindingGroupById(binding: TaskServerBinding, groupId: string) {
+function removeManualBindingGroupById(binding: ManualDeployBindingState, groupId: string) {
     const idx = binding.command_group_ids.indexOf(groupId);
     if (idx > -1) binding.command_group_ids.splice(idx, 1);
+    if (binding.extract_command_group_id === groupId) binding.extract_command_group_id = null;
+    invalidateManualPreflight();
 }
+
+const manualExtractConfigurationValid = computed(() => manualExtractPolicy.value === 'skip'
+    || (Boolean(manualExtractDir.value.trim())
+        && manualServerBindings.value.every(binding => Boolean(binding.extract_command_group_id)
+            && binding.command_group_ids.includes(binding.extract_command_group_id!))));
+
+const manualDeployInputValid = computed(() => {
+    const localPathValid = manualTransferPolicy.value === 'remote_only' || Boolean(manualLocalPath.value.trim());
+    return localPathValid
+        && Boolean(manualRemotePath.value.trim())
+        && manualServerBindings.value.length > 0
+        && manualServerBindings.value.every(binding => Boolean(binding.server_id))
+        && !hasDuplicateManualServers.value
+        && !hasUnavailableManualServer.value
+        && Boolean(manualExtractConfigurationValid.value);
+});
 
 const canManualDeploy = computed(() => {
     return !appStore.isManualDeploying
-        && manualLocalPath.value.trim()
-        && manualRemotePath.value.trim()
-        && manualServerBindings.value.length > 0
-        && manualServerBindings.value.every(b => b.server_id);
+        && !isManualPreflighting.value
+        && manualDeployInputValid.value
+        && !isLatestManualDeployRunning.value;
 });
+
+function buildManualDeployRequest(): StartManualDeployTaskRequest {
+    const identityPath = manualLocalPath.value.trim() || manualRemotePath.value.trim();
+    const folderName = identityPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'manual';
+    const bindings = manualServerBindings.value
+        .filter(binding => config.value.servers.some(server => server.id === binding.server_id && server.enabled))
+        .map(binding => ({
+            server_id: binding.server_id,
+            command_group_ids: [...binding.command_group_ids],
+            extract_command_group_id: manualExtractPolicy.value === 'skip'
+                ? null
+                : binding.extract_command_group_id,
+        }));
+    return {
+        task_group_id: null,
+        display_name: folderName,
+        folder_name: folderName,
+        local_path: manualLocalPath.value.trim(),
+        remote_path: manualRemotePath.value.trim(),
+        transfer_policy: manualTransferPolicy.value,
+        extract_policy: manualExtractPolicy.value,
+        extract_dir: manualExtractDir.value.trim(),
+        bindings,
+    };
+}
+
+async function handleManualPreflight() {
+    if (!manualDeployInputValid.value || appStore.isManualDeploying || isLatestManualDeployRunning.value) return;
+    isManualPreflighting.value = true;
+    appStore.manualDeployMsg = '';
+    manualDeployMsgType.value = '';
+    try {
+        manualPreflightResults.value = await preflightManualDeploy(buildManualDeployRequest());
+        appStore.manualDeployMsg = t('settings.manualPreflightComplete', { count: manualPreflightResults.value.length });
+        manualDeployMsgType.value = 'info';
+    } catch (error) {
+        manualPreflightResults.value = [];
+        appStore.manualDeployMsg = t('settings.manualPreflightFailed', { error: String(error) });
+        manualDeployMsgType.value = 'error';
+    } finally {
+        isManualPreflighting.value = false;
+    }
+}
 
 async function handleManualDeploy() {
     if (!canManualDeploy.value) return;
@@ -612,28 +939,14 @@ async function handleManualDeploy() {
     manualDeployMsgType.value = '';
 
     try {
-        const folderName = manualLocalPath.value.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'manual';
-
-        const validBindings = manualServerBindings.value
-            .filter(b => config.value.servers.find(s => s.id === b.server_id))
-            .map(b => ({
-                server_id: b.server_id,
-                command_group_ids: [...b.command_group_ids],
-            }));
-
-        await taskStateStore.startManualDeploy({
-            task_group_id: null,
-            display_name: folderName,
-            folder_name: folderName,
-            local_path: manualLocalPath.value,
-            remote_path: manualRemotePath.value,
-            bindings: validBindings,
-        });
+        const request = buildManualDeployRequest();
+        await taskStateStore.startManualDeploy(request);
 
         // The command only queues the run; success or failure shows up in the
         // execution log, so never claim the deployment already succeeded here.
-        appStore.manualDeployMsg = t('settings.deployStarted', { count: validBindings.length });
+        appStore.manualDeployMsg = t('settings.deployStarted', { count: request.bindings.length });
         manualDeployMsgType.value = 'info';
+        manualDeployDialogOpen.value = true;
     } catch (e) {
         appStore.manualDeployMsg = t('settings.deployError', { error: String(e) });
         manualDeployMsgType.value = 'error';
@@ -711,18 +1024,20 @@ async function load() {
     }
 }
 
-async function save() {
+async function save(): Promise<boolean> {
     if (hasConfigErrors.value) {
         pushToast(t('settings.toast.invalid'), 'warning');
-        return;
+        return false;
     }
-    if (isSaving.value) return;
+    if (isSaving.value) return false;
     isSaving.value = true;
     try {
         await configStore.saveSync();
         pushToast(t('settings.toast.saved'), 'success');
+        return true;
     } catch (e) {
         pushToast(t('settings.toast.saveError', { error: String(e) }), 'error', { ttlMs: 5000 });
+        return false;
     } finally {
         isSaving.value = false;
     }
@@ -1465,9 +1780,21 @@ onMounted(load);
         </div>
 
         <!-- Server Edit Modal -->
-        <div v-if="isEditingServer" class="fixed inset-0 bg-black/50 flex items-center justify-center z-[65] p-4">
-          <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all">
-            <h3 class="text-lg font-bold mb-6 text-slate-800">{{ editingServerIndex > -1 ? t('settings.editServer') : t('settings.addServer') }}</h3>
+        <Teleport to="body">
+          <div v-if="isEditingServer" class="fixed inset-0 bg-slate-950/55 flex items-center justify-center z-[80] p-4" @click.self="closeServerEditor">
+          <div
+            ref="serverEditorDialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-server-editor-title"
+            aria-describedby="settings-server-editor-description"
+            class="bg-white rounded-2xl p-6 w-full max-w-lg shadow-[0_24px_80px_rgba(15,23,42,0.28)] max-h-[88vh] overflow-y-auto"
+            @keydown.stop="handleServerEditorKeydown"
+          >
+            <h3 id="settings-server-editor-title" class="text-lg font-bold text-slate-950">{{ editingServerIndex > -1 ? t('settings.editServer') : t('settings.addServer') }}</h3>
+            <p id="settings-server-editor-description" class="mt-1 mb-5 text-sm leading-6 text-slate-600">
+              {{ editingServerIndex > -1 ? t('settings.serverGlobalEditNotice') : t('settings.serverCreateNotice') }}
+            </p>
             <div class="space-y-4">
               <div class="grid grid-cols-3 gap-4">
                 <div class="col-span-2">
@@ -1496,6 +1823,7 @@ onMounted(load);
               <div>
                 <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.remoteTargetDir') }}</label>
                 <input v-model="serverForm.remote_path" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="/root" />
+                <p v-if="serverEditorTargetBindingIndex !== null" class="mt-1 text-xs leading-5 text-slate-500">{{ t('settings.manualRemotePathOverrideHint') }}</p>
               </div>
               <div>
                 <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.sshTimeout') }}</label>
@@ -1508,13 +1836,32 @@ onMounted(load);
                   <option :value="60">60 {{ t('settings.seconds') }}</option>
                 </select>
               </div>
+              <p v-if="serverFormError" role="alert" class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{{ serverFormError }}</p>
+              <p
+                v-if="serverFormTestStatus.state !== 'idle'"
+                :role="serverFormTestStatus.state === 'error' ? 'alert' : 'status'"
+                class="rounded-lg border px-3 py-2 text-sm break-words"
+                :class="serverFormTestStatus.state === 'ok'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : serverFormTestStatus.state === 'error'
+                    ? 'border-rose-200 bg-rose-50 text-rose-700'
+                    : 'border-blue-200 bg-blue-50 text-blue-700'"
+              >
+                {{ serverFormTestStatus.state === 'testing' ? t('settings.testing') : serverFormTestStatus.message }}
+              </p>
             </div>
-            <div class="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-100">
-              <button @click="isEditingServer = false" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">{{ t('console.cancel') }}</button>
-              <button @click="saveServer" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm">{{ t('settings.save') }}</button>
+            <div class="flex flex-wrap justify-end gap-3 mt-8 pt-4 border-t border-slate-100">
+              <button ref="serverEditorCancelBtn" type="button" @click="closeServerEditor" :disabled="isSaving || serverFormTestStatus.state === 'testing'" class="min-h-11 cursor-pointer px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500/40 disabled:cursor-not-allowed disabled:opacity-60">{{ t('console.cancel') }}</button>
+              <button type="button" @click="testServerFormConnection" :disabled="isSaving || serverFormTestStatus.state === 'testing'" class="min-h-11 cursor-pointer px-4 py-2 border border-blue-200 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 disabled:cursor-not-allowed disabled:opacity-60">
+                {{ serverFormTestStatus.state === 'testing' ? t('settings.testing') : t('settings.testConnection') }}
+              </button>
+              <button type="button" @click="saveServer" :disabled="isSaving || serverFormTestStatus.state === 'testing'" class="min-h-11 cursor-pointer px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
+                {{ isSaving ? t('settings.saving') : serverEditorTargetBindingIndex !== null ? t('settings.saveAndUse') : t('settings.save') }}
+              </button>
             </div>
           </div>
-        </div>
+          </div>
+        </Teleport>
 
         <!-- Command Groups -->
         <div class="pt-6 border-t border-slate-100">
@@ -1630,9 +1977,48 @@ onMounted(load);
           </h4>
           <p class="text-xs text-slate-400">{{ t('settings.manualDeployDesc') }}</p>
 
+          <div class="grid grid-cols-1 gap-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4 xl:grid-cols-2">
+            <fieldset>
+              <legend class="text-sm font-semibold text-slate-700">{{ t('settings.manualTransferPolicy') }}</legend>
+              <p id="manual-transfer-policy-hint" class="mt-1 text-xs text-slate-500">{{ t('settings.manualTransferPolicyHint') }}</p>
+              <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3" aria-describedby="manual-transfer-policy-hint">
+                <label
+                  v-for="policy in manualTransferPolicies"
+                  :key="policy"
+                  class="min-h-11 cursor-pointer rounded-lg border px-3 py-2 transition-colors focus-within:ring-2 focus-within:ring-indigo-500/50"
+                  :class="manualTransferPolicy === policy ? 'border-indigo-300 bg-indigo-50 text-indigo-800' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'"
+                >
+                  <input v-model="manualTransferPolicy" class="sr-only" type="radio" name="manual-transfer-policy" :value="policy" @change="invalidateManualPreflight" />
+                  <span class="block text-sm font-semibold">{{ t(`settings.manualTransferPolicy_${policy}`) }}</span>
+                  <span class="mt-0.5 block text-[11px] leading-4 opacity-80">{{ t(`settings.manualTransferPolicy_${policy}Desc`) }}</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend class="text-sm font-semibold text-slate-700">{{ t('settings.manualExtractPolicy') }}</legend>
+              <p id="manual-extract-policy-hint" class="mt-1 text-xs text-slate-500">{{ t('settings.manualExtractPolicyHint') }}</p>
+              <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3" aria-describedby="manual-extract-policy-hint">
+                <label
+                  v-for="policy in manualExtractPolicies"
+                  :key="policy"
+                  class="min-h-11 cursor-pointer rounded-lg border px-3 py-2 transition-colors focus-within:ring-2 focus-within:ring-emerald-500/50"
+                  :class="manualExtractPolicy === policy ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'"
+                >
+                  <input v-model="manualExtractPolicy" class="sr-only" type="radio" name="manual-extract-policy" :value="policy" @change="invalidateManualPreflight" />
+                  <span class="block text-sm font-semibold">{{ t(`settings.manualExtractPolicy_${policy}`) }}</span>
+                  <span class="mt-0.5 block text-[11px] leading-4 opacity-80">{{ t(`settings.manualExtractPolicy_${policy}Desc`) }}</span>
+                </label>
+              </div>
+            </fieldset>
+          </div>
+
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.manualLocalPath') }}</label>
+              <label class="block text-sm font-medium text-slate-600 mb-1">
+                {{ t('settings.manualLocalPath') }}
+                <span v-if="manualTransferPolicy === 'remote_only'" class="font-normal text-slate-400">{{ t('settings.manualLocalOptional') }}</span>
+              </label>
               <DirectoryPathInput
                 v-model="manualLocalPath"
                 :placeholder="t('settings.manualLocalPlaceholder')"
@@ -1640,22 +2026,39 @@ onMounted(load);
                 allow-file
                 :file-title="t('settings.selectFile')"
                 @pick-error="handleDirectoryPickError"
+                @update:model-value="invalidateManualPreflight"
               />
+              <p v-if="manualTransferPolicy === 'remote_only'" class="mt-1 text-xs text-amber-700">{{ t('settings.manualRemoteOnlyLocalHint') }}</p>
             </div>
             <div>
-              <label class="block text-sm font-medium text-slate-600 mb-1">{{ t('settings.remotePath') }}</label>
-              <input v-model="manualRemotePath" type="text" :placeholder="t('settings.manualRemotePlaceholder')" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
+              <label for="manual-remote-path" class="block text-sm font-medium text-slate-600 mb-1">
+                {{ manualTransferPolicy === 'remote_only' ? t('settings.manualRemotePackagePath') : t('settings.remotePath') }}
+              </label>
+              <input id="manual-remote-path" v-model="manualRemotePath" type="text" :placeholder="manualTransferPolicy === 'remote_only' ? t('settings.manualRemotePackagePlaceholder') : t('settings.manualRemotePlaceholder')" class="w-full min-h-11 p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" @input="invalidateManualPreflight" />
+              <p class="mt-1 text-xs text-slate-500">{{ manualTransferPolicy === 'remote_only' ? t('settings.manualRemotePackageHint') : t('settings.manualRemotePathHint') }}</p>
             </div>
+          </div>
+
+          <div v-if="manualExtractPolicy !== 'skip'" class="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+            <label for="manual-extract-dir" class="block text-sm font-medium text-emerald-900">{{ t('settings.manualExtractDir') }}</label>
+            <input id="manual-extract-dir" v-model="manualExtractDir" type="text" class="mt-1 min-h-11 w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 font-mono text-sm text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/50" :placeholder="t('settings.manualExtractDirPlaceholder')" @input="invalidateManualPreflight" />
+            <p class="mt-1 text-xs text-emerald-800">{{ t('settings.manualExtractDirHint') }}</p>
           </div>
 
           <!-- Server Bindings -->
           <div>
             <div class="flex items-center justify-between mb-2">
               <label class="text-sm font-medium text-slate-600">{{ t('settings.manualDeployServerBindings') }}</label>
-              <button @click="addManualBinding" type="button"
-                class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium bg-blue-50 hover:bg-blue-100 px-2.5 py-1 rounded-lg transition-colors">
-                <Plus class="w-3 h-3" /> {{ t('settings.addServerBinding') }}
-              </button>
+              <div class="flex flex-wrap justify-end gap-2">
+                <button @click="addManualBinding" type="button"
+                  class="min-h-11 cursor-pointer text-xs text-blue-700 hover:text-blue-900 flex items-center gap-1 font-medium border border-blue-200 bg-blue-50 hover:bg-blue-100 px-3 py-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50">
+                  <Server class="w-3.5 h-3.5" /> {{ t('settings.selectExistingServer') }}
+                </button>
+                <button @click="addManualServer" type="button"
+                  class="min-h-11 cursor-pointer text-xs text-emerald-700 hover:text-emerald-900 flex items-center gap-1 font-medium border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-3 py-2 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50">
+                  <Plus class="w-3.5 h-3.5" /> {{ t('settings.createAndSelectServer') }}
+                </button>
+              </div>
             </div>
 
             <div v-if="manualServerBindings.length === 0" class="text-xs text-slate-400 italic text-center py-3 bg-slate-50 rounded-lg border border-dashed border-slate-200">
@@ -1666,17 +2069,31 @@ onMounted(load);
               <div v-for="(binding, bidx) in manualServerBindings" :key="bidx"
                 class="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
                 <div class="flex items-center gap-2">
-                  <select v-model="binding.server_id"
-                    class="flex-1 p-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+                  <select v-model="binding.server_id" @change="invalidateManualPreflight"
+                    class="min-h-11 flex-1 p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white">
                     <option value="" disabled>{{ t('settings.selectServer') }}</option>
-                    <option v-for="s in config.servers" :key="s.id" :value="s.id">
-                      {{ serverDisplayName(s) }} ({{ s.host }})
+                    <option v-for="s in availableManualServers(bidx)" :key="s.id" :value="s.id">
+                      {{ serverDisplayName(s) }} ({{ s.host }}:{{ s.port }}){{ s.enabled ? '' : ` - ${t('settings.disabled')}` }}
                     </option>
                   </select>
+                  <button
+                    v-if="binding.server_id"
+                    @click="editManualBindingServer(binding, bidx)"
+                    type="button"
+                    class="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-lg text-amber-600 transition-colors hover:bg-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50"
+                    :aria-label="t('settings.editSelectedServer')"
+                    :title="t('settings.editSelectedServer')"
+                  >
+                    <Edit class="w-4 h-4" />
+                  </button>
                   <button @click="removeManualBinding(bidx)" type="button"
-                    class="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors shrink-0">
+                    class="inline-flex h-11 w-11 cursor-pointer items-center justify-center p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50"
+                    :aria-label="t('settings.removeTargetServer')" :title="t('settings.removeTargetServer')">
                     <Trash2 class="w-3.5 h-3.5" />
                   </button>
+                </div>
+                <div v-if="binding.server_id" class="text-xs text-slate-500 font-mono">
+                  {{ config.servers.find(server => server.id === binding.server_id)?.user }}@{{ config.servers.find(server => server.id === binding.server_id)?.host }}:{{ config.servers.find(server => server.id === binding.server_id)?.port }}
                 </div>
                 <!-- Command group selection -->
                 <div v-if="config.command_groups.length > 0">
@@ -1694,6 +2111,19 @@ onMounted(load);
                       </span>
                       {{ group.name }}
                     </button>
+                  </div>
+                  <div v-if="manualExtractPolicy !== 'skip' && binding.command_group_ids.length > 0" class="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/70 p-3">
+                    <label :for="`manual-extract-group-${bidx}`" class="block text-xs font-semibold text-emerald-900">{{ t('settings.manualExtractCommandGroup') }}</label>
+                    <select
+                      :id="`manual-extract-group-${bidx}`"
+                      v-model="binding.extract_command_group_id"
+                      class="mt-1 min-h-11 w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/50"
+                      @change="invalidateManualPreflight"
+                    >
+                      <option :value="null" disabled>{{ t('settings.manualSelectExtractCommandGroup') }}</option>
+                      <option v-for="groupId in binding.command_group_ids" :key="groupId" :value="groupId">{{ commandGroupName(groupId) }}</option>
+                    </select>
+                    <p class="mt-1 text-[11px] leading-4 text-emerald-800">{{ t('settings.manualExtractCommandGroupHint') }}</p>
                   </div>
                   <div v-if="binding.command_group_ids.length === 0" class="text-xs text-slate-400 italic mt-1">{{ t('settings.bindingNoGroups') }}</div>
                   <div v-else class="mt-3 space-y-2">
@@ -1748,20 +2178,76 @@ onMounted(load);
                 <div v-else class="text-xs text-slate-400 italic">{{ t('settings.noCommandGroups') }}</div>
               </div>
             </div>
+            <p v-if="hasDuplicateManualServers" role="alert" class="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {{ t('settings.duplicateManualServer') }}
+            </p>
+            <p v-if="hasUnavailableManualServer" role="alert" class="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              {{ t('settings.unavailableManualServer') }}
+            </p>
           </div>
 
-          <div class="flex items-center gap-3">
+          <div class="rounded-lg border border-indigo-200 bg-indigo-50/60 px-4 py-3" aria-live="polite">
+            <div class="flex items-start gap-3">
+              <ShieldCheck class="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
+              <div>
+                <div class="text-sm font-semibold text-indigo-900">{{ t('settings.manualExecutionPlan') }}</div>
+                <p class="mt-0.5 text-xs leading-5 text-indigo-800">
+                  {{ t(`settings.manualTransferPolicy_${manualTransferPolicy}`) }} ·
+                  {{ t(`settings.manualExtractPolicy_${manualExtractPolicy}`) }} ·
+                  {{ t('settings.manualExecutionPlanServers', { count: manualServerBindings.length }) }}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="manualPreflightResults.length > 0" class="space-y-2" aria-live="polite">
+            <div class="text-sm font-semibold text-slate-700">{{ t('settings.manualPreflightResults') }}</div>
+            <div
+              v-for="result in manualPreflightResults"
+              :key="result.server_id"
+              class="grid grid-cols-1 gap-2 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm md:grid-cols-[minmax(160px,0.8fr)_minmax(0,1.7fr)_auto] md:items-center"
+            >
+              <div class="font-semibold text-slate-700">{{ result.server_name }}</div>
+              <div class="min-w-0">
+                <div class="truncate font-mono text-xs text-slate-600" :title="result.remote_package_path">{{ result.remote_package_path }}</div>
+                <div class="mt-1 text-xs text-slate-500">{{ t('settings.manualExtractTarget') }}: {{ result.extract_dir }}</div>
+              </div>
+              <div class="flex flex-wrap gap-1.5 md:justify-end">
+                <span class="rounded-full border border-sky-200 bg-sky-50 px-2 py-1 text-xs font-medium text-sky-700">{{ t(`settings.manualTransferAction_${result.transfer_action}`) }}</span>
+                <span class="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">{{ t(`settings.manualExtractAction_${result.extract_action}`) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              class="min-h-11 cursor-pointer rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500/40"
+              :disabled="!manualDeployInputValid || appStore.isManualDeploying || isLatestManualDeployRunning || isManualPreflighting"
+              @click="handleManualPreflight"
+            >
+              <span class="inline-flex items-center gap-2">
+                <Search class="h-4 w-4" />
+                {{ isManualPreflighting ? t('settings.manualPreflighting') : t('settings.manualPreflight') }}
+              </span>
+            </button>
             <button @click="handleManualDeploy"
-              class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              class="min-h-11 cursor-pointer bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2"
               :disabled="!canManualDeploy">
               <UploadCloud class="w-4 h-4" />
               {{ appStore.isManualDeploying ? t('settings.deploying') : t('settings.deployNow') }}
             </button>
+            <button
+              v-if="taskStateStore.latestManualDeploy"
+              type="button"
+              class="min-h-11 cursor-pointer inline-flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 transition-colors hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+              @click="manualDeployDialogOpen = true"
+            >
+              <FileText class="h-4 w-4" />
+              {{ isLatestManualDeployRunning ? t('settings.viewDeployLog') : t('settings.viewLastDeployLog') }}
+            </button>
             <span v-if="appStore.manualDeployMsg" :class="manualDeployMsgType === 'error' ? 'text-red-500' : 'text-sky-600'" class="text-sm font-medium">
               {{ appStore.manualDeployMsg }}
-              <span v-if="appStore.isManualDeploying && appStore.progress" class="ml-2 text-blue-600">
-                ({{ appStore.progress.percentage.toFixed(0) }}%)
-              </span>
             </span>
           </div>
         </div>
@@ -1901,6 +2387,28 @@ onMounted(load);
       <Save v-else class="w-4 h-4" aria-hidden="true" />
       {{ isSaving ? t('settings.saving') : t('settings.save') }}
     </button>
+
+    <ManualDeployLogDialog
+      :open="manualDeployDialogOpen"
+      :session="taskStateStore.latestManualDeploy"
+      :group="latestManualDeployGroup"
+      :logs="taskStateStore.taskLogs"
+      :servers="config.servers"
+      @close="manualDeployDialogOpen = false"
+      @edit-server="editManualDeployServer"
+    />
+
+    <AppConfirmDialog
+      :open="Boolean(pendingConfirmation)"
+      :title="pendingConfirmation?.title ?? ''"
+      :description="pendingConfirmation?.description ?? ''"
+      :confirm-label="pendingConfirmation?.confirmLabel ?? t('settings.confirm')"
+      :cancel-label="t('console.cancel')"
+      :tone="pendingConfirmation?.tone ?? 'danger'"
+      :busy="confirmationBusy"
+      @confirm="confirmPendingAction"
+      @cancel="closeConfirmation"
+    />
   </div>
   </div>
 </template>

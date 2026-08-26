@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use image::{DynamicImage, GenericImageView, ImageFormat};
@@ -38,6 +38,9 @@ const LAUNCHER_EXPANDED_SLACK: u32 = 4;
 /// Physical pixels the cursor must travel before a press on the capsule counts
 /// as a drag rather than an expand/collapse click.
 const LAUNCHER_DRAG_THRESHOLD: i32 = 4;
+/// Logical pixels from a display's left or right edge that trigger docking
+/// when the launcher is released.
+const LAUNCHER_SNAP_DISTANCE: f64 = 28.0;
 const LAUNCHER_DRAG_TICK_MS: u64 = 8;
 /// Ceiling on a single drag, so a missed button-up cannot pin a worker thread.
 const LAUNCHER_DRAG_MAX_MS: u64 = 60_000;
@@ -67,6 +70,8 @@ pub struct PaperTodoRuntime {
     /// Logical width the collapsed master capsule reported for its own label.
     /// Zero until the webview has measured itself.
     launcher_capsule_width: AtomicUsize,
+    /// Latest WebView transition allowed to restore the visible surface.
+    launcher_transition_id: AtomicU64,
 }
 
 impl Drop for PaperTodoRuntime {
@@ -136,6 +141,9 @@ fn default_document() -> Value {
             "launcherEnabled": false,
             "launcherEdge": "right",
             "launcherOffset": 35,
+            "launcherDocked": true,
+            "launcherMonitor": "",
+            "launcherX": 100,
             "hotkeys": {
                 "showAll": "",
                 "hideAll": "",
@@ -497,17 +505,68 @@ pub fn dispatch_background(app: AppHandle, action: &'static str) {
     });
 }
 
+fn launcher_monitor_key(monitor: &tauri::Monitor) -> String {
+    monitor
+        .name()
+        .filter(|name| !name.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            let position = monitor.position();
+            let size = monitor.size();
+            format!(
+                "display@{},{}:{}x{}",
+                position.x, position.y, size.width, size.height
+            )
+        })
+}
+
+fn launcher_monitor(
+    window: &tauri::WebviewWindow,
+    settings: &Value,
+) -> Result<tauri::Monitor, String> {
+    let monitors = window
+        .available_monitors()
+        .map_err(|error| error.to_string())?;
+    let stored = settings
+        .get("launcherMonitor")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !stored.is_empty() {
+        if let Some(monitor) = monitors
+            .iter()
+            .find(|monitor| launcher_monitor_key(monitor) == stored)
+        {
+            return Ok(monitor.clone());
+        }
+    }
+    // Profiles created before monitor persistence existed always lived on the
+    // primary display. Preserve that behavior when no stored monitor matches.
+    if let Some(monitor) = window
+        .primary_monitor()
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(monitor);
+    }
+    if let Some(monitor) = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(monitor);
+    }
+    monitors
+        .into_iter()
+        .next()
+        .ok_or_else(|| "未找到显示器".to_string())
+}
+
 fn launcher_position(
+    app: &AppHandle,
     window: &tauri::WebviewWindow,
     settings: &Value,
     logical_width: u32,
     logical_height: u32,
 ) -> Result<(PhysicalPosition<i32>, tauri::PhysicalSize<u32>), String> {
-    let monitor = window
-        .primary_monitor()
-        .map_err(|error| error.to_string())?
-        .or_else(|| window.current_monitor().ok().flatten())
-        .ok_or_else(|| "未找到显示器".to_string())?;
+    let monitor = launcher_monitor(window, settings)?;
     let monitor_position = monitor.position();
     let monitor_size = monitor.size();
     let scale_factor = monitor.scale_factor();
@@ -517,6 +576,16 @@ fn launcher_position(
         .get("launcherEdge")
         .and_then(Value::as_str)
         .unwrap_or("right");
+    let docked = settings
+        .get("launcherDocked")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let horizontal_offset = settings
+        .get("launcherX")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(if edge == "left" { 0.0 } else { 100.0 })
+        .clamp(0.0, 100.0);
     let offset = settings
         .get("launcherOffset")
         .and_then(Value::as_i64)
@@ -531,14 +600,28 @@ fn launcher_position(
     let anchored_y = monitor_position.y + collapsed_available_height.max(0) * offset / 100;
     let max_y = monitor_position.y + (monitor_size.height as i32 - window_height).max(0);
     let y = anchored_y.min(max_y);
-    // Keep the whole native window inside the selected monitor. Parking a
-    // transparent strip beyond the display edge works only on a single-screen
-    // desktop; with an adjacent monitor that strip becomes visible there.
-    let x = if edge == "left" {
-        monitor_position.x
+    let collapsed_width = (collapsed_launcher_width(app) as f64 * scale_factor).round() as i32;
+    let available_anchor_width = (monitor_size.width as i32 - collapsed_width).max(0);
+    let anchor_x = if docked {
+        if edge == "left" {
+            monitor_position.x
+        } else {
+            monitor_position.x + available_anchor_width
+        }
     } else {
-        monitor_position.x + monitor_size.width as i32 - window_width
+        monitor_position.x
+            + (available_anchor_width as f64 * horizontal_offset / 100.0).round() as i32
     };
+    // `launcherX` stores the collapsed capsule's top-left anchor. Expanded
+    // content grows inward from the chosen side so the control itself stays at
+    // the same screen coordinate.
+    let raw_x = if edge == "right" {
+        anchor_x + collapsed_width - window_width
+    } else {
+        anchor_x
+    };
+    let max_x = monitor_position.x + (monitor_size.width as i32 - window_width).max(0);
+    let x = raw_x.clamp(monitor_position.x, max_x);
     Ok((
         PhysicalPosition::new(x, y),
         tauri::PhysicalSize::new(window_width as u32, window_height as u32),
@@ -586,6 +669,40 @@ fn set_launcher_geometry(
         .map_err(|error| error.to_string())
 }
 
+#[cfg(target_os = "windows")]
+fn set_launcher_transition_visible(
+    window: &tauri::WebviewWindow,
+    visible: bool,
+) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
+
+    let handle = window.hwnd().map_err(|error| error.to_string())?;
+    unsafe {
+        let _ = ShowWindow(
+            HWND(handle.0 as *mut _),
+            if visible { SW_SHOWNOACTIVATE } else { SW_HIDE },
+        );
+    }
+    if visible {
+        reassert_topmost(window);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_launcher_transition_visible(
+    window: &tauri::WebviewWindow,
+    visible: bool,
+) -> Result<(), String> {
+    if visible {
+        window.show()
+    } else {
+        window.hide()
+    }
+    .map_err(|error| error.to_string())
+}
+
 /// Collapsed window width: the capsule's own measured width. Keeping the native
 /// bounds equal to the visible control prevents it leaking onto an adjacent
 /// monitor in a multi-display desktop.
@@ -602,7 +719,11 @@ fn collapsed_launcher_width(app: &AppHandle) -> u32 {
     capsule.clamp(LAUNCHER_MIN_CAPSULE_WIDTH, LAUNCHER_EXPANDED_WIDTH)
 }
 
-fn sync_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), String> {
+fn sync_launcher_window_visibility(
+    app: &AppHandle,
+    settings: &Value,
+    reveal: bool,
+) -> Result<(), String> {
     let enabled = settings
         .get("launcherEnabled")
         .and_then(Value::as_bool)
@@ -635,10 +756,16 @@ fn sync_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), String>
     } else {
         collapsed_launcher_width(app)
     };
-    let (position, physical_size) = launcher_position(&window, settings, width, height)?;
+    let (position, physical_size) = launcher_position(app, &window, settings, width, height)?;
     set_launcher_geometry(&window, position, physical_size)?;
-    window.show().map_err(|error| error.to_string())?;
+    if reveal {
+        set_launcher_transition_visible(&window, true)?;
+    }
     Ok(())
+}
+
+fn sync_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), String> {
+    sync_launcher_window_visibility(app, settings, true)
 }
 
 fn ensure_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), String> {
@@ -681,8 +808,15 @@ fn ensure_launcher_window(app: &AppHandle, settings: &Value) -> Result<(), Strin
         let settings = settings.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-            if let Err(error) = sync_launcher_window(&app, &settings) {
-                log::warn!("[paper-todo] delayed launcher size sync failed: {error}");
+            let interaction_started = app
+                .state::<PaperTodoRuntime>()
+                .launcher_transition_id
+                .load(Ordering::Acquire)
+                != 0;
+            if !interaction_started {
+                if let Err(error) = sync_launcher_window_visibility(&app, &settings, false) {
+                    log::warn!("[paper-todo] delayed launcher size sync failed: {error}");
+                }
             }
         });
     }
@@ -705,8 +839,13 @@ pub fn paper_todo_set_launcher_expanded(
     expanded: bool,
     item_count: usize,
     capsule_width: Option<f64>,
+    defer_display: bool,
+    transition_id: u64,
 ) -> Result<(), String> {
     let runtime = app.state::<PaperTodoRuntime>();
+    runtime
+        .launcher_transition_id
+        .store(transition_id, Ordering::Release);
     runtime.launcher_expanded.store(expanded, Ordering::Relaxed);
     runtime
         .launcher_item_count
@@ -723,18 +862,64 @@ pub fn paper_todo_set_launcher_expanded(
         let _guard = runtime.io_lock.lock().map_err(|error| error.to_string())?;
         load_document_unlocked(&app)
     };
-    sync_launcher_window(&app, &document["settings"])
+    sync_launcher_window_visibility(&app, &document["settings"], !defer_display)
 }
 
-/// Drag the edge launcher along the display edge it is parked on.
-///
-/// The capsule is the drag handle now that it has no grip icon, and the whole
-/// travel has to stay on the primary monitor's side. `startDragging` cannot do
-/// that: it hands the window to the OS drag loop, which moves it freely in two
-/// axes and only lets us snap it back after the button is released. Reading the
-/// cursor directly keeps `x` pinned and `y` clamped for every frame of the
-/// drag, and it survives the pointer leaving the 60 px wide capsule — which
-/// webview mouse events would not.
+#[tauri::command]
+pub fn paper_todo_finish_launcher_transition(
+    app: AppHandle,
+    transition_id: u64,
+) -> Result<(), String> {
+    if app
+        .state::<PaperTodoRuntime>()
+        .launcher_transition_id
+        .load(Ordering::Acquire)
+        != transition_id
+    {
+        return Ok(());
+    }
+    let window = app
+        .get_webview_window(LAUNCHER_LABEL)
+        .ok_or_else(|| "边缘入口窗口不存在".to_string())?;
+    if window.is_visible().map_err(|error| error.to_string())? {
+        reassert_topmost(&window);
+        Ok(())
+    } else {
+        set_launcher_transition_visible(&window, true)
+    }
+}
+
+fn monitor_for_point<'a>(
+    monitors: &'a [tauri::Monitor],
+    x: i32,
+    y: i32,
+) -> Option<&'a tauri::Monitor> {
+    monitors.iter().min_by_key(|monitor| {
+        let position = monitor.position();
+        let size = monitor.size();
+        let right = position.x + size.width as i32;
+        let bottom = position.y + size.height as i32;
+        let dx = if x < position.x {
+            i64::from(position.x - x)
+        } else if x >= right {
+            i64::from(x - right + 1)
+        } else {
+            0
+        };
+        let dy = if y < position.y {
+            i64::from(position.y - y)
+        } else if y >= bottom {
+            i64::from(y - bottom + 1)
+        } else {
+            0
+        };
+        dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
+    })
+}
+
+/// Drag the launcher freely across the virtual desktop. The cursor chooses the
+/// active display, including secondary displays with negative coordinates, and
+/// the full window remains reachable while crossing between them.
 ///
 /// Returns whether the press ever became a drag, so a press that never moved
 /// can be treated as the expand/collapse click.
@@ -748,22 +933,22 @@ fn run_launcher_drag(app: &AppHandle) -> Result<bool, String> {
     let window = app
         .get_webview_window(LAUNCHER_LABEL)
         .ok_or_else(|| "边缘入口窗口不存在".to_string())?;
-    let monitor = window
-        .primary_monitor()
-        .map_err(|error| error.to_string())?
-        .or_else(|| window.current_monitor().ok().flatten())
-        .ok_or_else(|| "未找到显示器".to_string())?;
+    let monitors = window
+        .available_monitors()
+        .map_err(|error| error.to_string())?;
+    if monitors.is_empty() {
+        return Err("未找到显示器".to_string());
+    }
     let origin = window.outer_position().map_err(|error| error.to_string())?;
     let size = window.outer_size().map_err(|error| error.to_string())?;
-    let min_y = monitor.position().y;
-    let max_y = min_y + (monitor.size().height as i32 - size.height as i32).max(0);
 
     let mut cursor = POINT::default();
     unsafe { GetCursorPos(&mut cursor) }.map_err(|error| error.to_string())?;
+    let start_cursor_x = cursor.x;
     let start_cursor_y = cursor.y;
     let deadline = Instant::now() + Duration::from_millis(LAUNCHER_DRAG_MAX_MS);
     let mut moved = false;
-    let mut last_y = origin.y;
+    let mut last_position = origin;
     while Instant::now() < deadline {
         let pressed = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000;
         if pressed == 0 {
@@ -772,13 +957,37 @@ fn run_launcher_drag(app: &AppHandle) -> Result<bool, String> {
         if unsafe { GetCursorPos(&mut cursor) }.is_err() {
             break;
         }
-        let travel = cursor.y - start_cursor_y;
-        if moved || travel.abs() >= LAUNCHER_DRAG_THRESHOLD {
+        let travel_x = cursor.x - start_cursor_x;
+        let travel_y = cursor.y - start_cursor_y;
+        if moved
+            || travel_x.abs() >= LAUNCHER_DRAG_THRESHOLD
+            || travel_y.abs() >= LAUNCHER_DRAG_THRESHOLD
+        {
             moved = true;
-            let target = (origin.y + travel).clamp(min_y, max_y);
-            if target != last_y {
-                last_y = target;
-                let _ = window.set_position(PhysicalPosition::new(origin.x, target));
+            let Some(monitor) = monitor_for_point(&monitors, cursor.x, cursor.y) else {
+                break;
+            };
+            let monitor_position = monitor.position();
+            let monitor_size = monitor.size();
+            let max_x = monitor_position.x + (monitor_size.width as i32 - size.width as i32).max(0);
+            let max_y =
+                monitor_position.y + (monitor_size.height as i32 - size.height as i32).max(0);
+            let unsnapped_x = (origin.x + travel_x).clamp(monitor_position.x, max_x);
+            let snap_distance = (LAUNCHER_SNAP_DISTANCE * monitor.scale_factor()).round() as i32;
+            let target_x = if (unsnapped_x - monitor_position.x).abs() <= snap_distance {
+                monitor_position.x
+            } else if (max_x - unsnapped_x).abs() <= snap_distance {
+                max_x
+            } else {
+                unsnapped_x
+            };
+            let target = PhysicalPosition::new(
+                target_x,
+                (origin.y + travel_y).clamp(monitor_position.y, max_y),
+            );
+            if target != last_position {
+                last_position = target;
+                let _ = window.set_position(target);
             }
         }
         std::thread::sleep(Duration::from_millis(LAUNCHER_DRAG_TICK_MS));
@@ -798,7 +1007,7 @@ pub async fn paper_todo_drag_launcher(app: AppHandle) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let moved = run_launcher_drag(&app)?;
         if moved {
-            save_launcher_offset(&app)?;
+            save_launcher_placement(&app)?;
         }
         Ok(moved)
     })
@@ -806,38 +1015,100 @@ pub async fn paper_todo_drag_launcher(app: AppHandle) -> Result<bool, String> {
     .map_err(|error| error.to_string())?
 }
 
-/// Persist where the drag left the launcher, as a percentage of the travel its
-/// edge allows, and re-snap the window onto that anchor.
-fn save_launcher_offset(app: &AppHandle) -> Result<i64, String> {
+/// Persist a monitor-relative collapsed-capsule anchor. Releasing within the
+/// snap threshold docks to the closest horizontal edge; otherwise the launcher
+/// stays at its free position on that display.
+fn save_launcher_placement(app: &AppHandle) -> Result<(), String> {
     let runtime = app.state::<PaperTodoRuntime>();
     let window = app
         .get_webview_window(LAUNCHER_LABEL)
         .ok_or_else(|| "边缘入口窗口不存在".to_string())?;
-    let monitor = window
-        .primary_monitor()
-        .map_err(|error| error.to_string())?
-        .or_else(|| window.current_monitor().ok().flatten())
-        .ok_or_else(|| "未找到显示器".to_string())?;
+    let monitors = window
+        .available_monitors()
+        .map_err(|error| error.to_string())?;
     let position = window.outer_position().map_err(|error| error.to_string())?;
     let window_size = window.outer_size().map_err(|error| error.to_string())?;
-    let available_height = monitor.size().height.saturating_sub(window_size.height) as i64;
-    let relative_y = i64::from(position.y - monitor.position().y).clamp(0, available_height);
+    let center_x = position.x + window_size.width as i32 / 2;
+    let center_y = position.y + window_size.height as i32 / 2;
+    let monitor = monitor_for_point(&monitors, center_x, center_y)
+        .ok_or_else(|| "未找到显示器".to_string())?;
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let scale_factor = monitor.scale_factor();
+    let collapsed_width = (collapsed_launcher_width(app) as f64 * scale_factor).round() as i32;
+    let collapsed_height = (LAUNCHER_COLLAPSED_HEIGHT as f64 * scale_factor).round() as i32;
+    let settings = {
+        let _guard = runtime.io_lock.lock().map_err(|error| error.to_string())?;
+        load_document_unlocked(app)["settings"].clone()
+    };
+    let previous_edge = settings
+        .get("launcherEdge")
+        .and_then(Value::as_str)
+        .unwrap_or("right");
+    let expanded = runtime.launcher_expanded.load(Ordering::Relaxed);
+    let raw_anchor_x = if expanded && previous_edge == "right" {
+        position.x + window_size.width as i32 - collapsed_width
+    } else {
+        position.x
+    };
+    let available_width = (monitor_size.width as i32 - collapsed_width).max(0);
+    let available_height = (monitor_size.height as i32 - collapsed_height).max(0);
+    let anchor_x = raw_anchor_x.clamp(monitor_position.x, monitor_position.x + available_width);
+    let anchor_y = position
+        .y
+        .clamp(monitor_position.y, monitor_position.y + available_height);
+    let left_distance = (anchor_x - monitor_position.x).abs();
+    let right_distance =
+        (monitor_position.x + monitor_size.width as i32 - (anchor_x + collapsed_width)).abs();
+    let snap_distance = (LAUNCHER_SNAP_DISTANCE * scale_factor).round() as i32;
+    let docked = left_distance.min(right_distance) <= snap_distance;
+    let edge = if docked {
+        if left_distance <= right_distance {
+            "left"
+        } else {
+            "right"
+        }
+    } else if anchor_x + collapsed_width / 2 < monitor_position.x + monitor_size.width as i32 / 2 {
+        "left"
+    } else {
+        "right"
+    };
+    let snapped_anchor_x = if docked {
+        if edge == "left" {
+            monitor_position.x
+        } else {
+            monitor_position.x + available_width
+        }
+    } else {
+        anchor_x
+    };
+    let horizontal_offset = if available_width == 0 {
+        0.0
+    } else {
+        f64::from(snapped_anchor_x - monitor_position.x) * 100.0 / f64::from(available_width)
+    };
+    let relative_y = i64::from(anchor_y - monitor_position.y).clamp(0, i64::from(available_height));
     let offset = if available_height == 0 {
         0
     } else {
-        ((relative_y * 100 + available_height / 2) / available_height).clamp(0, 100)
+        ((relative_y * 100 + i64::from(available_height) / 2) / i64::from(available_height))
+            .clamp(0, 100)
     };
 
     let settings = {
         let _guard = runtime.io_lock.lock().map_err(|error| error.to_string())?;
         let mut document = load_document_unlocked(app);
+        document["settings"]["launcherDocked"] = json!(docked);
+        document["settings"]["launcherMonitor"] = json!(launcher_monitor_key(monitor));
+        document["settings"]["launcherEdge"] = json!(edge);
+        document["settings"]["launcherX"] = json!(horizontal_offset.clamp(0.0, 100.0));
         document["settings"]["launcherOffset"] = json!(offset);
         let settings = document["settings"].clone();
         persist_and_emit(app, document, None, Some("launcher-drag"))?;
         settings
     };
     sync_launcher_window(app, &settings)?;
-    Ok(offset)
+    Ok(())
 }
 
 #[tauri::command]

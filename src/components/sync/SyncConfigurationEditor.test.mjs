@@ -43,3 +43,38 @@ test('delivery workspace retains advanced server, manual deployment, command and
   assert.match(editorSource, /commandGroupForm/);
   assert.match(editorSource, /localGroupForm/);
 });
+
+test('manual deployment exposes safe transfer, extraction and server preflight controls', () => {
+  for (const feature of [
+    'manualTransferPolicy',
+    'manualExtractPolicy',
+    'manualExtractDir',
+    'extract_command_group_id',
+    'preflightManualDeploy',
+    'manualPreflightResults',
+  ]) {
+    assert.match(editorSource, new RegExp(feature));
+  }
+  assert.match(editorSource, /type="radio" name="manual-transfer-policy"/);
+  assert.match(editorSource, /type="radio" name="manual-extract-policy"/);
+  assert.match(editorSource, /manualTransferPolicy\.value === 'remote_only'/);
+  assert.match(editorSource, /manualExtractPolicy\.value === 'skip'/);
+});
+
+test('manual deployment keeps a recoverable run-scoped log session', () => {
+  assert.match(editorSource, /ManualDeployLogDialog/);
+  assert.match(editorSource, /taskStateStore\.latestManualDeploy/);
+  assert.match(editorSource, /manualDeployDialogOpen\.value = true/);
+  assert.match(editorSource, /availableManualServers\(bidx\)/);
+  assert.match(editorSource, /createAndSelectServer/);
+  assert.match(editorSource, /editManualBindingServer/);
+  assert.match(editorSource, /hasDuplicateManualServers/);
+});
+
+test('server changes use application UI instead of native browser dialogs', () => {
+  assert.match(editorSource, /AppConfirmDialog/);
+  assert.match(editorSource, /testServerFormConnection/);
+  assert.match(editorSource, /serverGlobalEditNotice/);
+  assert.doesNotMatch(editorSource, /\b(?:window\.)?alert\s*\(/);
+  assert.doesNotMatch(editorSource, /\b(?:window\.)?confirm\s*\(/);
+});

@@ -110,22 +110,28 @@ describe('paper todo standalone window lifecycle', () => {
       launcherSource.indexOf('async function startLauncherDrag'),
       launcherSource.indexOf('function toggleFromKeyboard'),
     );
-    expect(dragHandler).toContain('await setExpanded(!expanded.value)');
+    expect(dragHandler).toContain('await setExpanded(!requestedExpanded)');
     // Keyboard activation never reaches the drag loop, so it still toggles.
     expect(launcherSource).toContain('if (event.detail !== 0) return;');
     expect(launcherSource).toContain('@click="toggleFromKeyboard"');
   });
 
-  it('confines the launcher drag to the primary display edge', () => {
+  it('moves the launcher across displays and snaps near either horizontal edge', () => {
     expect(backendSource).toContain('pub async fn paper_todo_drag_launcher');
     expect(mainSource).toContain('paper_todo::paper_todo_drag_launcher');
     const dragLoop = backendSource.slice(
       backendSource.indexOf('fn run_launcher_drag(app: &AppHandle)'),
       backendSource.indexOf('pub async fn paper_todo_drag_launcher'),
     );
-    // `x` stays at the docked edge and `y` never leaves the primary monitor.
-    expect(dragLoop).toContain('PhysicalPosition::new(origin.x, target)');
-    expect(dragLoop).toContain('.clamp(min_y, max_y)');
+    expect(dragLoop).toContain('.available_monitors()');
+    expect(dragLoop).toContain('monitor_for_point(&monitors, cursor.x, cursor.y)');
+    expect(dragLoop).toContain('origin.x + travel_x');
+    expect(dragLoop).toContain('let target_x = if');
+    expect(dragLoop).toContain('LAUNCHER_SNAP_DISTANCE * monitor.scale_factor()');
+    expect(backendSource).toContain('save_launcher_placement(&app)');
+    expect(backendSource).toContain('const LAUNCHER_SNAP_DISTANCE: f64 = 28.0;');
+    expect(backendSource).toContain('document["settings"]["launcherDocked"] = json!(docked)');
+    expect(backendSource).toContain('document["settings"]["launcherMonitor"]');
     expect(dragLoop).toContain('LAUNCHER_DRAG_THRESHOLD');
     expect(dragLoop).toContain('LAUNCHER_DRAG_MAX_MS');
     expect(dragLoop).not.toContain('start_dragging');
@@ -145,17 +151,44 @@ describe('paper todo standalone window lifecycle', () => {
     expect(launcherSource).toContain('width: max-content');
   });
 
-  it('resizes the native launcher before rendering either visible state', () => {
+  it('clears the compositor surface before resizing and only reveals the latest state', () => {
     const toggleHandler = launcherSource.slice(
       launcherSource.indexOf('async function setExpanded'),
       launcherSource.indexOf('async function syncCollapsedWidth'),
     );
-    expect(toggleHandler.indexOf('await queueLauncherSync(value, itemCount')).toBeLessThan(
+    expect(toggleHandler.indexOf('transitioning.value = true')).toBeLessThan(
+      toggleHandler.indexOf('await queueLauncherSync('),
+    );
+    expect(toggleHandler.indexOf('await queueLauncherSync(')).toBeLessThan(
       toggleHandler.indexOf('expanded.value = value'),
     );
     expect(launcherSource).toContain('ref="collapsedCapsuleMeasure"');
     expect(launcherSource).toContain('class="launcher-master-capsule launcher-capsule-measurer"');
     expect(launcherSource).toContain('if (stateVersion !== launcherStateVersion) return;');
+    expect(launcherSource).toContain('finishPaperLauncherTransition');
+    expect(launcherSource).toContain('requestAnimationFrame(() => requestAnimationFrame(() => resolve()))');
+    expect(launcherSource).toContain("transitioning && 'launcher-transitioning'");
+    expect(launcherSource).toMatch(/\.launcher-transitioning \{[\s\S]*?opacity: 0;/);
+    expect(backendSource).toContain('defer_display: bool');
+    expect(backendSource).not.toContain('set_launcher_transition_visible(window, false)');
+    expect(backendSource).toContain('launcher_transition_id: AtomicU64');
+    expect(backendSource).toContain('!= transition_id');
+    expect(backendSource).toContain('window.is_visible()');
+    expect(mainSource).toContain('paper_todo::paper_todo_finish_launcher_transition');
+  });
+
+  it('toggles rapid clicks from the latest requested state instead of stale DOM', () => {
+    expect(launcherSource).toContain('let requestedExpanded = false;');
+    expect(launcherSource).toContain('await setExpanded(!requestedExpanded);');
+    expect(launcherSource).toContain('void setExpanded(!requestedExpanded);');
+    expect(launcherSource).not.toContain('setExpanded(!expanded.value)');
+    expect(launcherSource).toMatch(
+      /if \(value === requestedExpanded\) \{\s*return;\s*\}/,
+    );
+    expect(launcherSource).toContain('if (stateVersion === launcherStateVersion)');
+    expect(launcherSource).toContain('finishPaperLauncherTransition(stateVersion)');
+    expect(launcherSource).toContain('if (expanded.value) void syncExpandedGeometry();');
+    expect(launcherSource).not.toContain('if (expanded.value) void setExpanded(true);');
   });
 
   it('reserves height for the creation row instead of clipping its bottom edge', () => {
@@ -239,7 +272,7 @@ describe('paper todo standalone window lifecycle', () => {
     expect(paperSource).toContain(':disabled="deletingPaper"');
   });
 
-  it('expands the launcher vertically on the primary monitor', () => {
+  it('expands the launcher on its persisted primary or secondary monitor', () => {
     expect(launcherSource).toContain('id="paper-todo-capsule-list"');
     expect(launcherSource).toContain('class="launcher-paper-list"');
     expect(launcherSource).toContain('flex-direction: column');
@@ -249,9 +282,10 @@ describe('paper todo standalone window lifecycle', () => {
       backendSource.indexOf('fn launcher_position'),
       backendSource.indexOf('fn sync_launcher_window'),
     );
-    expect(launcherPosition.indexOf('.primary_monitor()')).toBeLessThan(
-      launcherPosition.indexOf('.current_monitor()'),
-    );
+    expect(backendSource).toContain('fn launcher_monitor_key');
+    expect(backendSource).toContain('launcherMonitor');
+    expect(launcherPosition).toContain('launcherDocked');
+    expect(launcherPosition).toContain('launcherX');
     expect(launcherPosition).toContain('collapsed_available_height');
     expect(launcherPosition).toContain('let y = anchored_y.min(max_y);');
   });

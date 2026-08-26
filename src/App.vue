@@ -81,7 +81,18 @@ const quitConfirmTaskNames = ref<string[]>([]);
 const quitConfirmSimulatorCleanup = ref(false);
 const quitConfirmBusy = ref(false);
 const quitConfirmError = ref('');
+const isNavigating = ref(false);
 let quitFlowActive = false;
+
+const removeNavigationStartHook = router.beforeEach((to, from) => {
+  isNavigating.value = to.fullPath !== from.fullPath;
+});
+const removeNavigationEndHook = router.afterEach(() => {
+  isNavigating.value = false;
+});
+const removeNavigationErrorHook = router.onError(() => {
+  isNavigating.value = false;
+});
 
 interface ScanQueuedEvent {
   folder: string;
@@ -517,6 +528,9 @@ onUnmounted(() => {
   if (unlistenDeviceSimulatorStatus) unlistenDeviceSimulatorStatus();
   if (unlistenOpenClipboardSettings) unlistenOpenClipboardSettings();
   if (unlistenMainWindowResize) unlistenMainWindowResize();
+  removeNavigationStartHook();
+  removeNavigationEndHook();
+  removeNavigationErrorHook();
 });
 </script>
 
@@ -539,8 +553,16 @@ onUnmounted(() => {
       <main
         id="main-content"
         role="main"
-        class="flex flex-1 flex-col overflow-hidden"
+        class="relative flex flex-1 flex-col overflow-hidden"
+        :aria-busy="isNavigating"
       >
+        <div
+          v-show="isNavigating"
+          class="pointer-events-none absolute inset-x-0 top-0 z-30 h-0.5 overflow-hidden"
+          aria-hidden="true"
+        >
+          <div class="h-full w-full animate-pulse bg-gradient-to-r from-sky-500 via-cyan-400 to-blue-600 motion-reduce:animate-none"></div>
+        </div>
         <router-view v-slot="{ Component }">
         <!--
           Keep-alive list intentionally narrow:
@@ -551,10 +573,13 @@ onUnmounted(() => {
           - NetworkToolsPage: holds tab state (ping scan, port test, WOL,
             subnet calc, TCP table) — remounting would lose in-progress data.
           - SettingsPage: keeps application preferences stable across routes.
+          - ToolsHubPage, AboutPage, and ErrorCodeLookupPage have no polling or
+            native event resources; caching them safely avoids repeated setup
+            and preserves query/expanded state.
           Other pages either reload cheaply or rely on Tauri events that
           re-hydrate state on mount, so they intentionally remount.
         -->
-        <keep-alive include="SyncConsolePage,CodeStatisticsPage,NetworkToolsPage,RemotePackagePatchPage,SettingsPage">
+        <keep-alive include="SyncConsolePage,CodeStatisticsPage,NetworkToolsPage,RemotePackagePatchPage,SettingsPage,ToolsHubPage,AboutPage,ErrorCodeLookupPage">
           <component :is="Component" />
         </keep-alive>
         </router-view>

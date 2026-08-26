@@ -54,6 +54,7 @@ assert.equal(store.groups[0].task_group_id, 'group-1');
 await store.selectTaskGroup('group-1');
 assert.equal(store.selectedTaskGroupId, 'group-1');
 assert.equal(store.selectedGroupDetail.task_group_id, 'group-1');
+assert.equal(store.groupDetails['group-1'].task_group_id, 'group-1');
 
 store.applyDetailSnapshot({
   task_group_id: 'group-1',
@@ -111,12 +112,36 @@ const deployHandle = await actionStore.startManualDeploy({
   display_name: 'pkg',
   local_path: 'D:\\dst\\pkg',
   remote_path: '/srv/pkg',
-  bindings: [],
+  transfer_policy: 'smart',
+  extract_policy: 'auto',
+  extract_dir: '${remote_target}/${filename}',
+  bindings: [{
+    server_id: 'server-a',
+    command_group_ids: ['extract', 'install'],
+    extract_command_group_id: 'extract',
+  }],
 });
 
 assert.equal(deployHandle.task_group_id, 'group-deploy');
 assert.equal(deployHandle.run_id, 'run-deploy');
+assert.equal(actionStore.latestManualDeploy.task_group_id, 'group-deploy');
+assert.equal(actionStore.latestManualDeploy.run_id, 'run-deploy');
+assert.deepEqual(actionStore.latestManualDeploy.server_ids, ['server-a']);
 assert.equal(actionCalls.length, 2);
 assert.equal(actionCalls[0][0], 'copy');
 assert.equal(actionCalls[1][0], 'deploy');
+assert.deepEqual(actionCalls[1][1], {
+  task_group_id: null,
+  display_name: 'pkg',
+  local_path: 'D:\\dst\\pkg',
+  remote_path: '/srv/pkg',
+  transfer_policy: 'smart',
+  extract_policy: 'auto',
+  extract_dir: '${remote_target}/${filename}',
+  bindings: [{
+    server_id: 'server-a',
+    command_group_ids: ['extract', 'install'],
+    extract_command_group_id: 'extract',
+  }],
+});
 console.log('taskStateStore manual action tests PASSED');

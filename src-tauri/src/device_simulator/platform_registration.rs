@@ -34,6 +34,18 @@ pub struct PlatformDeviceEntry {
     pub port: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlatformAddDevicesRequest {
+    pub devices: Vec<PlatformDeviceEntry>,
+    #[serde(default)]
+    pub server_ids: Vec<String>,
+    #[serde(default)]
+    pub automatic_only: bool,
+    #[serde(default)]
+    pub replace_existing: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformAddDeviceOutcome {
@@ -181,10 +193,9 @@ struct DeleteDeviceSuccess {
 pub async fn device_simulator_add_devices_to_platform(
     app_handle: AppHandle,
     app_state: State<'_, AppState>,
-    devices: Vec<PlatformDeviceEntry>,
-    replace_existing: bool,
+    request: PlatformAddDevicesRequest,
 ) -> Result<PlatformAddDevicesReport, SimulatorErrorBody> {
-    if devices.is_empty() {
+    if request.devices.is_empty() {
         return Err(platform_error(
             "device_simulator.platform.devices_missing",
             "deviceSimulator.errors.platformAddFailed",
@@ -198,7 +209,15 @@ pub async fn device_simulator_add_devices_to_platform(
             config.framework_password_api_timeout_secs,
         )
     };
-    validate_registration_settings(&settings)?;
+    let servers = registration_servers(&settings, &request)?;
+    if servers.is_empty() {
+        return Ok(PlatformAddDevicesReport {
+            servers: vec![],
+            total_devices: 0,
+            added_devices: 0,
+        });
+    }
+    validate_registration_servers(&servers)?;
     let client = crate::build_device_http_client_with_timeout(Duration::from_secs(timeout_secs))
         .map_err(|details| {
             platform_error(
@@ -208,14 +227,15 @@ pub async fn device_simulator_add_devices_to_platform(
             )
         })?;
 
-    let total_devices = devices
+    let total_devices = request
+        .devices
         .len()
-        .saturating_mul(settings.last_platform_servers.len())
+        .saturating_mul(servers.len())
         .try_into()
         .unwrap_or(u32::MAX);
     let mut added_devices = 0_u32;
-    let mut servers = Vec::with_capacity(settings.last_platform_servers.len());
-    for server in &settings.last_platform_servers {
+    let mut server_results = Vec::with_capacity(servers.len());
+    for server in servers {
         emit_log(
             &app_handle,
             "info",
@@ -224,11 +244,22 @@ pub async fn device_simulator_add_devices_to_platform(
                 "开始向 {}:{} 添加 {} 台虚拟设备",
                 server.host,
                 server.port,
-                devices.len()
+                request.devices.len()
             ),
         );
-        let result =
-            register_server(&app_handle, &client, server, &devices, replace_existing).await;
+        let replace_existing = request.replace_existing.unwrap_or_else(|| {
+            server
+                .replace_existing_devices
+                .unwrap_or(settings.platform_replace_existing_devices)
+        });
+        let result = register_server(
+            &app_handle,
+            &client,
+            server,
+            &request.devices,
+            replace_existing,
+        )
+        .await;
         added_devices = added_devices.saturating_add(
             result
                 .devices
@@ -244,7 +275,7 @@ pub async fn device_simulator_add_devices_to_platform(
                     "{}:{} 已添加全部 {} 台虚拟设备",
                     server.host,
                     server.port,
-                    devices.len()
+                    request.devices.len()
                 ),
             )
         } else {
@@ -268,19 +299,20 @@ pub async fn device_simulator_add_devices_to_platform(
             )
         };
         emit_log(&app_handle, level, error_code, message);
-        servers.push(result);
+        server_results.push(result);
     }
 
     Ok(PlatformAddDevicesReport {
-        servers,
+        servers: server_results,
         total_devices,
         added_devices,
     })
 }
 
-fn validate_registration_settings(
-    settings: &DeviceSimulatorSettings,
-) -> Result<(), SimulatorErrorBody> {
+fn registration_servers<'a>(
+    settings: &'a DeviceSimulatorSettings,
+    request: &PlatformAddDevicesRequest,
+) -> Result<Vec<&'a PlatformServerSettings>, SimulatorErrorBody> {
     if settings.last_platform_servers.is_empty() {
         return Err(platform_error(
             "device_simulator.platform.server_missing",
@@ -288,8 +320,42 @@ fn validate_registration_settings(
             "请先配置至少一台 UMS 服务器",
         ));
     }
-    if settings
+    let requested_ids = request
+        .server_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if !request.server_ids.is_empty()
+        && request.server_ids.iter().any(|server_id| {
+            !settings
+                .last_platform_servers
+                .iter()
+                .any(|server| server.id == *server_id)
+        })
+    {
+        return Err(platform_error(
+            "device_simulator.platform.server_not_found",
+            "deviceSimulator.errors.platformServerMissing",
+            "指定的 UMS 服务器不存在或尚未保存",
+        ));
+    }
+    Ok(settings
         .last_platform_servers
+        .iter()
+        .filter(|server| requested_ids.is_empty() || requested_ids.contains(server.id.as_str()))
+        .filter(|server| {
+            !request.automatic_only
+                || server
+                    .auto_register_devices
+                    .unwrap_or(settings.platform_auto_add_devices)
+        })
+        .collect())
+}
+
+fn validate_registration_servers(
+    servers: &[&PlatformServerSettings],
+) -> Result<(), SimulatorErrorBody> {
+    if servers
         .iter()
         .any(|server| server.username.trim().is_empty() || server.password.is_empty())
     {
@@ -973,6 +1039,8 @@ mod tests {
                     port: 80,
                     username: "loadmin".into(),
                     password: "admin_123".into(),
+                    auto_register_devices: Some(true),
+                    replace_existing_devices: Some(false),
                 },
                 PlatformServerSettings {
                     id: "ums-2".into(),
@@ -980,14 +1048,107 @@ mod tests {
                     port: 80,
                     username: "loadmin-2".into(),
                     password: String::new(),
+                    auto_register_devices: Some(true),
+                    replace_existing_devices: Some(false),
                 },
             ],
             ..DeviceSimulatorSettings::default()
         };
 
-        assert!(validate_registration_settings(&settings).is_err());
+        let servers = settings.last_platform_servers.iter().collect::<Vec<_>>();
+        assert!(validate_registration_servers(&servers).is_err());
         settings.last_platform_servers[1].password = "server-2-password".into();
-        assert!(validate_registration_settings(&settings).is_ok());
+        let servers = settings.last_platform_servers.iter().collect::<Vec<_>>();
+        assert!(validate_registration_servers(&servers).is_ok());
+    }
+
+    #[test]
+    fn automatic_registration_filters_servers_and_manual_selection_does_not() {
+        let settings = DeviceSimulatorSettings {
+            last_platform_servers: vec![
+                PlatformServerSettings {
+                    id: "automatic".into(),
+                    host: "192.115.1.17".into(),
+                    port: 80,
+                    username: "loadmin".into(),
+                    password: "admin_123".into(),
+                    auto_register_devices: Some(true),
+                    replace_existing_devices: Some(false),
+                },
+                PlatformServerSettings {
+                    id: "manual".into(),
+                    host: "192.115.1.18".into(),
+                    port: 80,
+                    username: "loadmin".into(),
+                    password: "admin_123".into(),
+                    auto_register_devices: Some(false),
+                    replace_existing_devices: Some(true),
+                },
+            ],
+            ..DeviceSimulatorSettings::default()
+        };
+        let automatic = registration_servers(
+            &settings,
+            &PlatformAddDevicesRequest {
+                devices: devices(),
+                server_ids: vec![],
+                automatic_only: true,
+                replace_existing: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            automatic
+                .iter()
+                .map(|server| server.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["automatic"]
+        );
+
+        let manual = registration_servers(
+            &settings,
+            &PlatformAddDevicesRequest {
+                devices: devices(),
+                server_ids: vec!["manual".into()],
+                automatic_only: false,
+                replace_existing: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            manual
+                .iter()
+                .map(|server| server.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["manual"]
+        );
+    }
+
+    #[test]
+    fn registration_rejects_an_unknown_server_id() {
+        let settings = DeviceSimulatorSettings {
+            last_platform_servers: vec![PlatformServerSettings {
+                id: "ums-1".into(),
+                host: "192.115.1.17".into(),
+                port: 80,
+                username: "loadmin".into(),
+                password: "admin_123".into(),
+                auto_register_devices: Some(true),
+                replace_existing_devices: Some(false),
+            }],
+            ..DeviceSimulatorSettings::default()
+        };
+        let error = registration_servers(
+            &settings,
+            &PlatformAddDevicesRequest {
+                devices: devices(),
+                server_ids: vec!["missing".into()],
+                automatic_only: false,
+                replace_existing: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "device_simulator.platform.server_not_found");
     }
 
     #[test]

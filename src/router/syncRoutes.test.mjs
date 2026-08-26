@@ -39,3 +39,12 @@ test('the legacy strategy URL redirects to the combined tasks and strategy page'
   );
   assert.doesNotMatch(routerSource, /path: 'strategy',[\s\S]{0,100}component: SyncStrategyPage/);
 });
+
+test('sidebar routes can preload their existing lazy component loaders without duplicate work', () => {
+  for (const path of ['/', '/sync', '/settings', '/tools', '/tools/screen-share']) {
+    assert.match(routerSource, new RegExp(`'${path.replaceAll('/', '\\/')}': \\[`));
+  }
+  assert.match(routerSource, /export async function preloadRoute\(path: string\): Promise<void>/);
+  assert.match(routerSource, /new WeakMap<RouteComponentLoader, Promise<unknown>>\(\)/);
+  assert.match(routerSource, /routeComponentPreloadCache\.delete\(loader\)/);
+});

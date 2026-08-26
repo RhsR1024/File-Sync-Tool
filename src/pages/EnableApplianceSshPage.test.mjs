@@ -39,3 +39,13 @@ test('HA access groups are placed in the right column above results', () => {
   assert.ok(haGroups > rightColumn);
   assert.ok(results > haGroups);
 });
+
+test('recent IP chips toggle selection while the trash action only removes history', () => {
+  assert.match(
+    pageSource,
+    /const toggleRecentIp = \(ip: string\) => \{[\s\S]*?selectedIps\.value = selectedIps\.value\.filter[\s\S]*?manualIpInputRef\.value\?\.removeTag\(ip\)[\s\S]*?manualIpInputRef\.value\?\.applyTag\(ip\)/,
+  );
+  assert.match(pageSource, /:aria-pressed="isRecentIpSelected\(ip\)"/);
+  assert.match(pageSource, /@click="toggleRecentIp\(ip\)"/);
+  assert.match(pageSource, /@click\.stop="removeRecentIp\(ip\)"/);
+});

@@ -366,7 +366,7 @@ function progressSizeText(row: TaskGroupListItem): string {
                     <RefreshCw class="w-4 h-4" aria-hidden="true" />
                   </button>
                   <button
-                    v-else-if="row.had_failures"
+                    v-else-if="row.had_failures && row.task_config_id"
                     @click.stop="emit('retryDeploy', row.task_group_id)"
                     class="inline-flex w-8 h-8 items-center justify-center rounded-md bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700 border border-amber-200 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50 focus-visible:ring-offset-1"
                     :title="t('console.retryDeploy')"

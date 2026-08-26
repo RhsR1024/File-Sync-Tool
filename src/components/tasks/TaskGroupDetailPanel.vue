@@ -12,7 +12,7 @@ import type {
   TaskSummaryStatus, AttemptStatus, DeployState,
 } from '@/lib/tauri';
 import { openPathParent } from '@/lib/tauri';
-import { buildTaskDetailSections } from '@/lib/taskStatusView';
+import { buildTaskDetailSections, serverDisplayLabel } from '@/lib/taskStatusView';
 import { useI18n } from 'vue-i18n';
 
 const props = defineProps<{
@@ -134,6 +134,39 @@ function serverStatusDotClass(status: AttemptStatus): string {
     interrupted: 'bg-orange-400',
   };
   return map[status] ?? 'bg-slate-400';
+}
+
+function serverStatusRowClass(status: AttemptStatus): string {
+  const map: Record<AttemptStatus, string> = {
+    running: 'border-blue-200 bg-blue-50',
+    success: 'border-emerald-200 bg-emerald-50',
+    failed: 'border-rose-200 bg-rose-50',
+    cancelled: 'border-red-200 bg-red-50',
+    interrupted: 'border-orange-200 bg-orange-50',
+  };
+  return map[status] ?? 'border-slate-200 bg-slate-50';
+}
+
+function serverStatusBadgeClass(status: AttemptStatus): string {
+  const map: Record<AttemptStatus, string> = {
+    running: 'bg-blue-100 text-blue-700 ring-blue-300',
+    success: 'bg-emerald-100 text-emerald-700 ring-emerald-300',
+    failed: 'bg-rose-100 text-rose-700 ring-rose-300',
+    cancelled: 'bg-red-100 text-red-700 ring-red-300',
+    interrupted: 'bg-orange-100 text-orange-700 ring-orange-300',
+  };
+  return map[status] ?? 'bg-slate-100 text-slate-700 ring-slate-300';
+}
+
+function attemptStatusLabel(status: AttemptStatus): string {
+  const map: Record<AttemptStatus, string> = {
+    running: t('console.phaseDeploying'),
+    success: t('console.phaseCompleted'),
+    failed: t('console.phaseFailed'),
+    cancelled: t('console.phaseCancelled'),
+    interrupted: t('console.phaseInterrupted'),
+  };
+  return map[status] ?? status;
 }
 
 function deployStatusLabel(status: DeployState): string {
@@ -462,26 +495,23 @@ function phaseIconClass(status: string): string {
                     v-for="rollup in group.server_rollups"
                     :key="rollup.server_id"
                     class="flex items-center gap-3 rounded-lg border px-3 py-2 text-xs"
-                    :class="rollup.latest_status === 'failed'
-                      ? 'border-rose-200 bg-rose-50'
-                      : rollup.latest_status === 'success'
-                        ? 'border-emerald-200 bg-emerald-50'
-                        : 'border-blue-200 bg-blue-50'"
+                    :class="serverStatusRowClass(rollup.latest_status)"
                   >
                     <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="serverStatusDotClass(rollup.latest_status)"></span>
-                    <span class="flex-1 font-mono text-slate-700 truncate">{{ rollup.server_name }}</span>
+                    <span class="flex-1 font-mono text-slate-700 truncate" :title="serverDisplayLabel(rollup)">
+                      {{ serverDisplayLabel(rollup) }}
+                    </span>
                     <span class="text-[11px] text-slate-500 tabular-nums">
-                      {{ rollup.success_count }} / {{ rollup.success_count + rollup.failure_count }}
+                      {{ t('console.serverSuccessCount', {
+                        success: rollup.success_count,
+                        total: rollup.attempt_ids.length,
+                      }) }}
                     </span>
                     <span
                       class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold ring-1 ring-inset whitespace-nowrap"
-                      :class="rollup.latest_status === 'failed'
-                        ? 'bg-rose-100 text-rose-700 ring-rose-300'
-                        : rollup.latest_status === 'success'
-                          ? 'bg-emerald-100 text-emerald-700 ring-emerald-300'
-                          : 'bg-blue-100 text-blue-700 ring-blue-300'"
+                      :class="serverStatusBadgeClass(rollup.latest_status)"
                     >
-                      {{ rollup.latest_status }}
+                      {{ attemptStatusLabel(rollup.latest_status) }}
                     </span>
                   </div>
                 </div>
@@ -499,14 +529,16 @@ function phaseIconClass(status: string): string {
                     :key="failure.serverId"
                     class="rounded border border-amber-200 bg-white px-3 py-2 text-xs"
                   >
-                    <span class="font-semibold text-slate-700">{{ failure.serverName }}:</span>
-                    <span class="text-rose-600 ml-1">{{ failure.message }}</span>
+                    <div class="font-semibold text-slate-700">
+                      {{ t('console.serverDeployFailed', { server: failure.serverLabel }) }}
+                    </div>
+                    <div class="mt-1 text-rose-600 break-words">{{ failure.message }}</div>
                   </div>
                 </div>
               </div>
 
               <!-- Action buttons -->
-              <div v-if="group.had_failures" class="flex gap-2 flex-wrap">
+              <div v-if="group.had_failures && group.task_config_id" class="flex gap-2 flex-wrap">
                 <button
                   @click="emit('retryDeploy', group.task_group_id)"
                   class="px-4 py-2 rounded-lg font-semibold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-all flex items-center gap-2 text-xs active:scale-95"

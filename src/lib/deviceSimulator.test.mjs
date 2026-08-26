@@ -15,10 +15,16 @@ test('command and event names match the approved Tauri contract', () => {
   assert.deepEqual(Object.values(DEVICE_SIMULATOR_COMMANDS), [
     'device_simulator_get_settings',
     'device_simulator_save_settings',
+    'device_simulator_update_platform_servers',
+    'device_simulator_migrate_local_materials',
     'device_simulator_list_interfaces',
     'device_simulator_list_profiles',
     'device_simulator_list_alarm_types',
     'device_simulator_list_media_themes',
+    'device_simulator_get_local_materials_path',
+    'device_simulator_refresh_local_materials',
+    'device_simulator_sync_remote_materials',
+    'device_simulator_reset_and_sync_remote_materials',
     'device_simulator_get_asset_status',
     'device_simulator_prepare_assets',
     'device_simulator_cancel_asset_download',
@@ -58,6 +64,8 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
 
   await api.getSettings();
   await api.saveSettings({ marker: 'settings' });
+  const servers = [{ id: 'server-1', host: '192.115.1.38', port: 80 }];
+  await api.updatePlatformServers(servers);
   await api.listInterfaces();
   await api.listProfiles();
   await api.listAlarmTypes();
@@ -76,11 +84,18 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
   await api.stopAlarm('alarm-1');
   await api.recover('session-1');
   const devices = [{ address: '192.115.1.69', port: 80 }];
-  await api.addDevicesToPlatform(devices, true);
+  const platformRequest = {
+    devices,
+    serverIds: ['server-1'],
+    automaticOnly: false,
+    replaceExisting: true,
+  };
+  await api.addDevicesToPlatform(platformRequest);
 
   assert.deepEqual(calls, [
     [DEVICE_SIMULATOR_COMMANDS.getSettings, undefined],
     [DEVICE_SIMULATOR_COMMANDS.saveSettings, { settings: { marker: 'settings' } }],
+    [DEVICE_SIMULATOR_COMMANDS.updatePlatformServers, { servers }],
     [DEVICE_SIMULATOR_COMMANDS.listInterfaces, undefined],
     [DEVICE_SIMULATOR_COMMANDS.listProfiles, undefined],
     [DEVICE_SIMULATOR_COMMANDS.listAlarmTypes, undefined],
@@ -98,7 +113,7 @@ test('API wrappers use camelCase Tauri arguments without leaking raw invoke call
     [DEVICE_SIMULATOR_COMMANDS.triggerAlarmOnce, { request: alarmRequest }],
     [DEVICE_SIMULATOR_COMMANDS.stopAlarm, { jobId: 'alarm-1' }],
     [DEVICE_SIMULATOR_COMMANDS.recover, { sessionId: 'session-1' }],
-    [DEVICE_SIMULATOR_COMMANDS.addDevicesToPlatform, { devices, replaceExisting: true }],
+    [DEVICE_SIMULATOR_COMMANDS.addDevicesToPlatform, { request: platformRequest }],
   ]);
 });
 

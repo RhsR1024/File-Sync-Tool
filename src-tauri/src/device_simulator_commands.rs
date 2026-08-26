@@ -6,7 +6,7 @@ use app_lib::device_simulator::api::{
     AlarmTypeSummary, AssetPackStatus, AssetProgressSnapshot, AssetStatus, DevicePreview,
     DeviceProfileAvailability, DeviceProfileSummary, ImportedAlarmImage, MediaThemeSummary,
     PreflightReport, ProfileAlarmTypes, RecoveryResult, RemoteMaterialSyncResult,
-    RuntimeTelemetrySnapshot, SimulatorStartRequest, SimulatorStatusSnapshot,
+    RuntimeTelemetrySnapshot, SimulatorStartRequest, SimulatorStatusSnapshot, TargetPlatformServer,
     DEVICE_SIMULATOR_EVENT_ALARM_STATS, DEVICE_SIMULATOR_EVENT_ALARM_SUBSCRIPTION,
     DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS, DEVICE_SIMULATOR_EVENT_CLEANUP_PROGRESS,
     DEVICE_SIMULATOR_EVENT_DEVICE_STATUS, DEVICE_SIMULATOR_EVENT_LOG,
@@ -55,7 +55,7 @@ use app_lib::device_simulator::windows::ip_alias::{
 use app_lib::device_simulator::windows::named_pipe::PipeIdentity;
 use app_lib::device_simulator::worker_protocol::{
     AlarmJobCommandPayload, InitializeSessionPayload, RecoverSessionPayload, StopAlarmJobPayload,
-    WorkerCommandName,
+    UpdatePlatformServersPayload, WorkerCommandName,
 };
 use semver::Version;
 use serde::de::DeserializeOwned;
@@ -193,6 +193,19 @@ pub async fn device_simulator_save_settings(
         .map_err(|details| settings_error("device_simulator.settings.save_failed", details))?;
     *state.config.lock().unwrap() = next;
     Ok(settings)
+}
+
+#[tauri::command]
+pub async fn device_simulator_update_platform_servers(
+    simulator_state: State<'_, DeviceSimulatorCommandState>,
+    servers: Vec<TargetPlatformServer>,
+) -> Result<SimulatorStatusSnapshot, SimulatorErrorBody> {
+    worker_request(
+        &simulator_state.manager,
+        WorkerCommandName::UpdatePlatformServers,
+        Some(&UpdatePlatformServersPayload { servers }),
+    )
+    .await
 }
 
 #[tauri::command]

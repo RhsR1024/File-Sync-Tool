@@ -12,6 +12,71 @@ const EnableApplianceSshPage = () => import('@/pages/EnableApplianceSshPage.vue'
 const SyncConsolePage = () => import('@/pages/sync/SyncConsolePage.vue')
 const SyncTasksPage = () => import('@/pages/sync/SyncTasksPage.vue')
 const SyncDeliveryPage = () => import('@/pages/sync/SyncDeliveryPage.vue')
+const AboutPage = () => import('../pages/AboutPage.vue')
+const ToolsHubPage = () => import('../pages/ToolsHubPage.vue')
+const UmsInitialPasswordPage = () => import('../pages/UmsInitialPasswordPage.vue')
+const PortalAutoLoginPage = () => import('../pages/PortalAutoLoginPage.vue')
+const RemotePackagePatchPage = () => import('../pages/RemotePackagePatchPage.vue')
+const CodeStatisticsPage = () => import('../pages/CodeStatisticsPage.vue')
+const NetworkToolsPage = () => import('../pages/NetworkToolsPage.vue')
+const DisplayControlPage = () => import('../pages/DisplayControlPage.vue')
+const ScreenSharePage = () => import('../pages/ScreenSharePage.vue')
+const VideoDeviceSimulatorPage = () => import('../pages/VideoDeviceSimulatorPage.vue')
+const FileSharePage = () => import('../pages/FileSharePage.vue')
+const TftpServerPage = () => import('../pages/TftpServerPage.vue')
+const DiskCacheCleanupPage = () => import('../pages/DiskCacheCleanupPage.vue')
+const ClipboardManagerPage = () => import('../pages/ClipboardManagerPage.vue')
+const ErrorCodeLookupPage = () => import('../pages/ErrorCodeLookupPage.vue')
+const NotepadExtensionsPage = () => import('../pages/NotepadExtensionsPage.vue')
+const PaperTodoPage = () => import('../pages/PaperTodoPage.vue')
+
+type RouteComponentLoader = () => Promise<unknown>
+
+const routePreloaders: Readonly<Record<string, readonly RouteComponentLoader[]>> = {
+  '/': [RuntimeLogsPage],
+  '/sync': [SyncConsolePage, SyncOverviewPage],
+  '/sync/tasks': [SyncConsolePage, SyncTasksPage],
+  '/sync/delivery': [SyncConsolePage, SyncDeliveryPage],
+  '/settings': [SettingsPage],
+  '/about': [AboutPage],
+  '/tools': [ToolsHubPage],
+  '/tools/ums-initial-password': [UmsInitialPasswordPage],
+  '/tools/appliance-ssh': [EnableApplianceSshPage],
+  '/tools/portal-auto-login': [PortalAutoLoginPage],
+  '/tools/remote-package-patch': [RemotePackagePatchPage],
+  '/tools/code-statistics': [CodeStatisticsPage],
+  '/tools/network': [NetworkToolsPage],
+  '/tools/display-control': [DisplayControlPage],
+  '/tools/screen-share': [ScreenSharePage],
+  '/tools/video-device-simulator': [VideoDeviceSimulatorPage],
+  '/tools/file-share': [FileSharePage],
+  '/tools/tftp-server': [TftpServerPage],
+  '/tools/disk-cache-cleanup': [DiskCacheCleanupPage],
+  '/tools/clipboard': [ClipboardManagerPage],
+  '/tools/error-code-lookup': [ErrorCodeLookupPage],
+  '/tools/notepad-extensions': [NotepadExtensionsPage],
+  '/tools/paper-todo': [PaperTodoPage],
+}
+
+const routeComponentPreloadCache = new WeakMap<RouteComponentLoader, Promise<unknown>>()
+
+function preloadRouteComponent(loader: RouteComponentLoader): Promise<unknown> {
+  const cached = routeComponentPreloadCache.get(loader)
+  if (cached) return cached
+
+  const pending = loader().catch((error) => {
+    routeComponentPreloadCache.delete(loader)
+    throw error
+  })
+  routeComponentPreloadCache.set(loader, pending)
+  return pending
+}
+
+export async function preloadRoute(path: string): Promise<void> {
+  const preloaders = routePreloaders[path]
+  if (!preloaders) return
+  await Promise.all(preloaders.map(preloadRouteComponent))
+}
 
 const routes: RouteRecordRaw[] = [
   {
@@ -65,15 +130,15 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/about',
     name: 'about',
-    component: () => import('../pages/AboutPage.vue'),
+    component: AboutPage,
   },
   {
     path: '/tools',
-    component: () => import('../pages/ToolsHubPage.vue'),
+    component: ToolsHubPage,
   },
   {
     path: '/tools/ums-initial-password',
-    component: () => import('../pages/UmsInitialPasswordPage.vue'),
+    component: UmsInitialPasswordPage,
   },
   {
     path: '/tools/framework-password',
@@ -85,59 +150,59 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/tools/portal-auto-login',
-    component: () => import('../pages/PortalAutoLoginPage.vue'),
+    component: PortalAutoLoginPage,
   },
   {
     path: '/tools/remote-package-patch',
-    component: () => import('../pages/RemotePackagePatchPage.vue'),
+    component: RemotePackagePatchPage,
   },
   {
     path: '/tools/code-statistics',
-    component: () => import('../pages/CodeStatisticsPage.vue'),
+    component: CodeStatisticsPage,
   },
   {
     path: '/tools/network',
-    component: () => import('../pages/NetworkToolsPage.vue'),
+    component: NetworkToolsPage,
   },
   {
     path: '/tools/display-control',
-    component: () => import('../pages/DisplayControlPage.vue'),
+    component: DisplayControlPage,
   },
   {
     path: '/tools/screen-share',
-    component: () => import('../pages/ScreenSharePage.vue'),
+    component: ScreenSharePage,
   },
   {
     path: '/tools/video-device-simulator',
-    component: () => import('../pages/VideoDeviceSimulatorPage.vue'),
+    component: VideoDeviceSimulatorPage,
   },
   {
     path: '/tools/file-share',
-    component: () => import('../pages/FileSharePage.vue'),
+    component: FileSharePage,
   },
   {
     path: '/tools/tftp-server',
-    component: () => import('../pages/TftpServerPage.vue'),
+    component: TftpServerPage,
   },
   {
     path: '/tools/disk-cache-cleanup',
-    component: () => import('../pages/DiskCacheCleanupPage.vue'),
+    component: DiskCacheCleanupPage,
   },
   {
     path: '/tools/clipboard',
-    component: () => import('../pages/ClipboardManagerPage.vue'),
+    component: ClipboardManagerPage,
   },
   {
     path: '/tools/error-code-lookup',
-    component: () => import('../pages/ErrorCodeLookupPage.vue'),
+    component: ErrorCodeLookupPage,
   },
   {
     path: '/tools/notepad-extensions',
-    component: () => import('../pages/NotepadExtensionsPage.vue'),
+    component: NotepadExtensionsPage,
   },
   {
     path: '/tools/paper-todo',
-    component: () => import('../pages/PaperTodoPage.vue'),
+    component: PaperTodoPage,
   },
   {
     path: '/paper-todo/window/:id',

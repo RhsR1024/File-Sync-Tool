@@ -22,7 +22,7 @@ import {
   Terminal,
   Video,
 } from 'lucide-vue-next';
-import { computed, type Component } from 'vue';
+import { computed, onMounted, onUnmounted, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
 
@@ -31,6 +31,7 @@ import { useUpdater } from '@/composables/useUpdater';
 import { SIDEBAR_NAV_SECTIONS, isSidebarItemActive, type SidebarIconKey } from '@/lib/sidebarNavigation';
 import { appStore } from '@/lib/store';
 import { formatReleaseDate } from '@/pages/about/version';
+import { preloadRoute } from '@/router';
 
 const route = useRoute();
 const router = useRouter();
@@ -91,6 +92,50 @@ const versionChipLabel = computed(() => {
 });
 
 const latestVersion = computed(() => updaterState.value?.manifest?.latest ?? null);
+
+const IDLE_PRELOAD_PATHS = ['/', '/sync', '/tools', '/settings'] as const;
+let idlePreloadStartTimer: number | null = null;
+let idlePreloadCallbackId: number | null = null;
+
+function warmRoute(path: string) {
+  void preloadRoute(path).catch(() => {
+    // Navigation still owns user-facing load errors; speculative work is silent.
+  });
+}
+
+async function preloadCommonRoutes() {
+  for (const path of IDLE_PRELOAD_PATHS) {
+    if (route.path === path) continue;
+    try {
+      await preloadRoute(path);
+    } catch {
+      // A later hover or real navigation retries failed component loads.
+    }
+  }
+}
+
+onMounted(() => {
+  idlePreloadStartTimer = window.setTimeout(() => {
+    idlePreloadStartTimer = null;
+    if (typeof window.requestIdleCallback === 'function') {
+      idlePreloadCallbackId = window.requestIdleCallback(() => {
+        idlePreloadCallbackId = null;
+        void preloadCommonRoutes();
+      }, { timeout: 2000 });
+      return;
+    }
+    void preloadCommonRoutes();
+  }, 800);
+});
+
+onUnmounted(() => {
+  if (idlePreloadStartTimer !== null) {
+    window.clearTimeout(idlePreloadStartTimer);
+  }
+  if (idlePreloadCallbackId !== null && typeof window.cancelIdleCallback === 'function') {
+    window.cancelIdleCallback(idlePreloadCallbackId);
+  }
+});
 </script>
 
 <template>
@@ -138,6 +183,9 @@ const latestVersion = computed(() => updaterState.value?.manifest?.latest ?? nul
                     : 'border-transparent text-slate-400 hover:border-slate-700/70 hover:bg-slate-800/80 hover:text-slate-100'"
                   :aria-current="item.active ? 'page' : undefined"
                   :title="item.label"
+                  @pointerenter="warmRoute(item.path)"
+                  @focus="warmRoute(item.path)"
+                  @pointerdown="warmRoute(item.path)"
                 >
                   <component
                     :is="item.icon"
@@ -180,6 +228,9 @@ const latestVersion = computed(() => updaterState.value?.manifest?.latest ?? nul
         class="flex w-full items-center gap-3 rounded-2xl border border-transparent px-2 py-2 text-left text-xs font-mono text-slate-400 transition motion-reduce:transition-none hover:border-slate-800 hover:bg-slate-900/70 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b1220]"
         :title="t('sidebar.versionChipTooltip')"
         @click="router.push('/about')"
+        @pointerenter="warmRoute('/about')"
+        @focus="warmRoute('/about')"
+        @pointerdown="warmRoute('/about')"
       >
         <ShieldCheck class="h-4 w-4" aria-hidden="true" />
         <span class="min-w-0 flex-1 truncate">{{ versionChipLabel }}</span>

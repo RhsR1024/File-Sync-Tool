@@ -378,6 +378,9 @@ impl std::error::Error for FirewallBackendError {}
 pub trait FirewallBackend: Send + Sync {
     fn list_managed_rules(&self) -> Result<Vec<FirewallRuleSpec>, FirewallBackendError>;
     fn create_rule(&self, rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError>;
+    /// Replace the remote scope of an owned rule without changing its stable
+    /// identity. Implementations must refuse any other field change.
+    fn update_rule(&self, rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError>;
     fn delete_rule(&self, rule_id: &str) -> Result<(), FirewallBackendError>;
 }
 
@@ -390,6 +393,10 @@ impl FirewallBackend for UnsupportedFirewallBackend {
     }
 
     fn create_rule(&self, _rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError> {
+        Err(FirewallBackendError::UnsupportedPlatform)
+    }
+
+    fn update_rule(&self, _rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError> {
         Err(FirewallBackendError::UnsupportedPlatform)
     }
 
@@ -408,6 +415,10 @@ impl FirewallBackend for SystemFirewallBackend {
 
     fn create_rule(&self, rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError> {
         create_system_rule(rule)
+    }
+
+    fn update_rule(&self, rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError> {
+        update_system_rule(rule)
     }
 
     fn delete_rule(&self, rule_id: &str) -> Result<(), FirewallBackendError> {
@@ -558,6 +569,56 @@ fn create_system_rule(rule: &FirewallRuleSpec) -> Result<(), FirewallBackendErro
 
 #[cfg(not(target_os = "windows"))]
 fn create_system_rule(_rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError> {
+    Err(FirewallBackendError::UnsupportedPlatform)
+}
+
+#[cfg(target_os = "windows")]
+fn update_system_rule(rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError> {
+    use windows::core::BSTR;
+
+    let matching = list_system_managed_rules()?
+        .into_iter()
+        .filter(|observed| observed.rule_id == rule.rule_id)
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        return Err(FirewallBackendError::Native(format!(
+            "expected exactly one owned firewall rule for '{}', found {}",
+            rule.rule_id,
+            matching.len()
+        )));
+    }
+    let observed = &matching[0];
+    let mut expected = rule.clone();
+    expected.remote_scope = observed.remote_scope.clone();
+    if &expected != observed {
+        return Err(FirewallBackendError::Native(format!(
+            "refused to change non-scope fields of firewall rule '{}'",
+            rule.rule_id
+        )));
+    }
+
+    let _apartment = ComApartment::initialize()?;
+    let rules = firewall_rules()?;
+    let native_rule =
+        unsafe { rules.Item(&BSTR::from(observed.name.as_str())) }.map_err(|source| {
+            FirewallBackendError::Native(format!(
+                "could not open Windows Firewall rule '{}': {source}",
+                observed.name
+            ))
+        })?;
+    let remote_addresses = encode_remote_scope(&rule.remote_scope);
+    unsafe { native_rule.SetRemoteAddresses(&BSTR::from(remote_addresses.as_str())) }.map_err(
+        |source| {
+            FirewallBackendError::Native(format!(
+                "could not update Windows Firewall rule '{}': {source}",
+                observed.name
+            ))
+        },
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn update_system_rule(_rule: &FirewallRuleSpec) -> Result<(), FirewallBackendError> {
     Err(FirewallBackendError::UnsupportedPlatform)
 }
 

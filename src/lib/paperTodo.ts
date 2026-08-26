@@ -50,6 +50,9 @@ export interface PaperTodoSettings {
   launcherEnabled: boolean;
   launcherEdge: 'left' | 'right';
   launcherOffset: number;
+  launcherDocked: boolean;
+  launcherMonitor: string;
+  launcherX: number;
   autoCollapseLauncher: boolean;
   theme: PaperTheme;
   palette: PaperPalette;
@@ -111,6 +114,9 @@ export function createDefaultSettings(): PaperTodoSettings {
     launcherEnabled: false,
     launcherEdge: 'right',
     launcherOffset: 35,
+    launcherDocked: true,
+    launcherMonitor: '',
+    launcherX: 100,
     autoCollapseLauncher: false,
     theme: 'system',
     palette: 'warm',
@@ -199,6 +205,8 @@ export function normalizePaperTodoState(value: unknown): PaperTodoState {
     : null;
   const hasExplicitLauncherSetting = inputSettings !== null
     && Object.prototype.hasOwnProperty.call(inputSettings, 'launcherEnabled');
+  const hasExplicitLauncherX = inputSettings !== null
+    && Object.prototype.hasOwnProperty.call(inputSettings, 'launcherX');
   const settings = {
     ...fallback.settings,
     ...(inputSettings ?? {}),
@@ -229,6 +237,13 @@ export function normalizePaperTodoState(value: unknown): PaperTodoState {
   settings.interfaceScale = Math.min(120, Math.max(80, finiteNumber(settings.interfaceScale, 100)));
   settings.launcherOffset = Math.min(100, Math.max(0, finiteNumber(settings.launcherOffset, 35)));
   settings.launcherEdge = settings.launcherEdge === 'left' ? 'left' : 'right';
+  settings.launcherDocked = settings.launcherDocked !== false;
+  settings.launcherMonitor = typeof settings.launcherMonitor === 'string'
+    ? settings.launcherMonitor.slice(0, 256)
+    : '';
+  settings.launcherX = hasExplicitLauncherX
+    ? Math.min(100, Math.max(0, finiteNumber(settings.launcherX, 50)))
+    : settings.launcherEdge === 'left' ? 0 : 100;
   const skins: PaperSkin[] = ['classic', 'grain', 'quiet', 'desk'];
   settings.paperSkin = skins.includes(settings.paperSkin) ? settings.paperSkin : 'classic';
 
@@ -402,13 +417,27 @@ export async function setPaperLauncherExpanded(
   expanded: boolean,
   itemCount = 0,
   capsuleWidth: number | null = null,
+  deferDisplay = false,
+  transitionId = 0,
 ): Promise<void> {
   if (!isTauriRuntime()) return;
-  await invoke('paper_todo_set_launcher_expanded', { expanded, itemCount, capsuleWidth });
+  await invoke('paper_todo_set_launcher_expanded', {
+    expanded,
+    itemCount,
+    capsuleWidth,
+    deferDisplay,
+    transitionId,
+  });
+}
+
+export async function finishPaperLauncherTransition(transitionId: number): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke('paper_todo_finish_launcher_transition', { transitionId });
 }
 
 /**
- * Run the native drag loop that slides the launcher along its display edge.
+ * Run the native drag loop that moves the launcher across the virtual desktop
+ * and snaps it to a display edge when released close enough.
  * Resolves to `true` once the press actually travelled, and `false` when it was
  * a plain click the caller should turn into an expand/collapse.
  */

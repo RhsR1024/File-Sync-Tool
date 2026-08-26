@@ -124,6 +124,8 @@ pub struct DeployAttempt {
     pub run_id: String,
     pub server_id: String,
     pub server_name: String,
+    #[serde(default)]
+    pub server_host: String,
     pub attempt_no: u32,
     pub trigger_source: TaskTriggerSource,
     pub stage: DeployStage,
@@ -158,6 +160,8 @@ pub struct TaskRun {
 pub struct ServerRollup {
     pub server_id: String,
     pub server_name: String,
+    #[serde(default)]
+    pub server_host: String,
     pub latest_status: AttemptStatus,
     pub latest_attempt_id: Option<String>,
     pub success_count: u32,
@@ -269,6 +273,7 @@ impl TaskState {
                         run_id: "run-1".to_string(),
                         server_id: "server-a".to_string(),
                         server_name: "Server A".to_string(),
+                        server_host: "192.0.2.10".to_string(),
                         attempt_no: 1,
                         trigger_source: TaskTriggerSource::Scheduled,
                         stage: DeployStage::Connecting,
@@ -604,6 +609,7 @@ fn build_server_rollups(runs: &[TaskRun]) -> Vec<ServerRollup> {
                 .or_insert_with(|| ServerRollup {
                     server_id: attempt.server_id.clone(),
                     server_name: attempt.server_name.clone(),
+                    server_host: attempt.server_host.clone(),
                     latest_status: attempt.status.clone(),
                     latest_attempt_id: Some(attempt.attempt_id.clone()),
                     success_count: 0,
@@ -611,6 +617,9 @@ fn build_server_rollups(runs: &[TaskRun]) -> Vec<ServerRollup> {
                     last_error_message: None,
                     attempt_ids: vec![],
                 });
+
+            entry.server_name = attempt.server_name.clone();
+            entry.server_host = attempt.server_host.clone();
 
             if attempt.status == AttemptStatus::Success {
                 entry.success_count += 1;
@@ -701,6 +710,7 @@ mod tests {
                     run_id: "run-1".to_string(),
                     server_id: "server-a".to_string(),
                     server_name: "Server A".to_string(),
+                    server_host: "192.0.2.10".to_string(),
                     attempt_no: 1,
                     trigger_source: TaskTriggerSource::Manual,
                     stage: DeployStage::Done,
@@ -720,6 +730,7 @@ mod tests {
                     run_id: "run-1".to_string(),
                     server_id: "server-b".to_string(),
                     server_name: "Server B".to_string(),
+                    server_host: "192.0.2.11".to_string(),
                     attempt_no: 2,
                     trigger_source: TaskTriggerSource::Manual,
                     stage: DeployStage::Uploading,

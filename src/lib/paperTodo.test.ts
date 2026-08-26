@@ -50,8 +50,33 @@ describe('paper todo core data', () => {
     expect(settings.hotkeys.toggleAll).toBe('Ctrl+Shift+Space');
     expect(settings.launcherEnabled).toBe(false);
     expect(settings.launcherEdge).toBe('right');
+    expect(settings.launcherDocked).toBe(true);
+    expect(settings.launcherMonitor).toBe('');
+    expect(settings.launcherX).toBe(100);
     expect(settings.autoCollapseLauncher).toBe(false);
     expect(settings.paperSkin).toBe('classic');
+  });
+
+  it('normalizes persisted free launcher placement without breaking legacy settings', () => {
+    const legacy = normalizePaperTodoState({ papers: [], settings: { launcherEdge: 'left' } });
+    expect(legacy.settings.launcherDocked).toBe(true);
+    expect(legacy.settings.launcherX).toBe(0);
+
+    const free = normalizePaperTodoState({
+      papers: [],
+      settings: {
+        launcherDocked: false,
+        launcherMonitor: '\\\\.\\DISPLAY2',
+        launcherX: 42.5,
+        launcherOffset: 63,
+      },
+    });
+    expect(free.settings).toMatchObject({
+      launcherDocked: false,
+      launcherMonitor: '\\\\.\\DISPLAY2',
+      launcherX: 42.5,
+      launcherOffset: 63,
+    });
   });
 
   it('keeps the edge launcher enabled for existing papers unless explicitly disabled', () => {

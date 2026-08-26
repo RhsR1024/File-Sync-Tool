@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { buildTaskRows, buildTaskDetailSections } from './taskStatusView.ts';
+import { buildTaskRows, buildTaskDetailSections, serverDisplayLabel } from './taskStatusView.ts';
 
 const rows = buildTaskRows([
   {
@@ -63,6 +63,7 @@ const detail = buildTaskDetailSections({
     {
       server_id: 'server-a',
       server_name: 'Server A',
+      server_host: '192.0.2.10',
       latest_status: 'failed',
       latest_attempt_id: 'attempt-1',
       success_count: 0,
@@ -75,4 +76,7 @@ const detail = buildTaskDetailSections({
 });
 
 assert.equal(detail.serverFailures[0].message, 'ssh timeout');
+assert.equal(detail.serverFailures[0].serverLabel, 'Server A (192.0.2.10)');
+assert.equal(serverDisplayLabel({ server_id: 'server-b', server_name: '', server_host: '192.0.2.11' }), '192.0.2.11');
+assert.equal(serverDisplayLabel({ server_id: 'server-c', server_name: '', server_host: '' }), 'server-c');
 console.log('taskStatusView tests PASSED');

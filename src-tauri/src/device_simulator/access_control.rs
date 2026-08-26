@@ -30,8 +30,9 @@ impl std::fmt::Display for AccessPolicyError {
 impl std::error::Error for AccessPolicyError {}
 
 /// Resolved form of [`PlatformAccessMode`]: the mode plus the IPv4 addresses the
-/// configured platform servers resolved to at session start. Resolution happens
-/// once, in the Worker, so a later DNS change cannot widen a running session.
+/// configured platform servers resolved to for the current applied
+/// configuration. The Worker replaces this snapshot only through the explicit
+/// save-and-apply flow, so an unrelated DNS change cannot widen a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformAccessPolicy {
     mode: PlatformAccessMode,

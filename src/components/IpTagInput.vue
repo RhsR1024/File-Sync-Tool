@@ -137,7 +137,15 @@ const applyTag = (tag: string) => {
   nextTick(() => inputRef.value?.focus());
 };
 
-defineExpose({ focus, applyTag });
+const removeTagValue = (tag: string) => {
+  if (pending.value.trim() === tag) {
+    pending.value = '';
+  }
+  removeTag(tag);
+  nextTick(() => inputRef.value?.focus());
+};
+
+defineExpose({ focus, applyTag, removeTag: removeTagValue });
 </script>
 
 <template>

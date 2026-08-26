@@ -22,3 +22,12 @@ test('task detail run history uses one header style and one body style', () => {
   );
   assert.doesNotMatch(detailSource, /font-mono tabular-nums\}\}\s*<\/td>/);
 });
+
+test('server deployment failures include a non-empty server identity and localized status', () => {
+  assert.match(detailSource, /serverDisplayLabel\(rollup\)/);
+  assert.match(detailSource, /console\.serverDeployFailed/);
+  assert.match(detailSource, /attemptStatusLabel\(rollup\.latest_status\)/);
+  assert.match(detailSource, /serverStatusRowClass\(rollup\.latest_status\)/);
+  assert.match(detailSource, /total: rollup\.attempt_ids\.length/);
+  assert.doesNotMatch(detailSource, /failure\.serverName \}\}:/);
+});

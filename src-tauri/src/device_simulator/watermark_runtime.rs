@@ -526,7 +526,7 @@ fn flush_watermark_diagnostics(
 ) {
     if window.has_anomaly() {
         if let Some(diagnostics) = diagnostics {
-            diagnostics.info(
+            diagnostics.debug(
                 "watermark_timing",
                 window.message(
                     kind,

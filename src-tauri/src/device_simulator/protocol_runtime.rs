@@ -39,6 +39,8 @@ const SERVICE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const PROTOCOL_LOG_INTERVAL_MS: u64 = 10_000;
 const HTTP_CLIENT_TASK_LIMIT: usize = 128;
 
+type SharedPlatformAccessPolicy = Arc<parking_lot::RwLock<PlatformAccessPolicy>>;
+
 #[derive(Debug, Clone)]
 pub struct ProtocolRuntimeConfig {
     pub request: SimulatorStartRequest,
@@ -49,8 +51,9 @@ pub struct ProtocolRuntimeConfig {
     /// subscription; the alarm runtime reads it so dispatch follows the
     /// platform. See [`SharedLearnedAlarmSubscriptions`].
     pub learned_subscriptions: SharedLearnedAlarmSubscriptions,
-    /// Which callers discovery and HTTP answer. Resolved once by the Worker from
-    /// [`crate::device_simulator::api::TargetPlatformConfig`]; RTSP is not gated.
+    /// Initial caller policy for discovery and HTTP. The running Worker may
+    /// replace it when the configured UMS server list is applied; RTSP is not
+    /// gated.
     pub access_policy: PlatformAccessPolicy,
     /// Tests may disable the fixed legacy multicast port while still exercising
     /// HTTP and RTSP on loopback. Production Worker sessions always enable it.
@@ -153,6 +156,7 @@ impl ServiceTask {
 
 pub struct ProtocolRuntime {
     summary: ProtocolRuntimeSummary,
+    access_policy: SharedPlatformAccessPolicy,
     discovery: Vec<ServiceTask>,
     http: Vec<ServiceTask>,
     rtsp: Vec<RtspEndpoint>,
@@ -167,6 +171,7 @@ impl ProtocolRuntime {
             "device simulator platform access policy: {}",
             config.access_policy.describe()
         );
+        let access_policy = Arc::new(parking_lot::RwLock::new(config.access_policy.clone()));
         let mut runtime = Self {
             summary: ProtocolRuntimeSummary {
                 total_devices: config.preview.total_devices,
@@ -175,6 +180,7 @@ impl ProtocolRuntime {
                 rtsp_listeners: 0,
                 bind_addresses: Vec::new(),
             },
+            access_policy: Arc::clone(&access_policy),
             discovery: Vec::new(),
             http: Vec::new(),
             rtsp: Vec::new(),
@@ -232,7 +238,7 @@ impl ProtocolRuntime {
                 Arc::clone(&config.assets),
                 Arc::clone(&config.picture_cache),
                 Arc::clone(&config.learned_subscriptions),
-                config.access_policy.clone(),
+                Arc::clone(&access_policy),
                 config.request.platform.kind,
                 config.request.device_http_port,
                 device.clone(),
@@ -363,7 +369,7 @@ impl ProtocolRuntime {
             for devices in legacy_discovery_batches(&config.preview.devices) {
                 match start_discovery_task(
                     Arc::clone(&config.assets),
-                    config.access_policy.clone(),
+                    Arc::clone(&access_policy),
                     config.request.device_http_port,
                     devices,
                 )
@@ -385,6 +391,14 @@ impl ProtocolRuntime {
         runtime.summary.bind_addresses.sort();
         runtime.summary.bind_addresses.dedup();
         Ok(runtime)
+    }
+
+    pub fn update_access_policy(&self, policy: PlatformAccessPolicy) {
+        log::info!(
+            "device simulator platform access policy updated: {}",
+            policy.describe()
+        );
+        *self.access_policy.write() = policy;
     }
 
     pub fn summary(&self) -> &ProtocolRuntimeSummary {
@@ -484,7 +498,7 @@ async fn start_http_task(
     assets: Arc<RuntimeAssetLayout>,
     picture_cache: SharedImageCache,
     learned_subscriptions: SharedLearnedAlarmSubscriptions,
-    access_policy: PlatformAccessPolicy,
+    access_policy: SharedPlatformAccessPolicy,
     platform: TargetPlatform,
     http_port: u16,
     device: DeviceIdentityPreviewDto,
@@ -517,7 +531,7 @@ async fn start_http_task(
                             // Close before a single byte is read, so a platform
                             // outside the allow list cannot even fingerprint the
                             // device from its HTTP responses.
-                            if !access_policy.permits_socket(peer) {
+                            if !access_policy.read().permits_socket(peer) {
                                 drop(stream);
                                 log::debug!(
                                     "device simulator HTTP connection from {peer} refused by the platform access policy"
@@ -641,7 +655,7 @@ async fn serve_http_connection(
 
 async fn start_discovery_task(
     assets: Arc<RuntimeAssetLayout>,
-    access_policy: PlatformAccessPolicy,
+    access_policy: SharedPlatformAccessPolicy,
     http_port: u16,
     devices: Vec<DeviceIdentityPreviewDto>,
 ) -> Result<(ServiceTask, String), ProtocolRuntimeError> {
@@ -699,7 +713,7 @@ async fn start_discovery_task(
                         Ok((probe, _)) => {
                             // Staying silent is what keeps the devices out of an
                             // unconfigured platform's search results entirely.
-                            if !access_policy.permits(*probe.source.ip()) {
+                            if !access_policy.read().permits(*probe.source.ip()) {
                                 log::debug!(
                                     "device simulator discovery probe from {} refused by the platform access policy",
                                     probe.source

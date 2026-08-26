@@ -55,6 +55,7 @@ pub struct StartManualDeployRequest {
 pub struct DeployTarget {
     pub server_id: String,
     pub server_name: String,
+    pub server_host: String,
     pub remote_target: String,
     pub trigger_source: TaskTriggerSource,
 }
@@ -307,6 +308,37 @@ impl TaskManager {
         self.after_change(Some(actual_group_id.as_str()));
         Ok(TaskRunHandle {
             task_group_id: actual_group_id,
+            run_id,
+        })
+    }
+
+    pub fn begin_deploy_retry_run(&self, task_group_id: &str) -> Result<TaskRunHandle, String> {
+        let started_at = current_timestamp();
+        let run_id = format!("run-{}", uuid::Uuid::new_v4());
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            group.runs.push(TaskRun {
+                run_id: run_id.clone(),
+                task_group_id: group.task_group_id.clone(),
+                run_type: TaskRunType::DeployRetry,
+                trigger_source: TaskTriggerSource::Recovery,
+                started_at: started_at.clone(),
+                finished_at: None,
+                copy_phase: CopyState::Completed,
+                local_exec_phase: LocalExecState::NotStarted,
+                deploy_phase: DeployState::Pending,
+                deploy_attempts: vec![],
+                attempt_ids: vec![],
+            });
+            group.started_at = started_at;
+            group.finished_at = None;
+            group.refresh_from_runs();
+        }
+
+        self.after_change(Some(task_group_id));
+        Ok(TaskRunHandle {
+            task_group_id: task_group_id.to_string(),
             run_id,
         })
     }
@@ -671,6 +703,7 @@ impl TaskManager {
                             run_id: run_id.to_string(),
                             server_id: target.server_id,
                             server_name: target.server_name,
+                            server_host: target.server_host,
                             attempt_no,
                             trigger_source: target.trigger_source,
                             stage: DeployStage::Pending,
@@ -1201,6 +1234,7 @@ impl DeployTarget {
         Self {
             server_id: "server-a".to_string(),
             server_name: "Server A".to_string(),
+            server_host: "192.0.2.10".to_string(),
             remote_target: "/srv/release".to_string(),
             trigger_source: TaskTriggerSource::Scheduled,
         }
@@ -1210,6 +1244,7 @@ impl DeployTarget {
         Self {
             server_id: name.to_string(),
             server_name: name.to_string(),
+            server_host: format!("{name}.example.test"),
             remote_target: format!("/srv/{name}"),
             trigger_source: TaskTriggerSource::Scheduled,
         }
@@ -1413,6 +1448,7 @@ mod tests {
 
         let detail = manager.get_group_detail(&handle.task_group_id).unwrap();
         assert_eq!(detail.server_rollups[0].failure_count, 1);
+        assert_eq!(detail.server_rollups[0].server_host, "192.0.2.10");
         assert_eq!(
             detail.runs[0].deploy_attempts[0].error_phase,
             Some(DeployStage::Connecting)
@@ -1602,6 +1638,7 @@ mod tests {
                 &[DeployTarget {
                     server_id: "server-manual".to_string(),
                     server_name: "Manual Server".to_string(),
+                    server_host: "192.0.2.20".to_string(),
                     remote_target: "/srv/pkg".to_string(),
                     trigger_source: TaskTriggerSource::Manual,
                 }],
@@ -1747,5 +1784,25 @@ mod tests {
         let groups = manager.list_groups();
         assert_eq!(groups.len(), 2);
         assert_ne!(deploy.task_group_id, seed.task_group_id);
+    }
+
+    #[test]
+    fn begin_deploy_retry_run_preserves_group_and_records_recovery_run() {
+        let manager = TaskManager::new_in_memory();
+        let seed = manager.begin_scheduled_copy(TaskStartRequest::sample());
+        manager
+            .mark_copy_completed(&seed.task_group_id, &seed.run_id, false)
+            .unwrap();
+
+        let retry = manager.begin_deploy_retry_run(&seed.task_group_id).unwrap();
+        let detail = manager.get_group_detail(&seed.task_group_id).unwrap();
+        let retry_run = detail.runs.last().unwrap();
+
+        assert_eq!(retry.task_group_id, seed.task_group_id);
+        assert_eq!(retry_run.run_id, retry.run_id);
+        assert_eq!(retry_run.run_type, TaskRunType::DeployRetry);
+        assert_eq!(retry_run.trigger_source, TaskTriggerSource::Recovery);
+        assert_eq!(retry_run.copy_phase, CopyState::Completed);
+        assert_eq!(retry_run.deploy_phase, DeployState::Pending);
     }
 }

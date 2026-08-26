@@ -260,7 +260,7 @@ fn flush_rtsp_diagnostics(
 ) {
     if window.has_anomaly(source, reason) {
         if let Some(diagnostics) = source.diagnostics.as_ref() {
-            diagnostics.info(
+            diagnostics.debug(
                 "rtsp_timing",
                 window.message(source, session_id, reason, now),
             );

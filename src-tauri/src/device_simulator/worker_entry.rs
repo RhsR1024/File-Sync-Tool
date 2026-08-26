@@ -4,8 +4,9 @@ use crate::device_simulator::session_journal::WorkerProcessIdentity;
 use crate::device_simulator::telemetry::ProtocolDiagnosticSink;
 use crate::device_simulator::worker_protocol::{
     read_frame, write_frame, AlarmJobCommandPayload, HandshakeRequest, InitializeSessionPayload,
-    RecoverSessionPayload, StopAlarmJobPayload, WorkerCommandName, WorkerHeartbeat, WorkerHello,
-    WorkerMessage, WorkerRequest, WorkerResponse, WORKER_PROTOCOL_VERSION,
+    RecoverSessionPayload, StopAlarmJobPayload, UpdatePlatformServersPayload, WorkerCommandName,
+    WorkerHeartbeat, WorkerHello, WorkerMessage, WorkerRequest, WorkerResponse,
+    WORKER_PROTOCOL_VERSION,
 };
 use crate::device_simulator::worker_runtime::WorkerRuntime;
 use serde::de::DeserializeOwned;
@@ -296,6 +297,15 @@ async fn handle_worker_request(
         }
         WorkerCommandName::RunPreflight => runtime.run_preflight().await.and_then(response_value),
         WorkerCommandName::StartServices => runtime.start_services().await.and_then(response_value),
+        WorkerCommandName::UpdatePlatformServers => {
+            match decode_payload::<UpdatePlatformServersPayload>(request.command.payload) {
+                Ok(payload) => runtime
+                    .update_platform_servers(payload)
+                    .await
+                    .and_then(response_value),
+                Err(error) => Err(error),
+            }
+        }
         WorkerCommandName::StopServices => runtime.stop_services().await.and_then(response_value),
         WorkerCommandName::StartAlarmJob => {
             match decode_payload::<AlarmJobCommandPayload>(request.command.payload) {

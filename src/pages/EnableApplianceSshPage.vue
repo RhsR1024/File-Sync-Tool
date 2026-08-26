@@ -97,11 +97,15 @@ const directTargetIps = computed(() => {
 
 const isRecentIpSelected = (ip: string) => directTargetIps.value.includes(ip);
 
-const applyRecentIp = (ip: string) => {
-  if (isLoading.value || isRecentIpSelected(ip)) {
-    return;
+const toggleRecentIp = (ip: string) => {
+  if (isLoading.value) return;
+
+  if (isRecentIpSelected(ip)) {
+    selectedIps.value = selectedIps.value.filter(selectedIp => selectedIp !== ip);
+    manualIpInputRef.value?.removeTag(ip);
+  } else {
+    manualIpInputRef.value?.applyTag(ip);
   }
-  manualIpInputRef.value?.applyTag(ip);
 };
 
 const activeGroups = computed(() => haGroups.value.filter(isGroupActive).map(normalizeGroup));
@@ -518,8 +522,9 @@ const enableStateClass = (value?: number) => {
                     <button
                       type="button"
                       :disabled="isLoading"
-                      class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed"
-                      @click="applyRecentIp(ip)"
+                      :aria-pressed="isRecentIpSelected(ip)"
+                      class="inline-flex cursor-pointer items-center gap-1 px-2.5 py-1 text-xs font-medium transition-colors duration-200 hover:bg-black/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-inset disabled:cursor-not-allowed"
+                      @click="toggleRecentIp(ip)"
                     >
                       <Check v-if="isRecentIpSelected(ip)" class="h-3 w-3" />
                       <span class="font-mono">{{ ip }}</span>
@@ -527,7 +532,8 @@ const enableStateClass = (value?: number) => {
                     <button
                       type="button"
                       :disabled="isLoading"
-                      class="inline-flex items-center border-l border-current/10 px-2 text-current/70 transition hover:text-current disabled:cursor-not-allowed"
+                      :aria-label="t('tools.applianceSsh.removeRecentIp')"
+                      class="inline-flex cursor-pointer items-center border-l border-current/10 px-2 text-current/70 transition-colors duration-200 hover:text-current focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-inset disabled:cursor-not-allowed"
                       :title="t('tools.applianceSsh.removeRecentIp')"
                       @click.stop="removeRecentIp(ip)"
                     >

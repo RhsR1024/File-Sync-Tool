@@ -78,6 +78,11 @@ const CLIPBOARD_INIT_MAX_ATTEMPTS: u32 = 5;
 const CLIPBOARD_INIT_RETRY_DELAY: Duration = Duration::from_millis(600);
 const WATCHDOG_PING_INTERVAL: Duration = Duration::from_secs(2);
 const WATCHDOG_STALL_THRESHOLD_MS: u64 = 10_000;
+const MANUAL_DEPLOY_MAX_CONCURRENCY: usize = 4;
+
+fn manual_deploy_concurrency(target_count: usize) -> usize {
+    target_count.min(MANUAL_DEPLOY_MAX_CONCURRENCY).max(1)
+}
 
 /// Default app data dir resolved without an AppHandle, for logging before/without
 /// a running Tauri app. Note: if the user configured a custom data dir, regular
@@ -297,6 +302,8 @@ struct StartManualDeployBindingRequest {
     server_id: String,
     #[serde(default)]
     command_group_ids: Vec<String>,
+    #[serde(default)]
+    extract_command_group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -308,6 +315,12 @@ struct StartManualDeployTaskRequest {
     folder_name: String,
     local_path: String,
     remote_path: String,
+    #[serde(default)]
+    transfer_policy: deploy::ManualDeployTransferPolicy,
+    #[serde(default)]
+    extract_policy: deploy::ManualDeployExtractPolicy,
+    #[serde(default)]
+    extract_dir: String,
     #[serde(default)]
     bindings: Vec<StartManualDeployBindingRequest>,
 }
@@ -726,6 +739,44 @@ fn resolve_manual_deploy_post_commands(
         }
     }
     commands
+}
+
+fn resolve_manual_deploy_command_plan(
+    binding: &StartManualDeployBindingRequest,
+    command_groups: &[config::CommandGroup],
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let extract_group_id = binding
+        .extract_command_group_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if let Some(group_id) = extract_group_id {
+        if !binding.command_group_ids.iter().any(|id| id == group_id) {
+            return Err(format!(
+                "Extraction command group must also be selected for server {}",
+                binding.server_id
+            ));
+        }
+    }
+
+    let extract_commands = match extract_group_id {
+        Some(group_id) => command_groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .map(|group| group.commands.clone())
+            .ok_or_else(|| format!("Extraction command group not found: {group_id}"))?,
+        None => Vec::new(),
+    };
+    let post_group_ids = binding
+        .command_group_ids
+        .iter()
+        .filter(|group_id| Some(group_id.as_str()) != extract_group_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok((
+        extract_commands,
+        resolve_manual_deploy_post_commands(&post_group_ids, command_groups),
+    ))
 }
 
 fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
@@ -1661,6 +1712,61 @@ async fn test_ssh_connection(server: DeployServer) -> Result<String, String> {
     deploy::check_connection(&server)
 }
 
+fn manual_deploy_options(request: &StartManualDeployTaskRequest) -> deploy::ManualDeployOptions {
+    deploy::ManualDeployOptions {
+        transfer_policy: request.transfer_policy,
+        extract_policy: request.extract_policy,
+        extract_dir: request.extract_dir.trim().to_string(),
+    }
+}
+
+#[tauri::command]
+async fn preflight_manual_deploy(
+    state: State<'_, AppState>,
+    request: StartManualDeployTaskRequest,
+) -> Result<Vec<deploy::ManualDeployPreflightResult>, String> {
+    if request.bindings.is_empty() {
+        return Err("At least one manual deploy binding is required".to_string());
+    }
+    let config_snapshot = state.config.lock().unwrap().clone();
+    let mut servers = Vec::with_capacity(request.bindings.len());
+    let mut unique_server_ids = HashSet::with_capacity(request.bindings.len());
+    for binding in &request.bindings {
+        if !unique_server_ids.insert(binding.server_id.as_str()) {
+            return Err(format!(
+                "Manual deploy server is selected more than once: {}",
+                binding.server_id
+            ));
+        }
+        let server = config_snapshot
+            .servers
+            .iter()
+            .find(|server| server.id == binding.server_id && server.enabled)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Manual deploy server is missing or disabled: {}",
+                    binding.server_id
+                )
+            })?;
+        servers.push(server);
+    }
+    let options = manual_deploy_options(&request);
+    let local_path = request.local_path.clone();
+    let remote_path = request.remote_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        servers
+            .iter()
+            .map(|server| {
+                deploy::preflight_manual_deploy(server, &local_path, &remote_path, &options)
+                    .map_err(|error| format!("{}: {error}", server.name))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .await
+    .map_err(|error| format!("Manual deploy preflight failed: {error}"))?
+}
+
 #[tauri::command]
 async fn start_manual_deploy_task(
     app_handle: tauri::AppHandle,
@@ -1671,13 +1777,43 @@ async fn start_manual_deploy_task(
     if request.bindings.is_empty() {
         return Err("At least one manual deploy binding is required".to_string());
     }
+    let mut unique_server_ids = HashSet::with_capacity(request.bindings.len());
+    for binding in &request.bindings {
+        if !unique_server_ids.insert(binding.server_id.as_str()) {
+            return Err(format!(
+                "Manual deploy server is selected more than once: {}",
+                binding.server_id
+            ));
+        }
+    }
 
     state.should_cancel.store(false, Ordering::SeqCst);
     state.is_paused.store(false, Ordering::SeqCst);
 
     let config_snapshot = state.config.lock().unwrap().clone();
+    let options = manual_deploy_options(&request);
+    if options.extract_policy != deploy::ManualDeployExtractPolicy::Skip
+        && request.bindings.iter().any(|binding| {
+            binding
+                .extract_command_group_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .is_none()
+        })
+    {
+        return Err(
+            "Every server requires an extraction command group for the selected extraction policy"
+                .to_string(),
+        );
+    }
+    let identity_path = if request.local_path.trim().is_empty() {
+        request.remote_path.as_str()
+    } else {
+        request.local_path.as_str()
+    };
     let folder_name = if request.folder_name.trim().is_empty() {
-        manual_deploy_folder_name(&request.local_path)
+        manual_deploy_folder_name(identity_path)
     } else {
         request.folder_name.trim().to_string()
     };
@@ -1695,20 +1831,24 @@ async fn start_manual_deploy_task(
         let server = config_snapshot
             .servers
             .iter()
-            .find(|server| server.id == binding.server_id)
+            .find(|server| server.id == binding.server_id && server.enabled)
             .cloned()
-            .ok_or_else(|| format!("Manual deploy server not found: {}", binding.server_id))?;
-        let post_commands = resolve_manual_deploy_post_commands(
-            &binding.command_group_ids,
-            &config_snapshot.command_groups,
-        );
+            .ok_or_else(|| {
+                format!(
+                    "Manual deploy server is missing or disabled: {}",
+                    binding.server_id
+                )
+            })?;
+        let (extract_commands, post_commands) =
+            resolve_manual_deploy_command_plan(binding, &config_snapshot.command_groups)?;
         targets.push(task_manager::DeployTarget {
             server_id: server.id.clone(),
             server_name: server.name.clone(),
+            server_host: server.host.clone(),
             remote_target: remote_target.clone(),
             trigger_source: task_domain::TaskTriggerSource::Manual,
         });
-        resolved_bindings.push((server, post_commands));
+        resolved_bindings.push((server, extract_commands, post_commands));
     }
 
     let task_manager = state.task_manager.clone();
@@ -1774,67 +1914,74 @@ async fn start_manual_deploy_task(
     let is_paused = state.is_paused.clone();
     let is_paused_for_cleanup = state.is_paused.clone();
     let targets_for_task = targets.clone();
+    let options_for_task = options.clone();
 
     tauri::async_runtime::spawn(async move {
-        let join_result = tauri::async_runtime::spawn_blocking(move || {
-            let _execution_reservation = execution_reservation;
-            let mut first_error: Option<String> = None;
-            for (server, post_commands) in resolved_bindings {
-                if let Err(error) = deploy::deploy_manual(
-                    &app_handle_for_task,
+        // Keep the global manual-deploy reservation for the whole batch while
+        // allowing independent SSH/SFTP targets to run concurrently.
+        let _execution_reservation = execution_reservation;
+        let concurrency = manual_deploy_concurrency(resolved_bindings.len());
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let start_message =
+            format!("Manual deployment is using up to {concurrency} parallel server connection(s)");
+        emit_runtime_log(&app_handle_for_result, start_message.clone(), "info");
+        let _ = tracking.record_log(None, None, "info", &start_message);
+
+        let mut workers = Vec::with_capacity(resolved_bindings.len());
+        for ((server, extract_commands, post_commands), target) in resolved_bindings
+            .into_iter()
+            .zip(targets_for_task.iter().cloned())
+        {
+            if should_cancel.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => break,
+            };
+            if should_cancel.load(Ordering::SeqCst) {
+                drop(permit);
+                break;
+            }
+
+            let app_handle = app_handle_for_task.clone();
+            let local_path = local_path.clone();
+            let remote_path = remote_path.clone();
+            let should_cancel = should_cancel.clone();
+            let is_paused = is_paused.clone();
+            let tracking = tracking.clone();
+            let options = options_for_task.clone();
+            let worker = tauri::async_runtime::spawn_blocking(move || {
+                let _permit = permit;
+                deploy::deploy_manual(
+                    &app_handle,
                     &server,
+                    &extract_commands,
                     &post_commands,
                     &local_path,
                     &remote_path,
-                    should_cancel.clone(),
-                    is_paused.clone(),
-                    Some(tracking.clone()),
-                ) {
-                    if error.to_lowercase().contains("cancelled") {
-                        let _ = tracking.cancel_pending();
-                        return Err(error);
-                    }
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
+                    &options,
+                    should_cancel,
+                    is_paused,
+                    Some(tracking),
+                )
+            });
+            workers.push((target, worker));
+        }
+
+        let mut deployment_errors = Vec::new();
+        for (target, worker) in workers {
+            match worker.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    deployment_errors.push(format!("{}: {}", target.server_name, error))
                 }
-            }
-            match first_error {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }
-        })
-        .await;
-
-        let _ = task_runtime_for_task.clear(
-            &run_handle_for_task.task_group_id,
-            &run_handle_for_task.run_id,
-        );
-        clear_finished_targeted_run_controls(
-            &active_execution_for_task,
-            &run_control_target,
-            &should_cancel_for_cleanup,
-            Some(&should_skip_current),
-            &is_paused_for_cleanup,
-        );
-
-        match join_result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                let level = if error.to_lowercase().contains("cancelled") {
-                    "warn"
-                } else {
-                    "error"
-                };
-                emit_runtime_log(
-                    &app_handle_for_result,
-                    format!("Manual deploy task failed: {}", error),
-                    level,
-                );
-            }
-            Err(error) => {
-                let message = format!("Manual deploy task panic: {}", error);
-                for target in &targets_for_task {
+                Err(error) => {
+                    let message = format!(
+                        "Manual deploy task panic on {}: {}",
+                        target.server_name, error
+                    );
                     let _ = task_manager_for_task.fail_attempt(
                         &run_handle_for_task.task_group_id,
                         &run_handle_for_task.run_id,
@@ -1849,6 +1996,202 @@ async fn start_manual_deploy_task(
                         Some(target.server_name.as_str()),
                         "error",
                         &message,
+                    );
+                    deployment_errors.push(message);
+                }
+            }
+        }
+
+        if should_cancel_for_cleanup.load(Ordering::SeqCst) {
+            let _ = tracking.cancel_pending();
+        }
+
+        let _ = task_runtime_for_task.clear(
+            &run_handle_for_task.task_group_id,
+            &run_handle_for_task.run_id,
+        );
+        clear_finished_targeted_run_controls(
+            &active_execution_for_task,
+            &run_control_target,
+            &should_cancel_for_cleanup,
+            Some(&should_skip_current),
+            &is_paused_for_cleanup,
+        );
+
+        if !deployment_errors.is_empty() {
+            let cancelled = deployment_errors
+                .iter()
+                .all(|error| error.to_lowercase().contains("cancelled"));
+            let level = if cancelled { "warn" } else { "error" };
+            emit_runtime_log(
+                &app_handle_for_result,
+                format!(
+                    "Manual deploy task failed on {} server(s): {}",
+                    deployment_errors.len(),
+                    deployment_errors.join(" | ")
+                ),
+                level,
+            );
+        }
+    });
+
+    Ok(run_handle)
+}
+
+#[tauri::command]
+async fn retry_task_group_deploy(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    task_group_id: String,
+) -> Result<task_manager::TaskRunHandle, String> {
+    let execution_reservation = reserve_manual_deploy_executor(state.inner())?;
+    let group = state
+        .task_manager
+        .get_group_detail(&task_group_id)
+        .ok_or_else(|| format!("Task group not found: {task_group_id}"))?;
+    let task_config_id = group.task_config_id.clone().ok_or_else(|| {
+        "Manual deployments must be started again from Deployment Configuration".to_string()
+    })?;
+    let failed_server_ids: HashSet<String> = group
+        .server_rollups
+        .iter()
+        .filter(|rollup| rollup.latest_status == task_domain::AttemptStatus::Failed)
+        .map(|rollup| rollup.server_id.clone())
+        .collect();
+    if failed_server_ids.is_empty() {
+        return Err("No failed deployment servers are available to retry".to_string());
+    }
+
+    let config_snapshot = state.config.lock().unwrap().clone();
+    let task = config_snapshot
+        .tasks
+        .iter()
+        .find(|task| task.id == task_config_id)
+        .ok_or_else(|| format!("Task configuration not found: {task_config_id}"))?;
+    let retry_bindings: Vec<_> = task
+        .server_bindings
+        .iter()
+        .filter(|binding| failed_server_ids.contains(&binding.server_id))
+        .cloned()
+        .collect();
+    if retry_bindings.is_empty() {
+        return Err("Failed servers are no longer bound to this task".to_string());
+    }
+
+    let retry_targets: Vec<_> = retry_bindings
+        .iter()
+        .map(|binding| {
+            let server = config_snapshot
+                .servers
+                .iter()
+                .find(|server| server.id == binding.server_id && server.enabled)
+                .ok_or_else(|| {
+                    format!("Retry server is missing or disabled: {}", binding.server_id)
+                })?;
+            Ok(task_manager::DeployTarget {
+                server_id: server.id.clone(),
+                server_name: server.name.clone(),
+                server_host: server.host.clone(),
+                remote_target: format!(
+                    "{}/{}",
+                    server.remote_path.trim_end_matches('/'),
+                    group.folder_name
+                ),
+                trigger_source: task_domain::TaskTriggerSource::Recovery,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    state.should_cancel.store(false, Ordering::SeqCst);
+    state.is_paused.store(false, Ordering::SeqCst);
+    let task_manager = state.task_manager.clone();
+    let task_runtime = state.task_runtime.clone();
+    let run_handle = task_manager.begin_deploy_retry_run(&task_group_id)?;
+    let tracking =
+        task_manager.tracking_context(run_handle.task_group_id.clone(), run_handle.run_id.clone());
+    let active_execution =
+        match task_runtime.activate(run_handle.task_group_id.clone(), run_handle.run_id.clone()) {
+            Ok(active_execution) => active_execution,
+            Err(error) => {
+                tracking.register_targets(&retry_targets)?;
+                for target in &retry_targets {
+                    let _ = task_manager.fail_attempt(
+                        &run_handle.task_group_id,
+                        &run_handle.run_id,
+                        &target.server_id,
+                        task_domain::DeployStage::Pending,
+                        error.clone(),
+                    );
+                }
+                return Err(error);
+            }
+        };
+    clear_stale_targeted_run_controls(
+        &active_execution,
+        &state.run_control_target,
+        &state.should_cancel,
+        Some(&state.should_skip_current),
+        &state.is_paused,
+    );
+
+    let run_handle_for_task = run_handle.clone();
+    let task_manager_for_task = task_manager.clone();
+    let task_runtime_for_task = task_runtime.clone();
+    let run_control_target = state.run_control_target.clone();
+    let should_cancel = state.should_cancel.clone();
+    let should_cancel_for_cleanup = state.should_cancel.clone();
+    let should_skip_current = state.should_skip_current.clone();
+    let is_paused = state.is_paused.clone();
+    let is_paused_for_cleanup = state.is_paused.clone();
+    let app_handle_for_result = app_handle.clone();
+    let folder_name = group.folder_name.clone();
+    let local_path = PathBuf::from(group.local_target_path.clone());
+
+    tauri::async_runtime::spawn(async move {
+        let join_result = tauri::async_runtime::spawn_blocking(move || {
+            let _execution_reservation = execution_reservation;
+            deploy::retry_deploy_to_remote(
+                &app_handle,
+                &retry_bindings,
+                &config_snapshot.servers,
+                &config_snapshot.command_groups,
+                &local_path,
+                &folder_name,
+                should_cancel,
+                is_paused,
+                Some(tracking),
+            )
+        })
+        .await;
+
+        let _ = task_runtime_for_task.clear(
+            &run_handle_for_task.task_group_id,
+            &run_handle_for_task.run_id,
+        );
+        clear_finished_targeted_run_controls(
+            &active_execution,
+            &run_control_target,
+            &should_cancel_for_cleanup,
+            Some(&should_skip_current),
+            &is_paused_for_cleanup,
+        );
+
+        match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => emit_runtime_log(
+                &app_handle_for_result,
+                format!("Retry deployment failed: {error}"),
+                "error",
+            ),
+            Err(error) => {
+                let message = format!("Retry deployment task panic: {error}");
+                for target in &retry_targets {
+                    let _ = task_manager_for_task.fail_attempt(
+                        &run_handle_for_task.task_group_id,
+                        &run_handle_for_task.run_id,
+                        &target.server_id,
+                        task_domain::DeployStage::Pending,
+                        message.clone(),
                     );
                 }
                 emit_runtime_log(&app_handle_for_result, message, "error");
@@ -1893,6 +2236,7 @@ async fn manual_deploy(
         };
     let server_id = server.id.clone();
     let server_name = server.name.clone();
+    let server_host = server.host.clone();
     let remote_target = resolve_manual_deploy_remote_target(&localPath, &remotePath);
     task_manager.register_deploy_targets(
         &run_handle.task_group_id,
@@ -1900,6 +2244,7 @@ async fn manual_deploy(
         &[task_manager::DeployTarget {
             server_id: server_id.clone(),
             server_name: server_name.clone(),
+            server_host,
             remote_target,
             trigger_source: task_domain::TaskTriggerSource::Manual,
         }],
@@ -1942,9 +2287,11 @@ async fn manual_deploy(
         deploy::deploy_manual(
             &app_handle,
             &server,
+            &[],
             &postCommands,
             &localPath,
             &remotePath,
+            &deploy::ManualDeployOptions::default(),
             should_cancel,
             is_paused,
             Some(tracking),
@@ -2528,6 +2875,14 @@ mod tests {
     };
     #[cfg(target_os = "windows")]
     use std::cell::Cell;
+
+    #[test]
+    fn manual_deploy_parallelism_is_bounded() {
+        assert_eq!(super::manual_deploy_concurrency(0), 1);
+        assert_eq!(super::manual_deploy_concurrency(1), 1);
+        assert_eq!(super::manual_deploy_concurrency(3), 3);
+        assert_eq!(super::manual_deploy_concurrency(20), 4);
+    }
 
     #[test]
     fn portal_auto_login_keeps_windows_startup_enabled() {
@@ -4499,6 +4854,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             device_simulator_commands::device_simulator_get_settings,
             device_simulator_commands::device_simulator_save_settings,
+            device_simulator_commands::device_simulator_update_platform_servers,
             device_simulator_commands::device_simulator_migrate_local_materials,
             device_simulator_commands::device_simulator_list_interfaces,
             device_simulator_commands::device_simulator_list_profiles,
@@ -4537,8 +4893,10 @@ fn main() {
             skip_current_copy,
             remove_from_scan_queue,
             test_ssh_connection,
+            preflight_manual_deploy,
             start_manual_copy_task,
             start_manual_deploy_task,
+            retry_task_group_deploy,
             queue_temporary_copy,
             preview_temporary_copy,
             get_app_paths,
@@ -4613,6 +4971,7 @@ fn main() {
             paper_todo::paper_todo_open_window,
             paper_todo::paper_todo_create_paper,
             paper_todo::paper_todo_set_launcher_expanded,
+            paper_todo::paper_todo_finish_launcher_transition,
             paper_todo::paper_todo_drag_launcher,
             paper_todo::paper_todo_open_settings,
             paper_todo::paper_todo_set_window_pinned,

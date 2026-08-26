@@ -311,12 +311,14 @@ function selectCommandMode(mode: TftpCommandMode) {
 }
 
 onMounted(async () => {
-  try {
-    interfaces.value = await screenShareListInterfaces();
-  } catch (error) {
-    pushToast(errorMessage(error), 'error');
-  }
-  await refreshStatus(true);
+  const interfacesPromise = screenShareListInterfaces()
+    .then((items) => {
+      interfaces.value = items;
+    })
+    .catch((error) => {
+      pushToast(errorMessage(error), 'error');
+    });
+  await Promise.all([interfacesPromise, refreshStatus(true)]);
   await refreshFiles(false);
   isLoading.value = false;
   pollTimer = setInterval(() => void refreshStatus(false), 1000);

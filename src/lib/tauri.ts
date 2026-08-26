@@ -359,7 +359,13 @@ export interface StartManualCopyTaskRequest {
 export interface StartManualDeployTaskBindingRequest {
   server_id: string;
   command_group_ids: string[];
+  extract_command_group_id?: string | null;
 }
+
+export type ManualDeployTransferPolicy = 'smart' | 'always' | 'remote_only';
+export type ManualDeployExtractPolicy = 'auto' | 'force' | 'skip';
+export type ManualDeployTransferAction = 'upload' | 'reuse';
+export type ManualDeployExtractAction = 'extract' | 'reuse' | 'skip';
 
 export interface StartManualDeployTaskRequest {
   task_group_id: string | null;
@@ -367,7 +373,22 @@ export interface StartManualDeployTaskRequest {
   folder_name?: string;
   local_path: string;
   remote_path: string;
+  transfer_policy?: ManualDeployTransferPolicy;
+  extract_policy?: ManualDeployExtractPolicy;
+  extract_dir?: string;
   bindings: StartManualDeployTaskBindingRequest[];
+}
+
+export interface ManualDeployPreflightResult {
+  server_id: string;
+  server_name: string;
+  remote_package_path: string;
+  extract_dir: string;
+  package_exists: boolean;
+  package_matches: boolean | null;
+  extraction_ready: boolean;
+  transfer_action: ManualDeployTransferAction;
+  extract_action: ManualDeployExtractAction;
 }
 
 export interface DeployAttempt {
@@ -376,6 +397,7 @@ export interface DeployAttempt {
   run_id: string;
   server_id: string;
   server_name: string;
+  server_host: string;
   attempt_no: number;
   trigger_source: TaskTriggerSource;
   stage: DeployStage;
@@ -407,6 +429,7 @@ export interface TaskRun {
 export interface ServerRollup {
   server_id: string;
   server_name: string;
+  server_host: string;
   latest_status: AttemptStatus;
   latest_attempt_id: string | null;
   success_count: number;
@@ -600,6 +623,10 @@ export async function startManualCopyTask(request: StartManualCopyTaskRequest): 
 
 export async function startManualDeployTask(request: StartManualDeployTaskRequest): Promise<TaskRunHandle> {
   return await invoke('start_manual_deploy_task', { request });
+}
+
+export async function preflightManualDeploy(request: StartManualDeployTaskRequest): Promise<ManualDeployPreflightResult[]> {
+  return await invoke('preflight_manual_deploy', { request });
 }
 
 export async function getAppPaths(): Promise<[string, string]> {
