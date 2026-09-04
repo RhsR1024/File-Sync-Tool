@@ -9,7 +9,7 @@ export const messages = {
       commonGroup: 'Quick Access',
       toolsOverview: 'Tools Overview',
       systemGroup: 'System',
-      version: '1.2.1 · 2026.08.05',
+      version: '1.2.2 · 2026.09.03',
       tools: 'Other Tools',
       umsInitialPassword: 'UMS Initial Password',
       applianceSsh: 'Appliance Access Control',
@@ -388,6 +388,9 @@ export const messages = {
         lineCount: '{count} lines',
         waitingForLogs: 'Waiting for deployment logs…',
         latest: 'Latest logs',
+        copyLogs: 'Copy logs',
+        copied: 'Copied',
+        copyFailed: 'Copy failed',
         editServer: 'Edit server {name}',
         summary: { success: 'succeeded', active: 'active', waiting: 'waiting', failed: 'failed' },
         status: {
@@ -504,9 +507,12 @@ export const messages = {
       commandGroupsDesc: 'Define reusable named groups of shell commands. Assign them to specific servers in each task.',
       addCommandGroup: 'Add Group',
       restoreBuiltin: 'Restore Built-in',
-      confirmRestoreBuiltin: 'This will restore 4 built-in command groups (Extract / Uninstall / Cleanup / Install). Existing built-in groups will be overwritten, custom groups are kept. Continue?',
+      confirmRestoreBuiltin: 'This will replace the legacy built-ins with 2 complete workflows (Normal Uninstall & Install / Force Uninstall & Install), migrate existing task references, and keep custom groups. The force workflow deletes framework residuals. Continue?',
       builtinBadge: 'Built-in',
       noCommandGroups: 'No command groups configured.',
+      commandGroupCommandCount: '{count} command | {count} commands',
+      showCommandGroupCommands: 'Show commands',
+      hideCommandGroupCommands: 'Hide commands',
       editCommandGroup: 'Edit Command Group',
       commandGroupName: 'Group Name',
       commandGroupNamePlaceholder: 'e.g. Uninstall, Install, Restart',
@@ -579,21 +585,13 @@ export const messages = {
         saveError: 'Save failed: {error}',
       },
       builtinCommands: {
-        unzip: {
-          name: 'Extract Package',
-          description: 'Untar the uploaded .tar.gz package on the remote server.',
+        normalWorkflow: {
+          name: 'Normal Uninstall & Install',
+          description: 'Extract, uninstall the old version, clean OMC/HA, inspect and guard the environment, then install the new version in a fixed order.',
         },
-        uninstall: {
-          name: 'Uninstall Old Version',
-          description: 'Run the bundled uninstaller from the previous deployment.',
-        },
-        cleanup: {
-          name: 'Clean OMC/HA',
-          description: 'Run any matching omc_uninstall.sh / hauninstall.sh scripts.',
-        },
-        install: {
-          name: 'Install New Version',
-          description: 'Run the bundled installer with default acceptance prompts.',
+        forceWorkflow: {
+          name: 'Force Uninstall & Install (Caution)',
+          description: 'Extract, try integrated and vendor uninstallers, forcibly remove OMC/HA and framework residuals, verify the environment, then install. The user accepts the deletion risk.',
         },
       },
     },
@@ -3479,7 +3477,7 @@ export const messages = {
       commonGroup: '\u5e38\u7528\u529f\u80fd',
       toolsOverview: '\u5de5\u5177\u603b\u89c8',
       systemGroup: '\u7cfb\u7edf\u8bbe\u7f6e',
-      version: '1.2.1 · 2026.08.05',
+      version: '1.2.2 · 2026.09.03',
       tools: '其他工具',
       umsInitialPassword: 'UMS 初始密码修改',
       applianceSsh: '一体机访问控制',
@@ -3852,6 +3850,9 @@ export const messages = {
         lineCount: '{count} 行',
         waitingForLogs: '正在等待部署日志…',
         latest: '查看最新日志',
+        copyLogs: '复制日志',
+        copied: '已复制',
+        copyFailed: '复制失败',
         editServer: '编辑服务器 {name}',
         summary: { success: '成功', active: '执行中', waiting: '等待中', failed: '失败' },
         status: {
@@ -3968,9 +3969,12 @@ export const messages = {
       commandGroupsDesc: '定义可复用的命令组，每组有名称和一批命令。在任务中为每台服务器选择要执行哪些命令组。',
       addCommandGroup: '添加命令组',
       restoreBuiltin: '恢复内置命令',
-      confirmRestoreBuiltin: '将恢复 4 个内置命令组（解压/卸载/清理/安装）。已有的内置命令组将被覆盖，自定义命令组不受影响。是否继续？',
+      confirmRestoreBuiltin: '将旧内置命令组替换为 2 个完整工作流（正常卸载安装/强制卸载安装），并迁移已有任务引用；自定义命令组不受影响。强制流程会删除框架残留，是否继续？',
       builtinBadge: '内置',
       noCommandGroups: '暂无命令组，请添加。',
+      commandGroupCommandCount: '{count} 条命令',
+      showCommandGroupCommands: '展开命令',
+      hideCommandGroupCommands: '收起命令',
       editCommandGroup: '编辑命令组',
       commandGroupName: '组名称',
       commandGroupNamePlaceholder: '例如：卸载、安装、重启',
@@ -4043,21 +4047,13 @@ export const messages = {
         saveError: '保存失败：{error}',
       },
       builtinCommands: {
-        unzip: {
-          name: '解压安装包',
-          description: '在远程服务器上解压上传的 .tar.gz 安装包。',
+        normalWorkflow: {
+          name: '正常卸载安装',
+          description: '按固定顺序执行解压、卸载旧版本、清理 OMC/HA、环境检测与守卫、安装新版本。',
         },
-        uninstall: {
-          name: '卸载旧版本',
-          description: '执行前一版本目录中的卸载脚本。',
-        },
-        cleanup: {
-          name: '清理 OMC/HA',
-          description: '尝试运行 omc_uninstall.sh / hauninstall.sh（如存在）。',
-        },
-        install: {
-          name: '安装新版本',
-          description: '运行新版本中的安装脚本，自动确认默认提示。',
+        forceWorkflow: {
+          name: '强制卸载安装（谨慎）',
+          description: '解压后先尝试 integrated/厂商卸载，再强制清理 OMC/HA 与框架残留，验证环境后安装；选择使用即表示用户自行承担删除风险。',
         },
       },
     },

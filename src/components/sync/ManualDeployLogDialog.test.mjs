@@ -26,3 +26,23 @@ test('deployment log dialog exposes per-server recovery without replacing runtim
   assert.match(dialogSource, /manualDeployLog\.description/);
   assert.match(dialogSource, /statusLabel\(item\.status\)/);
 });
+
+test('deployment log dialog copies timestamp and message as one line', () => {
+  assert.match(dialogSource, /return `\$\{formatTime\(log\.timestamp\)\}\$\{serverLabel\} \$\{log\.message\}`/);
+  assert.match(dialogSource, /filteredLogs\.value\.map\(formatLogLine\)\.join\('\\n'\)/);
+  assert.match(dialogSource, /navigator\.clipboard\.writeText/);
+  assert.match(dialogSource, /settings\.manualDeployLog\.copyLogs/);
+  assert.doesNotMatch(dialogSource, /class="flex gap-2"/);
+});
+
+test('deployment log dialog highlights severity keywords case-insensitively without raw HTML', () => {
+  assert.match(dialogSource, /LOG_KEYWORD_SPLIT_PATTERN = \/\(failed\|fail\|error\|warning\|warn\|info\)\/gi/);
+  assert.match(dialogSource, /normalizedKeyword === 'error' \|\| normalizedKeyword === 'fail' \|\| normalizedKeyword === 'failed'/);
+  assert.match(dialogSource, /normalizedKeyword === 'info'/);
+  assert.match(dialogSource, /font-semibold text-rose-300/);
+  assert.match(dialogSource, /font-semibold text-emerald-300/);
+  assert.match(dialogSource, /font-semibold text-amber-300/);
+  assert.match(dialogSource, /segmentLogMessage\(log\.message\)/);
+  assert.match(dialogSource, /\{\{ segment\.text \}\}/);
+  assert.doesNotMatch(dialogSource, /v-html/);
+});

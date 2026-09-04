@@ -170,10 +170,15 @@ const isRecentGroupSelected = (group: HaAccessGroup) => {
   return activeGroups.value.some(g => serializeGroup(g) === serialized);
 };
 
-const applyRecentGroup = (group: HaAccessGroup) => {
-  if (isLoading.value || isRecentGroupSelected(group)) {
+const toggleRecentGroup = (group: HaAccessGroup) => {
+  if (isLoading.value) return;
+
+  const serialized = serializeGroup(group);
+  if (isRecentGroupSelected(group)) {
+    haGroups.value = haGroups.value.filter(current => serializeGroup(current) !== serialized);
     return;
   }
+
   // Reuse an empty group if the user just added one, otherwise append.
   const emptyGroup = haGroups.value.find(g => !isGroupActive(g) && !g.backup.trim() && g.slaves.length === 0);
   if (emptyGroup) {
@@ -933,9 +938,10 @@ const enableStateClass = (value?: number) => {
                   <button
                     type="button"
                     :disabled="isLoading"
-                    class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium font-mono disabled:cursor-not-allowed"
+                    :aria-pressed="isRecentGroupSelected(entry.group)"
+                    class="inline-flex cursor-pointer items-center gap-1 px-2.5 py-1 text-xs font-medium font-mono transition-colors duration-200 hover:bg-black/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-inset disabled:cursor-not-allowed"
                     :title="entry.group.slaves.length > 0 ? entry.group.slaves.join(', ') : undefined"
-                    @click="applyRecentGroup(entry.group)"
+                    @click="toggleRecentGroup(entry.group)"
                   >
                     <Check v-if="isRecentGroupSelected(entry.group)" class="h-3 w-3" />
                     <span>{{ entry.group.master }}</span>
@@ -948,7 +954,8 @@ const enableStateClass = (value?: number) => {
                   <button
                     type="button"
                     :disabled="isLoading"
-                    class="inline-flex items-center border-l border-current/10 px-2 text-current/70 transition hover:text-current disabled:cursor-not-allowed"
+                    :aria-label="t('tools.applianceSsh.removeRecentHaGroup')"
+                    class="inline-flex cursor-pointer items-center border-l border-current/10 px-2 text-current/70 transition-colors duration-200 hover:text-current focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-inset disabled:cursor-not-allowed"
                     :title="t('tools.applianceSsh.removeRecentHaGroup')"
                     @click.stop="removeRecentGroup(entry.key)"
                   >

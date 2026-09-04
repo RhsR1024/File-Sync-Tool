@@ -1316,7 +1316,77 @@ fn validate_extract_cleanup_target(extract_dir: &str, remote_package: &str) -> R
     Ok(())
 }
 
-fn execute_session_command(session: &Session, command: &str) -> Result<Vec<String>, String> {
+#[derive(Debug, PartialEq, Eq)]
+struct SessionCommandResult {
+    lines: Vec<String>,
+    exit_code: i32,
+}
+
+impl SessionCommandResult {
+    fn ensure_success(&self) -> Result<(), String> {
+        if self.exit_code == 0 {
+            Ok(())
+        } else {
+            Err(format!("Command exited with code {}", self.exit_code))
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CommandOutputCollector {
+    pending: Vec<u8>,
+    lines: Vec<String>,
+}
+
+impl CommandOutputCollector {
+    fn push<F>(&mut self, chunk: &[u8], on_line: &mut F)
+    where
+        F: FnMut(&str),
+    {
+        self.pending.extend_from_slice(chunk);
+        while let Some(delimiter_index) = self
+            .pending
+            .iter()
+            .position(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            let mut raw_line = self.pending.drain(..=delimiter_index).collect::<Vec<_>>();
+            raw_line.pop();
+            self.record_line(&raw_line, on_line);
+        }
+    }
+
+    fn finish<F>(&mut self, on_line: &mut F)
+    where
+        F: FnMut(&str),
+    {
+        if self.pending.is_empty() {
+            return;
+        }
+        let raw_line = std::mem::take(&mut self.pending);
+        self.record_line(&raw_line, on_line);
+    }
+
+    fn record_line<F>(&mut self, raw_line: &[u8], on_line: &mut F)
+    where
+        F: FnMut(&str),
+    {
+        let line = String::from_utf8_lossy(raw_line).trim().to_string();
+        if line.is_empty() {
+            return;
+        }
+        on_line(&line);
+        self.lines.push(line);
+    }
+}
+
+fn execute_session_command_streaming<F>(
+    session: &Session,
+    command: &str,
+    mut on_line: F,
+) -> Result<SessionCommandResult, String>
+where
+    F: FnMut(&str),
+{
     let mut channel = session
         .channel_session()
         .map_err(|error| error.to_string())?;
@@ -1325,21 +1395,41 @@ fn execute_session_command(session: &Session, command: &str) -> Result<Vec<Strin
         .map_err(|error| error.to_string())?;
     channel.exec(command).map_err(|error| error.to_string())?;
     channel.send_eof().map_err(|error| error.to_string())?;
-    let mut output = String::new();
-    channel
-        .read_to_string(&mut output)
-        .map_err(|error| error.to_string())?;
+
+    let mut collector = CommandOutputCollector::default();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = channel
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        collector.push(&buffer[..read], &mut on_line);
+    }
+    collector.finish(&mut on_line);
     channel.wait_close().map_err(|error| error.to_string())?;
     let exit_code = channel.exit_status().unwrap_or(-1);
-    if exit_code != 0 {
-        return Err(format!("Command exited with code {exit_code}"));
-    }
-    Ok(output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
+    Ok(SessionCommandResult {
+        lines: collector.lines,
+        exit_code,
+    })
+}
+
+fn execute_session_command(
+    session: &Session,
+    command: &str,
+) -> Result<SessionCommandResult, String> {
+    execute_session_command_streaming(session, command, |_| {})
+}
+
+fn execute_successful_session_command(
+    session: &Session,
+    command: &str,
+) -> Result<Vec<String>, String> {
+    let result = execute_session_command(session, command)?;
+    result.ensure_success()?;
+    Ok(result.lines)
 }
 
 fn write_deploy_marker(
@@ -1393,8 +1483,7 @@ fn execute_manual_commands<R: tauri::Runtime>(
             Some(server.id.as_str()),
             Some(server.name.as_str()),
         );
-        let lines = execute_session_command(session, &final_command)?;
-        for line in lines {
+        let result = execute_session_command_streaming(session, &final_command, |line| {
             emit_log_with_tracking(
                 app_handle,
                 format!("> {line}"),
@@ -1403,7 +1492,8 @@ fn execute_manual_commands<R: tauri::Runtime>(
                 Some(server.id.as_str()),
                 Some(server.name.as_str()),
             );
-        }
+        })?;
+        result.ensure_success()?;
     }
     Ok(())
 }
@@ -1595,15 +1685,18 @@ pub fn deploy_manual<R: tauri::Runtime>(
         })?;
         let parent = remote_parent(&paths.upload_target);
         if parent != "." {
-            execute_session_command(&sess, &format!("mkdir -p -- {}", shell_quote(&parent)))
-                .map_err(|message| {
-                    report_stage_failure(
-                        tracking.as_ref(),
-                        &server.id,
-                        DeployStage::Uploading,
-                        format!("Cannot create remote upload directory: {message}"),
-                    )
-                })?;
+            execute_successful_session_command(
+                &sess,
+                &format!("mkdir -p -- {}", shell_quote(&parent)),
+            )
+            .map_err(|message| {
+                report_stage_failure(
+                    tracking.as_ref(),
+                    &server.id,
+                    DeployStage::Uploading,
+                    format!("Cannot create remote upload directory: {message}"),
+                )
+            })?;
         }
         emit_log_with_tracking(
             app_handle,
@@ -1729,7 +1822,7 @@ pub fn deploy_manual<R: tauri::Runtime>(
                     Some(server.id.as_str()),
                     Some(server.name.as_str()),
                 );
-                execute_session_command(
+                execute_successful_session_command(
                     &sess,
                     &format!("rm -rf -- {}", shell_quote(&paths.extract_dir)),
                 )
@@ -2150,6 +2243,48 @@ mod tests {
             ),
             "cd /root && test -f /root/pkg.tar.gz && cd /root/pkg/pkg"
         );
+    }
+
+    #[test]
+    fn session_command_result_preserves_output_when_exit_code_is_nonzero() {
+        let result = SessionCommandResult {
+            lines: vec![
+                "Warning: uninstallation will remove all components and data!".to_string(),
+                "[CHECK] Current node is not the primary node.".to_string(),
+            ],
+            exit_code: 1,
+        };
+
+        assert_eq!(
+            result.lines,
+            vec![
+                "Warning: uninstallation will remove all components and data!",
+                "[CHECK] Current node is not the primary node.",
+            ]
+        );
+        assert_eq!(
+            result.ensure_success(),
+            Err("Command exited with code 1".to_string())
+        );
+    }
+
+    #[test]
+    fn command_output_collector_streams_split_utf8_crlf_and_final_tail() {
+        let mut collector = CommandOutputCollector::default();
+        let mut emitted = Vec::new();
+        let mut on_line = |line: &str| emitted.push(line.to_string());
+        let output = "第一行\r\nsecond line\nfinal tail".as_bytes();
+        let split_inside_utf8 = 2;
+
+        collector.push(&output[..split_inside_utf8], &mut on_line);
+        assert!(collector.lines.is_empty());
+        collector.push(&output[split_inside_utf8..17], &mut on_line);
+        collector.push(&output[17..], &mut on_line);
+        collector.finish(&mut on_line);
+        drop(on_line);
+
+        assert_eq!(emitted, vec!["第一行", "second line", "final tail"]);
+        assert_eq!(collector.lines, emitted);
     }
 
     #[test]

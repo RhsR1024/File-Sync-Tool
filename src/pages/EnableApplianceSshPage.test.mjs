@@ -49,3 +49,13 @@ test('recent IP chips toggle selection while the trash action only removes histo
   assert.match(pageSource, /@click="toggleRecentIp\(ip\)"/);
   assert.match(pageSource, /@click\.stop="removeRecentIp\(ip\)"/);
 });
+
+test('recent HA group chips toggle selection while the trash action only removes history', () => {
+  assert.match(
+    pageSource,
+    /const toggleRecentGroup = \(group: HaAccessGroup\) => \{[\s\S]*?if \(isRecentGroupSelected\(group\)\) \{[\s\S]*?haGroups\.value = haGroups\.value\.filter\(current => serializeGroup\(current\) !== serialized\)[\s\S]*?haGroups\.value\.push/,
+  );
+  assert.match(pageSource, /:aria-pressed="isRecentGroupSelected\(entry\.group\)"/);
+  assert.match(pageSource, /@click="toggleRecentGroup\(entry\.group\)"/);
+  assert.match(pageSource, /@click\.stop="removeRecentGroup\(entry\.key\)"/);
+});

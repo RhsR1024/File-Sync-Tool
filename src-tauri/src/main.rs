@@ -240,9 +240,11 @@ struct AppState {
     updater: updater::SharedUpdaterState,
     task_manager: task_manager::TaskManager,
     task_runtime: task_runtime::TaskRuntimeRegistry,
+    manual_deploy_task_runtime: task_runtime::TaskRuntimeRegistry,
     executor_active: Arc<AtomicBool>,
     executor_admission: Arc<Mutex<()>>,
     run_control_target: Arc<Mutex<Option<task_runtime::ActiveRunExecution>>>,
+    manual_deploy_run_control_target: Arc<Mutex<Option<task_runtime::ActiveRunExecution>>>,
     is_scanning: Arc<AtomicBool>,
     is_manual_copying: Arc<AtomicBool>,
     is_manually_deploying: Arc<AtomicBool>,
@@ -254,6 +256,8 @@ struct AppState {
     should_skip_current: Arc<AtomicBool>,
     scan_queue_removals: Arc<Mutex<HashSet<String>>>,
     is_paused: Arc<AtomicBool>,
+    manual_deploy_should_cancel: Arc<AtomicBool>,
+    manual_deploy_is_paused: Arc<AtomicBool>,
     is_quitting: Arc<AtomicBool>,
     code_count_should_cancel: Arc<AtomicBool>,
     screen_share: Arc<screenshare::ScreenShareHandle>,
@@ -352,6 +356,16 @@ struct ExecutorReservation {
     category_flag: Arc<AtomicBool>,
 }
 
+struct AtomicFlagReservation {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for AtomicFlagReservation {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
 impl Drop for ExecutorReservation {
     fn drop(&mut self) {
         self.category_flag.store(false, Ordering::SeqCst);
@@ -382,6 +396,12 @@ fn try_reserve_executor(
         executor_active,
         category_flag,
     })
+}
+
+fn try_reserve_flag(flag: Arc<AtomicBool>) -> Option<AtomicFlagReservation> {
+    flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| AtomicFlagReservation { flag })
 }
 
 /// Whether the copy queue holds work that can start as soon as the executor frees up.
@@ -439,18 +459,9 @@ fn reserve_manual_copy_executor(
     })
 }
 
-fn reserve_manual_deploy_executor(state: &AppState) -> Result<ExecutorReservation, String> {
-    try_reserve_executor(
-        state.executor_active.clone(),
-        state.is_manually_deploying.clone(),
-    )
-    .ok_or_else(|| {
-        if state.is_manually_deploying.load(Ordering::SeqCst) {
-            "Manual deploy already in progress".to_string()
-        } else {
-            "Copy or scan already in progress".to_string()
-        }
-    })
+fn reserve_manual_deploy_executor(state: &AppState) -> Result<AtomicFlagReservation, String> {
+    try_reserve_flag(state.is_manually_deploying.clone())
+        .ok_or_else(|| "Manual deploy already in progress".to_string())
 }
 
 fn clear_stale_targeted_run_controls(
@@ -535,6 +546,39 @@ fn set_targeted_run_controls(
         })?;
 
     Ok(())
+}
+
+fn set_manual_deploy_run_controls(
+    state: &AppState,
+    task_group_id: &str,
+    run_id: &str,
+    cancel: Option<bool>,
+    paused: Option<bool>,
+) -> Result<(), String> {
+    state
+        .manual_deploy_task_runtime
+        .apply_if_active(task_group_id, run_id, |active| {
+            *state.manual_deploy_run_control_target.lock().unwrap() = Some(active.clone());
+            if let Some(cancel) = cancel {
+                state
+                    .manual_deploy_should_cancel
+                    .store(cancel, Ordering::SeqCst);
+            }
+            if let Some(paused) = paused {
+                state
+                    .manual_deploy_is_paused
+                    .store(paused, Ordering::SeqCst);
+            }
+        })?;
+
+    Ok(())
+}
+
+fn manual_deploy_run_is_active(state: &AppState, task_group_id: &str, run_id: &str) -> bool {
+    state
+        .manual_deploy_task_runtime
+        .current()
+        .is_some_and(|active| active.task_group_id == task_group_id && active.run_id == run_id)
 }
 
 fn emit_runtime_log<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, msg: String, level: &str) {
@@ -728,17 +772,14 @@ fn resolve_manual_deploy_remote_target(local_path: &str, remote_path: &str) -> S
     resolved.replace('\\', "/")
 }
 
-fn resolve_manual_deploy_post_commands(
-    command_group_ids: &[String],
-    command_groups: &[config::CommandGroup],
-) -> Vec<String> {
-    let mut commands = Vec::new();
-    for group_id in command_group_ids {
-        if let Some(group) = command_groups.iter().find(|group| &group.id == group_id) {
-            commands.extend(group.commands.iter().cloned());
-        }
-    }
-    commands
+const BUILTIN_NORMAL_WORKFLOW_ID: &str = "__builtin_normal_workflow__";
+const BUILTIN_FORCE_WORKFLOW_ID: &str = "__builtin_force_workflow__";
+
+fn is_builtin_deploy_workflow_id(group_id: &str) -> bool {
+    matches!(
+        group_id,
+        BUILTIN_NORMAL_WORKFLOW_ID | BUILTIN_FORCE_WORKFLOW_ID
+    )
 }
 
 fn resolve_manual_deploy_command_plan(
@@ -760,23 +801,40 @@ fn resolve_manual_deploy_command_plan(
     }
 
     let extract_commands = match extract_group_id {
-        Some(group_id) => command_groups
-            .iter()
-            .find(|group| group.id == group_id)
-            .map(|group| group.commands.clone())
-            .ok_or_else(|| format!("Extraction command group not found: {group_id}"))?,
+        Some(group_id) => {
+            let group = command_groups
+                .iter()
+                .find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Extraction command group not found: {group_id}"))?;
+            if is_builtin_deploy_workflow_id(group_id) {
+                group
+                    .commands
+                    .first()
+                    .cloned()
+                    .map(|command| vec![command])
+                    .ok_or_else(|| format!("Built-in deployment workflow is empty: {group_id}"))?
+            } else {
+                group.commands.clone()
+            }
+        }
         None => Vec::new(),
     };
-    let post_group_ids = binding
-        .command_group_ids
-        .iter()
-        .filter(|group_id| Some(group_id.as_str()) != extract_group_id)
-        .cloned()
-        .collect::<Vec<_>>();
-    Ok((
-        extract_commands,
-        resolve_manual_deploy_post_commands(&post_group_ids, command_groups),
-    ))
+
+    let mut post_commands = Vec::new();
+    for group_id in &binding.command_group_ids {
+        if Some(group_id.as_str()) == extract_group_id && !is_builtin_deploy_workflow_id(group_id) {
+            continue;
+        }
+        let Some(group) = command_groups.iter().find(|group| group.id == *group_id) else {
+            continue;
+        };
+        if is_builtin_deploy_workflow_id(group_id) {
+            post_commands.extend(group.commands.iter().skip(1).cloned());
+        } else {
+            post_commands.extend(group.commands.iter().cloned());
+        }
+    }
+    Ok((extract_commands, post_commands))
 }
 
 fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
@@ -1266,6 +1324,9 @@ async fn confirm_quit(
             // process goes away; a run that cannot react is still recovered on next start,
             // where task state left mid-flight is loaded back as interrupted.
             state.should_cancel.store(true, Ordering::SeqCst);
+            state
+                .manual_deploy_should_cancel
+                .store(true, Ordering::SeqCst);
             state.task_manager.interrupt_in_progress_for_exit();
             state.clipboard.shutdown();
             spawn_exit_watchdog();
@@ -1347,6 +1408,34 @@ fn build_paused_copy_item(
         task_id: group.task_config_id,
         allow_deploy: group.source_type == task_domain::TaskSourceType::Scheduled,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManualCopyPauseTarget {
+    Active,
+    Queued,
+}
+
+fn classify_manual_copy_pause_target<'a>(
+    active: Option<&task_runtime::ActiveRunExecution>,
+    queued_runs: impl Iterator<Item = &'a task_manager::TaskRunHandle>,
+    task_group_id: &str,
+    run_id: &str,
+) -> Result<ManualCopyPauseTarget, String> {
+    if active.is_some_and(|run| run.task_group_id == task_group_id && run.run_id == run_id) {
+        return Ok(ManualCopyPauseTarget::Active);
+    }
+
+    if queued_runs
+        .into_iter()
+        .any(|run| run.task_group_id == task_group_id && run.run_id == run_id)
+    {
+        return Ok(ManualCopyPauseTarget::Queued);
+    }
+
+    Err(format!(
+        "Task run is not active or queued: {task_group_id} / {run_id}"
+    ))
 }
 
 fn enqueue_paused_copy(state: &AppState, item: ManualCopyQueueItem) -> bool {
@@ -1571,6 +1660,20 @@ fn cancel_task_run(
     task_group_id: String,
     run_id: String,
 ) -> Result<(), String> {
+    if manual_deploy_run_is_active(state.inner(), &task_group_id, &run_id) {
+        set_manual_deploy_run_controls(
+            state.inner(),
+            &task_group_id,
+            &run_id,
+            Some(true),
+            Some(false),
+        )?;
+        let _ = state
+            .task_manager
+            .request_run_cancel(&task_group_id, &run_id);
+        return Ok(());
+    }
+
     let is_active = state
         .task_runtime
         .current()
@@ -1622,10 +1725,36 @@ fn pause_task_run(
     task_group_id: String,
     run_id: String,
 ) -> Result<(), String> {
-    let queued_item = build_paused_copy_item(state.inner(), &task_group_id, &run_id)?;
+    if manual_deploy_run_is_active(state.inner(), &task_group_id, &run_id) {
+        return set_manual_deploy_run_controls(
+            state.inner(),
+            &task_group_id,
+            &run_id,
+            None,
+            Some(true),
+        );
+    }
+
+    let active_run = state.task_runtime.current();
+    let pause_target = {
+        let queue = state.manual_copy_queue.lock().unwrap();
+        classify_manual_copy_pause_target(
+            active_run.as_ref(),
+            queue.iter().filter_map(|item| item.task_handle.as_ref()),
+            &task_group_id,
+            &run_id,
+        )?
+    };
+
     state
         .task_manager
         .requeue_paused_copy(&task_group_id, &run_id)?;
+
+    if pause_target == ManualCopyPauseTarget::Queued {
+        return Ok(());
+    }
+
+    let queued_item = build_paused_copy_item(state.inner(), &task_group_id, &run_id)?;
     let should_start_worker = enqueue_paused_copy(state.inner(), queued_item);
     set_targeted_run_controls(
         state.inner(),
@@ -1648,6 +1777,16 @@ fn resume_task_run(
     task_group_id: String,
     run_id: String,
 ) -> Result<(), String> {
+    if manual_deploy_run_is_active(state.inner(), &task_group_id, &run_id) {
+        return set_manual_deploy_run_controls(
+            state.inner(),
+            &task_group_id,
+            &run_id,
+            Some(false),
+            Some(false),
+        );
+    }
+
     let is_queued = state.manual_copy_queue.lock().unwrap().iter().any(|item| {
         item.task_handle
             .as_ref()
@@ -1787,8 +1926,10 @@ async fn start_manual_deploy_task(
         }
     }
 
-    state.should_cancel.store(false, Ordering::SeqCst);
-    state.is_paused.store(false, Ordering::SeqCst);
+    state
+        .manual_deploy_should_cancel
+        .store(false, Ordering::SeqCst);
+    state.manual_deploy_is_paused.store(false, Ordering::SeqCst);
 
     let config_snapshot = state.config.lock().unwrap().clone();
     let options = manual_deploy_options(&request);
@@ -1852,7 +1993,7 @@ async fn start_manual_deploy_task(
     }
 
     let task_manager = state.task_manager.clone();
-    let task_runtime = state.task_runtime.clone();
+    let task_runtime = state.manual_deploy_task_runtime.clone();
     let run_handle =
         task_manager.begin_manual_deploy_run(task_manager::StartManualDeployRequest {
             task_group_id: request.task_group_id.clone(),
@@ -1893,10 +2034,10 @@ async fn start_manual_deploy_task(
         };
     clear_stale_targeted_run_controls(
         &active_execution,
-        &state.run_control_target,
-        &state.should_cancel,
-        Some(&state.should_skip_current),
-        &state.is_paused,
+        &state.manual_deploy_run_control_target,
+        &state.manual_deploy_should_cancel,
+        None,
+        &state.manual_deploy_is_paused,
     );
 
     let app_handle_for_task = app_handle.clone();
@@ -1907,17 +2048,16 @@ async fn start_manual_deploy_task(
     let active_execution_for_task = active_execution.clone();
     let task_runtime_for_task = task_runtime.clone();
     let task_manager_for_task = task_manager.clone();
-    let run_control_target = state.run_control_target.clone();
-    let should_cancel = state.should_cancel.clone();
-    let should_cancel_for_cleanup = state.should_cancel.clone();
-    let should_skip_current = state.should_skip_current.clone();
-    let is_paused = state.is_paused.clone();
-    let is_paused_for_cleanup = state.is_paused.clone();
+    let run_control_target = state.manual_deploy_run_control_target.clone();
+    let should_cancel = state.manual_deploy_should_cancel.clone();
+    let should_cancel_for_cleanup = state.manual_deploy_should_cancel.clone();
+    let is_paused = state.manual_deploy_is_paused.clone();
+    let is_paused_for_cleanup = state.manual_deploy_is_paused.clone();
     let targets_for_task = targets.clone();
     let options_for_task = options.clone();
 
     tauri::async_runtime::spawn(async move {
-        // Keep the global manual-deploy reservation for the whole batch while
+        // Keep the manual-deploy reservation for the whole batch while
         // allowing independent SSH/SFTP targets to run concurrently.
         let _execution_reservation = execution_reservation;
         let concurrency = manual_deploy_concurrency(resolved_bindings.len());
@@ -2014,7 +2154,7 @@ async fn start_manual_deploy_task(
             &active_execution_for_task,
             &run_control_target,
             &should_cancel_for_cleanup,
-            Some(&should_skip_current),
+            None,
             &is_paused_for_cleanup,
         );
 
@@ -2102,10 +2242,12 @@ async fn retry_task_group_deploy(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
-    state.should_cancel.store(false, Ordering::SeqCst);
-    state.is_paused.store(false, Ordering::SeqCst);
+    state
+        .manual_deploy_should_cancel
+        .store(false, Ordering::SeqCst);
+    state.manual_deploy_is_paused.store(false, Ordering::SeqCst);
     let task_manager = state.task_manager.clone();
-    let task_runtime = state.task_runtime.clone();
+    let task_runtime = state.manual_deploy_task_runtime.clone();
     let run_handle = task_manager.begin_deploy_retry_run(&task_group_id)?;
     let tracking =
         task_manager.tracking_context(run_handle.task_group_id.clone(), run_handle.run_id.clone());
@@ -2128,21 +2270,20 @@ async fn retry_task_group_deploy(
         };
     clear_stale_targeted_run_controls(
         &active_execution,
-        &state.run_control_target,
-        &state.should_cancel,
-        Some(&state.should_skip_current),
-        &state.is_paused,
+        &state.manual_deploy_run_control_target,
+        &state.manual_deploy_should_cancel,
+        None,
+        &state.manual_deploy_is_paused,
     );
 
     let run_handle_for_task = run_handle.clone();
     let task_manager_for_task = task_manager.clone();
     let task_runtime_for_task = task_runtime.clone();
-    let run_control_target = state.run_control_target.clone();
-    let should_cancel = state.should_cancel.clone();
-    let should_cancel_for_cleanup = state.should_cancel.clone();
-    let should_skip_current = state.should_skip_current.clone();
-    let is_paused = state.is_paused.clone();
-    let is_paused_for_cleanup = state.is_paused.clone();
+    let run_control_target = state.manual_deploy_run_control_target.clone();
+    let should_cancel = state.manual_deploy_should_cancel.clone();
+    let should_cancel_for_cleanup = state.manual_deploy_should_cancel.clone();
+    let is_paused = state.manual_deploy_is_paused.clone();
+    let is_paused_for_cleanup = state.manual_deploy_is_paused.clone();
     let app_handle_for_result = app_handle.clone();
     let folder_name = group.folder_name.clone();
     let local_path = PathBuf::from(group.local_target_path.clone());
@@ -2172,7 +2313,7 @@ async fn retry_task_group_deploy(
             &active_execution,
             &run_control_target,
             &should_cancel_for_cleanup,
-            Some(&should_skip_current),
+            None,
             &is_paused_for_cleanup,
         );
 
@@ -2214,13 +2355,15 @@ async fn manual_deploy(
     taskGroupId: Option<String>,
 ) -> Result<(), String> {
     let _execution_reservation = reserve_manual_deploy_executor(state.inner())?;
-    state.should_cancel.store(false, Ordering::SeqCst);
-    state.is_paused.store(false, Ordering::SeqCst);
+    state
+        .manual_deploy_should_cancel
+        .store(false, Ordering::SeqCst);
+    state.manual_deploy_is_paused.store(false, Ordering::SeqCst);
 
-    let should_cancel = state.should_cancel.clone();
-    let is_paused = state.is_paused.clone();
+    let should_cancel = state.manual_deploy_should_cancel.clone();
+    let is_paused = state.manual_deploy_is_paused.clone();
     let task_manager = state.task_manager.clone();
-    let task_runtime = state.task_runtime.clone();
+    let task_runtime = state.manual_deploy_task_runtime.clone();
     let folder_name = manual_deploy_folder_name(&localPath);
     let run_handle =
         match task_manager.begin_manual_deploy_run(task_manager::StartManualDeployRequest {
@@ -2273,10 +2416,10 @@ async fn manual_deploy(
         };
     clear_stale_targeted_run_controls(
         &active_execution,
-        &state.run_control_target,
-        &state.should_cancel,
-        Some(&state.should_skip_current),
-        &state.is_paused,
+        &state.manual_deploy_run_control_target,
+        &state.manual_deploy_should_cancel,
+        None,
+        &state.manual_deploy_is_paused,
     );
     let tracking =
         task_manager.tracking_context(run_handle.task_group_id.clone(), run_handle.run_id.clone());
@@ -2302,10 +2445,10 @@ async fn manual_deploy(
     let _ = task_runtime.clear(&run_handle.task_group_id, &run_handle.run_id);
     clear_finished_targeted_run_controls(
         &active_execution,
-        &state.run_control_target,
-        &state.should_cancel,
-        Some(&state.should_skip_current),
-        &state.is_paused,
+        &state.manual_deploy_run_control_target,
+        &state.manual_deploy_should_cancel,
+        None,
+        &state.manual_deploy_is_paused,
     );
 
     match join_result {
@@ -2859,9 +3002,52 @@ where
         .map_err(|_| "MAIN_THREAD_DIALOG_RESULT_DROPPED".to_string())?
 }
 
+struct ClipboardPanelNativeDialogGuard {
+    panel: WebviewWindow,
+    state: Arc<clipboard::ClipboardState>,
+    restore_panel: bool,
+}
+
+impl ClipboardPanelNativeDialogGuard {
+    fn new(panel: WebviewWindow, state: Arc<clipboard::ClipboardState>) -> Self {
+        let restore_panel = panel.is_visible().unwrap_or(false);
+        state
+            .panel_native_dialog_open
+            .store(true, Ordering::Release);
+        clipboard::preview::hide_preview_windows(panel.app_handle());
+
+        Self {
+            panel,
+            state,
+            restore_panel,
+        }
+    }
+}
+
+impl Drop for ClipboardPanelNativeDialogGuard {
+    fn drop(&mut self) {
+        self.state
+            .panel_native_dialog_open
+            .store(false, Ordering::Release);
+
+        if self.restore_panel {
+            // The picker is modal to this TOPMOST panel. Reassert its normal
+            // popup state after either selection, cancellation, or dispatch
+            // failure so dragging and window controls immediately work again.
+            let _ = self.panel.set_always_on_top(true);
+            let _ = self.panel.show();
+            let _ = self.panel.set_focus();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     #[cfg(target_os = "windows")]
     use super::open_url_windows_with;
@@ -2882,6 +3068,162 @@ mod tests {
         assert_eq!(super::manual_deploy_concurrency(1), 1);
         assert_eq!(super::manual_deploy_concurrency(3), 3);
         assert_eq!(super::manual_deploy_concurrency(20), 4);
+    }
+
+    #[test]
+    fn manual_deploy_splits_builtin_workflow_extraction_from_post_commands() {
+        let workflow_id = super::BUILTIN_NORMAL_WORKFLOW_ID.to_string();
+        let binding = super::StartManualDeployBindingRequest {
+            server_id: "server-a".to_string(),
+            command_group_ids: vec![workflow_id.clone()],
+            extract_command_group_id: Some(workflow_id.clone()),
+        };
+        let groups = vec![crate::config::CommandGroup {
+            id: workflow_id,
+            name: "Normal".to_string(),
+            commands: vec![
+                "extract".to_string(),
+                "uninstall".to_string(),
+                "guard".to_string(),
+                "install".to_string(),
+            ],
+        }];
+
+        let (extract, post) = super::resolve_manual_deploy_command_plan(&binding, &groups)
+            .expect("built-in workflow should resolve");
+
+        assert_eq!(extract, vec!["extract"]);
+        assert_eq!(post, vec!["uninstall", "guard", "install"]);
+    }
+
+    #[test]
+    fn manual_deploy_skip_extraction_omits_builtin_workflow_first_command() {
+        let workflow_id = super::BUILTIN_FORCE_WORKFLOW_ID.to_string();
+        let binding = super::StartManualDeployBindingRequest {
+            server_id: "server-a".to_string(),
+            command_group_ids: vec![workflow_id.clone()],
+            extract_command_group_id: None,
+        };
+        let groups = vec![crate::config::CommandGroup {
+            id: workflow_id,
+            name: "Force".to_string(),
+            commands: vec![
+                "extract".to_string(),
+                "force-clean".to_string(),
+                "install".to_string(),
+            ],
+        }];
+
+        let (extract, post) = super::resolve_manual_deploy_command_plan(&binding, &groups)
+            .expect("built-in workflow should resolve when extraction is skipped");
+
+        assert!(extract.is_empty());
+        assert_eq!(post, vec!["force-clean", "install"]);
+    }
+
+    #[test]
+    fn manual_deploy_keeps_custom_extraction_group_semantics() {
+        let binding = super::StartManualDeployBindingRequest {
+            server_id: "server-a".to_string(),
+            command_group_ids: vec!["custom-extract".to_string(), "custom-post".to_string()],
+            extract_command_group_id: Some("custom-extract".to_string()),
+        };
+        let groups = vec![
+            crate::config::CommandGroup {
+                id: "custom-extract".to_string(),
+                name: "Extract".to_string(),
+                commands: vec!["prepare".to_string(), "extract".to_string()],
+            },
+            crate::config::CommandGroup {
+                id: "custom-post".to_string(),
+                name: "Post".to_string(),
+                commands: vec!["install".to_string()],
+            },
+        ];
+
+        let (extract, post) = super::resolve_manual_deploy_command_plan(&binding, &groups)
+            .expect("custom groups should retain legacy behavior");
+
+        assert_eq!(extract, vec!["prepare", "extract"]);
+        assert_eq!(post, vec!["install"]);
+    }
+
+    #[test]
+    fn manual_deploy_reservation_is_independent_from_copy_executor() {
+        let executor_active = Arc::new(AtomicBool::new(false));
+        let copy_active = Arc::new(AtomicBool::new(false));
+        let deploy_active = Arc::new(AtomicBool::new(false));
+
+        let copy_reservation =
+            super::try_reserve_executor(executor_active.clone(), copy_active.clone())
+                .expect("copy executor should be available");
+        let deploy_reservation = super::try_reserve_flag(deploy_active.clone())
+            .expect("manual deploy should run alongside copying");
+
+        assert!(executor_active.load(Ordering::SeqCst));
+        assert!(copy_active.load(Ordering::SeqCst));
+        assert!(deploy_active.load(Ordering::SeqCst));
+        assert!(super::try_reserve_flag(deploy_active.clone()).is_none());
+
+        drop(copy_reservation);
+        assert!(!executor_active.load(Ordering::SeqCst));
+        assert!(deploy_active.load(Ordering::SeqCst));
+
+        drop(deploy_reservation);
+        assert!(!deploy_active.load(Ordering::SeqCst));
+        assert!(super::try_reserve_flag(deploy_active).is_some());
+    }
+
+    #[test]
+    fn queued_copy_pause_does_not_target_the_active_run() {
+        let active = crate::task_runtime::ActiveRunExecution {
+            task_group_id: "group-a".to_string(),
+            run_id: "run-a".to_string(),
+        };
+        let queued = [crate::task_manager::TaskRunHandle {
+            task_group_id: "group-b".to_string(),
+            run_id: "run-b".to_string(),
+        }];
+
+        let target = super::classify_manual_copy_pause_target(
+            Some(&active),
+            queued.iter(),
+            "group-b",
+            "run-b",
+        )
+        .expect("queued run should be pauseable while another run is active");
+
+        assert_eq!(target, super::ManualCopyPauseTarget::Queued);
+    }
+
+    #[test]
+    fn active_copy_pause_still_targets_runtime_controls() {
+        let active = crate::task_runtime::ActiveRunExecution {
+            task_group_id: "group-a".to_string(),
+            run_id: "run-a".to_string(),
+        };
+        let queued: [crate::task_manager::TaskRunHandle; 0] = [];
+
+        let target = super::classify_manual_copy_pause_target(
+            Some(&active),
+            queued.iter(),
+            "group-a",
+            "run-a",
+        )
+        .expect("active run should remain pauseable");
+
+        assert_eq!(target, super::ManualCopyPauseTarget::Active);
+    }
+
+    #[test]
+    fn copy_pause_rejects_runs_that_are_neither_active_nor_queued() {
+        let queued: [crate::task_manager::TaskRunHandle; 0] = [];
+
+        let error =
+            super::classify_manual_copy_pause_target(None, queued.iter(), "group-a", "run-a")
+                .expect_err("stale run should not be requeued by pause");
+
+        assert!(error.contains("not active or queued"));
     }
 
     #[test]
@@ -3103,17 +3445,30 @@ mod tests {
 }
 
 #[tauri::command]
-async fn open_directory(window: WebviewWindow) -> Result<Option<String>, String> {
+async fn open_directory(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
     // Windows shell folder dialogs are sensitive to COM apartment ownership
     // when users create a folder inside the dialog. Run the sync dialog on
     // Tauri's main UI thread instead of a transient async worker thread.
+    // Explicitly owning the dialog also prevents a TOPMOST clipboard panel
+    // from covering it while the synchronous modal loop owns the UI thread.
+    let _clipboard_panel_guard = (window.label() == "clipboard-panel")
+        .then(|| ClipboardPanelNativeDialogGuard::new(window.clone(), state.clipboard.clone()));
+    let dialog_parent = window.clone();
+
     pick_directory_on_main_thread_with(
         |task| {
             window
                 .run_on_main_thread(task)
                 .map_err(|error| format!("MAIN_THREAD_DIALOG_DISPATCH_FAILED::{}", error))
         },
-        || rfd::FileDialog::new().pick_folder(),
+        move || {
+            rfd::FileDialog::new()
+                .set_parent(&dialog_parent)
+                .pick_folder()
+        },
     )
     .await
 }
@@ -3122,13 +3477,18 @@ async fn open_directory(window: WebviewWindow) -> Result<Option<String>, String>
 async fn open_file(window: WebviewWindow) -> Result<Option<String>, String> {
     // Same main-thread dispatch as `open_directory`: Windows shell dialogs must
     // run on the thread that owns the COM apartment.
+    let dialog_parent = window.clone();
     pick_directory_on_main_thread_with(
         |task| {
             window
                 .run_on_main_thread(task)
                 .map_err(|error| format!("MAIN_THREAD_DIALOG_DISPATCH_FAILED::{}", error))
         },
-        || rfd::FileDialog::new().pick_file(),
+        move || {
+            rfd::FileDialog::new()
+                .set_parent(&dialog_parent)
+                .pick_file()
+        },
     )
     .await
 }
@@ -4609,9 +4969,11 @@ fn main() {
                 updater: Arc::new(updater::UpdaterState::new()),
                 task_manager,
                 task_runtime: task_runtime::TaskRuntimeRegistry::new(),
+                manual_deploy_task_runtime: task_runtime::TaskRuntimeRegistry::new(),
                 executor_active: Arc::new(AtomicBool::new(false)),
                 executor_admission: Arc::new(Mutex::new(())),
                 run_control_target: Arc::new(Mutex::new(None)),
+                manual_deploy_run_control_target: Arc::new(Mutex::new(None)),
                 is_scanning: Arc::new(AtomicBool::new(false)),
                 is_manual_copying: Arc::new(AtomicBool::new(false)),
                 is_manually_deploying: Arc::new(AtomicBool::new(false)),
@@ -4623,6 +4985,8 @@ fn main() {
                 should_skip_current: Arc::new(AtomicBool::new(false)),
                 scan_queue_removals: Arc::new(Mutex::new(HashSet::new())),
                 is_paused: Arc::new(AtomicBool::new(false)),
+                manual_deploy_should_cancel: Arc::new(AtomicBool::new(false)),
+                manual_deploy_is_paused: Arc::new(AtomicBool::new(false)),
                 is_quitting: Arc::new(AtomicBool::new(false)),
                 code_count_should_cancel: Arc::new(AtomicBool::new(false)),
                 screen_share: Arc::new(screenshare::ScreenShareHandle::new()),

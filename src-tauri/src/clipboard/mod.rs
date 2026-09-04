@@ -39,6 +39,9 @@ pub struct ClipboardState {
     /// When true the popup panel does NOT auto-hide on focus loss. Toggled by
     /// the lock-window toolbar button on the panel.
     pub panel_pinned: AtomicBool,
+    /// Prevents the popup panel from hiding its owned native file dialog when
+    /// focus moves from the WebView to that dialog.
+    pub panel_native_dialog_open: AtomicBool,
     pub settings: Arc<RwLock<ClipboardSettings>>,
     /// Current custom group selected in the clipboard panel. `None` is the
     /// default ungrouped bucket; new captures are stored into this group.
@@ -77,6 +80,7 @@ impl ClipboardState {
             icon_dir,
             is_enabled: std::sync::atomic::AtomicBool::new(settings.enabled),
             panel_pinned: std::sync::atomic::AtomicBool::new(false),
+            panel_native_dialog_open: std::sync::atomic::AtomicBool::new(false),
             settings: std::sync::Arc::new(parking_lot::RwLock::new(settings)),
             active_group_id: parking_lot::Mutex::new(None),
             paste_target_window: parking_lot::Mutex::new(None),

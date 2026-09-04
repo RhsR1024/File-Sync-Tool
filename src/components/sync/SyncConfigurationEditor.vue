@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw, Cpu, Monitor, Check, Search, ShieldCheck } from 'lucide-vue-next';
+import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw, Cpu, Monitor, Check, Search, ShieldCheck, ChevronDown } from 'lucide-vue-next';
 import { preflightManualDeploy, testSshConnection, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type ManualDeployTransferPolicy, type ManualDeployExtractPolicy, type ManualDeployPreflightResult, type StartManualDeployTaskRequest } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
@@ -139,27 +139,64 @@ function handleServerManagerKeydown(event: KeyboardEvent) {
 // ── Command Group Management ──────────────────────────────────────────────────
 // Built-in groups carry stable ids; their human-facing name is i18n-driven so
 // language switches reflect immediately while config persistence stays stable.
-type BuiltinCommandKey = 'unzip' | 'uninstall' | 'cleanup' | 'install';
+const BUILTIN_NORMAL_WORKFLOW_ID = '__builtin_normal_workflow__';
+const BUILTIN_FORCE_WORKFLOW_ID = '__builtin_force_workflow__';
+const LEGACY_BUILTIN_COMMAND_IDS = new Set([
+    '__builtin_extract__',
+    '__builtin_uninstall__',
+    '__builtin_cleanup__',
+    '__builtin_cleanup_residuals__',
+    '__builtin_install_diagnostics__',
+    '__builtin_install_guard__',
+    '__builtin_install__',
+]);
+
+type BuiltinCommandKey = 'normalWorkflow' | 'forceWorkflow';
+const builtinCleanupResidualsCommandV2 = [
+    'bash -lc \'result=0;',
+    '[ "$(id -u)" -eq 0 ] || { echo "[FORCE-CLEANUP] root privileges required" >&2; exit 43; };',
+    'if [ -f "${remote_target}/${filename}/integrated_uninstall.sh" ]; then',
+    'echo "[FORCE-CLEANUP] trying integrated_uninstall.sh first";',
+    '(cd "${remote_target}/${filename}" && printf "y\\n" | sh ./integrated_uninstall.sh) || echo "[FORCE-CLEANUP] integrated_uninstall.sh failed; continuing with forced cleanup" >&2;',
+    'elif command -v integrated_uninstall.sh >/dev/null 2>&1; then',
+    'echo "[FORCE-CLEANUP] trying installed integrated_uninstall.sh first";',
+    'printf "y\\n" | sh "$(command -v integrated_uninstall.sh)" || echo "[FORCE-CLEANUP] integrated_uninstall.sh failed; continuing with forced cleanup" >&2;',
+    'else echo "[FORCE-CLEANUP] integrated_uninstall.sh not found; continuing with forced cleanup"; fi;',
+    'rm -f /usr/local/bin/integrated_uninstall.sh || result=1;',
+    'if command -v omc_uninstall.sh >/dev/null 2>&1; then echo "[FORCE-CLEANUP] trying vendor OMC uninstaller"; printf "yes\\n" | "$(command -v omc_uninstall.sh)" || echo "[FORCE-CLEANUP] vendor OMC uninstaller failed; continuing with forced cleanup" >&2; fi;',
+    'if command -v hauninstall.sh >/dev/null 2>&1; then echo "[FORCE-CLEANUP] trying HA uninstaller"; printf "yes\\n" | "$(command -v hauninstall.sh)" || echo "[FORCE-CLEANUP] HA uninstaller failed; continuing with forced cleanup" >&2; fi;',
+    'echo "[FORCE-CLEANUP] stopping framework services";',
+    'systemctl stop cfc.service cfs.service deployOps.service openresty.service 2>/dev/null || echo "[FORCE-CLEANUP] one or more services could not be stopped normally" >&2;',
+    'systemctl disable cfc.service cfs.service deployOps.service openresty.service 2>/dev/null || true;',
+    'rm -f /etc/systemd/system/{cfc,cfs,deployOps,openresty}.service /etc/systemd/system/func-* /etc/systemd/system/common-* /etc/logrotate.d/omc_out_logs || result=1;',
+    'systemctl daemon-reload || result=1;',
+    'echo "[FORCE-CLEANUP] removing residual files and directories";',
+    'rm -rf /opt/common-database0/data/pgdata /program/omc/ /var/log/func-* /var/log/common-* /data /var/runtime/cfg/ha_maintenance_mode /opt || result=1;',
+    'rm -rf /mnt/BK || result=1;',
+    'rm -f /usr/local/bin/jsonutil /usr/local/sbin/update /usr/local/bin/omc_uninstall.sh || result=1;',
+    'systemctl daemon-reload || result=1;',
+    'if ss -ltnp 2>/dev/null | grep -Eq ":(21900|21903)([[:space:]]|$)"; then echo "[FORCE-CLEANUP] framework ports still listening" >&2; ss -ltnp 2>/dev/null | grep -E ":(21900|21903)([[:space:]]|$)" >&2; result=1; fi;',
+    'if [ -e /program/omc ] || [ -e /opt ] || [ -e /data ] || [ -e /mnt/BK ] || [ -e /var/runtime/cfg/ha_maintenance_mode ]; then echo "[FORCE-CLEANUP] residual directory still exists" >&2; ls -ld /program/omc /opt /data /mnt/BK /var/runtime/cfg/ha_maintenance_mode 2>/dev/null >&2 || true; result=1; fi;',
+    'if compgen -G "/etc/systemd/system/func-*" >/dev/null || compgen -G "/etc/systemd/system/common-*" >/dev/null || compgen -G "/var/log/func-*" >/dev/null || compgen -G "/var/log/common-*" >/dev/null; then echo "[FORCE-CLEANUP] wildcard residual paths still exist" >&2; compgen -G "/etc/systemd/system/func-*" >&2 || true; compgen -G "/etc/systemd/system/common-*" >&2 || true; compgen -G "/var/log/func-*" >&2 || true; compgen -G "/var/log/common-*" >&2 || true; result=1; fi;',
+    'if systemctl list-unit-files 2>/dev/null | grep -Eq "^(cfc|cfs|deployOps|openresty)\\.service|^(func-|common-)"; then echo "[FORCE-CLEANUP] framework service definitions still exist" >&2; systemctl list-unit-files 2>/dev/null | grep -E "^(cfc|cfs|deployOps|openresty)\\.service|^(func-|common-)" >&2; result=1; fi;',
+    '[ "$result" -eq 0 ] || { echo "[FORCE-CLEANUP] cleanup verification failed" >&2; exit 43; }; echo "[FORCE-CLEANUP] forced cleanup complete"\'',
+].join(' ');
+const builtinExtractCommand = 'cd ${remote_target} && tar -zxvf ${filename}.tar.gz';
+const builtinUninstallCommand = 'cd ${remote_target}/${filename} && echo y | ./integrated_uninstall.sh';
+const builtinCleanupCommand = 'which omc_uninstall.sh > /dev/null 2>&1 && echo yes | omc_uninstall.sh || true; which hauninstall.sh > /dev/null 2>&1 && printf \'yes\\n\' | hauninstall.sh || true';
+const builtinCleanupResidualsCommand = 'bash -lc \'result=0; [ "$(id -u)" -eq 0 ] || { echo "[FORCE-CLEANUP] root privileges required" >&2; exit 43; }; if [ -f "${remote_target}/${filename}/integrated_uninstall.sh" ]; then echo "[FORCE-CLEANUP] trying integrated_uninstall.sh first"; (cd "${remote_target}/${filename}" && printf "y\\n" | ./integrated_uninstall.sh) || echo "[FORCE-CLEANUP] integrated_uninstall.sh failed; continuing with forced cleanup" >&2; elif command -v integrated_uninstall.sh >/dev/null 2>&1; then echo "[FORCE-CLEANUP] trying installed integrated_uninstall.sh first"; printf "y\\n" | integrated_uninstall.sh || echo "[FORCE-CLEANUP] integrated_uninstall.sh failed; continuing with forced cleanup" >&2; else echo "[FORCE-CLEANUP] integrated_uninstall.sh not found; continuing with forced cleanup"; fi; if [ -f /usr/local/bin/omc_uninstall.sh ]; then echo "[FORCE-CLEANUP] trying vendor OMC uninstaller"; printf "yes\\n" | /usr/local/bin/omc_uninstall.sh || echo "[FORCE-CLEANUP] vendor uninstaller failed; continuing with forced cleanup" >&2; fi; echo "[FORCE-CLEANUP] stopping framework services"; systemctl stop cfc.service cfs.service deployOps.service openresty.service 2>/dev/null || echo "[FORCE-CLEANUP] one or more services could not be stopped normally" >&2; systemctl disable cfc.service cfs.service deployOps.service openresty.service 2>/dev/null || true; command -v hauninstall.sh >/dev/null 2>&1 && printf "yes\\n" | hauninstall.sh || true; rm -f /etc/systemd/system/{cfc,cfs,deployOps,openresty}.service /etc/logrotate.d/omc_out_logs || result=1; systemctl daemon-reload || result=1; echo "[FORCE-CLEANUP] removing /program and /opt/package"; rm -rf /program /opt/package || result=1; rm -f /usr/local/bin/integrated_uninstall.sh /usr/local/bin/jsonutil /usr/local/sbin/update /usr/local/bin/omc_uninstall.sh || result=1; systemctl daemon-reload || result=1; if ss -ltnp 2>/dev/null | grep -Eq ":(21900|21903)([[:space:]]|$)"; then echo "[FORCE-CLEANUP] framework ports still listening" >&2; ss -ltnp 2>/dev/null | grep -E ":(21900|21903)([[:space:]]|$)" >&2; result=1; fi; if [ -e /program ] || [ -e /opt/package ]; then echo "[FORCE-CLEANUP] residual directory still exists" >&2; ls -ld /program /opt/package 2>/dev/null >&2 || true; result=1; fi; if systemctl list-unit-files 2>/dev/null | grep -Eq "^(cfc|cfs|deployOps|openresty)\\.service"; then echo "[FORCE-CLEANUP] framework service definitions still exist" >&2; systemctl list-unit-files 2>/dev/null | grep -E "^(cfc|cfs|deployOps|openresty)\\.service" >&2; result=1; fi; [ "$result" -eq 0 ] || { echo "[FORCE-CLEANUP] cleanup verification failed" >&2; exit 43; }; echo "[FORCE-CLEANUP] forced cleanup complete"\'';
+const builtinInstallGuardCommand = 'bash -lc \'deadline=$((SECONDS+300)); prev=""; quiet=0; while (( SECONDS < deadline )); do reasons=""; ports=$(ss -H -ltnp 2>/dev/null | grep -E ":(21900|21903)([[:space:]]|$)" || true); if [ -n "$ports" ]; then reasons="$reasons framework-port"; echo "[PRECHECK] framework ports: listening"; printf "%s\\n" "$ports"; else echo "[PRECHECK] framework ports: none"; fi; if [ -e /program/omc ]; then reasons="$reasons /program/omc"; echo "[PRECHECK] /program/omc: present"; ls -ld /program/omc 2>/dev/null || true; else echo "[PRECHECK] /program/omc: absent"; fi; if [ -d /opt/package ]; then entries=$(find /opt/package -mindepth 1 -maxdepth 1 2>/dev/null | wc -l); echo "[PRECHECK] /opt/package: present, top-level entries=$entries"; if [ "$entries" -gt 0 ]; then reasons="$reasons /opt/package-not-empty"; find /opt/package -mindepth 1 -maxdepth 2 -printf "%p|%y|%s|%T@\\n" 2>/dev/null | head -20; fi; else echo "[PRECHECK] /opt/package: absent"; fi; sig=$(find /opt/package -xdev -printf "%P|%y|%s|%T@\\n" 2>/dev/null | LC_ALL=C sort | cksum); if [ -z "$reasons" ] && [ "$sig" = "$prev" ]; then quiet=$((quiet+1)); else quiet=0; fi; printf "[PRECHECK] reasons=%s quiet=%s/3\\n" "${reasons:-none}" "$quiet"; [ "$quiet" -ge 3 ] && { echo "[PRECHECK] environment is quiet; update -f allowed"; exit 0; }; prev="$sig"; sleep 10; done; echo "[PRECHECK] timeout; update -f blocked" >&2; exit 42\'';
+const builtinInstallCommand = 'cd ${remote_target}/${filename} && printf \'yes\\ny\\n\' | ./update -f';
 const builtinCommandDescriptors: ReadonlyArray<{ id: string; key: BuiltinCommandKey; commands: string[] }> = [
     {
-        id: '__builtin_extract__',
-        key: 'unzip',
-        commands: ['cd ${remote_target} && tar -zxvf ${filename}.tar.gz'],
+        id: BUILTIN_NORMAL_WORKFLOW_ID,
+        key: 'normalWorkflow',
+        commands: [builtinExtractCommand, builtinUninstallCommand, builtinCleanupCommand, builtinInstallGuardCommand, builtinInstallCommand],
     },
     {
-        id: '__builtin_uninstall__',
-        key: 'uninstall',
-        commands: ['cd ${remote_target}/${filename} && echo y | ./integrated_uninstall.sh'],
-    },
-    {
-        id: '__builtin_cleanup__',
-        key: 'cleanup',
-        commands: ['which omc_uninstall.sh > /dev/null 2>&1 && echo yes | omc_uninstall.sh || true; which hauninstall.sh > /dev/null 2>&1 && printf \'yes\\n\' | hauninstall.sh || true'],
-    },
-    {
-        id: '__builtin_install__',
-        key: 'install',
-        commands: ['cd ${remote_target}/${filename} && printf \'yes\\ny\\n\' | ./update -f'],
+        id: BUILTIN_FORCE_WORKFLOW_ID,
+        key: 'forceWorkflow',
+        commands: [builtinExtractCommand, builtinCleanupResidualsCommandV2, builtinInstallGuardCommand, builtinInstallCommand],
     },
 ];
 
@@ -192,6 +229,95 @@ const isEditingCommandGroup = ref(false);
 const editingCommandGroupIndex = ref(-1);
 const commandGroupForm = ref<CommandGroup>({ id: '', name: '', commands: [] });
 const newGroupCommand = ref('');
+const expandedCommandGroupIds = ref<Set<string>>(new Set());
+
+function isCommandGroupExpanded(groupId: string): boolean {
+    return expandedCommandGroupIds.value.has(groupId);
+}
+
+function toggleCommandGroup(groupId: string) {
+    const nextExpandedIds = new Set(expandedCommandGroupIds.value);
+    if (nextExpandedIds.has(groupId)) {
+        nextExpandedIds.delete(groupId);
+    } else {
+        nextExpandedIds.add(groupId);
+    }
+    expandedCommandGroupIds.value = nextExpandedIds;
+}
+
+function isBuiltinWorkflowId(groupId: string | null | undefined): boolean {
+    return groupId === BUILTIN_NORMAL_WORKFLOW_ID || groupId === BUILTIN_FORCE_WORKFLOW_ID;
+}
+
+function migrateBuiltinWorkflowIds(groupIds: string[]): string[] {
+    const selectedWorkflowId = groupIds.includes(BUILTIN_FORCE_WORKFLOW_ID)
+        || groupIds.includes('__builtin_cleanup_residuals__')
+        ? BUILTIN_FORCE_WORKFLOW_ID
+        : BUILTIN_NORMAL_WORKFLOW_ID;
+    const containsBuiltin = groupIds.some(groupId => (
+        isBuiltinWorkflowId(groupId) || LEGACY_BUILTIN_COMMAND_IDS.has(groupId)
+    ));
+    if (!containsBuiltin) return [...groupIds];
+
+    const migrated: string[] = [];
+    let workflowInserted = false;
+    for (const groupId of groupIds) {
+        if (isBuiltinWorkflowId(groupId) || LEGACY_BUILTIN_COMMAND_IDS.has(groupId)) {
+            if (!workflowInserted) {
+                migrated.push(selectedWorkflowId);
+                workflowInserted = true;
+            }
+        } else if (!migrated.includes(groupId)) {
+            migrated.push(groupId);
+        }
+    }
+    return migrated;
+}
+
+function migrateBuiltinWorkflowBindings(): boolean {
+    let changed = false;
+    const migrateGroupIds = (groupIds: string[]): string[] => {
+        const migrated = migrateBuiltinWorkflowIds(groupIds);
+        const isUnchanged = migrated.length === groupIds.length
+            && migrated.every((groupId, index) => groupId === groupIds[index]);
+        if (isUnchanged) return groupIds;
+        changed = true;
+        return migrated;
+    };
+
+    for (const task of config.value.tasks) {
+        for (const binding of task.server_bindings) {
+            binding.command_group_ids = migrateGroupIds(binding.command_group_ids);
+        }
+    }
+    for (const binding of taskForm.value.server_bindings) {
+        binding.command_group_ids = migrateGroupIds(binding.command_group_ids);
+    }
+    for (const binding of manualServerBindings.value) {
+        const previousExtractGroupId = binding.extract_command_group_id;
+        binding.command_group_ids = migrateGroupIds(binding.command_group_ids);
+        if (isBuiltinWorkflowId(previousExtractGroupId)
+            || (previousExtractGroupId && LEGACY_BUILTIN_COMMAND_IDS.has(previousExtractGroupId))) {
+            const nextExtractGroupId = binding.command_group_ids.find(isBuiltinWorkflowId) ?? null;
+            if (nextExtractGroupId !== previousExtractGroupId) {
+                binding.extract_command_group_id = nextExtractGroupId;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+function replaceLegacyBuiltinCommandGroups() {
+    migrateBuiltinWorkflowBindings();
+    const customGroups = config.value.command_groups.filter(group => (
+        !isBuiltinWorkflowId(group.id) && !LEGACY_BUILTIN_COMMAND_IDS.has(group.id)
+    ));
+    config.value.command_groups = [
+        ...builtinCommandGroups.value.map(group => ({ ...group, commands: [...group.commands] })),
+        ...customGroups,
+    ];
+}
 
 function restoreBuiltinCommandGroups() {
     requestConfirmation({
@@ -200,15 +326,7 @@ function restoreBuiltinCommandGroups() {
         confirmLabel: t('settings.restoreBuiltin'),
         tone: 'warning',
         action: async () => {
-            const existing = config.value.command_groups;
-            for (const builtin of builtinCommandGroups.value) {
-                const idx = existing.findIndex(g => g.id === builtin.id);
-                if (idx >= 0) {
-                    existing[idx] = { ...builtin, commands: [...builtin.commands] };
-                } else {
-                    existing.push({ ...builtin, commands: [...builtin.commands] });
-                }
-            }
+            replaceLegacyBuiltinCommandGroups();
             await save();
         },
     });
@@ -453,6 +571,9 @@ function toggleBindingGroup(binding: TaskServerBinding, groupId: string) {
     if (idx > -1) {
         binding.command_group_ids.splice(idx, 1);
     } else {
+        if (isBuiltinWorkflowId(groupId)) {
+            binding.command_group_ids = binding.command_group_ids.filter(id => !isBuiltinWorkflowId(id));
+        }
         binding.command_group_ids.push(groupId);
     }
 }
@@ -839,8 +960,13 @@ function toggleManualBindingGroup(binding: ManualDeployBindingState, groupId: st
         binding.command_group_ids.splice(idx, 1);
         if (binding.extract_command_group_id === groupId) binding.extract_command_group_id = null;
     } else {
+        if (isBuiltinWorkflowId(groupId)) {
+            binding.command_group_ids = binding.command_group_ids.filter(id => !isBuiltinWorkflowId(id));
+        }
         binding.command_group_ids.push(groupId);
-        if (!binding.extract_command_group_id) binding.extract_command_group_id = groupId;
+        if (isBuiltinWorkflowId(groupId) || !binding.extract_command_group_id) {
+            binding.extract_command_group_id = groupId;
+        }
     }
     invalidateManualPreflight();
 }
@@ -1015,9 +1141,22 @@ function handleDirectoryPickError(error: string, mode: 'directory' | 'file' = 'd
 async function load() {
     try {
         await configStore.ensureLoaded();
+        let shouldSaveBuiltinMigration = false;
         // Auto-populate built-in groups when none are configured (e.g. fresh install)
         if (config.value.command_groups.length === 0) {
             config.value.command_groups = builtinCommandGroups.value.map(g => ({ ...g, commands: [...g.commands] }));
+        } else if (config.value.command_groups.some(group => (
+            LEGACY_BUILTIN_COMMAND_IDS.has(group.id)
+            || (group.id === BUILTIN_FORCE_WORKFLOW_ID && group.commands.includes(builtinCleanupResidualsCommand))
+        ))) {
+            replaceLegacyBuiltinCommandGroups();
+            shouldSaveBuiltinMigration = true;
+        }
+        if (migrateBuiltinWorkflowBindings()) {
+            shouldSaveBuiltinMigration = true;
+        }
+        if (shouldSaveBuiltinMigration) {
+            await configStore.saveSync();
         }
     } catch (e) {
         console.error(e);
@@ -1781,7 +1920,7 @@ onMounted(load);
 
         <!-- Server Edit Modal -->
         <Teleport to="body">
-          <div v-if="isEditingServer" class="fixed inset-0 bg-slate-950/55 flex items-center justify-center z-[80] p-4" @click.self="closeServerEditor">
+          <div v-if="isEditingServer" class="fixed inset-0 bg-slate-950/55 flex items-center justify-center z-[80] p-4" @pointerdown.self="closeServerEditor">
           <div
             ref="serverEditorDialog"
             role="dialog"
@@ -1893,30 +2032,55 @@ onMounted(load);
 
           <div v-else class="space-y-2">
             <div v-for="(group, idx) in config.command_groups" :key="group.id"
-              class="border border-slate-200 rounded-lg p-3 bg-white hover:shadow-sm transition-shadow flex items-start justify-between gap-3">
-              <div class="flex items-start gap-3 flex-1 min-w-0">
-                <div class="w-7 h-7 rounded-lg bg-sky-100 text-sky-600 flex items-center justify-center shrink-0">
-                  <Terminal class="w-3.5 h-3.5" />
-                </div>
-                <div class="min-w-0 flex-1">
-                  <div class="font-medium text-slate-800 text-sm flex items-center gap-1.5">
-                    {{ builtinDisplayName(group) }}
-                    <span v-if="group.id.startsWith('__builtin_')" class="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full font-normal leading-none">{{ t('settings.builtinBadge') }}</span>
-                  </div>
-                  <div class="text-xs text-slate-400">{{ group.commands.length }} {{ group.commands.length === 1 ? 'command' : 'commands' }}</div>
-                  <div class="mt-1.5 flex flex-col gap-1">
-                    <code v-for="(cmd, ci) in group.commands" :key="ci"
-                      class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-1 rounded font-mono whitespace-pre-wrap break-all cursor-default">{{ cmd }}</code>
-                  </div>
+              class="border border-slate-200 rounded-lg bg-white hover:shadow-sm transition-shadow">
+              <div class="flex items-stretch gap-1 p-1.5">
+                <button
+                  type="button"
+                  class="min-w-0 flex-1 cursor-pointer rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50"
+                  :aria-expanded="isCommandGroupExpanded(group.id)"
+                  :aria-controls="`command-group-commands-${idx}`"
+                  @click="toggleCommandGroup(group.id)"
+                >
+                  <span class="flex min-h-8 items-center gap-3">
+                    <span class="w-7 h-7 rounded-lg bg-sky-100 text-sky-600 flex items-center justify-center shrink-0" aria-hidden="true">
+                      <Terminal class="w-3.5 h-3.5" />
+                    </span>
+                    <span class="min-w-0 flex-1">
+                      <span class="font-medium text-slate-800 text-sm flex flex-wrap items-center gap-1.5">
+                        {{ builtinDisplayName(group) }}
+                        <span v-if="group.id.startsWith('__builtin_')" class="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full font-normal leading-none">{{ t('settings.builtinBadge') }}</span>
+                      </span>
+                      <span class="block text-xs text-slate-400">{{ t('settings.commandGroupCommandCount', group.commands.length) }}</span>
+                    </span>
+                    <span class="flex shrink-0 items-center gap-1 text-xs font-medium text-slate-500">
+                      {{ t(isCommandGroupExpanded(group.id) ? 'settings.hideCommandGroupCommands' : 'settings.showCommandGroupCommands') }}
+                      <ChevronDown
+                        class="h-4 w-4 transition-transform duration-200 motion-reduce:transition-none"
+                        :class="isCommandGroupExpanded(group.id) ? 'rotate-180' : ''"
+                        aria-hidden="true"
+                      />
+                    </span>
+                  </span>
+                </button>
+                <div class="flex items-center gap-1 shrink-0">
+                  <button type="button" @click="editCommandGroup(idx)" class="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50" :title="t('settings.edit')" :aria-label="t('settings.edit')">
+                    <Edit class="w-4 h-4" />
+                  </button>
+                  <button type="button" @click="removeCommandGroup(idx)" class="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50" :title="t('settings.deleteTitle')" :aria-label="t('settings.deleteTitle')">
+                    <Trash2 class="w-4 h-4" />
+                  </button>
                 </div>
               </div>
-              <div class="flex items-center gap-1 shrink-0">
-                <button @click="editCommandGroup(idx)" class="p-1.5 text-slate-500 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors" :title="t('settings.edit')" :aria-label="t('settings.edit')">
-                  <Edit class="w-4 h-4" />
-                </button>
-                <button @click="removeCommandGroup(idx)" class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" :title="t('settings.deleteTitle')" :aria-label="t('settings.deleteTitle')">
-                  <Trash2 class="w-4 h-4" />
-                </button>
+              <div
+                v-if="isCommandGroupExpanded(group.id)"
+                :id="`command-group-commands-${idx}`"
+                class="border-t border-slate-100 px-3 py-2.5"
+              >
+                <div v-if="group.commands.length" class="flex flex-col gap-1">
+                  <code v-for="(cmd, ci) in group.commands" :key="ci"
+                    class="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-1 rounded font-mono whitespace-pre-wrap break-all cursor-default">{{ cmd }}</code>
+                </div>
+                <p v-else class="text-xs italic text-slate-400">{{ t('settings.commandGroupNoCommands') }}</p>
               </div>
             </div>
           </div>
@@ -2112,7 +2276,7 @@ onMounted(load);
                       {{ group.name }}
                     </button>
                   </div>
-                  <div v-if="manualExtractPolicy !== 'skip' && binding.command_group_ids.length > 0" class="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/70 p-3">
+                  <div v-if="manualExtractPolicy !== 'skip' && binding.command_group_ids.length > 0 && !binding.command_group_ids.some(isBuiltinWorkflowId)" class="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/70 p-3">
                     <label :for="`manual-extract-group-${bidx}`" class="block text-xs font-semibold text-emerald-900">{{ t('settings.manualExtractCommandGroup') }}</label>
                     <select
                       :id="`manual-extract-group-${bidx}`"

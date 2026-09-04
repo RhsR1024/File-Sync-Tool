@@ -78,3 +78,74 @@ test('server changes use application UI instead of native browser dialogs', () =
   assert.doesNotMatch(editorSource, /\b(?:window\.)?alert\s*\(/);
   assert.doesNotMatch(editorSource, /\b(?:window\.)?confirm\s*\(/);
 });
+
+test('server editor only dismisses when pointer interaction starts on the backdrop', () => {
+  assert.match(editorSource, /@pointerdown\.self="closeServerEditor"/);
+  assert.doesNotMatch(editorSource, /@click\.self="closeServerEditor"/);
+});
+
+test('built-in deployment commands are two fixed workflows with migration support', () => {
+  assert.match(editorSource, /BUILTIN_NORMAL_WORKFLOW_ID = '__builtin_normal_workflow__'/);
+  assert.match(editorSource, /BUILTIN_FORCE_WORKFLOW_ID = '__builtin_force_workflow__'/);
+  assert.match(editorSource, /commands: \[builtinExtractCommand, builtinUninstallCommand, builtinCleanupCommand, builtinInstallGuardCommand, builtinInstallCommand\]/);
+  assert.match(editorSource, /commands: \[builtinExtractCommand, builtinCleanupResidualsCommandV2, builtinInstallGuardCommand, builtinInstallCommand\]/);
+  assert.match(editorSource, /builtinInstallGuardCommand/);
+  assert.match(editorSource, /builtinCleanupResidualsCommand/);
+  assert.match(editorSource, /migrateBuiltinWorkflowBindings/);
+  assert.match(editorSource, /function migrateBuiltinWorkflowBindings\(\): boolean/);
+  assert.match(editorSource, /if \(migrateBuiltinWorkflowBindings\(\)\) \{\s*shouldSaveBuiltinMigration = true;/);
+  assert.match(editorSource, /LEGACY_BUILTIN_COMMAND_IDS/);
+  assert.match(editorSource, /trying integrated_uninstall\.sh first/);
+  assert.match(editorSource, /integrated_uninstall\.sh failed; continuing with forced cleanup/);
+  assert.match(editorSource, /printf "y\\\\n" \| sh \.\/integrated_uninstall\.sh/);
+  assert.match(editorSource, /rm -f \/usr\/local\/bin\/integrated_uninstall\.sh/);
+  assert.match(editorSource, /command -v omc_uninstall\.sh/);
+  assert.match(editorSource, /command -v hauninstall\.sh/);
+  assert.match(editorSource, /rm -rf \/opt\/common-database0\/data\/pgdata \/program\/omc\/ \/var\/log\/func-\* \/var\/log\/common-\* \/data \/var\/runtime\/cfg\/ha_maintenance_mode \/opt/);
+  assert.match(editorSource, /rm -rf \/mnt\/BK \|\| result=1/);
+  assert.match(editorSource, /\[ -e \/mnt\/BK \]/);
+  assert.match(editorSource, /rm -f \/etc\/systemd\/system\/\{cfc,cfs,deployOps,openresty\}\.service \/etc\/systemd\/system\/func-\* \/etc\/systemd\/system\/common-\*/);
+  assert.match(editorSource, /systemctl stop cfc\.service cfs\.service deployOps\.service openresty\.service/);
+  assert.match(editorSource, /vendor OMC uninstaller failed; continuing with forced cleanup/);
+  assert.match(editorSource, /HA uninstaller failed; continuing with forced cleanup/);
+  assert.match(editorSource, /group\.commands\.includes\(builtinCleanupResidualsCommand\)/);
+  assert.match(editorSource, /cleanup verification failed/);
+  assert.match(editorSource, /\[PRECHECK\] framework ports: none/);
+  assert.match(editorSource, /\[PRECHECK\] \/program\/omc: absent/);
+  assert.match(editorSource, /\[PRECHECK\] \/opt\/package: absent/);
+  assert.match(editorSource, /LC_ALL=C sort \| cksum/);
+  assert.match(editorSource, /exit 42/);
+});
+
+test('force cleanup runs uninstallers before service and rm fallbacks', () => {
+  const commandStart = editorSource.indexOf('const builtinCleanupResidualsCommandV2 = [');
+  const commandEnd = editorSource.indexOf("].join(' ');", commandStart);
+  assert.notEqual(commandStart, -1);
+  assert.notEqual(commandEnd, -1);
+
+  const commandSource = editorSource.slice(commandStart, commandEnd);
+  const orderedMarkers = [
+    'sh ./integrated_uninstall.sh',
+    'rm -f /usr/local/bin/integrated_uninstall.sh',
+    'command -v omc_uninstall.sh',
+    'command -v hauninstall.sh',
+    'systemctl stop cfc.service cfs.service deployOps.service openresty.service',
+    'rm -f /etc/systemd/system/{cfc,cfs,deployOps,openresty}.service',
+    'rm -rf /opt/common-database0/data/pgdata',
+    'rm -rf /mnt/BK',
+  ];
+  let previousIndex = -1;
+  for (const marker of orderedMarkers) {
+    const markerIndex = commandSource.indexOf(marker);
+    assert.ok(markerIndex > previousIndex, `${marker} must follow the previous cleanup stage`);
+    previousIndex = markerIndex;
+  }
+});
+
+test('command group command details are collapsed by default and can be expanded accessibly', () => {
+  assert.match(editorSource, /expandedCommandGroupIds = ref<Set<string>>\(new Set\(\)\)/);
+  assert.match(editorSource, /:aria-expanded="isCommandGroupExpanded\(group\.id\)"/);
+  assert.match(editorSource, /:aria-controls="`command-group-commands-\$\{idx\}`"/);
+  assert.match(editorSource, /v-if="isCommandGroupExpanded\(group\.id\)"/);
+  assert.match(editorSource, /@click="toggleCommandGroup\(group\.id\)"/);
+});

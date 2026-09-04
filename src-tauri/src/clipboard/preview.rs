@@ -289,15 +289,15 @@ pub fn schedule_dismiss_if_orphaned<R>(
 ) where
     R: tauri::Runtime,
 {
-    if state
-        .panel_pinned
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
+    if panel_auto_hide_suppressed(&state) {
         return;
     }
 
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(150));
+        if panel_auto_hide_suppressed(&state) {
+            return;
+        }
         let panel_focused = panel.is_focused().unwrap_or(false);
         let preview_focused = preview_window_is_focused(&app);
         if !panel_focused && !preview_focused {
@@ -305,6 +305,21 @@ pub fn schedule_dismiss_if_orphaned<R>(
             let _ = panel.hide();
         }
     });
+}
+
+fn panel_auto_hide_suppressed(state: &ClipboardState) -> bool {
+    should_suppress_panel_auto_hide(
+        state
+            .panel_pinned
+            .load(std::sync::atomic::Ordering::Acquire),
+        state
+            .panel_native_dialog_open
+            .load(std::sync::atomic::Ordering::Acquire),
+    )
+}
+
+fn should_suppress_panel_auto_hide(panel_pinned: bool, native_dialog_open: bool) -> bool {
+    panel_pinned || native_dialog_open
 }
 
 pub fn attach_preview_dismiss_handlers<R>(
@@ -1213,6 +1228,13 @@ mod tests {
         assert_eq!(placement.side, PreviewSide::Right);
         assert_eq!(placement.x, 600 + 420_i32 + PREVIEW_GAP_PX);
         assert_eq!(placement.y, 200);
+    }
+
+    #[test]
+    fn native_dialog_suppresses_panel_auto_hide_until_the_dialog_closes() {
+        assert!(should_suppress_panel_auto_hide(false, true));
+        assert!(should_suppress_panel_auto_hide(true, false));
+        assert!(!should_suppress_panel_auto_hide(false, false));
     }
 
     #[test]

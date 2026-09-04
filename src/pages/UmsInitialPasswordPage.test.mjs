@@ -113,3 +113,13 @@ test('recent IPs migrate from the pre-rename storage key', () => {
   assert.match(pageSource, /const RECENT_IPS_KEY = 'umsInitialPassword\.recentIps';/);
   assert.match(pageSource, /const LEGACY_RECENT_IPS_KEY = 'frameworkPassword\.recentIps';/);
 });
+
+test('recent IP chips toggle selection while the trash action only removes history', () => {
+  assert.match(
+    pageSource,
+    /const toggleRecentIp = \(ip: string\) => \{[\s\S]*?form\.selectedIps = form\.selectedIps\.filter[\s\S]*?removeManualIpTag\(ip\)[\s\S]*?addManualIpTag\(ip\)/,
+  );
+  assert.match(pageSource, /:aria-pressed="isRecentIpSelected\(ip\)"/);
+  assert.match(pageSource, /@click="toggleRecentIp\(ip\)"/);
+  assert.match(pageSource, /@click\.stop="removeRecentIp\(ip\)"/);
+});

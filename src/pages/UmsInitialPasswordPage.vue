@@ -187,13 +187,20 @@ const allSelectedIps = computed(() => {
 
 const isRecentIpSelected = (ip: string) => allSelectedIps.value.includes(ip);
 
-const applyRecentIp = (ip: string) => {
-  if (isLoading.value || isRecentIpSelected(ip)) {
-    return;
+const toggleRecentIp = (ip: string) => {
+  if (isLoading.value) return;
+
+  if (isRecentIpSelected(ip)) {
+    form.selectedIps = form.selectedIps.filter(selectedIp => selectedIp !== ip);
+    removeManualIpTag(ip);
+    if (form.manualIpInput.trim() === ip) {
+      form.manualIpInput = '';
+    }
+  } else {
+    form.manualIpInput = '';
+    addManualIpTag(ip);
+    nextTick(() => fpIpInputRef.value?.focus());
   }
-  form.manualIpInput = '';
-  addManualIpTag(ip);
-  nextTick(() => fpIpInputRef.value?.focus());
 };
 
 const storeRecentIps = async (items: readonly string[]) => {
@@ -631,8 +638,9 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
                   <button
                     type="button"
                     :disabled="isLoading"
-                    class="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed"
-                    @click="applyRecentIp(ip)"
+                    :aria-pressed="isRecentIpSelected(ip)"
+                    class="inline-flex cursor-pointer items-center gap-1 px-2.5 py-1 text-xs font-medium transition-colors duration-200 hover:bg-black/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-inset disabled:cursor-not-allowed"
+                    @click="toggleRecentIp(ip)"
                   >
                     <Check v-if="isRecentIpSelected(ip)" class="h-3 w-3" />
                     <span class="font-mono">{{ ip }}</span>

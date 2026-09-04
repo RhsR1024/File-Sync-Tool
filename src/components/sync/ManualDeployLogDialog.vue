@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onDeactivated, ref, watch } from 'vue';
-import { CheckCircle2, ChevronDown, Clock3, LoaderCircle, Pencil, Server, X, XCircle } from 'lucide-vue-next';
+import { CheckCircle2, ChevronDown, Clock3, Copy, LoaderCircle, Pencil, Server, X, XCircle } from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
 import type { DeployAttempt, DeployServer, TaskGroup, TaskLogEntry } from '@/lib/tauri';
 import type { ManualDeploySession } from '@/lib/taskStateStore';
@@ -24,7 +24,9 @@ const closeButtonRef = ref<HTMLButtonElement | null>(null);
 const logScrollerRef = ref<HTMLElement | null>(null);
 const selectedServerId = ref<string | null>(null);
 const followingTail = ref(true);
+const copyStatus = ref<'idle' | 'success' | 'error'>('idle');
 let previousFocus: HTMLElement | null = null;
+let copyStatusTimer: ReturnType<typeof setTimeout> | null = null;
 
 const run = computed(() => props.group?.runs.find(candidate => candidate.run_id === props.session?.run_id) ?? null);
 const attempts = computed(() => run.value?.deploy_attempts ?? []);
@@ -102,11 +104,34 @@ function statusClass(status: DisplayStatus) {
 }
 
 function logLevelClass(level: string) {
-  if (level === 'error') return 'text-rose-300';
-  if (level === 'success') return 'text-emerald-300';
-  if (level === 'warn') return 'text-amber-300';
-  if (level === 'command') return 'text-cyan-300';
+  const normalizedLevel = level.toLowerCase();
+  if (normalizedLevel === 'error') return 'text-rose-300';
+  if (normalizedLevel === 'success') return 'text-emerald-300';
+  if (normalizedLevel === 'warn' || normalizedLevel === 'warning') return 'text-amber-300';
+  if (normalizedLevel === 'command') return 'text-cyan-300';
   return 'text-slate-200';
+}
+
+const LOG_KEYWORD_PATTERN = /^(failed|fail|error|warning|warn|info)$/i;
+const LOG_KEYWORD_SPLIT_PATTERN = /(failed|fail|error|warning|warn|info)/gi;
+
+function logKeywordClass(keyword: string) {
+  const normalizedKeyword = keyword.toLowerCase();
+  if (normalizedKeyword === 'error' || normalizedKeyword === 'fail' || normalizedKeyword === 'failed') {
+    return 'font-semibold text-rose-300';
+  }
+  if (normalizedKeyword === 'info') return 'font-semibold text-emerald-300';
+  return 'font-semibold text-amber-300';
+}
+
+function segmentLogMessage(message: string) {
+  return message
+    .split(LOG_KEYWORD_SPLIT_PATTERN)
+    .filter(segment => segment.length > 0)
+    .map(segment => ({
+      text: segment,
+      className: LOG_KEYWORD_PATTERN.test(segment) ? logKeywordClass(segment) : '',
+    }));
 }
 
 function formatTime(timestamp: string) {
@@ -116,6 +141,30 @@ function formatTime(timestamp: string) {
     }).format(new Date(timestamp));
   } catch {
     return timestamp;
+  }
+}
+
+function formatLogLine(log: TaskLogEntry) {
+  const serverLabel = log.server_name ? ` [${log.server_name}]` : '';
+  return `${formatTime(log.timestamp)}${serverLabel} ${log.message}`;
+}
+
+function setCopyStatus(status: 'success' | 'error') {
+  copyStatus.value = status;
+  if (copyStatusTimer) clearTimeout(copyStatusTimer);
+  copyStatusTimer = setTimeout(() => {
+    copyStatus.value = 'idle';
+    copyStatusTimer = null;
+  }, 2_000);
+}
+
+async function copyLogs() {
+  if (!filteredLogs.value.length) return;
+  try {
+    await navigator.clipboard.writeText(filteredLogs.value.map(formatLogLine).join('\n'));
+    setCopyStatus('success');
+  } catch {
+    setCopyStatus('error');
   }
 }
 
@@ -162,6 +211,7 @@ watch(() => props.open, async open => {
     previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     selectedServerId.value = null;
     followingTail.value = true;
+    copyStatus.value = 'idle';
     await nextTick();
     closeButtonRef.value?.focus();
     logScrollerRef.value?.scrollTo({ top: logScrollerRef.value.scrollHeight });
@@ -179,7 +229,10 @@ watch(() => visibleLogs.value.length, async () => {
 });
 
 onDeactivated(close);
-onBeforeUnmount(() => previousFocus?.focus?.());
+onBeforeUnmount(() => {
+  if (copyStatusTimer) clearTimeout(copyStatusTimer);
+  previousFocus?.focus?.();
+});
 </script>
 
 <template>
@@ -290,9 +343,26 @@ onBeforeUnmount(() => previousFocus?.focus?.());
             </aside>
 
             <div class="relative flex min-h-0 flex-col bg-slate-950">
-              <div class="flex items-center justify-between border-b border-slate-800 px-4 py-2.5 font-mono text-xs text-slate-400">
+              <div class="flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-2.5 font-mono text-xs text-slate-400">
                 <span>{{ selectedServerId ? t('settings.manualDeployLog.filteredLog') : t('settings.manualDeployLog.allLog') }}</span>
-                <span>{{ t('settings.manualDeployLog.lineCount', { count: filteredLogs.length }) }}</span>
+                <div class="flex items-center gap-3">
+                  <span>{{ t('settings.manualDeployLog.lineCount', { count: filteredLogs.length }) }}</span>
+                  <button
+                    type="button"
+                    class="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 font-sans text-xs font-medium text-slate-200 transition-colors duration-200 hover:border-slate-600 hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    :disabled="filteredLogs.length === 0"
+                    :aria-label="t('settings.manualDeployLog.copyLogs')"
+                    :title="t('settings.manualDeployLog.copyLogs')"
+                    @click="copyLogs"
+                  >
+                    <CheckCircle2 v-if="copyStatus === 'success'" class="h-4 w-4 text-emerald-400" aria-hidden="true" />
+                    <XCircle v-else-if="copyStatus === 'error'" class="h-4 w-4 text-rose-400" aria-hidden="true" />
+                    <Copy v-else class="h-4 w-4" aria-hidden="true" />
+                    <span v-if="copyStatus === 'success'">{{ t('settings.manualDeployLog.copied') }}</span>
+                    <span v-else-if="copyStatus === 'error'">{{ t('settings.manualDeployLog.copyFailed') }}</span>
+                    <span v-else>{{ t('settings.manualDeployLog.copyLogs') }}</span>
+                  </button>
+                </div>
               </div>
               <div
                 ref="logScrollerRef"
@@ -302,10 +372,12 @@ onBeforeUnmount(() => previousFocus?.focus?.());
                 <div v-if="visibleLogs.length === 0" class="flex min-h-56 items-center justify-center text-slate-500">
                   {{ t('settings.manualDeployLog.waitingForLogs') }}
                 </div>
-                <div v-for="(log, index) in visibleLogs" v-else :key="`${log.timestamp}-${index}`" class="flex gap-2">
-                  <span class="shrink-0 tabular-nums text-slate-500">{{ formatTime(log.timestamp) }}</span>
-                  <span v-if="log.server_name" class="shrink-0 text-indigo-300">[{{ log.server_name }}]</span>
-                  <span class="whitespace-pre-wrap break-words" :class="logLevelClass(log.level)">{{ log.message }}</span>
+                <div v-for="(log, index) in visibleLogs" v-else :key="`${log.timestamp}-${index}`" class="break-words">
+                  <span class="tabular-nums text-slate-500">{{ formatTime(log.timestamp) }}</span><span v-if="log.server_name" class="text-indigo-300"> [{{ log.server_name }}]</span><span class="whitespace-pre-wrap" :class="logLevelClass(log.level)"> <span
+                    v-for="(segment, segmentIndex) in segmentLogMessage(log.message)"
+                    :key="segmentIndex"
+                    :class="segment.className"
+                  >{{ segment.text }}</span></span>
                 </div>
               </div>
               <button
