@@ -116,7 +116,7 @@ struct OpenApiEnvelope<T> {
     code: i64,
     #[serde(default, alias = "msg", alias = "ErrMsg")]
     message: String,
-    #[serde(default, alias = "Result")]
+    #[serde(alias = "Result")]
     data: Option<T>,
 }
 
@@ -716,11 +716,24 @@ async fn query_existing_device_ids(
             &content_type,
             &text,
         );
+        let response: OpenApiEnvelope<QueryDeviceData> = serde_json::from_str(&text)
+            .map_err(|error| format!("平台设备查询响应不是有效 JSON: {error}"))?;
+        if response.code == RESOURCE_QUERY_NOT_FOUND_CODE {
+            emit_log(
+                app_handle,
+                "warning",
+                None,
+                format!(
+                    "平台设备查询接口不可用（code={}，{}），尝试使用 BCP 设备查询接口",
+                    response.code, response.message
+                ),
+            );
+            return query_existing_device_ids_via_bcp(app_handle, client, server, token, devices)
+                .await;
+        }
         if !status.is_success() {
             return Err(format!("查询平台设备接口返回 HTTP {}", status.as_u16()));
         }
-        let response: OpenApiEnvelope<QueryDeviceData> = serde_json::from_str(&text)
-            .map_err(|error| format!("平台设备查询响应不是有效 JSON: {error}"))?;
         if response.code != 0 {
             return Err(format!(
                 "查询平台设备失败：code={} {}",
@@ -751,6 +764,167 @@ async fn query_existing_device_ids(
         "info",
         None,
         format!("平台设备查询完成，找到 {} 台同 IP 设备", device_ids.len()),
+    );
+    Ok(device_ids)
+}
+
+fn build_bcp_query_request(
+    server: &PlatformServerSettings,
+    page_first_row_number: u32,
+) -> BcpQueryDeviceRequest {
+    BcpQueryDeviceRequest {
+        user_info: BcpUserInfo {
+            user_code: server.username.trim().to_owned(),
+            user_login_code: server.username.trim().to_owned(),
+            user_ip_address: server.host.trim().to_owned(),
+        },
+        org: BCP_ORG_CODE,
+        query_condition: BcpQueryCondition {
+            item_num: 7,
+            query_condition_list: vec![
+                BcpQueryConditionItem {
+                    query_type: 4,
+                    logic_flag: 18,
+                    query_data: "2",
+                },
+                BcpQueryConditionItem {
+                    query_type: 4,
+                    logic_flag: 18,
+                    query_data: "3",
+                },
+                BcpQueryConditionItem {
+                    query_type: 4,
+                    logic_flag: 18,
+                    query_data: "9",
+                },
+                BcpQueryConditionItem {
+                    query_type: 4,
+                    logic_flag: 18,
+                    query_data: "10",
+                },
+                BcpQueryConditionItem {
+                    query_type: 5,
+                    logic_flag: 0,
+                    query_data: "1",
+                },
+                BcpQueryConditionItem {
+                    query_type: 910,
+                    logic_flag: 8,
+                    query_data: "4",
+                },
+                BcpQueryConditionItem {
+                    query_type: 6,
+                    logic_flag: 0,
+                    query_data: "0",
+                },
+            ],
+        },
+        query_page_info: BcpQueryPageInfo {
+            query_count: 1,
+            page_first_row_number,
+            page_row_num: BCP_QUERY_PAGE_SIZE,
+        },
+    }
+}
+
+async fn query_existing_device_ids_via_bcp(
+    app_handle: &AppHandle,
+    client: &reqwest::Client,
+    server: &PlatformServerSettings,
+    token: &str,
+    devices: &[PlatformDeviceEntry],
+) -> Result<Vec<String>, String> {
+    let url = server_url(&server.host, server.port, PLATFORM_BCP_QUERY_DEVICE_PATH)?;
+    let url_for_log = url.as_str().to_owned();
+    let target_addresses = devices
+        .iter()
+        .map(|device| device.address.to_string())
+        .collect::<HashSet<_>>();
+    let mut device_ids = Vec::new();
+    let mut seen_device_ids = HashSet::new();
+    let mut page_first_row_number = 0_u32;
+
+    loop {
+        let request = build_bcp_query_request(server, page_first_row_number);
+        emit_log(
+            app_handle,
+            "info",
+            None,
+            format!(
+                "HTTP request: POST {url_for_log} | authorization=<redacted> | Content-Type=application/json | body={}",
+                json_for_log(&request)
+            ),
+        );
+        let response = client
+            .post(url.clone())
+            .header("authorization", token)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| format!("BCP 平台设备查询请求失败: {error}"))?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("<missing>")
+            .to_owned();
+        let text = response
+            .text()
+            .await
+            .map_err(|error| format!("读取 BCP 平台设备查询响应失败: {error}"))?;
+        emit_http_response_log(
+            app_handle,
+            "POST",
+            &url_for_log,
+            status,
+            &content_type,
+            &text,
+        );
+        if !status.is_success() {
+            return Err(format!("BCP 平台设备查询接口返回 HTTP {}", status.as_u16()));
+        }
+        let response: BcpQueryResponse = serde_json::from_str(&text)
+            .map_err(|error| format!("BCP 平台设备查询响应不是有效 JSON: {error}"))?;
+        if response.error_code != 0 {
+            return Err(format!(
+                "BCP 平台设备查询失败：code={} {}",
+                response.error_code, response.error_message
+            ));
+        }
+        let result = response
+            .result
+            .ok_or_else(|| "BCP 平台设备查询响应缺少 Result".to_string())?;
+        for device in result.devices {
+            if target_addresses.contains(device.device_address.trim())
+                && !device.ums_resource_id.trim().is_empty()
+                && seen_device_ids.insert(device.ums_resource_id.clone())
+            {
+                device_ids.push(device.ums_resource_id);
+            }
+        }
+        let total_row_num = result.page_info.total_row_num;
+        let current_row_num = result.page_info.row_num;
+        if total_row_num == 0
+            || u64::from(page_first_row_number).saturating_add(u64::from(BCP_QUERY_PAGE_SIZE))
+                >= total_row_num
+            || current_row_num == 0
+        {
+            break;
+        }
+        page_first_row_number = page_first_row_number
+            .checked_add(BCP_QUERY_PAGE_SIZE)
+            .ok_or_else(|| "BCP 平台设备查询页码超出范围".to_string())?;
+    }
+
+    emit_log(
+        app_handle,
+        "info",
+        None,
+        format!(
+            "BCP 平台设备查询完成，找到 {} 台同 IP 设备",
+            device_ids.len()
+        ),
     );
     Ok(device_ids)
 }
@@ -1336,6 +1510,80 @@ mod tests {
         assert_eq!(data.total, 201);
         assert_eq!(data.info_list[0].res_id, "630621988062232867");
         assert_eq!(data.info_list[0].ip_address, "192.115.1.220");
+    }
+
+    #[test]
+    fn resource_query_response_recognizes_the_missing_url_error_code() {
+        let response: OpenApiEnvelope<QueryDeviceData> = serde_json::from_value(json!({
+            "ErrCode": 70510,
+            "ErrMsg": "No matching URL found(/xapi/uap/v1/resource/query)"
+        }))
+        .unwrap();
+
+        assert_eq!(response.code, RESOURCE_QUERY_NOT_FOUND_CODE);
+        assert_eq!(
+            response.message,
+            "No matching URL found(/xapi/uap/v1/resource/query)"
+        );
+        assert!(response.data.is_none());
+    }
+
+    #[test]
+    fn bcp_query_request_matches_the_fallback_platform_contract() {
+        let server = PlatformServerSettings {
+            id: "ums-1".into(),
+            host: "206.206.0.100".into(),
+            port: 80,
+            username: "loadmin".into(),
+            password: "admin_123".into(),
+            auto_register_devices: Some(true),
+            replace_existing_devices: Some(false),
+        };
+        let request = serde_json::to_value(build_bcp_query_request(&server, 0)).unwrap();
+
+        assert_eq!(request["Userinfo"]["UserCode"], "loadmin");
+        assert_eq!(request["Userinfo"]["UserLoginCode"], "loadmin");
+        assert_eq!(request["Userinfo"]["UserIpAddress"], "206.206.0.100");
+        assert_eq!(request["org"], "iccsid");
+        assert_eq!(request["QueryCondition"]["ItemNum"], 7);
+        assert_eq!(
+            request["QueryCondition"]["QueryConditionList"],
+            json!([
+                {"QueryType": 4, "LogicFlag": 18, "QueryData": "2"},
+                {"QueryType": 4, "LogicFlag": 18, "QueryData": "3"},
+                {"QueryType": 4, "LogicFlag": 18, "QueryData": "9"},
+                {"QueryType": 4, "LogicFlag": 18, "QueryData": "10"},
+                {"QueryType": 5, "LogicFlag": 0, "QueryData": "1"},
+                {"QueryType": 910, "LogicFlag": 8, "QueryData": "4"},
+                {"QueryType": 6, "LogicFlag": 0, "QueryData": "0"}
+            ])
+        );
+        assert_eq!(request["QueryPageInfo"]["QueryCount"], 1);
+        assert_eq!(request["QueryPageInfo"]["PageFirstRowNumber"], 0);
+        assert_eq!(request["QueryPageInfo"]["PageRowNum"], 20);
+    }
+
+    #[test]
+    fn bcp_query_response_reads_resource_id_and_device_address() {
+        let response: BcpQueryResponse = serde_json::from_value(json!({
+            "ErrCode": 0,
+            "ErrMsg": "Succeed",
+            "Result": {
+                "RspPageInfo": {"RowNum": 2, "TotalRowNum": 2},
+                "RspDevInfoList": [{
+                    "UMSResID": "635932266987520600",
+                    "DevAddr": "213.213.16.14"
+                }]
+            }
+        }))
+        .unwrap();
+        let result = response.result.unwrap();
+
+        assert_eq!(response.error_code, 0);
+        assert_eq!(result.page_info.row_num, 2);
+        assert_eq!(result.page_info.total_row_num, 2);
+        assert_eq!(result.devices[0].ums_resource_id, "635932266987520600");
+        assert_eq!(result.devices[0].device_address, "213.213.16.14");
     }
 
     #[test]
