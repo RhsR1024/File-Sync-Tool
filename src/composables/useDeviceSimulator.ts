@@ -863,7 +863,15 @@ function createDeviceSimulator() {
 
   async function requestPlatformServerRegistration(serverId: string) {
     const server = platformServers.value.find((item) => item.id === serverId);
-    if (!server || platformServerDirty(serverId)) return null;
+    if (!server) return null;
+    if (platformServerDirty(serverId)) {
+      const saved = await savePlatformServers();
+      if (!saved) return null;
+      // Saving a changed server with automatic adding enabled already performs
+      // the add operation. Avoid sending the same device list a second time.
+      if (server.auto_register_devices) return null;
+    }
+    if (platformServerDirty(serverId)) return null;
     if (server.replace_existing_devices) {
       platformReplaceTargetServerId.value = serverId;
       platformReplaceRetryError.value = '';

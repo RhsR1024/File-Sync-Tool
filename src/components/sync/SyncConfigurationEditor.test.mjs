@@ -149,3 +149,12 @@ test('command group command details are collapsed by default and can be expanded
   assert.match(editorSource, /v-if="isCommandGroupExpanded\(group\.id\)"/);
   assert.match(editorSource, /@click="toggleCommandGroup\(group\.id\)"/);
 });
+
+test('composite task modules expose inheritable per-module overrides', () => {
+  assert.match(editorSource, /watch\(parsedTaskModulePaths/);
+  assert.match(editorSource, /setModuleRuleOverride/);
+  assert.match(editorSource, /setModuleServerOverride/);
+  assert.match(editorSource, /setModuleScriptOverride/);
+  assert.match(editorSource, /module\.post_copy_execution_order/);
+  assert.match(editorSource, /<details[\s\S]*v-for="\(module, moduleIndex\) in taskForm\.modules"/);
+});

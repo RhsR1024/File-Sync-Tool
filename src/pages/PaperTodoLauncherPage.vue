@@ -228,7 +228,10 @@ async function startLauncherDrag(event: MouseEvent): Promise<void> {
     // native loop moves it across the virtual desktop, snaps it near any
     // display edge, and reports whether it ever travelled. A press that did not
     // move is the expand/collapse click.
-    const moved = await dragPaperLauncher();
+    // Capture the press location before the IPC round-trip. The native loop
+    // starts asynchronously, so sampling the cursor there would lose any
+    // movement made during that gap and make the capsule trail the pointer.
+    const moved = await dragPaperLauncher(event.clientX, event.clientY);
     if (moved) {
       settleUntil = Date.now() + SETTLE_MS;
       await store.refreshFromDisk();

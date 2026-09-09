@@ -15,6 +15,8 @@ export function buildSyncPatch(config: AppConfig): SyncConfigPatch {
     stability_check_secs: config.stability_check_secs,
     recent_file_guard_mins: config.recent_file_guard_mins,
     fallback_recent_package_enabled: config.fallback_recent_package_enabled,
+    sync_retention_enabled: config.sync_retention_enabled,
+    sync_retention_days: config.sync_retention_days,
     copy_buffer_size_kb: config.copy_buffer_size_kb,
     copy_mode: config.copy_mode,
   };

@@ -29,3 +29,10 @@ test('update dialog keeps long changelogs inside a viewport-bound scroll area', 
     'found-update actions should stay outside the scroll area',
   );
 });
+
+test('restart and upgrade is single-flight and exposes a busy state', () => {
+  assert.match(dialogSource, /if \(isApplying\.value\) return;/);
+  assert.match(dialogSource, /:disabled="isApplying"/);
+  assert.match(dialogSource, /:aria-busy="isApplying"/);
+  assert.match(dialogSource, /updater\.dialog\.actionApplying/);
+});

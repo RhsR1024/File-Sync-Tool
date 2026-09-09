@@ -441,9 +441,9 @@ export async function finishPaperLauncherTransition(transitionId: number): Promi
  * Resolves to `true` once the press actually travelled, and `false` when it was
  * a plain click the caller should turn into an expand/collapse.
  */
-export async function dragPaperLauncher(): Promise<boolean> {
+export async function dragPaperLauncher(clientX: number, clientY: number): Promise<boolean> {
   if (!isTauriRuntime()) return false;
-  return invoke<boolean>('paper_todo_drag_launcher');
+  return invoke<boolean>('paper_todo_drag_launcher', { clientX, clientY });
 }
 
 export async function openPaperTodoSettings(): Promise<void> {

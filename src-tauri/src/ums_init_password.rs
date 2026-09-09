@@ -23,7 +23,6 @@ const UMS_PORT: u16 = 80;
 const CDM_PORT: u16 = 25011;
 
 const FRAMEWORK_USER: &str = "admin";
-const UMS_USER: &str = "loadmin";
 const CDM_USER: &str = "admin";
 
 /// 响应体写入日志前的截断长度。UMS 的公钥响应约 400 字符，留足余量即可。
@@ -44,8 +43,10 @@ pub struct UmsInitPasswordTargets {
 pub struct UmsInitPasswordRequest {
     pub ips: Vec<String>,
     pub targets: UmsInitPasswordTargets,
-    /// 统一新密码，对被勾选的三种流程共同生效。
-    pub new_password: String,
+    pub ums_username: String,
+    pub framework_new_password: String,
+    pub ums_new_password: String,
+    pub cdm_new_password: String,
     pub framework_old_password: String,
     pub ums_old_password: String,
     pub cdm_old_password: String,
@@ -295,7 +296,7 @@ pub(crate) async fn ums_acquire_access_token(
 
 // ─────────────────────────── 日志 ───────────────────────────
 
-fn log_line(app: &tauri::AppHandle, level: &str, message: &str) {
+fn log_line<R: tauri::Runtime>(app: &tauri::AppHandle<R>, level: &str, message: &str) {
     crate::scanner::emit_tool_log(app, TOOL_NAME, message, level);
 }
 
@@ -312,13 +313,13 @@ fn truncate_for_log(body: &str) -> String {
 }
 
 /// 单个流程的日志上下文，负责统一加上 `[IP][流程]` 前缀。
-struct FlowLogger<'a> {
-    app: &'a tauri::AppHandle,
+struct FlowLogger<'a, R: tauri::Runtime> {
+    app: &'a tauri::AppHandle<R>,
     ip: &'a str,
     kind: UmsInitPasswordKind,
 }
 
-impl<'a> FlowLogger<'a> {
+impl<'a, R: tauri::Runtime> FlowLogger<'a, R> {
     fn info(&self, message: &str) {
         log_line(
             self.app,
@@ -456,8 +457,8 @@ fn check_err_code(value: &serde_json::Value, step: &str) -> Result<(), String> {
 // ─────────────────────────── 框架流程 ───────────────────────────
 
 /// 框架：端口 21900，SHA-256 明文哈希，`code == 0` 判成功。
-async fn run_framework_flow(
-    app: &tauri::AppHandle,
+async fn run_framework_flow<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     client: &reqwest::Client,
     ip: &str,
     old_password: &str,
@@ -515,7 +516,7 @@ async fn run_framework_flow(
             return fail_result(kind, e, "login");
         }
     };
-    logger.info(&format!("{} ✓ token={}", step, token));
+    logger.info(&format!("{} ✓ 已获取 token", step));
 
     // ② 修改密码
     let change_body = json!({
@@ -577,17 +578,18 @@ async fn run_framework_flow(
 // ─────────────────────────── UMS 流程 ───────────────────────────
 
 /// UMS：端口 80，挑战握手 + MD5 签名 + RSA PKCS#1 v1.5 加密，最后置 `pwdIsInit` 字典开关。
-async fn run_ums_flow(
-    app: &tauri::AppHandle,
+async fn run_ums_flow<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     client: &reqwest::Client,
     ip: &str,
     target: Ipv4Addr,
+    username: &str,
     old_password: &str,
     new_password: &str,
 ) -> UmsInitPasswordTargetResult {
     let kind = UmsInitPasswordKind::Ums;
     let logger = FlowLogger { app, ip, kind };
-    logger.info(&format!("开始，账号={}", UMS_USER));
+    logger.info(&format!("开始，账号={}", username));
 
     let base = format!("http://{}:{}/sw", ip, UMS_PORT);
 
@@ -628,17 +630,17 @@ async fn run_ums_flow(
     } else {
         logger.info(&format!("② 登录 探测到本机 IP={}", local_ip));
     }
-    let signature = ums_login_signature(UMS_USER, &access_code, old_password);
+    let signature = ums_login_signature(username, &access_code, old_password);
     logger.info(&format!(
         "② 登录 签名 = MD5(Base64(\"{}\")=\"{}\" + AccessCode + MD5(旧密码)=\"{}\") = {}",
-        UMS_USER,
-        BASE64.encode(UMS_USER.as_bytes()),
+        username,
+        BASE64.encode(username.as_bytes()),
         md5_hex(old_password),
         signature
     ));
 
     let login_body = json!({
-        "UserName": UMS_USER,
+        "UserName": username,
         "AccessCode": access_code,
         "LoginSignature": signature,
         "isNewVersion": true,
@@ -700,7 +702,7 @@ async fn run_ums_flow(
             return fail_result(kind, e, "login");
         }
     };
-    logger.info(&format!("{} ✓ AccessToken={}", step, token));
+    logger.info(&format!("{} ✓ 已获取 AccessToken", step));
 
     // 新旧密码相同意味着密码已经是目标值，没有什么可改的 —— 但 pwdIsInit 开关
     // 可能还没置位。这种情况下跳过取公钥和改密，直接走 ⑤ 把初始化标识补上。
@@ -776,8 +778,8 @@ async fn run_ums_flow(
         ));
 
         let change_body = json!({
-            "userCode": UMS_USER,
-            "userName": UMS_USER,
+            "userCode": username,
+            "userName": username,
             "newUserPasswd": new_enc,
             "userPasswd": old_enc,
             "NewEncPassword": new_enc_2,
@@ -868,8 +870,8 @@ async fn run_ums_flow(
 // ─────────────────────────── CDM 流程 ───────────────────────────
 
 /// CDM：端口 25011，挑战握手 + MD5 拼接签名，改密用 PUT，响应体为空靠 HTTP 状态码判成功。
-async fn run_cdm_flow(
-    app: &tauri::AppHandle,
+async fn run_cdm_flow<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     client: &reqwest::Client,
     ip: &str,
     old_password: &str,
@@ -965,7 +967,7 @@ async fn run_cdm_flow(
             return fail_result(kind, e, "login");
         }
     };
-    logger.info(&format!("{} ✓ Authorization={}", step, token));
+    logger.info(&format!("{} ✓ 已获取 Authorization", step));
 
     // ③ 修改密码。响应体为空，只能靠 HTTP 状态码判成功。
     let step = "③ 修改密码";
@@ -1023,8 +1025,8 @@ async fn run_cdm_flow(
 ///
 /// 三条流程互相独立 —— 任意一条失败都不得中断其余流程，因此这里不用 `?`，
 /// 每条流程都自行把错误收敛成 `UmsInitPasswordTargetResult`。
-async fn run_for_ip(
-    app: tauri::AppHandle,
+async fn run_for_ip<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     client: reqwest::Client,
     ip_input: String,
     request: UmsInitPasswordRequest,
@@ -1086,7 +1088,7 @@ async fn run_for_ip(
                     &client,
                     &ip,
                     &request.framework_old_password,
-                    &request.new_password,
+                    &request.framework_new_password,
                 )
                 .await
             }
@@ -1096,8 +1098,9 @@ async fn run_for_ip(
                     &client,
                     &ip,
                     parsed,
+                    request.ums_username.trim(),
                     &request.ums_old_password,
-                    &request.new_password,
+                    &request.ums_new_password,
                 )
                 .await
             }
@@ -1107,7 +1110,7 @@ async fn run_for_ip(
                     &client,
                     &ip,
                     &request.cdm_old_password,
-                    &request.new_password,
+                    &request.cdm_new_password,
                 )
                 .await
             }
@@ -1143,24 +1146,26 @@ async fn run_for_ip(
 
 // ─────────────────────────── Tauri command ───────────────────────────
 
-#[tauri::command]
-pub async fn change_ums_init_password(
+pub(crate) async fn execute_ums_init_password<R: tauri::Runtime>(
     request: UmsInitPasswordRequest,
-    app_handle: tauri::AppHandle,
-    state: tauri::State<'_, crate::AppState>,
+    app_handle: tauri::AppHandle<R>,
+    api_timeout_secs: u64,
 ) -> Result<Vec<UmsInitPasswordResult>, String> {
     if !request.targets.framework && !request.targets.ums && !request.targets.cdm {
         return Err("请至少勾选一种密码修改流程".to_string());
     }
-    if request.new_password.is_empty() {
-        return Err("新密码不能为空".to_string());
+    if request.targets.framework && request.framework_new_password.is_empty() {
+        return Err("框架新密码不能为空".to_string());
     }
-
-    let api_timeout_secs = state
-        .config
-        .lock()
-        .unwrap()
-        .framework_password_api_timeout_secs;
+    if request.targets.ums && request.ums_username.trim().is_empty() {
+        return Err("UMS 用户名不能为空".to_string());
+    }
+    if request.targets.ums && request.ums_new_password.is_empty() {
+        return Err("UMS 新密码不能为空".to_string());
+    }
+    if request.targets.cdm && request.cdm_new_password.is_empty() {
+        return Err("CDM 新密码不能为空".to_string());
+    }
 
     log_line(
         &app_handle,
@@ -1192,6 +1197,20 @@ pub async fn change_ums_init_password(
     .await?;
 
     Ok(results.into_iter().flatten().collect())
+}
+
+#[tauri::command]
+pub async fn change_ums_init_password(
+    request: UmsInitPasswordRequest,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<UmsInitPasswordResult>, String> {
+    let api_timeout_secs = state
+        .config
+        .lock()
+        .unwrap()
+        .framework_password_api_timeout_secs;
+    execute_ums_init_password(request, app_handle, api_timeout_secs).await
 }
 
 #[cfg(test)]

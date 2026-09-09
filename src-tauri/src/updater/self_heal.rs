@@ -3,6 +3,8 @@
 //! installer batch always renamed the new exe to the previous file name) to
 //! 1.1.1+.
 
+use std::sync::atomic::Ordering;
+
 use tauri::{AppHandle, Manager};
 
 use crate::updater::{installer, manifest, Manifest, SharedUpdaterState, CURRENT_VERSION};
@@ -43,7 +45,7 @@ pub fn canonical_filename_for_version(manifest: &Manifest, version: &str) -> Opt
     manifest::download_file_name_from_url(&entry.url)
 }
 
-pub fn check_and_repair_filename(
+pub async fn check_and_repair_filename(
     app_handle: &AppHandle,
     updater_state: &SharedUpdaterState,
 ) -> HealOutcome {
@@ -90,7 +92,26 @@ pub fn check_and_repair_filename(
         return HealOutcome::TargetExists;
     }
 
+    let Some(state) = app_handle.try_state::<crate::AppState>() else {
+        return HealOutcome::Skipped("app_state_missing");
+    };
+    let Some(simulator_state) =
+        app_handle.try_state::<crate::device_simulator_commands::DeviceSimulatorCommandState>()
+    else {
+        return HealOutcome::Skipped("simulator_state_missing");
+    };
+    if state.is_quitting.swap(true, Ordering::SeqCst) {
+        return HealOutcome::Skipped("shutdown_in_progress");
+    }
+    if let Err(error) = crate::prepare_application_exit(app_handle, simulator_state.inner()).await {
+        state.is_quitting.store(false, Ordering::SeqCst);
+        log::warn!("[updater] self-heal exit preparation failed: {error}");
+        return HealOutcome::Skipped("shutdown_prepare_failed");
+    }
+
+    crate::quiesce_application_tasks(state.inner());
     if let Err(error) = installer::spawn_rename_helper(&current_exe, &target_path) {
+        state.is_quitting.store(false, Ordering::SeqCst);
         log::warn!("[updater] self-heal spawn_rename_helper failed: {error}");
         return HealOutcome::Skipped("spawn_failed");
     }
@@ -101,11 +122,7 @@ pub fn check_and_repair_filename(
         target_path.display()
     );
 
-    for window in app_handle.webview_windows().values() {
-        let _ = window.close();
-    }
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    app_handle.exit(0);
+    crate::finish_application_exit(app_handle, state.inner());
     HealOutcome::Spawned
 }
 

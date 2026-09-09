@@ -1,7 +1,8 @@
 use crate::task_domain::{
-    normalize_path_for_merge, CopyState, DeployAttempt, DeployStage, DeployState, LocalExecState,
-    TaskGroup, TaskMergeKey, TaskRun, TaskRunType, TaskSourceType, TaskState, TaskSummaryStatus,
-    TaskTriggerSource,
+    build_server_rollups, normalize_path_for_merge, ArtifactMetadata, CompositeBatchSummary,
+    CopyState, DeployAttempt, DeployStage, DeployState, LocalExecState, ModuleTaskStatus,
+    TaskGroup, TaskGroupKind, TaskMergeKey, TaskModuleSummary, TaskRun, TaskRunType,
+    TaskSourceType, TaskState, TaskSummaryStatus, TaskTriggerSource,
 };
 use crate::task_events::{
     TaskGroupDetailSnapshot, TaskGroupListItem, TaskGroupsSnapshot, TaskLogEntry,
@@ -9,11 +10,62 @@ use crate::task_events::{
 };
 use crate::task_persist::{load_task_state, save_task_state};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
 const ACTIVE_TASK_CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn artifact_metadata(source_path: &str, task_config_id: Option<&str>) -> ArtifactMetadata {
+    let parts = source_path
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let version_index = parts
+        .iter()
+        .position(|part| part.starts_with('B') && part.contains('.'));
+    let product = version_index
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| parts.get(index))
+        .map(|value| (*value).to_string());
+    let version = version_index
+        .and_then(|index| parts.get(index))
+        .map(|value| (*value).to_string());
+    let architecture = version_index
+        .and_then(|index| parts.get(index + 1))
+        .map(|value| (*value).to_string());
+    let build_id = parts
+        .iter()
+        .rev()
+        .find(|part| {
+            part.strip_prefix('C').is_some_and(|digits| {
+                !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
+            })
+        })
+        .map(|value| (*value).to_string());
+    let source_modified_at = std::fs::metadata(source_path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339());
+    let module_name = product.clone();
+    let module_id = task_config_id
+        .zip(product.as_deref())
+        .map(|(task_id, product)| {
+            let normalized = product
+                .to_ascii_lowercase()
+                .replace(|character: char| !character.is_ascii_alphanumeric(), "-");
+            format!("{task_id}:{normalized}")
+        });
+    ArtifactMetadata {
+        product,
+        version,
+        architecture,
+        build_id,
+        source_modified_at,
+        module_id,
+        module_name,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TaskStartRequest {
@@ -24,6 +76,17 @@ pub struct TaskStartRequest {
     pub local_target_path: String,
     pub source_type: TaskSourceType,
     pub trigger_source: TaskTriggerSource,
+    pub module_id: Option<String>,
+    pub module_name: Option<String>,
+    pub parent_task_group_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompositeBatchModuleRequest {
+    pub module_id: String,
+    pub module_name: String,
+    pub remote_path: String,
+    pub local_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +135,8 @@ struct TaskManagerInner {
     state: Mutex<TaskState>,
     persist_lock: Mutex<()>,
     persist_scheduled: AtomicBool,
+    snapshot_scheduled: AtomicBool,
+    snapshot_revision: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -90,6 +155,8 @@ impl TaskManager {
                 state: Mutex::new(state),
                 persist_lock: Mutex::new(()),
                 persist_scheduled: AtomicBool::new(false),
+                snapshot_scheduled: AtomicBool::new(false),
+                snapshot_revision: AtomicU64::new(0),
             }),
         };
 
@@ -111,19 +178,231 @@ impl TaskManager {
                 }),
                 persist_lock: Mutex::new(()),
                 persist_scheduled: AtomicBool::new(false),
+                snapshot_scheduled: AtomicBool::new(false),
+                snapshot_revision: AtomicU64::new(0),
             }),
         }
     }
 
-    pub fn begin_scheduled_copy(&self, request: TaskStartRequest) -> TaskRunHandle {
+    pub fn begin_composite_batch(
+        &self,
+        task_config_id: &str,
+        display_name: &str,
+        batch_key: &str,
+        modules: Vec<CompositeBatchModuleRequest>,
+    ) -> String {
         let started_at = current_timestamp();
         let merge_key = TaskMergeKey::new(
+            Some(format!("{task_config_id}:batch")),
+            batch_key.to_string(),
+            display_name.to_string(),
+        );
+        let mut state = self.inner.state.lock().unwrap();
+        let index = state
+            .groups
+            .iter()
+            .position(|group| {
+                group.group_kind == TaskGroupKind::CompositeBatch && group.merge_key == merge_key
+            })
+            .unwrap_or_else(|| {
+                state.groups.push(TaskGroup {
+                    task_group_id: format!("group-{}", uuid::Uuid::new_v4()),
+                    merge_key: merge_key.clone(),
+                    task_config_id: Some(task_config_id.to_string()),
+                    source_type: TaskSourceType::Scheduled,
+                    display_name: display_name.to_string(),
+                    folder_name: batch_key.to_string(),
+                    source_path: String::new(),
+                    local_target_path: String::new(),
+                    artifact: ArtifactMetadata::default(),
+                    copy_status: CopyState::Pending,
+                    local_exec_status: LocalExecState::NotStarted,
+                    deploy_status: DeployState::NotStarted,
+                    summary_status: TaskSummaryStatus::Queued,
+                    started_at: started_at.clone(),
+                    finished_at: None,
+                    elapsed_seconds: 0,
+                    latest_run_id: None,
+                    had_failures: false,
+                    server_rollups: vec![],
+                    runs: vec![],
+                    group_kind: TaskGroupKind::CompositeBatch,
+                    parent_task_group_id: None,
+                    composite_batch: None,
+                    paused: false,
+                    cancel_requested: false,
+                    paused_at: None,
+                    accumulated_paused_seconds: 0,
+                });
+                state.groups.len() - 1
+            });
+        let group = &mut state.groups[index];
+        group.display_name = display_name.to_string();
+        group.folder_name = batch_key.to_string();
+        group.started_at = started_at;
+        group.finished_at = None;
+        group.composite_batch = Some(CompositeBatchSummary {
+            batch_key: batch_key.to_string(),
+            expected_modules: modules.len() as u32,
+            found_modules: 0,
+            current_module_index: 0,
+            current_module_name: None,
+            total_bytes: 0,
+            copied_bytes: 0,
+            modules: modules
+                .into_iter()
+                .map(|module| TaskModuleSummary {
+                    module_id: module.module_id,
+                    module_name: module.module_name,
+                    remote_path: module.remote_path,
+                    local_path: module.local_path,
+                    status: ModuleTaskStatus::PendingScan,
+                    ..TaskModuleSummary::default()
+                })
+                .collect(),
+        });
+        group.refresh_composite_batch();
+        let group_id = group.task_group_id.clone();
+        drop(state);
+        self.after_change(Some(&group_id));
+        group_id
+    }
+
+    pub fn mark_composite_module_found(
+        &self,
+        parent_id: &str,
+        module_id: &str,
+        found_builds: u32,
+    ) -> Result<(), String> {
+        self.update_composite_module(parent_id, module_id, |module| {
+            module.found_builds = found_builds.max(1);
+            module.status = ModuleTaskStatus::Queued;
+            module.error_message = None;
+        })
+    }
+
+    pub fn mark_composite_module_no_output(
+        &self,
+        parent_id: &str,
+        module_id: &str,
+    ) -> Result<(), String> {
+        self.update_composite_module(parent_id, module_id, |module| {
+            module.status = ModuleTaskStatus::NoOutput;
+            module.error_message = None;
+        })
+    }
+
+    pub fn mark_composite_module_failed(
+        &self,
+        parent_id: &str,
+        module_id: &str,
+        message: String,
+    ) -> Result<(), String> {
+        self.update_composite_module(parent_id, module_id, |module| {
+            module.status = ModuleTaskStatus::Failed;
+            module.error_message = Some(message);
+        })
+    }
+
+    pub fn mark_composite_current(
+        &self,
+        parent_id: &str,
+        module_id: &str,
+        current_index: u32,
+    ) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, parent_id)?;
+            let batch = group
+                .composite_batch
+                .as_mut()
+                .ok_or_else(|| "Task group is not a composite batch".to_string())?;
+            batch.current_module_index = current_index;
+            batch.current_module_name = batch
+                .modules
+                .iter()
+                .find(|module| module.module_id == module_id)
+                .map(|module| module.module_name.clone());
+            if let Some(module) = batch
+                .modules
+                .iter_mut()
+                .find(|module| module.module_id == module_id)
+            {
+                module.status = ModuleTaskStatus::Running;
+            }
+            group.refresh_composite_batch();
+        }
+        self.after_change(Some(parent_id));
+        Ok(())
+    }
+
+    fn update_composite_module(
+        &self,
+        parent_id: &str,
+        module_id: &str,
+        update: impl FnOnce(&mut TaskModuleSummary),
+    ) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, parent_id)?;
+            let module = group
+                .composite_batch
+                .as_mut()
+                .and_then(|batch| {
+                    batch
+                        .modules
+                        .iter_mut()
+                        .find(|module| module.module_id == module_id)
+                })
+                .ok_or_else(|| format!("Composite module not found: {module_id}"))?;
+            update(module);
+            group.refresh_composite_batch();
+        }
+        self.after_change(Some(parent_id));
+        Ok(())
+    }
+
+    pub fn update_copy_progress(
+        &self,
+        task_group_id: &str,
+        run_id: &str,
+        copied_bytes: u64,
+        total_bytes: u64,
+    ) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            group.runs[run_index].copy_copied_bytes = copied_bytes.min(total_bytes);
+            group.runs[run_index].copy_total_bytes = total_bytes;
+            group.refresh_from_runs();
+            refresh_composite_parents_locked(&mut state);
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
+    }
+
+    pub fn begin_scheduled_copy(&self, request: TaskStartRequest) -> TaskRunHandle {
+        let started_at = current_timestamp();
+        let parent_task_group_id = request.parent_task_group_id.clone();
+        let module_id = request.module_id.clone();
+        let merge_key = TaskMergeKey::new_scoped(
             request.task_config_id.clone(),
+            request.module_id.as_deref(),
+            &request.source_path,
             request.local_target_path.clone(),
             request.folder_name.clone(),
         );
         let proposed_group_id = format!("group-{}", uuid::Uuid::new_v4());
         let run_id = format!("run-{}", uuid::Uuid::new_v4());
+        let mut artifact =
+            artifact_metadata(&request.source_path, request.task_config_id.as_deref());
+        if request.module_id.is_some() {
+            artifact.module_id.clone_from(&request.module_id);
+        }
+        if request.module_name.is_some() {
+            artifact.module_name.clone_from(&request.module_name);
+        }
         let actual_group_id;
 
         {
@@ -142,6 +421,7 @@ impl TaskManager {
                         folder_name: request.folder_name.clone(),
                         source_path: request.source_path.clone(),
                         local_target_path: request.local_target_path.clone(),
+                        artifact: artifact.clone(),
                         copy_status: CopyState::Pending,
                         local_exec_status: LocalExecState::NotStarted,
                         deploy_status: DeployState::NotStarted,
@@ -153,6 +433,9 @@ impl TaskManager {
                         had_failures: false,
                         server_rollups: vec![],
                         runs: vec![],
+                        group_kind: TaskGroupKind::Artifact,
+                        parent_task_group_id: request.parent_task_group_id.clone(),
+                        composite_batch: None,
                         paused: false,
                         cancel_requested: false,
                         paused_at: None,
@@ -171,6 +454,11 @@ impl TaskManager {
             group.folder_name = request.folder_name;
             group.source_path = request.source_path;
             group.local_target_path = request.local_target_path;
+            group.artifact = artifact;
+            group.group_kind = TaskGroupKind::Artifact;
+            group
+                .parent_task_group_id
+                .clone_from(&request.parent_task_group_id);
             group.finished_at = None;
             // Reset pause/cancel state so elapsed_seconds is computed cleanly for the new run
             group.paused = false;
@@ -190,8 +478,33 @@ impl TaskManager {
                 deploy_phase: DeployState::NotStarted,
                 deploy_attempts: vec![],
                 attempt_ids: vec![],
+                copy_total_bytes: 0,
+                copy_copied_bytes: 0,
             });
             group.refresh_from_runs();
+
+            if let (Some(parent_id), Some(module_id)) =
+                (parent_task_group_id.as_deref(), module_id.as_deref())
+            {
+                if let Some(parent) = state
+                    .groups
+                    .iter_mut()
+                    .find(|candidate| candidate.task_group_id == parent_id)
+                {
+                    if let Some(module) = parent.composite_batch.as_mut().and_then(|batch| {
+                        batch
+                            .modules
+                            .iter_mut()
+                            .find(|module| module.module_id == module_id)
+                    }) {
+                        if !module.child_task_group_ids.contains(&actual_group_id) {
+                            module.child_task_group_ids.push(actual_group_id.clone());
+                        }
+                        module.status = ModuleTaskStatus::Running;
+                    }
+                    parent.refresh_composite_batch();
+                }
+            }
         }
 
         self.after_change(Some(actual_group_id.as_str()));
@@ -232,6 +545,9 @@ impl TaskManager {
             local_target_path: request.local_target_path,
             source_type: TaskSourceType::Manual,
             trigger_source: request.trigger_source,
+            module_id: None,
+            module_name: None,
+            parent_task_group_id: None,
         }))
     }
 
@@ -267,6 +583,7 @@ impl TaskManager {
                     folder_name: request.folder_name.clone(),
                     source_path: request.source_path.clone(),
                     local_target_path: request.local_target_path.clone(),
+                    artifact: artifact_metadata(&request.source_path, None),
                     copy_status: CopyState::Completed,
                     local_exec_status: LocalExecState::NotStarted,
                     deploy_status: DeployState::Pending,
@@ -278,6 +595,9 @@ impl TaskManager {
                     had_failures: false,
                     server_rollups: vec![],
                     runs: vec![],
+                    group_kind: TaskGroupKind::Artifact,
+                    parent_task_group_id: None,
+                    composite_batch: None,
                     paused: false,
                     cancel_requested: false,
                     paused_at: None,
@@ -301,6 +621,8 @@ impl TaskManager {
                 deploy_phase: DeployState::Pending,
                 deploy_attempts: vec![],
                 attempt_ids: vec![],
+                copy_total_bytes: 0,
+                copy_copied_bytes: 0,
             });
             group.refresh_from_runs();
         }
@@ -330,6 +652,8 @@ impl TaskManager {
                 deploy_phase: DeployState::Pending,
                 deploy_attempts: vec![],
                 attempt_ids: vec![],
+                copy_total_bytes: 0,
+                copy_copied_bytes: 0,
             });
             group.started_at = started_at;
             group.finished_at = None;
@@ -339,6 +663,101 @@ impl TaskManager {
         self.after_change(Some(task_group_id));
         Ok(TaskRunHandle {
             task_group_id: task_group_id.to_string(),
+            run_id,
+        })
+    }
+
+    pub fn begin_topology_run(
+        &self,
+        existing_task_group_id: Option<&str>,
+        display_name: &str,
+        topology_summary: &str,
+        primary_ip: &str,
+    ) -> Result<TaskRunHandle, String> {
+        let started_at = current_timestamp();
+        let run_id = format!("run-{}", uuid::Uuid::new_v4());
+        let mut state = self.inner.state.lock().unwrap();
+        let group_index = if let Some(group_id) = existing_task_group_id {
+            state
+                .groups
+                .iter()
+                .position(|group| group.task_group_id == group_id)
+                .ok_or_else(|| format!("Topology task not found: {group_id}"))?
+        } else {
+            state.groups.push(TaskGroup {
+                task_group_id: format!("group-{}", uuid::Uuid::new_v4()),
+                merge_key: TaskMergeKey::new(
+                    None,
+                    primary_ip.to_string(),
+                    format!("topology-{}", uuid::Uuid::new_v4()),
+                ),
+                task_config_id: None,
+                source_type: TaskSourceType::Manual,
+                display_name: display_name.to_string(),
+                folder_name: topology_summary.to_string(),
+                source_path: topology_summary.to_string(),
+                local_target_path: String::new(),
+                artifact: ArtifactMetadata {
+                    product: Some(display_name.to_string()),
+                    ..ArtifactMetadata::default()
+                },
+                copy_status: CopyState::Completed,
+                local_exec_status: LocalExecState::NotStarted,
+                deploy_status: DeployState::Pending,
+                summary_status: TaskSummaryStatus::CopyCompleted,
+                started_at: started_at.clone(),
+                finished_at: None,
+                elapsed_seconds: 0,
+                latest_run_id: None,
+                had_failures: false,
+                server_rollups: vec![],
+                runs: vec![],
+                group_kind: TaskGroupKind::Topology,
+                parent_task_group_id: None,
+                composite_batch: None,
+                paused: false,
+                cancel_requested: false,
+                paused_at: None,
+                accumulated_paused_seconds: 0,
+            });
+            state.groups.len() - 1
+        };
+        let group = &mut state.groups[group_index];
+        group.group_kind = TaskGroupKind::Topology;
+        group.display_name = display_name.to_string();
+        group.folder_name = topology_summary.to_string();
+        group.source_path = topology_summary.to_string();
+        group.started_at = started_at.clone();
+        group.finished_at = None;
+        group.runs.push(TaskRun {
+            run_id: run_id.clone(),
+            task_group_id: group.task_group_id.clone(),
+            run_type: if existing_task_group_id.is_some() {
+                TaskRunType::PostInstallRetry
+            } else {
+                TaskRunType::Topology
+            },
+            trigger_source: if existing_task_group_id.is_some() {
+                TaskTriggerSource::Recovery
+            } else {
+                TaskTriggerSource::Manual
+            },
+            started_at,
+            finished_at: None,
+            copy_phase: CopyState::Completed,
+            local_exec_phase: LocalExecState::NotStarted,
+            deploy_phase: DeployState::Pending,
+            deploy_attempts: vec![],
+            attempt_ids: vec![],
+            copy_total_bytes: 0,
+            copy_copied_bytes: 0,
+        });
+        group.refresh_from_runs();
+        let group_id = group.task_group_id.clone();
+        drop(state);
+        self.after_change(Some(&group_id));
+        Ok(TaskRunHandle {
+            task_group_id: group_id,
             run_id,
         })
     }
@@ -716,6 +1135,13 @@ impl TaskManager {
                             error_phase: None,
                             error_message: None,
                             last_log_excerpt: None,
+                            server_role: None,
+                            stage_started_at: Some(started_at.clone()),
+                            stage_finished_at: None,
+                            poll_attempt: 0,
+                            next_poll_at: None,
+                            resumable: false,
+                            topology_dispatched: false,
                         });
                     }
                     run.deploy_phase = DeployState::Running;
@@ -746,6 +1172,12 @@ impl TaskManager {
             {
                 let run = &mut group.runs[run_index];
                 let attempt = find_latest_attempt_mut(run, server_id)?;
+                if attempt.stage != stage {
+                    attempt.stage_finished_at = Some(current_timestamp());
+                    attempt.stage_started_at = Some(current_timestamp());
+                    attempt.poll_attempt = 0;
+                    attempt.next_poll_at = None;
+                }
                 attempt.stage = stage;
                 attempt.status = crate::task_domain::AttemptStatus::Running;
                 if let Some(progress) = progress_percentage {
@@ -795,6 +1227,50 @@ impl TaskManager {
             group.refresh_from_runs();
         }
 
+        self.after_change(Some(task_group_id));
+        Ok(())
+    }
+
+    pub fn update_attempt_checkpoint(
+        &self,
+        task_group_id: &str,
+        run_id: &str,
+        server_id: &str,
+        poll_attempt: u32,
+        next_poll_at: Option<String>,
+        resumable: bool,
+        topology_dispatched: bool,
+    ) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            let run = &mut group.runs[run_index];
+            let attempt = find_latest_attempt_mut(run, server_id)?;
+            attempt.poll_attempt = poll_attempt;
+            attempt.next_poll_at = next_poll_at;
+            attempt.resumable = resumable;
+            attempt.topology_dispatched = topology_dispatched;
+        }
+        self.after_change(Some(task_group_id));
+        Ok(())
+    }
+
+    pub fn set_attempt_server_role(
+        &self,
+        task_group_id: &str,
+        run_id: &str,
+        server_id: &str,
+        role: String,
+    ) -> Result<(), String> {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let group = find_group_mut(&mut state, task_group_id)?;
+            let run_index = find_run_index(group, run_id)?;
+            let attempt = find_latest_attempt_mut(&mut group.runs[run_index], server_id)?;
+            attempt.server_role = Some(role);
+            group.refresh_from_runs();
+        }
         self.after_change(Some(task_group_id));
         Ok(())
     }
@@ -849,19 +1325,21 @@ impl TaskManager {
         message: &str,
     ) -> Result<(), String> {
         let timestamp = current_timestamp();
-        let resolved_server_name = {
+        let (resolved_server_name, parent_task_group_id) = {
             let mut state = self.inner.state.lock().unwrap();
             let group = find_group_mut(&mut state, task_group_id)?;
+            let parent_task_group_id = group.parent_task_group_id.clone();
             let run_index = find_run_index(group, run_id)?;
             let run = &mut group.runs[run_index];
 
-            if let Some(server_id) = server_id {
+            let resolved = if let Some(server_id) = server_id {
                 let attempt = find_latest_attempt_mut(run, server_id)?;
                 attempt.last_log_excerpt = Some(message.to_string());
                 Some(attempt.server_name.clone())
             } else {
                 None
-            }
+            };
+            (resolved, parent_task_group_id)
         };
 
         if let Some(app_handle) = self.inner.app_handle.as_ref() {
@@ -874,9 +1352,23 @@ impl TaskManager {
                     server_name: server_name.map(str::to_string).or(resolved_server_name),
                     level: level.to_string(),
                     message: message.to_string(),
-                    timestamp,
+                    timestamp: timestamp.clone(),
                 },
             );
+            if let Some(parent_id) = parent_task_group_id.as_deref() {
+                let _ = app_handle.emit(
+                    TASK_LOG_EVENT,
+                    TaskLogEntry {
+                        task_group_id: Some(parent_id.to_string()),
+                        run_id: Some(run_id.to_string()),
+                        server_id: server_id.map(str::to_string),
+                        server_name: server_name.map(str::to_string),
+                        level: level.to_string(),
+                        message: message.to_string(),
+                        timestamp,
+                    },
+                );
+            }
         }
 
         self.after_log_change(task_group_id);
@@ -920,22 +1412,48 @@ impl TaskManager {
     }
 
     pub fn get_group_detail(&self, task_group_id: &str) -> Option<TaskGroup> {
-        self.inner
-            .state
-            .lock()
-            .unwrap()
+        let state = self.inner.state.lock().unwrap();
+        let mut group = state
             .groups
             .iter()
             .find(|group| group.task_group_id == task_group_id)
-            .cloned()
+            .cloned()?;
+        if group.group_kind == TaskGroupKind::CompositeBatch {
+            let child_ids = group
+                .composite_batch
+                .as_ref()
+                .map(|batch| {
+                    batch
+                        .modules
+                        .iter()
+                        .flat_map(|module| module.child_task_group_ids.iter().cloned())
+                        .collect::<std::collections::HashSet<_>>()
+                })
+                .unwrap_or_default();
+            let child_groups = state
+                .groups
+                .iter()
+                .filter(|child| child_ids.contains(&child.task_group_id))
+                .collect::<Vec<_>>();
+            group.runs = child_groups
+                .iter()
+                .flat_map(|child| child.runs.iter().cloned())
+                .collect();
+            group
+                .runs
+                .sort_by(|left, right| right.started_at.cmp(&left.started_at));
+            group.server_rollups = build_server_rollups(&group.runs);
+        }
+        Some(group)
     }
 
     pub fn clear_task_group(&self, task_group_id: &str) -> Result<(), String> {
         {
             let mut state = self.inner.state.lock().unwrap();
-            state
-                .groups
-                .retain(|group| group.task_group_id != task_group_id);
+            state.groups.retain(|group| {
+                group.task_group_id != task_group_id
+                    && group.parent_task_group_id.as_deref() != Some(task_group_id)
+            });
         }
         self.after_change(None);
         Ok(())
@@ -954,6 +1472,43 @@ impl TaskManager {
         self.inner.state.lock().unwrap().clone()
     }
 
+    /// Enforce the configured history cap without ever removing active work.
+    pub fn prune_terminal_groups(&self, max_records: usize) -> usize {
+        let removed = {
+            let mut state = self.inner.state.lock().unwrap();
+            if state.groups.len() <= max_records {
+                return 0;
+            }
+            let mut terminal = state
+                .groups
+                .iter()
+                .filter(|group| {
+                    group.summary_status == TaskSummaryStatus::Completed && !group.had_failures
+                })
+                .map(|group| (group.task_group_id.clone(), group.started_at.clone()))
+                .collect::<Vec<_>>();
+            terminal.sort_by(|left, right| right.1.cmp(&left.1));
+            let active_count = state.groups.len().saturating_sub(terminal.len());
+            let terminal_budget = max_records.saturating_sub(active_count);
+            let keep = terminal
+                .into_iter()
+                .take(terminal_budget)
+                .map(|(id, _)| id)
+                .collect::<std::collections::HashSet<_>>();
+            let before = state.groups.len();
+            state.groups.retain(|group| {
+                group.summary_status != TaskSummaryStatus::Completed
+                    || group.had_failures
+                    || keep.contains(&group.task_group_id)
+            });
+            before - state.groups.len()
+        };
+        if removed > 0 {
+            self.after_change(None);
+        }
+        removed
+    }
+
     /// Freeze any in-flight task at the current time and persist it before a
     /// graceful application exit.
     pub fn interrupt_in_progress_for_exit(&self) {
@@ -968,7 +1523,11 @@ impl TaskManager {
     }
 
     fn after_change(&self, task_group_id: Option<&str>) {
-        self.emit_group_list_snapshot();
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            refresh_composite_parents_locked(&mut state);
+        }
+        self.schedule_group_list_snapshot();
         if let Some(group_id) = task_group_id {
             self.emit_detail_snapshot(group_id);
         }
@@ -988,9 +1547,31 @@ impl TaskManager {
         let _ = app_handle.emit(
             TASK_GROUPS_SNAPSHOT_EVENT,
             TaskGroupsSnapshot {
+                revision: self.inner.snapshot_revision.fetch_add(1, Ordering::SeqCst) + 1,
                 groups: self.list_groups(),
             },
         );
+    }
+
+    fn schedule_group_list_snapshot(&self) {
+        if self.inner.app_handle.is_none()
+            || self
+                .inner
+                .snapshot_scheduled
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+            manager
+                .inner
+                .snapshot_scheduled
+                .store(false, Ordering::SeqCst);
+            manager.emit_group_list_snapshot();
+        });
     }
 
     fn emit_detail_snapshot(&self, task_group_id: &str) {
@@ -1077,6 +1658,84 @@ impl TaskManager {
     }
 }
 
+fn refresh_composite_parents_locked(state: &mut TaskState) {
+    let child_state = state
+        .groups
+        .iter()
+        .filter(|group| group.group_kind == TaskGroupKind::Artifact)
+        .map(|group| {
+            let latest = group.runs.last();
+            (
+                group.task_group_id.clone(),
+                (
+                    group.summary_status.clone(),
+                    latest.map(|run| run.copy_total_bytes).unwrap_or(0),
+                    latest.map(|run| run.copy_copied_bytes).unwrap_or(0),
+                    group.runs.last().and_then(|run| {
+                        run.deploy_attempts
+                            .iter()
+                            .rev()
+                            .find_map(|attempt| attempt.error_message.clone())
+                    }),
+                ),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for parent in state
+        .groups
+        .iter_mut()
+        .filter(|group| group.group_kind == TaskGroupKind::CompositeBatch)
+    {
+        if let Some(batch) = parent.composite_batch.as_mut() {
+            for module in &mut batch.modules {
+                let children = module
+                    .child_task_group_ids
+                    .iter()
+                    .filter_map(|id| child_state.get(id))
+                    .collect::<Vec<_>>();
+                if children.is_empty() {
+                    continue;
+                }
+                module.found_builds = module.found_builds.max(children.len() as u32);
+                module.completed_builds = children
+                    .iter()
+                    .filter(|(status, _, _, _)| *status == TaskSummaryStatus::Completed)
+                    .count() as u32;
+                module.total_bytes = children.iter().map(|(_, total, _, _)| *total).sum();
+                module.copied_bytes = children.iter().map(|(_, _, copied, _)| *copied).sum();
+                module.status = if children.iter().any(|(status, _, _, _)| {
+                    matches!(
+                        status,
+                        TaskSummaryStatus::Failed | TaskSummaryStatus::PartialFailed
+                    )
+                }) {
+                    ModuleTaskStatus::Failed
+                } else if children
+                    .iter()
+                    .any(|(status, _, _, _)| *status == TaskSummaryStatus::Interrupted)
+                {
+                    ModuleTaskStatus::Interrupted
+                } else if children
+                    .iter()
+                    .any(|(status, _, _, _)| *status == TaskSummaryStatus::Cancelled)
+                {
+                    ModuleTaskStatus::Cancelled
+                } else if children
+                    .iter()
+                    .all(|(status, _, _, _)| *status == TaskSummaryStatus::Completed)
+                {
+                    ModuleTaskStatus::Completed
+                } else {
+                    ModuleTaskStatus::Running
+                };
+                module.error_message = children.iter().find_map(|(_, _, _, error)| error.clone());
+            }
+        }
+        parent.refresh_composite_batch();
+    }
+}
+
 impl DeployTrackingContext {
     pub fn register_targets(&self, targets: &[DeployTarget]) -> Result<(), String> {
         self.task_manager
@@ -1113,6 +1772,34 @@ impl DeployTrackingContext {
     pub fn mark_success(&self, server_id: &str) -> Result<(), String> {
         self.task_manager
             .complete_attempt_success(&self.task_group_id, &self.run_id, server_id)
+    }
+
+    pub fn mark_checkpoint(
+        &self,
+        server_id: &str,
+        poll_attempt: u32,
+        next_poll_at: Option<String>,
+        resumable: bool,
+        topology_dispatched: bool,
+    ) -> Result<(), String> {
+        self.task_manager.update_attempt_checkpoint(
+            &self.task_group_id,
+            &self.run_id,
+            server_id,
+            poll_attempt,
+            next_poll_at,
+            resumable,
+            topology_dispatched,
+        )
+    }
+
+    pub fn set_server_role(&self, server_id: &str, role: String) -> Result<(), String> {
+        self.task_manager.set_attempt_server_role(
+            &self.task_group_id,
+            &self.run_id,
+            server_id,
+            role,
+        )
     }
 
     pub fn cancel_pending(&self) -> Result<(), String> {
@@ -1224,6 +1911,9 @@ impl TaskStartRequest {
             local_target_path: "E:\\target\\Release_01".to_string(),
             source_type: TaskSourceType::Scheduled,
             trigger_source: TaskTriggerSource::Scheduled,
+            module_id: None,
+            module_name: None,
+            parent_task_group_id: None,
         }
     }
 }
@@ -1254,6 +1944,22 @@ impl DeployTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_business_identity_from_component_build_path() {
+        let metadata = artifact_metadata(
+            r"\\t03\每日编译1\组件项目\Jenkins\new\product\VMS_U500_H16\B2101.12.1\x86_64\0903\C1788473722875460505",
+            Some("task-components"),
+        );
+        assert_eq!(metadata.product.as_deref(), Some("VMS_U500_H16"));
+        assert_eq!(metadata.version.as_deref(), Some("B2101.12.1"));
+        assert_eq!(metadata.architecture.as_deref(), Some("x86_64"));
+        assert_eq!(metadata.build_id.as_deref(), Some("C1788473722875460505"));
+        assert_eq!(
+            metadata.module_id.as_deref(),
+            Some("task-components:vms-u500-h16")
+        );
+    }
 
     #[test]
     fn begin_copy_run_creates_group_and_active_run() {
@@ -1804,5 +2510,155 @@ mod tests {
         assert_eq!(retry_run.trigger_source, TaskTriggerSource::Recovery);
         assert_eq!(retry_run.copy_phase, CopyState::Completed);
         assert_eq!(retry_run.deploy_phase, DeployState::Pending);
+    }
+
+    #[test]
+    fn composite_batch_keeps_no_output_neutral_and_links_children() {
+        let manager = TaskManager::new_in_memory();
+        let parent = manager.begin_composite_batch(
+            "task-components",
+            "Components",
+            "2026-09-05",
+            vec![
+                CompositeBatchModuleRequest {
+                    module_id: "module-a".into(),
+                    module_name: "A".into(),
+                    remote_path: r"\\t03\A".into(),
+                    local_path: r"E:\A".into(),
+                },
+                CompositeBatchModuleRequest {
+                    module_id: "module-b".into(),
+                    module_name: "B".into(),
+                    remote_path: r"\\t03\B".into(),
+                    local_path: r"E:\B".into(),
+                },
+            ],
+        );
+        manager
+            .mark_composite_module_no_output(&parent, "module-b")
+            .unwrap();
+        manager
+            .mark_composite_module_found(&parent, "module-a", 1)
+            .unwrap();
+        let child = manager.begin_scheduled_copy(TaskStartRequest {
+            task_config_id: Some("task-components".into()),
+            display_name: "A".into(),
+            folder_name: "C1".into(),
+            source_path: r"\\t03\A\C1".into(),
+            local_target_path: r"E:\A\C1".into(),
+            source_type: TaskSourceType::Scheduled,
+            trigger_source: TaskTriggerSource::Scheduled,
+            module_id: Some("module-a".into()),
+            module_name: Some("A".into()),
+            parent_task_group_id: Some(parent.clone()),
+        });
+        manager
+            .mark_copy_completed(&child.task_group_id, &child.run_id, false)
+            .unwrap();
+
+        let detail = manager.get_group_detail(&parent).unwrap();
+        let batch = detail.composite_batch.unwrap();
+        assert_eq!(batch.expected_modules, 2);
+        assert_eq!(batch.found_modules, 1);
+        assert_eq!(batch.modules[1].status, ModuleTaskStatus::NoOutput);
+        assert_eq!(detail.summary_status, TaskSummaryStatus::Completed);
+        assert!(!detail.had_failures);
+    }
+
+    #[test]
+    fn composite_batch_surfaces_failed_and_cancelled_modules() {
+        let manager = TaskManager::new_in_memory();
+        let parent = manager.begin_composite_batch(
+            "task-components",
+            "Components",
+            "2026-09-05",
+            vec![
+                CompositeBatchModuleRequest {
+                    module_id: "module-a".into(),
+                    module_name: "A".into(),
+                    remote_path: r"\\t03\A".into(),
+                    local_path: r"E:\A".into(),
+                },
+                CompositeBatchModuleRequest {
+                    module_id: "module-b".into(),
+                    module_name: "B".into(),
+                    remote_path: r"\\t03\B".into(),
+                    local_path: r"E:\B".into(),
+                },
+                CompositeBatchModuleRequest {
+                    module_id: "module-c".into(),
+                    module_name: "C".into(),
+                    remote_path: r"\\t03\C".into(),
+                    local_path: r"E:\C".into(),
+                },
+            ],
+        );
+        manager
+            .mark_composite_module_no_output(&parent, "module-b")
+            .unwrap();
+        for module_id in ["module-a", "module-c"] {
+            manager
+                .mark_composite_module_found(&parent, module_id, 1)
+                .unwrap();
+        }
+        let child = |module_id: &str| {
+            manager.begin_scheduled_copy(TaskStartRequest {
+                task_config_id: Some("task-components".into()),
+                display_name: module_id.to_string(),
+                folder_name: "C1".into(),
+                source_path: format!(r"\\t03\{module_id}\C1"),
+                local_target_path: format!(r"E:\{module_id}\C1"),
+                source_type: TaskSourceType::Scheduled,
+                trigger_source: TaskTriggerSource::Scheduled,
+                module_id: Some(module_id.to_string()),
+                module_name: Some(module_id.to_string()),
+                parent_task_group_id: Some(parent.clone()),
+            })
+        };
+        let failed = child("module-a");
+        manager
+            .mark_copy_failed(&failed.task_group_id, &failed.run_id, "copy failed".into())
+            .unwrap();
+        let cancelled = child("module-c");
+        manager
+            .mark_copy_cancelled(&cancelled.task_group_id, &cancelled.run_id)
+            .unwrap();
+
+        let detail = manager.get_group_detail(&parent).unwrap();
+        let batch = detail.composite_batch.unwrap();
+        assert_eq!(batch.modules[0].status, ModuleTaskStatus::Failed);
+        assert_eq!(batch.modules[1].status, ModuleTaskStatus::NoOutput);
+        assert_eq!(batch.modules[2].status, ModuleTaskStatus::Cancelled);
+        assert_eq!(detail.summary_status, TaskSummaryStatus::PartialFailed);
+        assert!(detail.had_failures);
+    }
+
+    #[test]
+    fn task_list_100_and_1000_record_baseline_is_bounded() {
+        for count in [100usize, 1_000] {
+            let manager = TaskManager::new_in_memory();
+            let started = std::time::Instant::now();
+            for index in 0..count {
+                let mut request = TaskStartRequest::sample();
+                request.folder_name = format!("C{index:019}");
+                request.source_path = format!(r"\\t03\product\{index}");
+                request.local_target_path = format!(r"E:\sync\{index}");
+                let handle = manager.begin_scheduled_copy(request);
+                manager
+                    .mark_copy_completed(&handle.task_group_id, &handle.run_id, false)
+                    .unwrap();
+            }
+            let build_elapsed = started.elapsed();
+            let list_started = std::time::Instant::now();
+            let groups = manager.list_groups();
+            let list_elapsed = list_started.elapsed();
+            eprintln!(
+                "task-list-baseline count={count} build_ms={} list_ms={}",
+                build_elapsed.as_millis(),
+                list_elapsed.as_millis()
+            );
+            assert_eq!(groups.len(), count);
+            assert!(list_elapsed < std::time::Duration::from_secs(2));
+        }
     }
 }

@@ -3,9 +3,9 @@
   "versions": [
     {
       "version": "1.2.2",
-      "url": "file-sync-tool-1.2.2-202609032016.exe",
-      "sha256": "6105a94ff2c2eb96a531a4ad6fe64afc34a6dfd24a227162333c76957bdbd5d3",
-      "released_at": "2026-09-03",
+      "url": "file-sync-tool-1.2.2-202609091431.exe",
+      "sha256": "31fa7d81702a115dd761af821f8e1f65d79862cabc1fe04c29629e9c22c1c2b4",
+      "released_at": "2026-09-09",
       "changelog": [
         "增强视频设备模拟器稳定性与媒体能力：优化时间水印录像、Media Foundation H.264 编码及 RTSP/RTP 调度传输，完善告警图片组轮换、投递和遥测，并改进本地素材、平台注册、扫描、Worker 运行时及 Windows 网络资源处理。",
         "增强同步扫描、任务管理、任务组和配置编辑流程，完善任务状态及同步交付能力。",

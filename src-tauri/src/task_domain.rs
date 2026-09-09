@@ -16,6 +16,19 @@ impl TaskMergeKey {
         Self(format!("{task_id}||{normalized_path}||{normalized_folder}"))
     }
 
+    pub fn new_scoped(
+        task_config_id: Option<String>,
+        module_id: Option<&str>,
+        source_path: &str,
+        local_target_path: String,
+        folder_name: String,
+    ) -> Self {
+        let base = Self::new(task_config_id, local_target_path, folder_name);
+        let module = module_id.map(normalize_token).unwrap_or_default();
+        let source = normalize_path_for_merge(source_path);
+        Self(format!("{}||{module}||{source}", base.0))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -38,6 +51,63 @@ pub enum TaskSummaryStatus {
     Interrupted,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskGroupKind {
+    #[default]
+    Artifact,
+    CompositeBatch,
+    Topology,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleTaskStatus {
+    #[default]
+    PendingScan,
+    NoOutput,
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskModuleSummary {
+    pub module_id: String,
+    pub module_name: String,
+    pub remote_path: String,
+    pub local_path: String,
+    pub status: ModuleTaskStatus,
+    #[serde(default)]
+    pub child_task_group_ids: Vec<String>,
+    #[serde(default)]
+    pub found_builds: u32,
+    #[serde(default)]
+    pub completed_builds: u32,
+    #[serde(default)]
+    pub total_bytes: u64,
+    #[serde(default)]
+    pub copied_bytes: u64,
+    #[serde(default)]
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CompositeBatchSummary {
+    pub batch_key: String,
+    pub expected_modules: u32,
+    pub found_modules: u32,
+    pub current_module_index: u32,
+    pub current_module_name: Option<String>,
+    pub total_bytes: u64,
+    pub copied_bytes: u64,
+    #[serde(default)]
+    pub modules: Vec<TaskModuleSummary>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptStatus {
@@ -55,6 +125,12 @@ pub enum DeployStage {
     Connecting,
     Uploading,
     ExecutingCommands,
+    WaitingReboot,
+    EnablingSsh,
+    ConfiguringTopology,
+    VerifyingTopology,
+    ChangingPasswords,
+    Unconfirmed,
     Done,
 }
 
@@ -64,6 +140,8 @@ pub enum TaskRunType {
     CopyAndDeploy,
     DeployRetry,
     ManualDeploy,
+    Topology,
+    PostInstallRetry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,6 +216,20 @@ pub struct DeployAttempt {
     pub error_phase: Option<DeployStage>,
     pub error_message: Option<String>,
     pub last_log_excerpt: Option<String>,
+    #[serde(default)]
+    pub server_role: Option<String>,
+    #[serde(default)]
+    pub stage_started_at: Option<String>,
+    #[serde(default)]
+    pub stage_finished_at: Option<String>,
+    #[serde(default)]
+    pub poll_attempt: u32,
+    #[serde(default)]
+    pub next_poll_at: Option<String>,
+    #[serde(default)]
+    pub resumable: bool,
+    #[serde(default)]
+    pub topology_dispatched: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +246,10 @@ pub struct TaskRun {
     pub deploy_phase: DeployState,
     pub deploy_attempts: Vec<DeployAttempt>,
     pub attempt_ids: Vec<String>,
+    #[serde(default)]
+    pub copy_total_bytes: u64,
+    #[serde(default)]
+    pub copy_copied_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +264,26 @@ pub struct ServerRollup {
     pub failure_count: u32,
     pub last_error_message: Option<String>,
     pub attempt_ids: Vec<String>,
+    #[serde(default)]
+    pub server_role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ArtifactMetadata {
+    #[serde(default)]
+    pub product: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub architecture: Option<String>,
+    #[serde(default)]
+    pub build_id: Option<String>,
+    #[serde(default)]
+    pub source_modified_at: Option<String>,
+    #[serde(default)]
+    pub module_id: Option<String>,
+    #[serde(default)]
+    pub module_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +296,8 @@ pub struct TaskGroup {
     pub folder_name: String,
     pub source_path: String,
     pub local_target_path: String,
+    #[serde(default)]
+    pub artifact: ArtifactMetadata,
     pub copy_status: CopyState,
     pub local_exec_status: LocalExecState,
     pub deploy_status: DeployState,
@@ -191,6 +309,12 @@ pub struct TaskGroup {
     pub had_failures: bool,
     pub server_rollups: Vec<ServerRollup>,
     pub runs: Vec<TaskRun>,
+    #[serde(default)]
+    pub group_kind: TaskGroupKind,
+    #[serde(default)]
+    pub parent_task_group_id: Option<String>,
+    #[serde(default)]
+    pub composite_batch: Option<CompositeBatchSummary>,
     #[serde(default, skip_serializing)]
     pub paused: bool,
     #[serde(default, skip_serializing)]
@@ -242,6 +366,7 @@ impl TaskState {
                 folder_name: "Release_01".to_string(),
                 source_path: "C:\\source\\Release_01".to_string(),
                 local_target_path: "E:\\target\\builds".to_string(),
+                artifact: ArtifactMetadata::default(),
                 copy_status: CopyState::Completed,
                 local_exec_status: LocalExecState::NotStarted,
                 deploy_status: DeployState::Running,
@@ -286,8 +411,20 @@ impl TaskState {
                         error_phase: None,
                         error_message: None,
                         last_log_excerpt: None,
+                        server_role: None,
+                        stage_started_at: None,
+                        stage_finished_at: None,
+                        poll_attempt: 0,
+                        next_poll_at: None,
+                        resumable: false,
+                        topology_dispatched: false,
                     }],
+                    copy_total_bytes: 0,
+                    copy_copied_bytes: 0,
                 }],
+                group_kind: TaskGroupKind::Artifact,
+                parent_task_group_id: None,
+                composite_batch: None,
             }],
         }
     }
@@ -344,6 +481,10 @@ impl TaskGroup {
     }
 
     pub fn refresh_from_runs(&mut self) {
+        if self.group_kind == TaskGroupKind::CompositeBatch {
+            self.refresh_composite_batch();
+            return;
+        }
         let Some(latest_run) = self.runs.last_mut() else {
             return;
         };
@@ -396,10 +537,10 @@ impl TaskGroup {
         self.server_rollups = build_server_rollups(&self.runs);
         self.had_failures = self.runs.iter().any(|run| {
             run.copy_phase == CopyState::Failed
-                || run
-                    .deploy_attempts
-                    .iter()
-                    .any(|attempt| attempt.status == AttemptStatus::Failed)
+                || run.deploy_attempts.iter().any(|attempt| {
+                    attempt.status == AttemptStatus::Failed
+                        || (attempt.status == AttemptStatus::Interrupted && attempt.resumable)
+                })
         });
         let total_elapsed = compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
         // Subtract any time the task was paused (including current pause if ongoing)
@@ -408,6 +549,64 @@ impl TaskGroup {
             paused_duration += compute_elapsed_seconds(paused_at_str, None);
         }
         self.elapsed_seconds = total_elapsed.saturating_sub(paused_duration);
+    }
+    pub fn refresh_composite_batch(&mut self) {
+        let Some(batch) = self.composite_batch.as_mut() else {
+            return;
+        };
+        batch.expected_modules = batch.modules.len() as u32;
+        batch.found_modules = batch
+            .modules
+            .iter()
+            .filter(|module| module.found_builds > 0)
+            .count() as u32;
+        batch.total_bytes = batch.modules.iter().map(|module| module.total_bytes).sum();
+        batch.copied_bytes = batch.modules.iter().map(|module| module.copied_bytes).sum();
+        self.had_failures = batch
+            .modules
+            .iter()
+            .any(|module| module.status == ModuleTaskStatus::Failed);
+        let any_active = batch.modules.iter().any(|module| {
+            matches!(
+                module.status,
+                ModuleTaskStatus::Queued
+                    | ModuleTaskStatus::Running
+                    | ModuleTaskStatus::PendingScan
+            )
+        });
+        self.summary_status = if any_active {
+            TaskSummaryStatus::Copying
+        } else if self.had_failures {
+            TaskSummaryStatus::PartialFailed
+        } else if batch
+            .modules
+            .iter()
+            .any(|module| module.status == ModuleTaskStatus::Interrupted)
+        {
+            TaskSummaryStatus::Interrupted
+        } else if batch
+            .modules
+            .iter()
+            .any(|module| module.status == ModuleTaskStatus::Cancelled)
+        {
+            TaskSummaryStatus::Cancelled
+        } else {
+            TaskSummaryStatus::Completed
+        };
+        self.copy_status = if any_active {
+            CopyState::Running
+        } else if self.had_failures {
+            CopyState::Failed
+        } else {
+            CopyState::Completed
+        };
+        if any_active {
+            self.finished_at = None;
+        } else if self.finished_at.is_none() {
+            self.finished_at = Some(current_timestamp());
+        }
+        self.elapsed_seconds =
+            compute_elapsed_seconds(&self.started_at, self.finished_at.as_deref());
     }
 }
 
@@ -599,7 +798,7 @@ fn summarize_group(
     }
 }
 
-fn build_server_rollups(runs: &[TaskRun]) -> Vec<ServerRollup> {
+pub(crate) fn build_server_rollups(runs: &[TaskRun]) -> Vec<ServerRollup> {
     let mut rollups = BTreeMap::<String, ServerRollup>::new();
 
     for run in runs {
@@ -616,10 +815,12 @@ fn build_server_rollups(runs: &[TaskRun]) -> Vec<ServerRollup> {
                     failure_count: 0,
                     last_error_message: None,
                     attempt_ids: vec![],
+                    server_role: attempt.server_role.clone(),
                 });
 
             entry.server_name = attempt.server_name.clone();
             entry.server_host = attempt.server_host.clone();
+            entry.server_role.clone_from(&attempt.server_role);
 
             if attempt.status == AttemptStatus::Success {
                 entry.success_count += 1;
@@ -644,6 +845,77 @@ fn build_server_rollups(runs: &[TaskRun]) -> Vec<ServerRollup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn scoped_merge_key_separates_modules_with_the_same_build_folder() {
+        let first = TaskMergeKey::new_scoped(
+            Some("task-components".to_string()),
+            Some("module-a"),
+            r"\\t03\product\A\0905\C1",
+            r"E:\sync\C1".to_string(),
+            "C1".to_string(),
+        );
+        let second = TaskMergeKey::new_scoped(
+            Some("task-components".to_string()),
+            Some("module-b"),
+            r"\\t03\product\B\0905\C1",
+            r"E:\sync\C1".to_string(),
+            "C1".to_string(),
+        );
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn legacy_task_state_defaults_new_composite_and_checkpoint_fields() {
+        let mut value = serde_json::to_value(TaskState::sample_running()).unwrap();
+        {
+            let group = value
+                .pointer_mut("/groups/0")
+                .and_then(Value::as_object_mut)
+                .unwrap();
+            group.remove("group_kind");
+            group.remove("parent_task_group_id");
+            group.remove("composite_batch");
+        }
+        {
+            let run = value
+                .pointer_mut("/groups/0/runs/0")
+                .and_then(Value::as_object_mut)
+                .unwrap();
+            run.remove("copy_total_bytes");
+            run.remove("copy_copied_bytes");
+        }
+        {
+            let attempt = value
+                .pointer_mut("/groups/0/runs/0/deploy_attempts/0")
+                .and_then(Value::as_object_mut)
+                .unwrap();
+            for key in [
+                "server_role",
+                "stage_started_at",
+                "stage_finished_at",
+                "poll_attempt",
+                "next_poll_at",
+                "resumable",
+                "topology_dispatched",
+            ] {
+                attempt.remove(key);
+            }
+        }
+
+        let restored: TaskState = serde_json::from_value(value).unwrap();
+        let group = &restored.groups[0];
+        assert_eq!(group.group_kind, TaskGroupKind::Artifact);
+        assert!(group.parent_task_group_id.is_none());
+        assert!(group.composite_batch.is_none());
+        let run = &group.runs[0];
+        assert_eq!(run.copy_total_bytes, 0);
+        let attempt = &run.deploy_attempts[0];
+        assert_eq!(attempt.poll_attempt, 0);
+        assert!(!attempt.resumable);
+        assert!(!attempt.topology_dispatched);
+    }
 
     #[test]
     fn merge_key_normalizes_windows_paths() {
@@ -723,6 +995,13 @@ mod tests {
                     error_phase: None,
                     error_message: None,
                     last_log_excerpt: None,
+                    server_role: None,
+                    stage_started_at: None,
+                    stage_finished_at: None,
+                    poll_attempt: 0,
+                    next_poll_at: None,
+                    resumable: false,
+                    topology_dispatched: false,
                 },
                 DeployAttempt {
                     attempt_id: "attempt-2".to_string(),
@@ -743,9 +1022,18 @@ mod tests {
                     error_phase: Some(DeployStage::Uploading),
                     error_message: Some("Interrupted".to_string()),
                     last_log_excerpt: None,
+                    server_role: None,
+                    stage_started_at: None,
+                    stage_finished_at: None,
+                    poll_attempt: 0,
+                    next_poll_at: None,
+                    resumable: false,
+                    topology_dispatched: false,
                 },
             ],
             attempt_ids: vec![],
+            copy_total_bytes: 0,
+            copy_copied_bytes: 0,
         };
 
         run.refresh_deploy_phase();

@@ -8,8 +8,6 @@ import {
   Check,
   CheckCircle2,
   Database,
-  Eye,
-  EyeOff,
   Globe,
   KeyRound,
   Layers,
@@ -47,27 +45,19 @@ const RECENT_IPS_KEY = 'umsInitialPassword.recentIps';
 const LEGACY_RECENT_IPS_KEY = 'frameworkPassword.recentIps';
 const RECENT_IPS_LIMIT = 10;
 
-const showNewPassword = ref(false);
-
 interface FlowDefinition {
   kind: UmsInitPasswordKind;
   icon: typeof Layers;
   labelKey: string;
-  account: string;
+  account: string | null;
   port: number;
 }
 
 const FLOWS: FlowDefinition[] = [
   { kind: 'framework', icon: Layers, labelKey: 'tools.umsInitialPassword.scope.framework', account: 'admin', port: 21900 },
-  { kind: 'ums', icon: Building2, labelKey: 'tools.umsInitialPassword.scope.ums', account: 'loadmin', port: 80 },
+  { kind: 'ums', icon: Building2, labelKey: 'tools.umsInitialPassword.scope.ums', account: null, port: 80 },
   { kind: 'cdm', icon: Database, labelKey: 'tools.umsInitialPassword.scope.cdm', account: 'admin', port: 25011 },
 ];
-
-const showOldPassword = ref<Record<UmsInitPasswordKind, boolean>>({
-  framework: false,
-  ums: false,
-  cdm: false,
-});
 
 const toggleFlow = (kind: UmsInitPasswordKind) => {
   form.enabledFlows[kind] = !form.enabledFlows[kind];
@@ -76,7 +66,9 @@ const toggleFlow = (kind: UmsInitPasswordKind) => {
 const selectedFlowCount = computed(() => FLOWS.filter(flow => form.enabledFlows[flow.kind]).length);
 
 const isSameAsNew = (kind: UmsInitPasswordKind) =>
-  form.enabledFlows[kind] && form.oldPasswords[kind] === form.newPassword;
+  form.enabledFlows[kind] && form.oldPasswords[kind] === form.newPasswords[kind];
+
+const flowAccount = (flow: FlowDefinition) => flow.kind === 'ums' ? form.umsUsername : flow.account;
 
 // UMS ships with `admin_123`, which is the very value most people type as the new
 // password. Rather than blocking, identical passwords mean "already at the target
@@ -235,7 +227,8 @@ const isFormValid = computed(
   () =>
     allSelectedIps.value.length > 0 &&
     selectedFlowCount.value > 0 &&
-    form.newPassword.length > 0 &&
+    FLOWS.every(flow => !form.enabledFlows[flow.kind] || form.newPasswords[flow.kind].length > 0) &&
+    (!form.enabledFlows.ums || form.umsUsername.trim().length > 0) &&
     conflictingFlows.value.length === 0 &&
     !isLoading.value,
 );
@@ -243,7 +236,7 @@ const isFormValid = computed(
 // Carry the target selection across app restarts too. Passwords stay in memory
 // only — see the note in umsInitialPasswordForm.ts.
 watch(
-  () => [form.selectedIps, form.manualIpTags, form.manualIpInput, form.enabledFlows],
+  () => [form.selectedIps, form.manualIpTags, form.manualIpInput, form.enabledFlows, form.umsUsername],
   () => persistUmsInitialPasswordForm(),
   { deep: true },
 );
@@ -332,7 +325,10 @@ const handleExecute = async () => {
     const response = await changeUmsInitPassword({
       ips: ipList,
       targets: { ...form.enabledFlows },
-      newPassword: form.newPassword,
+      umsUsername: form.umsUsername.trim(),
+      frameworkNewPassword: form.newPasswords.framework,
+      umsNewPassword: form.newPasswords.ums,
+      cdmNewPassword: form.newPasswords.cdm,
       frameworkOldPassword: form.oldPasswords.framework,
       umsOldPassword: form.oldPasswords.ums,
       cdmOldPassword: form.oldPasswords.cdm,
@@ -471,33 +467,8 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
             <h3 class="text-sm font-semibold text-slate-800">{{ t('tools.umsInitialPassword.passwordConfig') }}</h3>
           </div>
 
-          <!-- Shared new password -->
-          <div class="space-y-1.5">
-            <label class="block text-xs font-medium text-slate-600">{{ t('tools.umsInitialPassword.newPassword') }}</label>
-            <div class="flex items-center gap-2">
-              <input
-                v-model="form.newPassword"
-                :type="showNewPassword ? 'text' : 'password'"
-                autocomplete="new-password"
-                :placeholder="t('tools.umsInitialPassword.newPasswordPlaceholder')"
-                :disabled="isLoading"
-                class="flex-1 px-3 py-2 text-sm border rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 transition-colors"
-                :class="conflictingFlows.length > 0 ? 'border-amber-300 bg-amber-50' : 'border-slate-200'"
-              />
-              <button
-                type="button"
-                class="inline-flex items-center gap-1 text-xs font-medium text-slate-500 transition-colors hover:text-slate-700 shrink-0"
-                @click="showNewPassword = !showNewPassword"
-              >
-                <component :is="showNewPassword ? EyeOff : Eye" class="h-3.5 w-3.5" />
-                {{ t(showNewPassword ? 'tools.umsInitialPassword.hidePassword' : 'tools.umsInitialPassword.showPassword') }}
-              </button>
-            </div>
-            <p class="text-xs text-slate-400">{{ t('tools.umsInitialPassword.newPasswordHint') }}</p>
-          </div>
-
-          <!-- Per-flow selection with its own old password -->
-          <div class="mt-5 space-y-2">
+          <!-- Per-flow selection with independent credentials -->
+          <div class="space-y-2">
             <p class="text-xs font-medium text-slate-600">{{ t('tools.umsInitialPassword.scope.legend') }}</p>
             <div
               v-for="flow in FLOWS"
@@ -519,30 +490,50 @@ const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';
                 />
                 <component :is="flow.icon" class="w-4 h-4 text-slate-400 shrink-0" />
                 <span class="text-sm font-medium text-slate-800">{{ t(flow.labelKey) }}</span>
-                <span class="text-xs text-slate-400 font-mono">:{{ flow.port }} · {{ flow.account }}</span>
+                <span class="text-xs text-slate-400 font-mono">:{{ flow.port }} · {{ flowAccount(flow) }}</span>
               </label>
 
-              <div v-if="form.enabledFlows[flow.kind]" class="mt-2.5 pl-7 flex items-center gap-2">
-                <label class="text-xs text-slate-500 shrink-0" :for="`ums-init-password-old-${flow.kind}`">
-                  {{ t('tools.umsInitialPassword.oldPasswordFor') }}
-                </label>
-                <input
-                  :id="`ums-init-password-old-${flow.kind}`"
-                  v-model="form.oldPasswords[flow.kind]"
-                  :type="showOldPassword[flow.kind] ? 'text' : 'password'"
-                  autocomplete="new-password"
-                  :disabled="isLoading"
-                  class="flex-1 max-w-[16rem] px-3 py-1.5 text-sm border rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 transition-colors"
-                  :class="hasFlowConflict(flow.kind) ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'"
-                />
-                <button
-                  type="button"
-                  class="inline-flex items-center text-slate-400 transition-colors hover:text-slate-600 shrink-0"
-                  :title="t(showOldPassword[flow.kind] ? 'tools.umsInitialPassword.hidePassword' : 'tools.umsInitialPassword.showPassword')"
-                  @click="showOldPassword[flow.kind] = !showOldPassword[flow.kind]"
-                >
-                  <component :is="showOldPassword[flow.kind] ? EyeOff : Eye" class="h-4 w-4" />
-                </button>
+              <div v-if="form.enabledFlows[flow.kind]" class="mt-2.5 pl-7 space-y-2">
+                <div v-if="flow.kind === 'ums'" class="flex items-center gap-2">
+                  <label class="w-20 text-xs text-slate-500 shrink-0" for="ums-init-password-username">
+                    {{ t('tools.umsInitialPassword.umsUsername') }}
+                  </label>
+                  <input
+                    id="ums-init-password-username"
+                    v-model="form.umsUsername"
+                    autocomplete="username"
+                    :disabled="isLoading"
+                    class="flex-1 max-w-[16rem] px-3 py-1.5 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50"
+                  />
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="w-20 text-xs text-slate-500 shrink-0" :for="`ums-init-password-old-${flow.kind}`">
+                    {{ t('tools.umsInitialPassword.oldPasswordFor') }}
+                  </label>
+                  <input
+                    :id="`ums-init-password-old-${flow.kind}`"
+                    v-model="form.oldPasswords[flow.kind]"
+                    type="text"
+                    autocomplete="new-password"
+                    :disabled="isLoading"
+                    class="flex-1 max-w-[16rem] px-3 py-1.5 text-sm border rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 transition-colors"
+                    :class="hasFlowConflict(flow.kind) ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'"
+                  />
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="w-20 text-xs text-slate-500 shrink-0" :for="`ums-init-password-new-${flow.kind}`">
+                    {{ t('tools.umsInitialPassword.newPasswordFor') }}
+                  </label>
+                  <input
+                    :id="`ums-init-password-new-${flow.kind}`"
+                    v-model="form.newPasswords[flow.kind]"
+                    type="text"
+                    autocomplete="new-password"
+                    :disabled="isLoading"
+                    class="flex-1 max-w-[16rem] px-3 py-1.5 text-sm border rounded-lg focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 disabled:bg-slate-50 disabled:cursor-not-allowed text-slate-900 transition-colors"
+                    :class="hasFlowConflict(flow.kind) ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'"
+                  />
+                </div>
               </div>
               <p v-if="hasFlowConflict(flow.kind)" class="mt-1.5 pl-7 text-xs font-medium text-amber-700">
                 {{ t('tools.umsInitialPassword.samePasswordFor', { target: t(flow.labelKey) }) }}

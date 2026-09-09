@@ -46,7 +46,9 @@ const tabs = [
 
     <div class="min-h-0 flex-1">
       <router-view v-slot="{ Component }">
-        <keep-alive include="SyncOverviewPage,SyncTasksPage,SyncDeliveryPage">
+        <!-- Keep configuration drafts alive; the high-frequency overview remounts from the
+             global shallow task store so hidden rows do not keep render effects subscribed. -->
+        <keep-alive include="SyncTasksPage,SyncDeliveryPage">
           <component :is="Component" />
         </keep-alive>
       </router-view>

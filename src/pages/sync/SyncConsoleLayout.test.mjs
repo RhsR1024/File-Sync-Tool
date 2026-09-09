@@ -8,6 +8,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const consoleSource = readFileSync(join(__dirname, 'SyncConsolePage.vue'), 'utf8');
 const overviewSource = readFileSync(join(__dirname, 'SyncOverviewPage.vue'), 'utf8');
 const tasksSource = readFileSync(join(__dirname, 'SyncTasksPage.vue'), 'utf8');
+const deliverySource = readFileSync(join(__dirname, 'SyncDeliveryPage.vue'), 'utf8');
 const tableSource = readFileSync(join(__dirname, '..', '..', 'components', 'tasks', 'TaskGroupsTable.vue'), 'utf8');
 const configurationSource = readFileSync(
   join(__dirname, '..', '..', 'components', 'sync', 'SyncConfigurationEditor.vue'),
@@ -69,6 +70,10 @@ test('sync configuration tabs use the full-width console workspace', () => {
   assert.doesNotMatch(configurationSource, /max-w-4xl/);
   assert.doesNotMatch(configurationSource, /min-h-full[^\"]*mx-auto/);
   assert.match(configurationSource, /sync-delivery-stack space-y-4/);
+});
+
+test('deployment configuration keeps a bounded vertical scroll viewport', () => {
+  assert.match(deliverySource, /class="h-full min-h-0 overflow-y-auto overscroll-y-none"/);
 });
 
 test('tasks route renders the combined tasks and strategy workspace', () => {

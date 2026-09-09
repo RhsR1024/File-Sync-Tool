@@ -92,7 +92,7 @@ describe('paper todo standalone window lifecycle', () => {
 
   it('provides dedicated drag handles for the edge launcher and paper window', () => {
     expect(launcherSource).toContain('launcher-drag-handle');
-    expect(launcherSource).toContain('await dragPaperLauncher()');
+    expect(launcherSource).toContain('await dragPaperLauncher(event.clientX, event.clientY)');
     expect(paperSource).toContain('paper-window-drag-handle');
     expect(paperSource).toContain('await getCurrentWindow().startDragging()');
   });
@@ -110,6 +110,7 @@ describe('paper todo standalone window lifecycle', () => {
       launcherSource.indexOf('async function startLauncherDrag'),
       launcherSource.indexOf('function toggleFromKeyboard'),
     );
+    expect(dragHandler).toContain('await dragPaperLauncher(event.clientX, event.clientY)');
     expect(dragHandler).toContain('await setExpanded(!requestedExpanded)');
     // Keyboard activation never reaches the drag loop, so it still toggles.
     expect(launcherSource).toContain('if (event.detail !== 0) return;');
@@ -120,12 +121,14 @@ describe('paper todo standalone window lifecycle', () => {
     expect(backendSource).toContain('pub async fn paper_todo_drag_launcher');
     expect(mainSource).toContain('paper_todo::paper_todo_drag_launcher');
     const dragLoop = backendSource.slice(
-      backendSource.indexOf('fn run_launcher_drag(app: &AppHandle)'),
+      backendSource.indexOf('fn run_launcher_drag(app: &AppHandle'),
       backendSource.indexOf('pub async fn paper_todo_drag_launcher'),
     );
     expect(dragLoop).toContain('.available_monitors()');
     expect(dragLoop).toContain('monitor_for_point(&monitors, cursor.x, cursor.y)');
-    expect(dragLoop).toContain('origin.x + travel_x');
+    expect(dragLoop).toContain('i64::from(origin.x) + travel_x');
+    expect(dragLoop).toContain('launcher_press_position(');
+    expect(dragLoop).toContain('window.scale_factor()');
     expect(dragLoop).toContain('let target_x = if');
     expect(dragLoop).toContain('LAUNCHER_SNAP_DISTANCE * monitor.scale_factor()');
     expect(backendSource).toContain('save_launcher_placement(&app)');

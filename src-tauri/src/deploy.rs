@@ -1,15 +1,14 @@
 #![allow(clippy::too_many_arguments)]
 
-use crate::config::{CommandGroup, DeployServer, TaskServerBinding};
+use crate::config::{CommandGroup, DeployServer, PostInstallActions, TaskServerBinding};
+use crate::deployment_topology::TopologyResultStatus;
 use crate::task_domain::DeployStage;
 use crate::task_manager::{DeployTarget, DeployTrackingContext};
 use sha2::{Digest, Sha256};
 use ssh2::Session;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use std::time::Instant;
 use tauri::Emitter;
 
@@ -179,24 +178,11 @@ fn emit_progress<R: tauri::Runtime>(
 }
 
 pub fn check_connection(server: &DeployServer) -> Result<String, String> {
-    let addr = format!("{}:{}", server.host, server.port)
-        .to_socket_addrs()
-        .map_err(|e| format!("Address resolution failed for {}: {}", server.host, e))?
-        .next()
-        .ok_or_else(|| format!("No address found for {}", server.host))?;
-    let timeout = Duration::from_secs(server.ssh_timeout_secs);
-    let tcp = TcpStream::connect_timeout(&addr, timeout)
-        .map_err(|e| format!("TCP Connect failed to {}: {}", server.host, e))?;
-
-    let mut sess = Session::new().map_err(|e| format!("SSH Session init failed: {}", e))?;
-    sess.set_tcp_stream(tcp);
-    sess.handshake()
-        .map_err(|e| format!("SSH Handshake failed: {}", e))?;
-
-    sess.userauth_password(&server.user, &server.password)
-        .map_err(|e| format!("Authentication failed: {}", e))?;
-
-    Ok(format!("Connected to {}", server.name))
+    let (_session, resolved) = crate::ssh_connection::resolve_and_connect(server)?;
+    Ok(format!(
+        "Connected to {} via {}@{}:{}",
+        server.name, resolved.username, resolved.host, resolved.port
+    ))
 }
 
 /// Resolve ordered commands from a list of command group IDs.
@@ -220,6 +206,8 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     tracking: Option<DeployTrackingContext>,
+    post_install_actions: Option<&PostInstallActions>,
+    api_timeout_secs: u64,
 ) -> Result<(), String> {
     deploy_to_remote_with_trigger(
         app_handle,
@@ -231,6 +219,8 @@ pub fn deploy_to_remote<R: tauri::Runtime>(
         should_cancel,
         is_paused,
         tracking,
+        post_install_actions,
+        api_timeout_secs,
         crate::task_domain::TaskTriggerSource::Scheduled,
     )
 }
@@ -245,6 +235,8 @@ pub fn retry_deploy_to_remote<R: tauri::Runtime>(
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     tracking: Option<DeployTrackingContext>,
+    post_install_actions: Option<&PostInstallActions>,
+    api_timeout_secs: u64,
 ) -> Result<(), String> {
     deploy_to_remote_with_trigger(
         app_handle,
@@ -256,6 +248,8 @@ pub fn retry_deploy_to_remote<R: tauri::Runtime>(
         should_cancel,
         is_paused,
         tracking,
+        post_install_actions,
+        api_timeout_secs,
         crate::task_domain::TaskTriggerSource::Recovery,
     )
 }
@@ -271,6 +265,8 @@ fn deploy_to_remote_with_trigger<R: tauri::Runtime>(
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     tracking: Option<DeployTrackingContext>,
+    post_install_actions: Option<&PostInstallActions>,
+    api_timeout_secs: u64,
     trigger_source: crate::task_domain::TaskTriggerSource,
 ) -> Result<(), String> {
     let progress_source = match &trigger_source {
@@ -317,8 +313,29 @@ fn deploy_to_remote_with_trigger<R: tauri::Runtime>(
 
     if let Some(tracking) = tracking.as_ref() {
         let _ = tracking.register_targets(&resolved_targets);
+        if let Some(topology) = post_install_actions
+            .filter(|actions| actions.enabled && actions.topology.enabled)
+            .map(|actions| &actions.topology)
+        {
+            for target in &resolved_targets {
+                let role = if target.server_host == topology.primary_ip {
+                    Some("primary")
+                } else if target.server_host == topology.ha_replica_ip {
+                    Some("ha_replica")
+                } else if topology.replica_ips.contains(&target.server_host) {
+                    Some("replica")
+                } else {
+                    None
+                };
+                if let Some(role) = role {
+                    let _ = tracking.set_server_role(&target.server_id, role.to_string());
+                }
+            }
+        }
     }
 
+    let mut successful_server_ids = Vec::new();
+    let mut had_deployment_failure = resolved_targets.len() != server_bindings.len();
     for (idx, binding) in server_bindings.iter().enumerate() {
         if should_cancel.load(Ordering::SeqCst) {
             emit_log_with_tracking(
@@ -389,7 +406,10 @@ fn deploy_to_remote_with_trigger<R: tauri::Runtime>(
             is_paused.clone(),
             progress_source,
             tracking.clone(),
+            post_install_actions,
+            api_timeout_secs,
         ) {
+            had_deployment_failure = true;
             emit_log_with_tracking(
                 app_handle,
                 format!("[{}] Deployment failed: {}", server.name, e),
@@ -399,6 +419,7 @@ fn deploy_to_remote_with_trigger<R: tauri::Runtime>(
                 Some(server.name.as_str()),
             );
         } else {
+            successful_server_ids.push(server.id.clone());
             emit_log_with_tracking(
                 app_handle,
                 format!("[{}] Deployment successful", server.name),
@@ -407,6 +428,135 @@ fn deploy_to_remote_with_trigger<R: tauri::Runtime>(
                 Some(server.id.as_str()),
                 Some(server.name.as_str()),
             );
+        }
+    }
+
+    if let Some(actions) = post_install_actions.filter(|actions| {
+        actions.enabled && actions.topology.enabled && !successful_server_ids.is_empty()
+    }) {
+        if had_deployment_failure || successful_server_ids.len() != resolved_targets.len() {
+            let error = "并非全部目标服务器都已完成版本安装，已跳过主备从配置".to_string();
+            for server_id in &successful_server_ids {
+                if let Some(tracking) = tracking.as_ref() {
+                    let _ = tracking.mark_failure(
+                        server_id,
+                        DeployStage::ConfiguringTopology,
+                        error.clone(),
+                    );
+                }
+            }
+            emit_log_with_tracking(app_handle, error, "error", tracking.as_ref(), None, None);
+        } else {
+            for server_id in &successful_server_ids {
+                if let Some(tracking) = tracking.as_ref() {
+                    let _ = tracking.mark_stage(
+                        server_id,
+                        DeployStage::ConfiguringTopology,
+                        Some(100.0),
+                        None,
+                    );
+                }
+            }
+            match crate::deployment_post_install::run_topology_post_install(
+                &actions.topology,
+                actions.poll_interval_secs,
+                actions.poll_attempts,
+            ) {
+                Ok(result) if result.status == TopologyResultStatus::Success => {
+                    emit_log_with_tracking(
+                        app_handle,
+                        result.message,
+                        "success",
+                        tracking.as_ref(),
+                        None,
+                        None,
+                    );
+                    for server_id in &successful_server_ids {
+                        let Some(server) =
+                            all_servers.iter().find(|server| &server.id == server_id)
+                        else {
+                            continue;
+                        };
+                        match crate::deployment_post_install::run_password_post_install(
+                            app_handle,
+                            server,
+                            actions,
+                            tracking.as_ref(),
+                            api_timeout_secs,
+                        ) {
+                            Ok(()) => {
+                                if let Some(tracking) = tracking.as_ref() {
+                                    let _ = tracking.mark_success(server_id);
+                                }
+                            }
+                            Err(error) => {
+                                let message = error.message;
+                                if let Some(tracking) = tracking.as_ref() {
+                                    let _ = tracking.mark_failure(
+                                        server_id,
+                                        error.stage,
+                                        message.clone(),
+                                    );
+                                }
+                                emit_log_with_tracking(
+                                    app_handle,
+                                    message,
+                                    "error",
+                                    tracking.as_ref(),
+                                    Some(server.id.as_str()),
+                                    Some(server.name.as_str()),
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(result) => {
+                    let stage = crate::deployment_post_install::topology_stage(&result);
+                    for server_id in &successful_server_ids {
+                        if let Some(tracking) = tracking.as_ref() {
+                            let _ = tracking.mark_checkpoint(
+                                server_id,
+                                actions.poll_attempts,
+                                None,
+                                false,
+                                result.status == TopologyResultStatus::Unconfirmed,
+                            );
+                            let _ = tracking.mark_failure(
+                                server_id,
+                                stage.clone(),
+                                result.message.clone(),
+                            );
+                        }
+                    }
+                    emit_log_with_tracking(
+                        app_handle,
+                        result.message,
+                        "error",
+                        tracking.as_ref(),
+                        None,
+                        None,
+                    );
+                }
+                Err(error) => {
+                    for server_id in &successful_server_ids {
+                        if let Some(tracking) = tracking.as_ref() {
+                            let _ = tracking.mark_failure(
+                                server_id,
+                                DeployStage::ConfiguringTopology,
+                                error.clone(),
+                            );
+                        }
+                    }
+                    emit_log_with_tracking(
+                        app_handle,
+                        error,
+                        "error",
+                        tracking.as_ref(),
+                        None,
+                        None,
+                    );
+                }
+            }
         }
     }
 
@@ -500,6 +650,8 @@ fn deploy_single_server<R: tauri::Runtime>(
     is_paused: Arc<AtomicBool>,
     source: &str,
     tracking: Option<DeployTrackingContext>,
+    post_install_actions: Option<&PostInstallActions>,
+    api_timeout_secs: u64,
 ) -> Result<(), String> {
     let remote_target = format!(
         "{}/{}",
@@ -528,60 +680,21 @@ fn deploy_single_server<R: tauri::Runtime>(
         Some(server.name.as_str()),
     );
 
-    let tcp = {
-        let addr = format!("{}:{}", server.host, server.port)
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut a| a.next())
-            .ok_or_else(|| {
-                report_stage_failure(
-                    tracking.as_ref(),
-                    &server.id,
-                    DeployStage::Connecting,
-                    format!("Address resolution failed for {}", server.host),
-                )
-            })?;
-        TcpStream::connect_timeout(&addr, Duration::from_secs(server.ssh_timeout_secs)).map_err(
-            |e| {
-                report_stage_failure(
-                    tracking.as_ref(),
-                    &server.id,
-                    DeployStage::Connecting,
-                    format!("TCP Connect failed to {}: {}", server.host, e),
-                )
-            },
-        )?
-    };
-    let mut sess = Session::new().map_err(|e| {
+    let (sess, resolved) = crate::ssh_connection::resolve_and_connect(server).map_err(|error| {
         report_stage_failure(
             tracking.as_ref(),
             &server.id,
             DeployStage::Connecting,
-            format!("SSH Session init failed: {}", e),
+            error,
         )
     })?;
-    sess.set_tcp_stream(tcp);
-    sess.handshake().map_err(|e| {
-        report_stage_failure(
-            tracking.as_ref(),
-            &server.id,
-            DeployStage::Connecting,
-            format!("SSH Handshake failed: {}", e),
-        )
-    })?;
-    sess.userauth_password(&server.user, &server.password)
-        .map_err(|e| {
-            report_stage_failure(
-                tracking.as_ref(),
-                &server.id,
-                DeployStage::Connecting,
-                format!("Authentication failed: {}", e),
-            )
-        })?;
 
     emit_log_with_tracking(
         app_handle,
-        format!("[{}] Connected", server.name),
+        format!(
+            "[{}] Connected via {}@{}:{}",
+            server.name, resolved.username, resolved.host, resolved.port
+        ),
         "info",
         tracking.as_ref(),
         Some(server.id.as_str()),
@@ -868,6 +981,21 @@ fn deploy_single_server<R: tauri::Runtime>(
                 ));
             }
         }
+    }
+
+    if let Some(actions) = post_install_actions {
+        crate::deployment_post_install::run_server_post_install(
+            app_handle,
+            server,
+            actions,
+            &should_cancel,
+            tracking.as_ref(),
+            api_timeout_secs,
+            !actions.topology.enabled,
+        )
+        .map_err(|error| {
+            report_stage_failure(tracking.as_ref(), &server.id, error.stage, error.message)
+        })?;
     }
 
     if let Some(tracking) = tracking.as_ref() {
@@ -1250,20 +1378,7 @@ fn inspect_manual_deploy_with_sftp(
 }
 
 fn open_manual_deploy_session(server: &DeployServer) -> Result<Session, String> {
-    let addr = format!("{}:{}", server.host, server.port)
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addresses| addresses.next())
-        .ok_or_else(|| format!("Address resolution failed for {}", server.host))?;
-    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(server.ssh_timeout_secs))
-        .map_err(|error| format!("TCP connect failed: {error}"))?;
-    let mut session = Session::new().map_err(|error| error.to_string())?;
-    session.set_tcp_stream(tcp);
-    session.handshake().map_err(|error| error.to_string())?;
-    session
-        .userauth_password(&server.user, &server.password)
-        .map_err(|error| format!("Authentication failed: {error}"))?;
-    Ok(session)
+    crate::ssh_connection::resolve_and_connect(server).map(|(session, _)| session)
 }
 
 pub fn preflight_manual_deploy(
@@ -1509,6 +1624,8 @@ pub fn deploy_manual<R: tauri::Runtime>(
     should_cancel: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     tracking: Option<DeployTrackingContext>,
+    post_install_actions: Option<&PostInstallActions>,
+    api_timeout_secs: u64,
 ) -> Result<(), String> {
     emit_log_with_tracking(
         app_handle,
@@ -1542,60 +1659,21 @@ pub fn deploy_manual<R: tauri::Runtime>(
         );
     }
 
-    let tcp = {
-        let addr = format!("{}:{}", server.host, server.port)
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut a| a.next())
-            .ok_or_else(|| {
-                report_stage_failure(
-                    tracking.as_ref(),
-                    &server.id,
-                    DeployStage::Connecting,
-                    format!("Address resolution failed for {}", server.host),
-                )
-            })?;
-        TcpStream::connect_timeout(&addr, Duration::from_secs(server.ssh_timeout_secs)).map_err(
-            |e| {
-                report_stage_failure(
-                    tracking.as_ref(),
-                    &server.id,
-                    DeployStage::Connecting,
-                    e.to_string(),
-                )
-            },
-        )?
-    };
-    let mut sess = Session::new().map_err(|e| {
+    let (sess, resolved) = crate::ssh_connection::resolve_and_connect(server).map_err(|error| {
         report_stage_failure(
             tracking.as_ref(),
             &server.id,
             DeployStage::Connecting,
-            e.to_string(),
+            error,
         )
     })?;
-    sess.set_tcp_stream(tcp);
-    sess.handshake().map_err(|e| {
-        report_stage_failure(
-            tracking.as_ref(),
-            &server.id,
-            DeployStage::Connecting,
-            e.to_string(),
-        )
-    })?;
-    sess.userauth_password(&server.user, &server.password)
-        .map_err(|e| {
-            report_stage_failure(
-                tracking.as_ref(),
-                &server.id,
-                DeployStage::Connecting,
-                e.to_string(),
-            )
-        })?;
 
     emit_log_with_tracking(
         app_handle,
-        "SSH Connected & Authenticated".to_string(),
+        format!(
+            "SSH Connected & Authenticated via {}@{}:{}",
+            resolved.username, resolved.host, resolved.port
+        ),
         "success",
         tracking.as_ref(),
         Some(server.id.as_str()),
@@ -1920,6 +1998,21 @@ pub fn deploy_manual<R: tauri::Runtime>(
                 DeployStage::ExecutingCommands,
                 message,
             )
+        })?;
+    }
+
+    if let Some(actions) = post_install_actions {
+        crate::deployment_post_install::run_server_post_install(
+            app_handle,
+            server,
+            actions,
+            &should_cancel,
+            tracking.as_ref(),
+            api_timeout_secs,
+            !actions.topology.enabled,
+        )
+        .map_err(|error| {
+            report_stage_failure(tracking.as_ref(), &server.id, error.stage, error.message)
         })?;
     }
 

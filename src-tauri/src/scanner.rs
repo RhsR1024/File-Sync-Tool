@@ -1,12 +1,15 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::config::{
-    AppConfig, CopyMode, LocalScriptBinding, MatchRule, PostCopyExecutionOrder, TaskServerBinding,
+    AppConfig, CopyMode, LocalScriptBinding, MatchRule, PostCopyExecutionOrder, ScanTask,
+    TaskServerBinding,
 };
 use crate::deploy::deploy_to_remote;
 use crate::local_exec::{self, LocalExecContext, LocalExecResult};
 use crate::task_domain::{CopyState, TaskSourceType, TaskTriggerSource};
-use crate::task_manager::{TaskManager, TaskRunHandle, TaskStartRequest};
+use crate::task_manager::{
+    CompositeBatchModuleRequest, TaskManager, TaskRunHandle, TaskStartRequest,
+};
 use crate::task_runtime::{ActiveRunExecution, TaskRuntimeRegistry};
 use crate::windows_copy::{copy_files_with_dialog, WindowsCopyError, WindowsCopyRequest};
 use chrono::{Duration, Local, NaiveDateTime, NaiveTime, Timelike};
@@ -14,7 +17,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use regex::Regex;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -38,6 +41,15 @@ pub struct ScanResult {
     /// The remaining candidates were not skipped, only postponed to a later cycle.
     #[serde(default)]
     pub deferred_for_copy_queue: bool,
+}
+
+#[derive(Clone)]
+struct ScanWorkItem {
+    task: ScanTask,
+    module_id: Option<String>,
+    module_name: Option<String>,
+    parent_task_group_id: Option<String>,
+    composite: bool,
 }
 
 /// Whether copies the user has already queued are still waiting to run.
@@ -1225,6 +1237,9 @@ async fn perform_copy<R: tauri::Runtime>(
     overwrite_existing: bool,
     result: &mut ScanResult,
     task_id: Option<String>,
+    module_id: Option<String>,
+    module_name: Option<String>,
+    parent_task_group_id: Option<String>,
     task_handle: Option<TaskRunHandle>,
     allow_deploy: bool,
     source: &str,
@@ -1233,6 +1248,7 @@ async fn perform_copy<R: tauri::Runtime>(
     cached_task_records: &[PersistedTaskRecord],
 ) {
     let target_full_path = target_parent_path.join(&folder_name);
+    let module_id_for_config = module_id.clone();
     let task_handle = task_handle.or_else(|| {
         if source == "scheduled" {
             Some(task_manager.begin_scheduled_copy(TaskStartRequest {
@@ -1243,6 +1259,9 @@ async fn perform_copy<R: tauri::Runtime>(
                 local_target_path: target_full_path.to_string_lossy().to_string(),
                 source_type: TaskSourceType::Scheduled,
                 trigger_source: TaskTriggerSource::Scheduled,
+                module_id,
+                module_name,
+                parent_task_group_id,
             }))
         } else {
             None
@@ -1393,6 +1412,7 @@ async fn perform_copy<R: tauri::Runtime>(
     let is_paused_clone = is_paused.clone();
     let live_config_clone = live_config.clone();
     let task_id_clone = task_id.clone();
+    let module_id_clone = module_id_for_config.clone();
     let source_clone = source.to_string();
     let task_manager_clone = task_manager.clone();
     let task_handle_clone = task_handle.clone();
@@ -1789,6 +1809,14 @@ async fn perform_copy<R: tauri::Runtime>(
                     &remote_path_display,
                     &source_clone,
                 );
+                if let Some(task_handle) = task_handle_clone.as_ref() {
+                    let _ = task_manager_clone.update_copy_progress(
+                        &task_handle.task_group_id,
+                        &task_handle.run_id,
+                        copied,
+                        total,
+                    );
+                }
                 last_emit_time = now;
             }
         };
@@ -1942,24 +1970,22 @@ async fn perform_copy<R: tauri::Runtime>(
         let current_config = live_config_clone.lock().unwrap().clone();
 
         // Determine local script binding for this task
-        let local_binding: Option<LocalScriptBinding> = task_id_clone.as_ref().and_then(|tid| {
-            current_config
-                .tasks
-                .iter()
-                .find(|t| &t.id == tid)
-                .and_then(|t| t.local_script_binding.clone())
-                .filter(|b| !b.command_group_ids.is_empty())
-        });
-
-        let execution_order: PostCopyExecutionOrder = task_id_clone
+        let configured_task = task_id_clone
             .as_ref()
-            .and_then(|tid| {
-                current_config
-                    .tasks
-                    .iter()
-                    .find(|t| &t.id == tid)
-                    .map(|t| t.post_copy_execution_order.clone())
-            })
+            .and_then(|tid| current_config.tasks.iter().find(|task| &task.id == tid));
+        let configured_module = configured_task.and_then(|task| {
+            module_id_clone
+                .as_ref()
+                .and_then(|module_id| task.modules.iter().find(|module| &module.id == module_id))
+        });
+        let local_binding: Option<LocalScriptBinding> = configured_module
+            .and_then(|module| module.local_script_binding.clone())
+            .or_else(|| configured_task.and_then(|task| task.local_script_binding.clone()))
+            .filter(|binding| !binding.command_group_ids.is_empty());
+
+        let execution_order: PostCopyExecutionOrder = configured_module
+            .and_then(|module| module.post_copy_execution_order.clone())
+            .or_else(|| configured_task.map(|task| task.post_copy_execution_order.clone()))
             .unwrap_or_default();
 
         let has_local = local_binding.is_some();
@@ -1967,16 +1993,10 @@ async fn perform_copy<R: tauri::Runtime>(
         // Determine remote deploy targets
         let live_server_bindings: Vec<TaskServerBinding> =
             if allow_deploy && current_config.deploy_enabled {
-                if let Some(ref tid) = task_id_clone {
-                    current_config
-                        .tasks
-                        .iter()
-                        .find(|t| &t.id == tid)
-                        .map(|t| t.server_bindings.clone())
-                        .unwrap_or_default()
-                } else {
-                    vec![]
-                }
+                configured_module
+                    .and_then(|module| module.server_bindings.clone())
+                    .or_else(|| configured_task.map(|task| task.server_bindings.clone()))
+                    .unwrap_or_default()
             } else {
                 vec![]
             };
@@ -1992,6 +2012,14 @@ async fn perform_copy<R: tauri::Runtime>(
             .any(|server| server.enabled);
 
         let has_remote = !live_server_bindings.is_empty() && has_enabled_deploy_targets;
+        let post_install_actions = task_id_clone.as_ref().and_then(|tid| {
+            current_config
+                .tasks
+                .iter()
+                .find(|task| &task.id == tid)
+                .map(|task| task.post_install_actions.clone())
+        });
+        let framework_api_timeout_secs = current_config.framework_password_api_timeout_secs;
         let has_post_actions = has_local || has_remote;
 
         mark_copy_completed_for_handle(
@@ -2035,6 +2063,8 @@ async fn perform_copy<R: tauri::Runtime>(
                     should_cancel_clone,
                     is_paused_clone,
                     deploy_tracking,
+                    post_install_actions.as_ref(),
+                    framework_api_timeout_secs,
                 ) {
                     emit_log(&handle, format!("Deployment failed: {}", e), "error");
                 }
@@ -2074,6 +2104,8 @@ async fn perform_copy<R: tauri::Runtime>(
                             should_cancel_clone,
                             is_paused_clone,
                             deploy_tracking,
+                            post_install_actions.as_ref(),
+                            framework_api_timeout_secs,
                         ) {
                             emit_log(&handle, format!("Deployment failed: {}", e), "error");
                         }
@@ -2094,6 +2126,8 @@ async fn perform_copy<R: tauri::Runtime>(
                         should_cancel_clone.clone(),
                         is_paused_clone,
                         deploy_tracking,
+                        post_install_actions.as_ref(),
+                        framework_api_timeout_secs,
                     ) {
                         emit_log(&handle, format!("Deployment failed: {}", e), "error");
                     }
@@ -2149,6 +2183,8 @@ async fn perform_copy<R: tauri::Runtime>(
                             should_cancel_clone,
                             is_paused_clone,
                             deploy_tracking,
+                            post_install_actions.as_ref(),
+                            framework_api_timeout_secs,
                         ) {
                             emit_log(&handle, format!("Deployment failed: {}", e), "error");
                         }
@@ -2251,6 +2287,9 @@ pub async fn temporary_copy<R: tauri::Runtime>(
     filename_includes: Vec<String>,
     skip_stability_check: bool,
     task_id: Option<String>,
+    module_id: Option<String>,
+    module_name: Option<String>,
+    parent_task_group_id: Option<String>,
     allow_deploy: bool,
 ) -> Result<(), String> {
     let source_path = PathBuf::from(source_path.trim());
@@ -2367,6 +2406,9 @@ pub async fn temporary_copy<R: tauri::Runtime>(
         overwrite_existing,
         &mut result,
         task_id,
+        module_id,
+        module_name,
+        parent_task_group_id,
         task_handle,
         allow_deploy,
         "manual",
@@ -2577,6 +2619,8 @@ async fn temporary_copy_file<R: tauri::Runtime>(
     let copy_buffer_size = (config.copy_buffer_size_kb as usize).max(64) * 1024;
     let copy_mode = config.copy_mode.clone();
     let owner_hwnd = main_window_hwnd(app_handle);
+    let progress_task_manager = task_manager.clone();
+    let progress_task_handle = task_handle.clone();
     if let Some(handle) = task_handle.as_ref() {
         let mode_label = match &copy_mode {
             CopyMode::BuiltIn => "Built-in copy engine",
@@ -2624,6 +2668,14 @@ async fn temporary_copy_file<R: tauri::Runtime>(
                     &source_display,
                     "manual",
                 );
+                if let Some(task_handle) = progress_task_handle.as_ref() {
+                    let _ = progress_task_manager.update_copy_progress(
+                        &task_handle.task_group_id,
+                        &task_handle.run_id,
+                        copied_so_far,
+                        file_size,
+                    );
+                }
                 last_emit_time = now;
             }
         };
@@ -2787,9 +2839,204 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
         }
     }
 
+    let mut scan_tasks = Vec::<ScanWorkItem>::new();
+    let mut composite_positions = HashMap::<String, u32>::new();
     for task in &config.tasks {
+        if task.modules.is_empty() {
+            scan_tasks.push(ScanWorkItem {
+                task: task.clone(),
+                module_id: None,
+                module_name: None,
+                parent_task_group_id: None,
+                composite: false,
+            });
+            continue;
+        }
+        let enabled_modules = task
+            .modules
+            .iter()
+            .filter(|module| module.enabled)
+            .collect::<Vec<_>>();
+        let composite = enabled_modules.len() > 1;
+        let parent_task_group_id = if composite {
+            Some(
+                task_manager.begin_composite_batch(
+                    &task.id,
+                    &task.name,
+                    &now_local.format("%Y-%m-%d").to_string(),
+                    enabled_modules
+                        .iter()
+                        .map(|module| CompositeBatchModuleRequest {
+                            module_id: module.id.clone(),
+                            module_name: module.name.clone(),
+                            remote_path: module.remote_path.clone(),
+                            local_path: module
+                                .local_path
+                                .clone()
+                                .or_else(|| task.local_path.clone())
+                                .unwrap_or_else(|| config.local_path.clone()),
+                        })
+                        .collect(),
+                ),
+            )
+        } else {
+            None
+        };
+        for module in enabled_modules {
+            let mut expanded = task.clone();
+            expanded.name = if composite {
+                format!("{} / {}", task.name, module.name)
+            } else {
+                task.name.clone()
+            };
+            expanded.remote_path.clone_from(&module.remote_path);
+            expanded.local_path = module
+                .local_path
+                .clone()
+                .or_else(|| task.local_path.clone());
+            if let Some(rule) = module.rule.clone() {
+                expanded.rule = rule;
+            }
+            if let Some(server_bindings) = module.server_bindings.clone() {
+                expanded.server_bindings = server_bindings;
+            }
+            if let Some(local_script_binding) = module.local_script_binding.clone() {
+                expanded.local_script_binding = Some(local_script_binding);
+            }
+            if let Some(order) = module.post_copy_execution_order.clone() {
+                expanded.post_copy_execution_order = order;
+            }
+            scan_tasks.push(ScanWorkItem {
+                task: expanded,
+                module_id: Some(module.id.clone()),
+                module_name: Some(module.name.clone()),
+                parent_task_group_id: parent_task_group_id.clone(),
+                composite,
+            });
+        }
+    }
+
+    // Composite component tasks use a discovery pass before any copy starts. This keeps
+    // the parent denominator stable (for example 5/10) while modules are processed later.
+    for work in &scan_tasks {
+        let (Some(parent_id), Some(module_id)) = (
+            work.parent_task_group_id.as_deref(),
+            work.module_id.as_deref(),
+        ) else {
+            continue;
+        };
+        if let MatchRule::DateMatch(format_str) = &work.task.rule {
+            let fmt = if format_str.trim().is_empty() {
+                "%y%m%d"
+            } else {
+                format_str.trim()
+            };
+            let target_name = now_local.format(fmt).to_string();
+            let target_path = Path::new(&work.task.remote_path).join(target_name);
+            let extensions = config.file_extensions.clone();
+            let includes = config.filename_includes.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                scan_date_build_candidates(&target_path, &extensions, &includes)
+            })
+            .await
+            {
+                Ok(Ok(Some(candidates))) if !candidates.is_empty() => {
+                    let _ = task_manager.mark_composite_module_found(
+                        parent_id,
+                        module_id,
+                        candidates.len() as u32,
+                    );
+                }
+                Ok(Ok(_)) => {
+                    let _ = task_manager.mark_composite_module_no_output(parent_id, module_id);
+                }
+                Ok(Err(error)) => {
+                    let _ = task_manager.mark_composite_module_failed(
+                        parent_id,
+                        module_id,
+                        error.to_string(),
+                    );
+                }
+                Err(error) => {
+                    let _ = task_manager.mark_composite_module_failed(
+                        parent_id,
+                        module_id,
+                        error.to_string(),
+                    );
+                }
+            }
+        } else if let MatchRule::VersionMatch(target_version) = &work.task.rule {
+            match fs::read_dir(&work.task.remote_path).await {
+                Ok(mut entries) => {
+                    let mut count = 0u32;
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if re_version
+                            .captures(&name)
+                            .and_then(|captures| captures.get(2))
+                            .is_some_and(|version| version.as_str() == target_version)
+                        {
+                            count += 1;
+                        }
+                    }
+                    if count > 0 {
+                        let _ =
+                            task_manager.mark_composite_module_found(parent_id, module_id, count);
+                    } else {
+                        let _ = task_manager.mark_composite_module_no_output(parent_id, module_id);
+                    }
+                }
+                Err(error) => {
+                    let _ = task_manager.mark_composite_module_failed(
+                        parent_id,
+                        module_id,
+                        error.to_string(),
+                    );
+                }
+            }
+        }
+    }
+    let mut next_position_by_parent = HashMap::<String, u32>::new();
+    for work in &scan_tasks {
+        let (Some(parent_id), Some(module_id)) = (
+            work.parent_task_group_id.as_deref(),
+            work.module_id.as_deref(),
+        ) else {
+            continue;
+        };
+        let parent = task_manager.get_group_detail(parent_id);
+        let found = parent
+            .as_ref()
+            .and_then(|group| group.composite_batch.as_ref())
+            .and_then(|batch| {
+                batch
+                    .modules
+                    .iter()
+                    .find(|module| module.module_id == module_id)
+            })
+            .is_some_and(|module| module.found_builds > 0);
+        if found {
+            let next = next_position_by_parent
+                .entry(parent_id.to_string())
+                .or_insert(0);
+            *next += 1;
+            composite_positions.insert(format!("{parent_id}|{module_id}"), *next);
+        }
+    }
+
+    for work in &scan_tasks {
+        let task = &work.task;
         if !task.enabled {
             continue;
+        }
+
+        if let (Some(parent_id), Some(module_id)) = (
+            work.parent_task_group_id.as_deref(),
+            work.module_id.as_deref(),
+        ) {
+            if let Some(position) = composite_positions.get(&format!("{parent_id}|{module_id}")) {
+                let _ = task_manager.mark_composite_current(parent_id, module_id, *position);
+            }
         }
 
         if should_cancel.load(Ordering::SeqCst) {
@@ -2954,6 +3201,9 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             false,
                             &mut result,
                             Some(task.id.clone()),
+                            work.module_id.clone(),
+                            work.module_name.clone(),
+                            work.parent_task_group_id.clone(),
                             None,
                             true,
                             "scheduled",
@@ -2985,8 +3235,13 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                 let yesterday_name = (now_local - Duration::days(1)).format(fmt).to_string();
 
                 let is_first_hour = now_local.hour() == 0;
-                let fallback_enabled = config.fallback_recent_package_enabled;
-                let mut dirs_to_check: Vec<(i64, String)> = if fallback_enabled {
+                // Composite component tasks represent today's coordinated build. A missing
+                // module is neutral "no output" and must never pull an older package.
+                let fallback_enabled =
+                    config.fallback_recent_package_enabled && task.modules.len() <= 1;
+                let mut dirs_to_check: Vec<(i64, String)> = if work.composite {
+                    vec![(0, today_name.clone())]
+                } else if fallback_enabled {
                     (0..=3)
                         .map(|offset| {
                             (
@@ -3184,6 +3439,9 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             false,
                             &mut result,
                             Some(task.id.clone()),
+                            work.module_id.clone(),
+                            work.module_name.clone(),
+                            work.parent_task_group_id.clone(),
                             None,
                             true,
                             "scheduled",

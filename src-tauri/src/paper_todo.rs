@@ -917,6 +917,38 @@ fn monitor_for_point<'a>(
     })
 }
 
+/// Convert the WebView's mousedown position into the same physical coordinate
+/// space returned by Win32 `GetCursorPos`. The launcher has no decorations, so
+/// its outer position is also the WebView client area's screen origin.
+fn launcher_press_position(
+    origin: PhysicalPosition<i32>,
+    client_x: f64,
+    client_y: f64,
+    scale_factor: f64,
+) -> Result<PhysicalPosition<i32>, String> {
+    if !client_x.is_finite()
+        || !client_y.is_finite()
+        || !scale_factor.is_finite()
+        || scale_factor <= 0.0
+    {
+        return Err("便签入口拖拽起点坐标无效".into());
+    }
+
+    let x = f64::from(origin.x) + (client_x * scale_factor).round();
+    let y = f64::from(origin.y) + (client_y * scale_factor).round();
+    if !x.is_finite()
+        || !y.is_finite()
+        || x < f64::from(i32::MIN)
+        || x > f64::from(i32::MAX)
+        || y < f64::from(i32::MIN)
+        || y > f64::from(i32::MAX)
+    {
+        return Err("便签入口拖拽起点超出屏幕坐标范围".into());
+    }
+
+    Ok(PhysicalPosition::new(x as i32, y as i32))
+}
+
 /// Drag the launcher freely across the virtual desktop. The cursor chooses the
 /// active display, including secondary displays with negative coordinates, and
 /// the full window remains reachable while crossing between them.
@@ -924,7 +956,7 @@ fn monitor_for_point<'a>(
 /// Returns whether the press ever became a drag, so a press that never moved
 /// can be treated as the expand/collapse click.
 #[cfg(target_os = "windows")]
-fn run_launcher_drag(app: &AppHandle) -> Result<bool, String> {
+fn run_launcher_drag(app: &AppHandle, client_x: f64, client_y: f64) -> Result<bool, String> {
     use std::time::{Duration, Instant};
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
@@ -941,14 +973,19 @@ fn run_launcher_drag(app: &AppHandle) -> Result<bool, String> {
     }
     let origin = window.outer_position().map_err(|error| error.to_string())?;
     let size = window.outer_size().map_err(|error| error.to_string())?;
-
-    let mut cursor = POINT::default();
-    unsafe { GetCursorPos(&mut cursor) }.map_err(|error| error.to_string())?;
-    let start_cursor_x = cursor.x;
-    let start_cursor_y = cursor.y;
+    // Use the coordinates captured by the WebView mousedown. Reading the
+    // cursor here used to shift the drag anchor by every pixel moved while
+    // the IPC request and blocking worker were being scheduled.
+    let start_cursor = launcher_press_position(
+        origin,
+        client_x,
+        client_y,
+        window.scale_factor().map_err(|error| error.to_string())?,
+    )?;
     let deadline = Instant::now() + Duration::from_millis(LAUNCHER_DRAG_MAX_MS);
     let mut moved = false;
     let mut last_position = origin;
+    let mut cursor = POINT::default();
     while Instant::now() < deadline {
         let pressed = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000;
         if pressed == 0 {
@@ -957,11 +994,11 @@ fn run_launcher_drag(app: &AppHandle) -> Result<bool, String> {
         if unsafe { GetCursorPos(&mut cursor) }.is_err() {
             break;
         }
-        let travel_x = cursor.x - start_cursor_x;
-        let travel_y = cursor.y - start_cursor_y;
+        let travel_x = i64::from(cursor.x) - i64::from(start_cursor.x);
+        let travel_y = i64::from(cursor.y) - i64::from(start_cursor.y);
         if moved
-            || travel_x.abs() >= LAUNCHER_DRAG_THRESHOLD
-            || travel_y.abs() >= LAUNCHER_DRAG_THRESHOLD
+            || travel_x.abs() >= i64::from(LAUNCHER_DRAG_THRESHOLD)
+            || travel_y.abs() >= i64::from(LAUNCHER_DRAG_THRESHOLD)
         {
             moved = true;
             let Some(monitor) = monitor_for_point(&monitors, cursor.x, cursor.y) else {
@@ -972,7 +1009,9 @@ fn run_launcher_drag(app: &AppHandle) -> Result<bool, String> {
             let max_x = monitor_position.x + (monitor_size.width as i32 - size.width as i32).max(0);
             let max_y =
                 monitor_position.y + (monitor_size.height as i32 - size.height as i32).max(0);
-            let unsnapped_x = (origin.x + travel_x).clamp(monitor_position.x, max_x);
+            let unsnapped_x = (i64::from(origin.x) + travel_x)
+                .clamp(i64::from(monitor_position.x), i64::from(max_x))
+                as i32;
             let snap_distance = (LAUNCHER_SNAP_DISTANCE * monitor.scale_factor()).round() as i32;
             let target_x = if (unsnapped_x - monitor_position.x).abs() <= snap_distance {
                 monitor_position.x
@@ -983,7 +1022,8 @@ fn run_launcher_drag(app: &AppHandle) -> Result<bool, String> {
             };
             let target = PhysicalPosition::new(
                 target_x,
-                (origin.y + travel_y).clamp(monitor_position.y, max_y),
+                (i64::from(origin.y) + travel_y)
+                    .clamp(i64::from(monitor_position.y), i64::from(max_y)) as i32,
             );
             if target != last_position {
                 last_position = target;
@@ -996,16 +1036,20 @@ fn run_launcher_drag(app: &AppHandle) -> Result<bool, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_launcher_drag(_app: &AppHandle) -> Result<bool, String> {
+fn run_launcher_drag(_app: &AppHandle, _client_x: f64, _client_y: f64) -> Result<bool, String> {
     Ok(false)
 }
 
 #[tauri::command]
-pub async fn paper_todo_drag_launcher(app: AppHandle) -> Result<bool, String> {
+pub async fn paper_todo_drag_launcher(
+    app: AppHandle,
+    client_x: f64,
+    client_y: f64,
+) -> Result<bool, String> {
     // The loop polls the cursor and the persistence that follows it touches the
     // data file; neither belongs on the WebView callback thread.
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
-        let moved = run_launcher_drag(&app)?;
+        let moved = run_launcher_drag(&app, client_x, client_y)?;
         if moved {
             save_launcher_placement(&app)?;
         }
@@ -2277,9 +2321,11 @@ pub fn paper_todo_clean_assets(
 mod tests {
     use super::{
         apply_launcher_compatibility, create_paper_value, default_document, is_valid_document,
-        prepare_papers_for_show_all, rect_is_on_any_screen, safe_extension, safe_label, Rect,
+        launcher_press_position, prepare_papers_for_show_all, rect_is_on_any_screen,
+        safe_extension, safe_label, Rect,
     };
     use serde_json::json;
+    use tauri::PhysicalPosition;
 
     const PRIMARY: Rect = Rect {
         x: 0,
@@ -2323,6 +2369,16 @@ mod tests {
     fn labels_and_extensions_drop_shell_characters() {
         assert_eq!(safe_label("abc-123_../"), "abc-123");
         assert_eq!(safe_extension(".md & calc"), "mdcalc");
+    }
+
+    #[test]
+    fn launcher_press_position_preserves_the_webview_press_anchor() {
+        assert_eq!(
+            launcher_press_position(PhysicalPosition::new(-1920, 120), 16.5, 7.5, 1.5).unwrap(),
+            PhysicalPosition::new(-1895, 131),
+        );
+        assert!(launcher_press_position(PhysicalPosition::new(0, 0), f64::NAN, 1.0, 1.0).is_err());
+        assert!(launcher_press_position(PhysicalPosition::new(0, 0), 1.0, 1.0, 0.0).is_err());
     }
 
     #[test]

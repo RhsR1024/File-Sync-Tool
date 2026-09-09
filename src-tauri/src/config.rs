@@ -121,7 +121,7 @@ pub struct CommandGroup {
     pub commands: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OnFailure {
     #[default]
@@ -245,6 +245,122 @@ pub enum MatchRule {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScanTaskModule {
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub name: String,
+    pub remote_path: String,
+    #[serde(default)]
+    pub local_path: Option<String>,
+    #[serde(default)]
+    pub rule: Option<MatchRule>,
+    #[serde(default)]
+    pub server_bindings: Option<Vec<TaskServerBinding>>,
+    #[serde(default)]
+    pub local_script_binding: Option<LocalScriptBinding>,
+    #[serde(default)]
+    pub post_copy_execution_order: Option<PostCopyExecutionOrder>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PostInstallTopologyMode {
+    #[default]
+    Ha,
+    Replica,
+    HaAndReplica,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct PostInstallPasswordSettings {
+    pub enabled: bool,
+    pub framework: bool,
+    pub ums: bool,
+    pub cdm: bool,
+    pub ums_username: String,
+    pub framework_old_password: String,
+    pub framework_new_password: String,
+    pub ums_old_password: String,
+    pub ums_new_password: String,
+    pub cdm_old_password: String,
+    pub cdm_new_password: String,
+}
+
+impl Default for PostInstallPasswordSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            framework: true,
+            ums: true,
+            cdm: true,
+            ums_username: "loadmin".to_string(),
+            framework_old_password: "123456".to_string(),
+            framework_new_password: "admin_123".to_string(),
+            ums_old_password: "admin_123".to_string(),
+            ums_new_password: "admin_1234".to_string(),
+            cdm_old_password: "admin".to_string(),
+            cdm_new_password: "admin_123".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct PostInstallTopologySettings {
+    pub enabled: bool,
+    pub mode: PostInstallTopologyMode,
+    pub primary_ip: String,
+    pub ha_replica_ip: String,
+    pub virtual_ip: String,
+    pub replica_ips: Vec<String>,
+    pub framework_password: String,
+}
+
+impl Default for PostInstallTopologySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: PostInstallTopologyMode::Ha,
+            primary_ip: String::new(),
+            ha_replica_ip: String::new(),
+            virtual_ip: String::new(),
+            replica_ips: Vec::new(),
+            framework_password: "admin_123".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct PostInstallActions {
+    pub enabled: bool,
+    pub enable_ssh: bool,
+    pub passwords: PostInstallPasswordSettings,
+    pub topology: PostInstallTopologySettings,
+    pub poll_interval_secs: u64,
+    pub poll_attempts: u32,
+}
+
+impl Default for PostInstallActions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            enable_ssh: true,
+            passwords: PostInstallPasswordSettings::default(),
+            topology: PostInstallTopologySettings::default(),
+            poll_interval_secs: 30,
+            poll_attempts: 20,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScanTask {
     pub id: String,
     pub enabled: bool,
@@ -252,6 +368,9 @@ pub struct ScanTask {
     pub remote_path: String,
     pub local_path: Option<String>,
     pub rule: MatchRule,
+    /// Composite source modules. Legacy fields mirror the first module.
+    #[serde(default)]
+    pub modules: Vec<ScanTaskModule>,
     /// Per-server deployment bindings. Each binding specifies which command groups
     /// to run on a given server after the upload completes.
     #[serde(default)]
@@ -260,6 +379,8 @@ pub struct ScanTask {
     pub local_script_binding: Option<LocalScriptBinding>,
     #[serde(default)]
     pub post_copy_execution_order: PostCopyExecutionOrder,
+    #[serde(default)]
+    pub post_install_actions: PostInstallActions,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -298,6 +419,12 @@ pub struct AppConfig {
     /// and copy only the newest package from the first date that contains one.
     #[serde(default = "default_fallback_recent_package_enabled")]
     pub fallback_recent_package_enabled: bool,
+
+    /// Automatically remove eligible local packages and task records older than N days.
+    #[serde(default = "default_sync_retention_enabled")]
+    pub sync_retention_enabled: bool,
+    #[serde(default = "default_sync_retention_days")]
+    pub sync_retention_days: u32,
 
     #[serde(default)]
     pub launch_and_auto_scan: bool,
@@ -388,6 +515,8 @@ pub struct SyncConfigPatch {
     pub stability_check_secs: u64,
     pub recent_file_guard_mins: u64,
     pub fallback_recent_package_enabled: bool,
+    pub sync_retention_enabled: bool,
+    pub sync_retention_days: u32,
     pub copy_buffer_size_kb: u32,
     pub copy_mode: CopyMode,
 }
@@ -425,6 +554,8 @@ pub fn apply_sync_patch(config: &mut AppConfig, patch: SyncConfigPatch) {
     config.stability_check_secs = patch.stability_check_secs;
     config.recent_file_guard_mins = patch.recent_file_guard_mins;
     config.fallback_recent_package_enabled = patch.fallback_recent_package_enabled;
+    config.sync_retention_enabled = patch.sync_retention_enabled;
+    config.sync_retention_days = patch.sync_retention_days;
     config.copy_buffer_size_kb = patch.copy_buffer_size_kb;
     config.copy_mode = patch.copy_mode;
 }
@@ -475,6 +606,12 @@ fn default_recent_file_guard_mins() -> u64 {
 }
 fn default_fallback_recent_package_enabled() -> bool {
     true
+}
+fn default_sync_retention_enabled() -> bool {
+    true
+}
+fn default_sync_retention_days() -> u32 {
+    5
 }
 fn default_max_log_lines() -> u32 {
     200
@@ -552,6 +689,8 @@ impl Default for AppConfig {
             stability_check_secs: 120,
             recent_file_guard_mins: MIN_RECENT_FILE_GUARD_MINS,
             fallback_recent_package_enabled: true,
+            sync_retention_enabled: true,
+            sync_retention_days: 5,
             launch_and_auto_scan: false,
             launch_and_auto_start_file_share: false,
             close_to_tray: false,
@@ -585,10 +724,71 @@ pub fn normalize_config(mut config: AppConfig) -> AppConfig {
     if config.recent_file_guard_mins < MIN_RECENT_FILE_GUARD_MINS {
         config.recent_file_guard_mins = MIN_RECENT_FILE_GUARD_MINS;
     }
+    config.sync_retention_days = config.sync_retention_days.clamp(1, 365);
     config.update_server_url = normalize_update_server_url(&config.update_server_url);
     config.device_simulator = normalize_device_simulator_settings(config.device_simulator);
     config.portal_login = normalize_portal_login_settings(config.portal_login);
+    for task in &mut config.tasks {
+        task.post_install_actions.poll_interval_secs =
+            task.post_install_actions.poll_interval_secs.clamp(1, 300);
+        task.post_install_actions.poll_attempts =
+            task.post_install_actions.poll_attempts.clamp(1, 120);
+        task.post_install_actions.passwords.ums_username = task
+            .post_install_actions
+            .passwords
+            .ums_username
+            .trim()
+            .to_string();
+        let topology = &mut task.post_install_actions.topology;
+        topology.primary_ip = topology.primary_ip.trim().to_string();
+        topology.ha_replica_ip = topology.ha_replica_ip.trim().to_string();
+        topology.virtual_ip = topology.virtual_ip.trim().to_string();
+        let mut replica_ips = HashSet::new();
+        topology.replica_ips.retain_mut(|ip| {
+            *ip = ip.trim().to_string();
+            !ip.is_empty() && replica_ips.insert(ip.clone())
+        });
+        if task.modules.is_empty() && !task.remote_path.trim().is_empty() {
+            task.modules.push(ScanTaskModule {
+                id: format!("{}-module-1", task.id),
+                enabled: true,
+                name: module_name_from_path(&task.remote_path),
+                remote_path: task.remote_path.trim().to_string(),
+                local_path: task.local_path.clone(),
+                rule: None,
+                server_bindings: None,
+                local_script_binding: None,
+                post_copy_execution_order: None,
+            });
+        }
+        for (index, module) in task.modules.iter_mut().enumerate() {
+            module.remote_path = module.remote_path.trim().to_string();
+            if module.id.trim().is_empty() {
+                module.id = format!("{}-module-{}", task.id, index + 1);
+            }
+            if module.name.trim().is_empty() {
+                module.name = module_name_from_path(&module.remote_path);
+            }
+        }
+        if let Some(first) = task.modules.first() {
+            task.remote_path.clone_from(&first.remote_path);
+            task.local_path.clone_from(&first.local_path);
+        }
+    }
     config
+}
+
+fn module_name_from_path(path: &str) -> String {
+    let parts = path
+        .split(['\\', '/'])
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>();
+    parts
+        .get(parts.len().saturating_sub(3))
+        .or_else(|| parts.last())
+        .copied()
+        .unwrap_or("module")
+        .to_string()
 }
 
 pub fn validate_config(config: &AppConfig) -> Result<(), String> {
@@ -610,9 +810,74 @@ pub fn validate_config(config: &AppConfig) -> Result<(), String> {
             MIN_RECENT_FILE_GUARD_MINS
         ));
     }
+    if !(1..=365).contains(&config.sync_retention_days) {
+        return Err("Sync retention days must be between 1 and 365".to_string());
+    }
     validate_update_server_url(&config.update_server_url)?;
     validate_device_simulator_settings(&config.device_simulator)?;
     validate_portal_login_settings(&config.portal_login)?;
+    for task in &config.tasks {
+        validate_post_install_actions(&task.post_install_actions)?;
+    }
+    Ok(())
+}
+
+fn validate_post_install_actions(actions: &PostInstallActions) -> Result<(), String> {
+    if !actions.enabled {
+        return Ok(());
+    }
+    if actions.poll_interval_secs == 0 || actions.poll_attempts == 0 {
+        return Err("Post-install polling interval and attempts must be greater than zero".into());
+    }
+    let passwords = &actions.passwords;
+    if passwords.enabled {
+        if !passwords.framework && !passwords.ums && !passwords.cdm {
+            return Err("Post-install password change requires at least one target".into());
+        }
+        if passwords.framework
+            && (passwords.framework_old_password.is_empty()
+                || passwords.framework_new_password.is_empty())
+        {
+            return Err("Framework old and new passwords are required".into());
+        }
+        if passwords.ums
+            && (passwords.ums_username.trim().is_empty()
+                || passwords.ums_old_password.is_empty()
+                || passwords.ums_new_password.is_empty())
+        {
+            return Err("UMS username, old password, and new password are required".into());
+        }
+        if passwords.cdm
+            && (passwords.cdm_old_password.is_empty() || passwords.cdm_new_password.is_empty())
+        {
+            return Err("CDM old and new passwords are required".into());
+        }
+    }
+    let topology = &actions.topology;
+    if !topology.enabled {
+        return Ok(());
+    }
+    let valid_ip = |value: &str| value.parse::<std::net::Ipv4Addr>().is_ok();
+    if !valid_ip(&topology.primary_ip) {
+        return Err("Post-install topology primary IP is invalid".into());
+    }
+    if matches!(
+        topology.mode,
+        PostInstallTopologyMode::Ha | PostInstallTopologyMode::HaAndReplica
+    ) && (!valid_ip(&topology.ha_replica_ip) || !valid_ip(&topology.virtual_ip))
+    {
+        return Err("Post-install topology HA standby or virtual IP is invalid".into());
+    }
+    if matches!(
+        topology.mode,
+        PostInstallTopologyMode::Replica | PostInstallTopologyMode::HaAndReplica
+    ) && (topology.replica_ips.is_empty() || topology.replica_ips.iter().any(|ip| !valid_ip(ip)))
+    {
+        return Err("Post-install topology requires valid replica IPs".into());
+    }
+    if topology.framework_password.is_empty() {
+        return Err("Post-install topology framework password is required".into());
+    }
     Ok(())
 }
 
@@ -1019,7 +1284,69 @@ fn prepare_config_for_storage(config: &AppConfig) -> Result<AppConfig, String> {
     let mut stored = config.clone();
     stored.portal_login.password = protect_portal_password(&config.portal_login.password)?;
     stored.portal_login.password_saved = !stored.portal_login.password.is_empty();
+    for task in &mut stored.tasks {
+        protect_post_install_passwords(&mut task.post_install_actions)?;
+    }
     Ok(stored)
+}
+
+fn post_install_passwords(actions: &PostInstallActions) -> [&str; 7] {
+    [
+        &actions.passwords.framework_old_password,
+        &actions.passwords.framework_new_password,
+        &actions.passwords.ums_old_password,
+        &actions.passwords.ums_new_password,
+        &actions.passwords.cdm_old_password,
+        &actions.passwords.cdm_new_password,
+        &actions.topology.framework_password,
+    ]
+}
+
+fn protect_post_install_passwords(actions: &mut PostInstallActions) -> Result<(), String> {
+    actions.passwords.framework_old_password =
+        protect_portal_password(&actions.passwords.framework_old_password)?;
+    actions.passwords.framework_new_password =
+        protect_portal_password(&actions.passwords.framework_new_password)?;
+    actions.passwords.ums_old_password =
+        protect_portal_password(&actions.passwords.ums_old_password)?;
+    actions.passwords.ums_new_password =
+        protect_portal_password(&actions.passwords.ums_new_password)?;
+    actions.passwords.cdm_old_password =
+        protect_portal_password(&actions.passwords.cdm_old_password)?;
+    actions.passwords.cdm_new_password =
+        protect_portal_password(&actions.passwords.cdm_new_password)?;
+    actions.topology.framework_password =
+        protect_portal_password(&actions.topology.framework_password)?;
+    Ok(())
+}
+
+fn unprotect_post_install_passwords(actions: &mut PostInstallActions) -> Result<(), String> {
+    actions.passwords.framework_old_password =
+        unprotect_portal_password(&actions.passwords.framework_old_password)?;
+    actions.passwords.framework_new_password =
+        unprotect_portal_password(&actions.passwords.framework_new_password)?;
+    actions.passwords.ums_old_password =
+        unprotect_portal_password(&actions.passwords.ums_old_password)?;
+    actions.passwords.ums_new_password =
+        unprotect_portal_password(&actions.passwords.ums_new_password)?;
+    actions.passwords.cdm_old_password =
+        unprotect_portal_password(&actions.passwords.cdm_old_password)?;
+    actions.passwords.cdm_new_password =
+        unprotect_portal_password(&actions.passwords.cdm_new_password)?;
+    actions.topology.framework_password =
+        unprotect_portal_password(&actions.topology.framework_password)?;
+    Ok(())
+}
+
+fn clear_post_install_passwords(actions: &mut PostInstallActions) {
+    actions.passwords.framework_old_password.clear();
+    actions.passwords.framework_new_password.clear();
+    actions.passwords.ums_old_password.clear();
+    actions.passwords.ums_new_password.clear();
+    actions.passwords.cdm_old_password.clear();
+    actions.passwords.cdm_new_password.clear();
+    actions.topology.framework_password.clear();
+    actions.enabled = false;
 }
 
 pub fn load_config(app_handle: &tauri::AppHandle) -> AppConfig {
@@ -1033,14 +1360,29 @@ pub fn load_config(app_handle: &tauri::AppHandle) -> AppConfig {
                         config.portal_login.password = password;
                         config.portal_login.password_saved =
                             !config.portal_login.password.is_empty();
-                        let config = normalize_config(config);
-                        if !stored_password.is_empty()
-                            && !stored_password.starts_with(PORTAL_PASSWORD_DPAPI_PREFIX)
-                        {
-                            if let Err(error) = save_config(app_handle, &config) {
+                        let mut migrate_plaintext = !stored_password.is_empty()
+                            && !stored_password.starts_with(PORTAL_PASSWORD_DPAPI_PREFIX);
+                        for task in &mut config.tasks {
+                            migrate_plaintext |= post_install_passwords(&task.post_install_actions)
+                                .iter()
+                                .any(|password| {
+                                    !password.is_empty()
+                                        && !password.starts_with(PORTAL_PASSWORD_DPAPI_PREFIX)
+                                });
+                            if let Err(error) =
+                                unprotect_post_install_passwords(&mut task.post_install_actions)
+                            {
                                 log::warn!(
-                                    "Failed to migrate the Portal password to DPAPI: {error}"
+                                    "Failed to decrypt post-install passwords for task {}: {error}",
+                                    task.id
                                 );
+                                clear_post_install_passwords(&mut task.post_install_actions);
+                            }
+                        }
+                        let config = normalize_config(config);
+                        if migrate_plaintext {
+                            if let Err(error) = save_config(app_handle, &config) {
+                                log::warn!("Failed to migrate saved passwords to DPAPI: {error}");
                             }
                         }
                         return config;
@@ -1315,6 +1657,8 @@ mod tests {
                 stability_check_secs: 180,
                 recent_file_guard_mins: 5,
                 fallback_recent_package_enabled: false,
+                sync_retention_enabled: false,
+                sync_retention_days: 7,
                 copy_buffer_size_kb: 8192,
                 copy_mode: CopyMode::WindowsShell,
             },
@@ -1324,6 +1668,8 @@ mod tests {
         assert_eq!(config.interval_minutes, 15);
         assert!(config.deploy_enabled);
         assert!(!config.fallback_recent_package_enabled);
+        assert!(!config.sync_retention_enabled);
+        assert_eq!(config.sync_retention_days, 7);
         assert_eq!(config.copy_mode, CopyMode::WindowsShell);
         assert_eq!(app_and_backend_domain_snapshot(&config), preserved);
     }
@@ -1637,6 +1983,119 @@ mod tests {
     #[test]
     fn default_app_config_remains_valid_with_auto_add_enabled() {
         assert!(validate_config(&AppConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn legacy_scan_task_receives_safe_post_install_defaults() {
+        let task: ScanTask = serde_json::from_value(serde_json::json!({
+            "id": "task-1",
+            "enabled": true,
+            "name": "components",
+            "remote_path": "\\\\server\\share\\product\\VMS_U500_H16\\B2101.12.1\\x86_64",
+            "local_path": null,
+            "rule": { "type": "DateMatch", "value": "%y%m%d" },
+            "server_bindings": []
+        }))
+        .unwrap();
+
+        assert!(task.post_install_actions.enabled);
+        assert!(task.post_install_actions.enable_ssh);
+        assert!(task.post_install_actions.passwords.enabled);
+        assert_eq!(task.post_install_actions.passwords.ums_username, "loadmin");
+        assert_eq!(
+            task.post_install_actions.passwords.framework_new_password,
+            "admin_123"
+        );
+        assert_eq!(
+            task.post_install_actions.passwords.ums_new_password,
+            "admin_1234"
+        );
+        assert_eq!(
+            task.post_install_actions.passwords.cdm_new_password,
+            "admin_123"
+        );
+        assert_eq!(task.post_install_actions.poll_interval_secs, 30);
+        assert_eq!(task.post_install_actions.poll_attempts, 20);
+    }
+
+    #[test]
+    fn scan_task_modules_migrate_and_round_trip_overrides() {
+        let legacy: ScanTask = serde_json::from_value(serde_json::json!({
+            "id": "task-components",
+            "enabled": true,
+            "name": "components",
+            "remote_path": "\\\\server\\share\\product\\VX_U_MOD\\B2106.12.1\\x86_64",
+            "local_path": "D:\\packages",
+            "rule": { "type": "DateMatch", "value": "%y%m%d" },
+            "server_bindings": []
+        }))
+        .unwrap();
+        let mut config = AppConfig::default();
+        config.tasks.push(legacy);
+        let mut normalized = normalize_config(config);
+        assert_eq!(normalized.tasks[0].modules.len(), 1);
+        assert_eq!(
+            normalized.tasks[0].modules[0].id,
+            "task-components-module-1"
+        );
+
+        let module = &mut normalized.tasks[0].modules[0];
+        module.rule = Some(MatchRule::VersionMatch("B2106.12.1".to_string()));
+        module.server_bindings = Some(vec![TaskServerBinding {
+            server_id: "server-a".to_string(),
+            command_group_ids: vec!["install".to_string()],
+        }]);
+        module.local_script_binding = Some(LocalScriptBinding {
+            command_group_ids: vec!["verify".to_string()],
+        });
+        module.post_copy_execution_order = Some(PostCopyExecutionOrder::Parallel);
+
+        let restored: AppConfig =
+            serde_json::from_value(serde_json::to_value(&normalized).unwrap()).unwrap();
+        let restored_module = &restored.tasks[0].modules[0];
+        assert!(matches!(
+            restored_module.rule,
+            Some(MatchRule::VersionMatch(_))
+        ));
+        assert_eq!(restored_module.server_bindings.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            restored_module
+                .local_script_binding
+                .as_ref()
+                .unwrap()
+                .command_group_ids,
+            ["verify"]
+        );
+        assert_eq!(
+            restored_module.post_copy_execution_order,
+            Some(PostCopyExecutionOrder::Parallel)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn post_install_passwords_use_dpapi_ciphertext_at_rest() {
+        let task: ScanTask = serde_json::from_value(serde_json::json!({
+            "id": "task-1",
+            "enabled": true,
+            "name": "components",
+            "remote_path": "\\\\server\\share\\product\\VMS_U500_H16\\B2101.12.1\\x86_64",
+            "local_path": null,
+            "rule": { "type": "DateMatch", "value": "%y%m%d" }
+        }))
+        .unwrap();
+        let mut config = AppConfig::default();
+        config.tasks.push(task);
+
+        let stored = prepare_config_for_storage(&config).unwrap();
+        let actions = &stored.tasks[0].post_install_actions;
+        for password in post_install_passwords(actions) {
+            assert!(password.starts_with(PORTAL_PASSWORD_DPAPI_PREFIX));
+            assert!(!password.contains("admin_123"));
+        }
+        let mut decrypted = actions.clone();
+        unprotect_post_install_passwords(&mut decrypted).unwrap();
+        assert_eq!(decrypted.passwords.ums_new_password, "admin_1234");
     }
 
     #[test]

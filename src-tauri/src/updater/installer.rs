@@ -22,15 +22,17 @@ pub fn build_helper_args(
     target_path: &Path,
 ) -> Vec<String> {
     vec![
+        "/d".to_string(),
+        "/s".to_string(),
         "/c".to_string(),
-        "start".to_string(),
-        "".to_string(),
-        "/min".to_string(),
-        bat_path.display().to_string(),
-        pid.to_string(),
-        src.display().to_string(),
-        current_path.display().to_string(),
-        target_path.display().to_string(),
+        format!(
+            "call \"{}\" {} \"{}\" \"{}\" \"{}\"",
+            bat_path.display(),
+            pid,
+            src.display(),
+            current_path.display(),
+            target_path.display()
+        ),
     ]
 }
 
@@ -47,10 +49,7 @@ pub fn spawn_helper(
         current_path,
         target_path,
     );
-    std::process::Command::new("cmd.exe")
-        .args(args)
-        .spawn()
-        .map_err(|error| UpdaterError::Io(error.to_string()))?;
+    spawn_cmd_helper(args)?;
     Ok(())
 }
 
@@ -73,22 +72,44 @@ pub fn build_rename_helper_args(
     target: &Path,
 ) -> Vec<String> {
     vec![
+        "/d".to_string(),
+        "/s".to_string(),
         "/c".to_string(),
-        "start".to_string(),
-        "".to_string(),
-        "/min".to_string(),
-        bat_path.display().to_string(),
-        pid.to_string(),
-        src.display().to_string(),
-        target.display().to_string(),
+        format!(
+            "call \"{}\" {} \"{}\" \"{}\"",
+            bat_path.display(),
+            pid,
+            src.display(),
+            target.display()
+        ),
     ]
 }
 
 pub fn spawn_rename_helper(src: &Path, target: &Path) -> Result<(), UpdaterError> {
     let bat_path = write_rename_helper()?;
     let args = build_rename_helper_args(&bat_path, std::process::id(), src, target);
-    std::process::Command::new("cmd.exe")
-        .args(args)
+    spawn_cmd_helper(args)?;
+    Ok(())
+}
+
+fn spawn_cmd_helper(args: Vec<String>) -> Result<(), UpdaterError> {
+    let mut command = std::process::Command::new("cmd.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let (command_line, switches) = args
+            .split_last()
+            .ok_or_else(|| UpdaterError::Io("missing helper command line".to_string()))?;
+        command.args(switches);
+        // cmd.exe has different quoting rules from CommandLineToArgvW. Passing
+        // its command text verbatim keeps quoted paths (including spaces) intact.
+        command.raw_arg(command_line);
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    command.args(args);
+    command
         .spawn()
         .map_err(|error| UpdaterError::Io(error.to_string()))?;
     Ok(())
@@ -112,6 +133,10 @@ mod tests {
     fn helper_bat_template_is_present_and_uses_positional_args() {
         let bat = crate::updater::HELPER_BAT;
         assert!(bat.contains("tasklist"));
+        assert!(bat.contains("WAIT_COUNT"));
+        assert!(bat.contains("process_still_running"));
+        assert!(!bat.contains("taskkill"));
+        assert!(bat.contains("file-sync-tool-updater.log"));
         assert!(bat.contains("%~1"));
         assert!(bat.contains("%~2"));
         assert!(bat.contains("%~3"));
@@ -119,6 +144,10 @@ mod tests {
         assert!(bat.contains("move /y \"%~2\" \"%~4\""));
         assert!(bat.contains("start \"\" \"%~4\""));
         assert!(bat.contains("del \"%~f0\""));
+        assert!(
+            !bat.contains("move /y \"%~3\""),
+            "the running executable must remain available as a rollback path"
+        );
     }
 
     #[test]
@@ -148,11 +177,16 @@ mod tests {
     fn rename_helper_bat_renames_then_launches() {
         let bat = crate::updater::HELPER_RENAME_BAT;
         assert!(bat.contains("tasklist"));
+        assert!(bat.contains("WAIT_COUNT"));
+        assert!(bat.contains("process_still_running"));
+        assert!(!bat.contains("taskkill"));
+        assert!(bat.contains("file-sync-tool-updater.log"));
         assert!(bat.contains("%~1"));
         assert!(bat.contains("%~2"));
         assert!(bat.contains("%~3"));
         assert!(bat.contains("move /y \"%~2\" \"%~3\""));
         assert!(bat.contains("start \"\" \"%~3\""));
+        assert!(bat.contains("start \"\" \"%~2\""));
         assert!(bat.contains("del \"%~f0\""));
     }
 
@@ -177,14 +211,13 @@ mod tests {
             std::path::Path::new(r"C:\app\file-sync-tool-1.1.0-202604271707.exe"),
             std::path::Path::new(r"C:\app\file-sync-tool-1.1.1-202605181737.exe"),
         );
-        assert_eq!(args[0], "/c");
-        assert_eq!(args[1], "start");
-        assert_eq!(args[2], "");
-        assert_eq!(args[3], "/min");
-        assert_eq!(args[4], r"C:\Temp\fst-rename.bat");
-        assert_eq!(args[5], "12345");
-        assert_eq!(args[6], r"C:\app\file-sync-tool-1.1.0-202604271707.exe");
-        assert_eq!(args[7], r"C:\app\file-sync-tool-1.1.1-202605181737.exe");
+        assert_eq!(args[0], "/d");
+        assert_eq!(args[1], "/s");
+        assert_eq!(args[2], "/c");
+        assert_eq!(
+            args[3],
+            r#"call "C:\Temp\fst-rename.bat" 12345 "C:\app\file-sync-tool-1.1.0-202604271707.exe" "C:\app\file-sync-tool-1.1.1-202605181737.exe""#
+        );
     }
 
     #[test]
@@ -197,14 +230,40 @@ mod tests {
             std::path::Path::new(r"C:\Program Files\file-sync-tool-1.0.7.exe"),
             std::path::Path::new(r"C:\Program Files\file-sync-tool-1.1.0.exe"),
         );
-        assert_eq!(args[0], "/c");
-        assert_eq!(args[1], "start");
-        assert_eq!(args[2], "");
-        assert_eq!(args[3], "/min");
-        assert_eq!(args[4], r"C:\Temp\fst-update.bat");
-        assert_eq!(args[5], "12345");
-        assert_eq!(args[6], r"C:\Temp\with space\new.exe");
-        assert_eq!(args[7], r"C:\Program Files\file-sync-tool-1.0.7.exe");
-        assert_eq!(args[8], r"C:\Program Files\file-sync-tool-1.1.0.exe");
+        assert_eq!(args[0], "/d");
+        assert_eq!(args[1], "/s");
+        assert_eq!(args[2], "/c");
+        assert_eq!(
+            args[3],
+            r#"call "C:\Temp\fst-update.bat" 12345 "C:\Temp\with space\new.exe" "C:\Program Files\file-sync-tool-1.0.7.exe" "C:\Program Files\file-sync-tool-1.1.0.exe""#
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_launch_preserves_paths_with_spaces() {
+        use std::time::{Duration, Instant};
+
+        let unique = format!("fst helper args {} {}", std::process::id(), random_suffix());
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir(&root).expect("create spaced helper directory");
+        let bat_path = root.join("update helper.bat");
+        std::fs::write(&bat_path, HELPER_BAT).expect("write helper");
+
+        let source = root.join("missing update source.exe");
+        let current = root.join("missing current executable.exe");
+        let target = root.join("missing update target.exe");
+        let args = build_helper_args(&bat_path, u32::MAX, &source, &current, &target);
+        spawn_cmd_helper(args).expect("spawn helper through cmd.exe");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while bat_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !bat_path.exists(),
+            "the helper must receive its spaced path intact and self-delete"
+        );
+        std::fs::remove_dir(&root).expect("remove spaced helper directory");
     }
 }

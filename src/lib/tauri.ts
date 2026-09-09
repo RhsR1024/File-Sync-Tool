@@ -66,6 +66,53 @@ export interface MatchRule {
   value: string;
 }
 
+export interface ScanTaskModule {
+  id: string;
+  enabled: boolean;
+  name: string;
+  remote_path: string;
+  local_path: string | null;
+  rule: MatchRule | null;
+  server_bindings: TaskServerBinding[] | null;
+  local_script_binding: LocalScriptBinding | null;
+  post_copy_execution_order: PostCopyExecutionOrder | null;
+}
+
+export type PostInstallTopologyMode = 'ha' | 'replica' | 'ha_and_replica';
+
+export interface PostInstallPasswordSettings {
+  enabled: boolean;
+  framework: boolean;
+  ums: boolean;
+  cdm: boolean;
+  ums_username: string;
+  framework_old_password: string;
+  framework_new_password: string;
+  ums_old_password: string;
+  ums_new_password: string;
+  cdm_old_password: string;
+  cdm_new_password: string;
+}
+
+export interface PostInstallTopologySettings {
+  enabled: boolean;
+  mode: PostInstallTopologyMode;
+  primary_ip: string;
+  ha_replica_ip: string;
+  virtual_ip: string;
+  replica_ips: string[];
+  framework_password: string;
+}
+
+export interface PostInstallActions {
+  enabled: boolean;
+  enable_ssh: boolean;
+  passwords: PostInstallPasswordSettings;
+  topology: PostInstallTopologySettings;
+  poll_interval_secs: number;
+  poll_attempts: number;
+}
+
 export type DiskCleanupLinuxMode = 'componentized' | 'mainline';
 
 export type CopyMode = 'built_in' | 'windows_shell';
@@ -77,10 +124,13 @@ export interface ScanTask {
   remote_path: string;
   local_path: string | null;
   rule: MatchRule;
+  /** Composite source modules. Older configs may omit this until normalized by Rust. */
+  modules?: ScanTaskModule[];
   /** Per-server deployment bindings with command groups. */
   server_bindings: TaskServerBinding[];
   local_script_binding: LocalScriptBinding | null;
   post_copy_execution_order: PostCopyExecutionOrder;
+  post_install_actions: PostInstallActions;
 }
 
 export interface PortalLoginSettings {
@@ -151,6 +201,10 @@ export interface AppConfig {
 
   /** Search the previous three days when today's date folder has no matching package. Default: true. */
   fallback_recent_package_enabled: boolean;
+
+  /** Automatically clean eligible local packages and task records older than this window. */
+  sync_retention_enabled: boolean;
+  sync_retention_days: number;
 
   /** One switch: launch on startup + auto start scheduler scan after app launch */
   launch_and_auto_scan: boolean;
@@ -225,6 +279,8 @@ export interface SyncConfigPatch extends Pick<
   | 'stability_check_secs'
   | 'recent_file_guard_mins'
   | 'fallback_recent_package_enabled'
+  | 'sync_retention_enabled'
+  | 'sync_retention_days'
   | 'copy_buffer_size_kb'
   | 'copy_mode'
 > {}
@@ -309,7 +365,35 @@ export type TaskSourceType = 'scheduled' | 'manual';
 
 export type TaskTriggerSource = 'scheduled' | 'manual' | 'recovery';
 
-export type TaskRunType = 'copy_and_deploy' | 'deploy_retry' | 'manual_deploy';
+export type TaskRunType = 'copy_and_deploy' | 'deploy_retry' | 'manual_deploy' | 'topology' | 'post_install_retry';
+
+export type TaskGroupKind = 'artifact' | 'composite_batch' | 'topology';
+export type ModuleTaskStatus = 'pending_scan' | 'no_output' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+export interface TaskModuleSummary {
+  module_id: string;
+  module_name: string;
+  remote_path: string;
+  local_path: string;
+  status: ModuleTaskStatus;
+  child_task_group_ids: string[];
+  found_builds: number;
+  completed_builds: number;
+  total_bytes: number;
+  copied_bytes: number;
+  error_message: string | null;
+}
+
+export interface CompositeBatchSummary {
+  batch_key: string;
+  expected_modules: number;
+  found_modules: number;
+  current_module_index: number;
+  current_module_name: string | null;
+  total_bytes: number;
+  copied_bytes: number;
+  modules: TaskModuleSummary[];
+}
 
 export type TaskSummaryStatus =
   | 'queued'
@@ -341,7 +425,18 @@ export type DeployState =
 
 export type AttemptStatus = 'running' | 'success' | 'failed' | 'cancelled' | 'interrupted';
 
-export type DeployStage = 'pending' | 'connecting' | 'uploading' | 'executing_commands' | 'done';
+export type DeployStage =
+  | 'pending'
+  | 'connecting'
+  | 'uploading'
+  | 'executing_commands'
+  | 'waiting_reboot'
+  | 'enabling_ssh'
+  | 'configuring_topology'
+  | 'verifying_topology'
+  | 'changing_passwords'
+  | 'unconfirmed'
+  | 'done';
 
 export interface TaskRunHandle {
   task_group_id: string;
@@ -377,6 +472,7 @@ export interface StartManualDeployTaskRequest {
   extract_policy?: ManualDeployExtractPolicy;
   extract_dir?: string;
   bindings: StartManualDeployTaskBindingRequest[];
+  post_install_actions: PostInstallActions;
 }
 
 export interface ManualDeployPreflightResult {
@@ -410,6 +506,13 @@ export interface DeployAttempt {
   error_phase: DeployStage | null;
   error_message: string | null;
   last_log_excerpt: string | null;
+  server_role: string | null;
+  stage_started_at: string | null;
+  stage_finished_at: string | null;
+  poll_attempt: number;
+  next_poll_at: string | null;
+  resumable: boolean;
+  topology_dispatched: boolean;
 }
 
 export interface TaskRun {
@@ -424,6 +527,8 @@ export interface TaskRun {
   deploy_phase: DeployState;
   deploy_attempts: DeployAttempt[];
   attempt_ids: string[];
+  copy_total_bytes: number;
+  copy_copied_bytes: number;
 }
 
 export interface ServerRollup {
@@ -436,6 +541,17 @@ export interface ServerRollup {
   failure_count: number;
   last_error_message: string | null;
   attempt_ids: string[];
+  server_role: string | null;
+}
+
+export interface ArtifactMetadata {
+  product: string | null;
+  version: string | null;
+  architecture: string | null;
+  build_id: string | null;
+  source_modified_at: string | null;
+  module_id: string | null;
+  module_name: string | null;
 }
 
 export interface TaskGroupListItem {
@@ -446,6 +562,7 @@ export interface TaskGroupListItem {
   folder_name: string;
   source_path: string;
   local_target_path: string;
+  artifact: ArtifactMetadata;
   copy_status: CopyState;
   local_exec_status: LocalExecState;
   deploy_status: DeployState;
@@ -456,6 +573,9 @@ export interface TaskGroupListItem {
   latest_run_id: string | null;
   had_failures: boolean;
   server_rollups: ServerRollup[];
+  group_kind: TaskGroupKind;
+  parent_task_group_id: string | null;
+  composite_batch: CompositeBatchSummary | null;
 }
 
 export interface TaskGroup extends TaskGroupListItem {
@@ -464,6 +584,7 @@ export interface TaskGroup extends TaskGroupListItem {
 }
 
 export interface TaskGroupsSnapshot {
+  revision: number;
   groups: TaskGroupListItem[];
 }
 
@@ -617,6 +738,10 @@ export async function retryTaskGroupDeploy(taskGroupId: string): Promise<TaskRun
   return await invoke('retry_task_group_deploy', { taskGroupId });
 }
 
+export async function retryFailedCompositeModules(taskGroupId: string): Promise<TaskRunHandle[]> {
+  return await invoke('retry_failed_composite_modules', { taskGroupId });
+}
+
 export async function startManualCopyTask(request: StartManualCopyTaskRequest): Promise<TaskRunHandle> {
   return await invoke('start_manual_copy_task', { request });
 }
@@ -694,8 +819,10 @@ export interface UmsInitPasswordResult {
 export interface UmsInitPasswordRequest {
   ips: string[];
   targets: UmsInitPasswordTargets;
-  /** Shared new password applied to every selected flow. */
-  newPassword: string;
+  umsUsername: string;
+  frameworkNewPassword: string;
+  umsNewPassword: string;
+  cdmNewPassword: string;
   frameworkOldPassword: string;
   umsOldPassword: string;
   cdmOldPassword: string;
@@ -711,6 +838,65 @@ export interface ApplianceSshResult {
   whitelistSourceIp?: string;
   whitelistApplied?: boolean;
   jumpHost?: string;
+}
+
+export type DeploymentTopologyMode = 'ha' | 'replica' | 'ha_and_replica';
+export type DeploymentTopologyResultStatus = 'success' | 'failed' | 'unconfirmed';
+
+export interface DeploymentTopologyRequest {
+  mode: DeploymentTopologyMode;
+  primaryIp: string;
+  haReplicaIp?: string | null;
+  virtualIp?: string | null;
+  replicaIps: string[];
+  frameworkPassword: string;
+  pollIntervalSecs?: number;
+  pollAttempts?: number;
+}
+
+export interface DeploymentTopologyServer {
+  serverIp: string;
+  serverName: string;
+  haType: number;
+  serverStatus: number;
+  isDeployed: number;
+  virtualIp: string;
+}
+
+export interface DeploymentTopologyResult {
+  status: DeploymentTopologyResultStatus;
+  message: string;
+  expectedServerCount: number;
+  observedServerCount: number;
+  servers: DeploymentTopologyServer[];
+}
+
+export interface SyncRetentionCandidate {
+  taskGroupId: string;
+  displayName: string;
+  localPath: string;
+  finishedAt: string;
+  bytes: number;
+  packageExists: boolean;
+  eligible: boolean;
+  skipReason: string | null;
+}
+
+export interface SyncRetentionPreview {
+  days: number;
+  cutoff: string;
+  candidates: SyncRetentionCandidate[];
+  eligiblePackages: number;
+  eligibleRecords: number;
+  totalBytes: number;
+}
+
+export interface SyncRetentionResult {
+  removedPackages: number;
+  removedRecords: number;
+  freedBytes: number;
+  skipped: number;
+  errors: string[];
 }
 
 export interface ApplianceSshTarget {
@@ -877,6 +1063,33 @@ export async function changeUmsInitPassword(
 
 export async function enableApplianceSsh(request: EnableApplianceSshRequest): Promise<ApplianceSshResult[]> {
   return await invoke<ApplianceSshResult[]>('enable_appliance_ssh', { request });
+}
+
+export async function configureDeploymentTopology(
+  request: DeploymentTopologyRequest,
+): Promise<DeploymentTopologyResult> {
+  return await invoke<DeploymentTopologyResult>('configure_deployment_topology', { request });
+}
+
+export async function startDeploymentTopologyTask(
+  request: DeploymentTopologyRequest,
+  taskGroupId: string | null = null,
+): Promise<TaskRunHandle> {
+  return await invoke<TaskRunHandle>('start_deployment_topology_task', { request, taskGroupId });
+}
+
+export async function queryDeploymentTopology(
+  request: DeploymentTopologyRequest,
+): Promise<DeploymentTopologyResult> {
+  return await invoke<DeploymentTopologyResult>('query_deployment_topology', { request });
+}
+
+export async function previewSyncRetention(days: number): Promise<SyncRetentionPreview> {
+  return await invoke<SyncRetentionPreview>('preview_sync_retention', { days });
+}
+
+export async function applySyncRetention(days: number): Promise<SyncRetentionResult> {
+  return await invoke<SyncRetentionResult>('apply_sync_retention', { days });
 }
 
 // Remote Package Patch

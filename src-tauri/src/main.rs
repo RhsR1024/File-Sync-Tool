@@ -6,6 +6,8 @@ mod clipboard;
 mod code_count;
 mod config;
 mod deploy;
+mod deployment_post_install;
+mod deployment_topology;
 mod device_simulator_commands;
 #[path = "device_simulator/platform_registration.rs"]
 mod device_simulator_platform_registration;
@@ -31,6 +33,8 @@ mod screenshare_web_assets;
 #[cfg(feature = "screen-share-webrtc-prototype")]
 mod screenshare_webrtc;
 mod single_instance_guard;
+mod ssh_connection;
+mod sync_retention;
 mod task_commands;
 mod task_domain;
 mod task_events;
@@ -46,7 +50,7 @@ mod windows_copy;
 use config::{AppConfig, DeployServer};
 use scanner::ScanResult;
 use ssh2::{ExtendedData, Session};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -327,6 +331,8 @@ struct StartManualDeployTaskRequest {
     extract_dir: String,
     #[serde(default)]
     bindings: Vec<StartManualDeployBindingRequest>,
+    #[serde(default)]
+    post_install_actions: config::PostInstallActions,
 }
 
 #[derive(serde::Serialize)]
@@ -983,6 +989,9 @@ fn start_manual_copy_worker(app_handle: tauri::AppHandle, state: &AppState) {
                     task.filename_includes.clone(),
                     task.skip_stability_check,
                     task.task_id.clone(),
+                    None,
+                    None,
+                    None,
                     task.allow_deploy,
                 )
                 .await;
@@ -1303,49 +1312,60 @@ fn spawn_exit_watchdog() {
         });
 }
 
+pub(crate) async fn prepare_application_exit(
+    app_handle: &tauri::AppHandle,
+    simulator_state: &device_simulator_commands::DeviceSimulatorCommandState,
+) -> Result<(), String> {
+    // Residual sessions launch an elevated recovery worker whose bounded request
+    // timeout is 120 seconds. Keep the application-owned dialog responsive while
+    // allowing that cleanup to finish instead of aborting it after 20 seconds.
+    match tokio::time::timeout(
+        Duration::from_secs(130),
+        device_simulator_commands::shutdown_for_exit(app_handle, simulator_state),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!(
+            "{}: {}",
+            error.code,
+            error.details.unwrap_or(error.message_key)
+        )),
+        Err(_) => Err("device_simulator.exit.cleanup_timeout: simulator cleanup did not finish within 130 seconds".into()),
+    }
+}
+
+pub(crate) fn quiesce_application_tasks(state: &AppState) {
+    // Copy workers own the only writes still in flight. Signalling them here lets
+    // an in-progress run reach a cancelled terminal state on its own before the
+    // process goes away; a run that cannot react is still recovered on next start,
+    // where task state left mid-flight is loaded back as interrupted.
+    state.should_cancel.store(true, Ordering::SeqCst);
+    state
+        .manual_deploy_should_cancel
+        .store(true, Ordering::SeqCst);
+    state.task_manager.interrupt_in_progress_for_exit();
+}
+
+pub(crate) fn finish_application_exit(app_handle: &tauri::AppHandle, state: &AppState) {
+    quiesce_application_tasks(state);
+    state.clipboard.shutdown();
+    spawn_exit_watchdog();
+    app_handle.exit(0);
+}
+
 #[tauri::command]
 async fn confirm_quit(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     simulator_state: State<'_, device_simulator_commands::DeviceSimulatorCommandState>,
 ) -> Result<(), String> {
-    // Residual sessions launch an elevated recovery worker whose bounded request
-    // timeout is 120 seconds. Keep the application-owned dialog responsive while
-    // allowing that cleanup to finish instead of aborting it after 20 seconds.
-    let cleanup = tokio::time::timeout(
-        Duration::from_secs(130),
-        device_simulator_commands::shutdown_for_exit(&app_handle, simulator_state.inner()),
-    )
-    .await;
-    match cleanup {
-        Ok(Ok(())) => {
-            // Copy workers own the only writes still in flight. Signalling them here lets
-            // an in-progress run reach a cancelled terminal state on its own before the
-            // process goes away; a run that cannot react is still recovered on next start,
-            // where task state left mid-flight is loaded back as interrupted.
-            state.should_cancel.store(true, Ordering::SeqCst);
-            state
-                .manual_deploy_should_cancel
-                .store(true, Ordering::SeqCst);
-            state.task_manager.interrupt_in_progress_for_exit();
-            state.clipboard.shutdown();
-            spawn_exit_watchdog();
-            app_handle.exit(0);
-            Ok(())
-        }
-        Ok(Err(error)) => {
-            state.is_quitting.store(false, Ordering::SeqCst);
-            Err(format!(
-                "{}: {}",
-                error.code,
-                error.details.unwrap_or(error.message_key)
-            ))
-        }
-        Err(_) => {
-            state.is_quitting.store(false, Ordering::SeqCst);
-            Err("device_simulator.exit.cleanup_timeout: simulator cleanup did not finish within 130 seconds".into())
-        }
+    if let Err(error) = prepare_application_exit(&app_handle, simulator_state.inner()).await {
+        state.is_quitting.store(false, Ordering::SeqCst);
+        return Err(error);
     }
+    finish_application_exit(&app_handle, state.inner());
+    Ok(())
 }
 
 fn enqueue_manual_copy(state: &AppState, item: ManualCopyQueueItem) -> (usize, bool) {
@@ -1588,6 +1608,9 @@ async fn update_app_config(
     sync_launch_on_startup(config_requires_launch_on_startup(&next))?;
     *state.config.lock().unwrap() = next.clone();
     config::save_config(&app_handle, &next)?;
+    state
+        .task_manager
+        .prune_terminal_groups(next.max_task_records as usize);
     updater::commands::handle_config_changed(&app_handle, state.inner(), server_url_changed);
     Ok(())
 }
@@ -1621,6 +1644,146 @@ async fn scan_now(
     .await;
 
     Ok(result)
+}
+
+#[tauri::command]
+async fn retry_failed_composite_modules(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    task_group_id: String,
+) -> Result<Vec<task_manager::TaskRunHandle>, String> {
+    let _execution_reservation =
+        reserve_scan_executor(state.inner(), "Another scan or copy is already in progress")?;
+    let parent = state
+        .task_manager
+        .get_group_detail(&task_group_id)
+        .ok_or_else(|| format!("Composite task not found: {task_group_id}"))?;
+    let batch = parent
+        .composite_batch
+        .ok_or_else(|| "The selected task is not a composite batch".to_string())?;
+    let task_config_id = parent
+        .task_config_id
+        .ok_or_else(|| "Composite task configuration is missing".to_string())?;
+    let failed_modules = batch
+        .modules
+        .into_iter()
+        .filter(|module| module.status == task_domain::ModuleTaskStatus::Failed)
+        .collect::<Vec<_>>();
+    if failed_modules.is_empty() {
+        return Err("No failed modules are available to retry".to_string());
+    }
+
+    state.should_cancel.store(false, Ordering::SeqCst);
+    state.should_skip_current.store(false, Ordering::SeqCst);
+    state.is_paused.store(false, Ordering::SeqCst);
+    let config = state.config.lock().unwrap().clone();
+    let mut handles = Vec::new();
+    let mut errors = Vec::new();
+
+    for (index, module) in failed_modules.iter().enumerate() {
+        let child = module
+            .child_task_group_ids
+            .iter()
+            .rev()
+            .find_map(|id| state.task_manager.get_group_detail(id));
+        let Some(child) = child else {
+            errors.push(format!(
+                "{}: no failed build record to retry",
+                module.module_name
+            ));
+            continue;
+        };
+        let target_root = Path::new(&child.local_target_path)
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| format!("Cannot resolve target root: {}", child.local_target_path))?;
+        let handle = state
+            .task_manager
+            .begin_scheduled_copy(task_manager::TaskStartRequest {
+                task_config_id: Some(task_config_id.clone()),
+                display_name: format!("{} / {}", parent.display_name, module.module_name),
+                folder_name: child.folder_name.clone(),
+                source_path: child.source_path.clone(),
+                local_target_path: child.local_target_path.clone(),
+                source_type: task_domain::TaskSourceType::Scheduled,
+                trigger_source: task_domain::TaskTriggerSource::Recovery,
+                module_id: Some(module.module_id.clone()),
+                module_name: Some(module.module_name.clone()),
+                parent_task_group_id: Some(task_group_id.clone()),
+            });
+        let active = match state
+            .task_runtime
+            .activate(handle.task_group_id.clone(), handle.run_id.clone())
+        {
+            Ok(active) => active,
+            Err(error) => {
+                errors.push(format!("{}: {error}", module.module_name));
+                continue;
+            }
+        };
+        clear_stale_targeted_run_controls(
+            &active,
+            &state.run_control_target,
+            &state.should_cancel,
+            Some(&state.should_skip_current),
+            &state.is_paused,
+        );
+        let _ = state.task_manager.mark_composite_current(
+            &task_group_id,
+            &module.module_id,
+            index as u32 + 1,
+        );
+        let result = scanner::temporary_copy(
+            &app_handle,
+            &config,
+            state.config.clone(),
+            state.task_manager.clone(),
+            state.task_runtime.clone(),
+            Some(handle.clone()),
+            child.source_path,
+            target_root.to_string_lossy().to_string(),
+            true,
+            state.should_cancel.clone(),
+            state.should_skip_current.clone(),
+            state.is_paused.clone(),
+            config.file_extensions.clone(),
+            config.filename_includes.clone(),
+            true,
+            Some(task_config_id.clone()),
+            Some(module.module_id.clone()),
+            Some(module.module_name.clone()),
+            Some(task_group_id.clone()),
+            true,
+        )
+        .await;
+        let _ = state
+            .task_runtime
+            .clear(&handle.task_group_id, &handle.run_id);
+        clear_finished_targeted_run_controls(
+            &active,
+            &state.run_control_target,
+            &state.should_cancel,
+            Some(&state.should_skip_current),
+            &state.is_paused,
+        );
+        if let Err(error) = result {
+            errors.push(format!("{}: {error}", module.module_name));
+        }
+        handles.push(handle);
+    }
+
+    if handles.is_empty() {
+        Err(errors.join(" | "))
+    } else {
+        if !errors.is_empty() {
+            emit_runtime_log(
+                &app_handle,
+                format!("Some module retries failed: {}", errors.join(" | ")),
+                "warn",
+            );
+        }
+        Ok(handles)
+    }
 }
 
 /// Probe the scan cycle uses to tell whether copies queued by the user are still waiting.
@@ -1932,6 +2095,8 @@ async fn start_manual_deploy_task(
     state.manual_deploy_is_paused.store(false, Ordering::SeqCst);
 
     let config_snapshot = state.config.lock().unwrap().clone();
+    let post_install_actions = request.post_install_actions.clone();
+    let framework_api_timeout_secs = config_snapshot.framework_password_api_timeout_secs;
     let options = manual_deploy_options(&request);
     if options.extract_policy != deploy::ManualDeployExtractPolicy::Skip
         && request.bindings.iter().any(|binding| {
@@ -2007,6 +2172,23 @@ async fn start_manual_deploy_task(
     let tracking =
         task_manager.tracking_context(run_handle.task_group_id.clone(), run_handle.run_id.clone());
     tracking.register_targets(&targets)?;
+    if post_install_actions.enabled && post_install_actions.topology.enabled {
+        for target in &targets {
+            let topology = &post_install_actions.topology;
+            let role = if target.server_host == topology.primary_ip {
+                Some("primary")
+            } else if target.server_host == topology.ha_replica_ip {
+                Some("ha_replica")
+            } else if topology.replica_ips.contains(&target.server_host) {
+                Some("replica")
+            } else {
+                None
+            };
+            if let Some(role) = role {
+                let _ = tracking.set_server_role(&target.server_id, role.to_string());
+            }
+        }
+    }
 
     let active_execution =
         match task_runtime.activate(run_handle.task_group_id.clone(), run_handle.run_id.clone()) {
@@ -2055,6 +2237,11 @@ async fn start_manual_deploy_task(
     let is_paused_for_cleanup = state.manual_deploy_is_paused.clone();
     let targets_for_task = targets.clone();
     let options_for_task = options.clone();
+    let post_install_actions_for_task = post_install_actions.clone();
+    let post_install_servers = resolved_bindings
+        .iter()
+        .map(|(server, _, _)| server.clone())
+        .collect::<Vec<_>>();
 
     tauri::async_runtime::spawn(async move {
         // Keep the manual-deploy reservation for the whole batch while
@@ -2092,6 +2279,7 @@ async fn start_manual_deploy_task(
             let is_paused = is_paused.clone();
             let tracking = tracking.clone();
             let options = options_for_task.clone();
+            let post_install_actions = post_install_actions_for_task.clone();
             let worker = tauri::async_runtime::spawn_blocking(move || {
                 let _permit = permit;
                 deploy::deploy_manual(
@@ -2105,15 +2293,18 @@ async fn start_manual_deploy_task(
                     should_cancel,
                     is_paused,
                     Some(tracking),
+                    Some(&post_install_actions),
+                    framework_api_timeout_secs,
                 )
             });
             workers.push((target, worker));
         }
 
         let mut deployment_errors = Vec::new();
+        let mut successful_server_ids = Vec::new();
         for (target, worker) in workers {
             match worker.await {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => successful_server_ids.push(target.server_id.clone()),
                 Ok(Err(error)) => {
                     deployment_errors.push(format!("{}: {}", target.server_name, error))
                 }
@@ -2140,6 +2331,100 @@ async fn start_manual_deploy_task(
                     deployment_errors.push(message);
                 }
             }
+        }
+
+        if deployment_errors.is_empty()
+            && successful_server_ids.len() == targets_for_task.len()
+            && !should_cancel_for_cleanup.load(Ordering::SeqCst)
+            && post_install_actions.enabled
+            && post_install_actions.topology.enabled
+        {
+            for target in &targets_for_task {
+                let _ = tracking.mark_stage(
+                    &target.server_id,
+                    task_domain::DeployStage::ConfiguringTopology,
+                    Some(100.0),
+                    None,
+                );
+            }
+            match deployment_post_install::run_topology_post_install(
+                &post_install_actions.topology,
+                post_install_actions.poll_interval_secs,
+                post_install_actions.poll_attempts,
+            ) {
+                Ok(result)
+                    if result.status == deployment_topology::TopologyResultStatus::Success =>
+                {
+                    let _ = tracking.record_log(None, None, "success", &result.message);
+                    for server in &post_install_servers {
+                        match deployment_post_install::run_password_post_install(
+                            &app_handle_for_task,
+                            server,
+                            &post_install_actions,
+                            Some(&tracking),
+                            framework_api_timeout_secs,
+                        ) {
+                            Ok(()) => {
+                                let _ = tracking.mark_success(&server.id);
+                            }
+                            Err(error) => {
+                                let message = error.message;
+                                let _ =
+                                    tracking.mark_failure(&server.id, error.stage, message.clone());
+                                let _ = tracking.record_log(
+                                    Some(&server.id),
+                                    Some(&server.name),
+                                    "error",
+                                    &message,
+                                );
+                                deployment_errors.push(format!("{}: {}", server.name, message));
+                            }
+                        }
+                    }
+                }
+                Ok(result) => {
+                    let stage = deployment_post_install::topology_stage(&result);
+                    for target in &targets_for_task {
+                        let _ = tracking.mark_checkpoint(
+                            &target.server_id,
+                            post_install_actions.poll_attempts,
+                            None,
+                            false,
+                            result.status == deployment_topology::TopologyResultStatus::Unconfirmed,
+                        );
+                        let _ = tracking.mark_failure(
+                            &target.server_id,
+                            stage.clone(),
+                            result.message.clone(),
+                        );
+                    }
+                    deployment_errors.push(result.message);
+                }
+                Err(error) => {
+                    for target in &targets_for_task {
+                        let _ = tracking.mark_failure(
+                            &target.server_id,
+                            task_domain::DeployStage::ConfiguringTopology,
+                            error.clone(),
+                        );
+                    }
+                    deployment_errors.push(error);
+                }
+            }
+        } else if post_install_actions.enabled
+            && post_install_actions.topology.enabled
+            && !successful_server_ids.is_empty()
+        {
+            let message = "并非全部目标服务器都已完成版本安装，已跳过主备从配置和初始密码修改";
+            for server_id in &successful_server_ids {
+                let _ = tracking.mark_failure(
+                    server_id,
+                    task_domain::DeployStage::ConfiguringTopology,
+                    message.to_string(),
+                );
+            }
+            let _ = tracking.record_log(None, None, "error", message);
+            deployment_errors.push(message.to_string());
         }
 
         if should_cancel_for_cleanup.load(Ordering::SeqCst) {
@@ -2195,12 +2480,59 @@ async fn retry_task_group_deploy(
     let failed_server_ids: HashSet<String> = group
         .server_rollups
         .iter()
-        .filter(|rollup| rollup.latest_status == task_domain::AttemptStatus::Failed)
+        .filter(|rollup| {
+            matches!(
+                rollup.latest_status,
+                task_domain::AttemptStatus::Failed | task_domain::AttemptStatus::Interrupted
+            )
+        })
         .map(|rollup| rollup.server_id.clone())
         .collect();
     if failed_server_ids.is_empty() {
         return Err("No failed deployment servers are available to retry".to_string());
     }
+    let latest_failed_attempts = group
+        .runs
+        .iter()
+        .flat_map(|run| run.deploy_attempts.iter())
+        .filter(|attempt| failed_server_ids.contains(&attempt.server_id))
+        .fold(
+            HashMap::<String, task_domain::DeployAttempt>::new(),
+            |mut latest, attempt| {
+                latest.insert(attempt.server_id.clone(), attempt.clone());
+                latest
+            },
+        );
+    let is_post_install_stage = |stage: &task_domain::DeployStage| {
+        matches!(
+            stage,
+            task_domain::DeployStage::WaitingReboot
+                | task_domain::DeployStage::EnablingSsh
+                | task_domain::DeployStage::ConfiguringTopology
+                | task_domain::DeployStage::VerifyingTopology
+                | task_domain::DeployStage::ChangingPasswords
+                | task_domain::DeployStage::Unconfirmed
+        )
+    };
+    let post_install_only = !latest_failed_attempts.is_empty()
+        && latest_failed_attempts.values().all(|attempt| {
+            attempt
+                .error_phase
+                .as_ref()
+                .is_some_and(&is_post_install_stage)
+        });
+    let topology_was_dispatched = latest_failed_attempts.values().any(|attempt| {
+        attempt.topology_dispatched || attempt.stage == task_domain::DeployStage::Unconfirmed
+    });
+    let failed_stage_by_server = latest_failed_attempts
+        .iter()
+        .filter_map(|(server_id, attempt)| {
+            attempt
+                .error_phase
+                .clone()
+                .map(|stage| (server_id.clone(), stage))
+        })
+        .collect::<HashMap<_, _>>();
 
     let config_snapshot = state.config.lock().unwrap().clone();
     let task = config_snapshot
@@ -2208,8 +2540,14 @@ async fn retry_task_group_deploy(
         .iter()
         .find(|task| task.id == task_config_id)
         .ok_or_else(|| format!("Task configuration not found: {task_config_id}"))?;
-    let retry_bindings: Vec<_> = task
-        .server_bindings
+    let effective_bindings = group
+        .artifact
+        .module_id
+        .as_deref()
+        .and_then(|module_id| task.modules.iter().find(|module| module.id == module_id))
+        .and_then(|module| module.server_bindings.clone())
+        .unwrap_or_else(|| task.server_bindings.clone());
+    let retry_bindings: Vec<_> = effective_bindings
         .iter()
         .filter(|binding| failed_server_ids.contains(&binding.server_id))
         .cloned()
@@ -2217,6 +2555,8 @@ async fn retry_task_group_deploy(
     if retry_bindings.is_empty() {
         return Err("Failed servers are no longer bound to this task".to_string());
     }
+    let post_install_actions = task.post_install_actions.clone();
+    let framework_api_timeout_secs = config_snapshot.framework_password_api_timeout_secs;
 
     let retry_targets: Vec<_> = retry_bindings
         .iter()
@@ -2291,17 +2631,137 @@ async fn retry_task_group_deploy(
     tauri::async_runtime::spawn(async move {
         let join_result = tauri::async_runtime::spawn_blocking(move || {
             let _execution_reservation = execution_reservation;
-            deploy::retry_deploy_to_remote(
-                &app_handle,
-                &retry_bindings,
-                &config_snapshot.servers,
-                &config_snapshot.command_groups,
-                &local_path,
-                &folder_name,
-                should_cancel,
-                is_paused,
-                Some(tracking),
-            )
+            if !post_install_only {
+                return deploy::retry_deploy_to_remote(
+                    &app_handle,
+                    &retry_bindings,
+                    &config_snapshot.servers,
+                    &config_snapshot.command_groups,
+                    &local_path,
+                    &folder_name,
+                    should_cancel,
+                    is_paused,
+                    Some(tracking),
+                    Some(&post_install_actions),
+                    framework_api_timeout_secs,
+                );
+            }
+
+            let retry_servers = retry_bindings
+                .iter()
+                .filter_map(|binding| {
+                    config_snapshot
+                        .servers
+                        .iter()
+                        .find(|server| server.id == binding.server_id && server.enabled)
+                })
+                .collect::<Vec<_>>();
+            let topology_needed = post_install_actions.enabled
+                && post_install_actions.topology.enabled
+                && retry_servers.iter().any(|server| {
+                    failed_stage_by_server.get(&server.id).is_some_and(|stage| {
+                        matches!(
+                            stage,
+                            task_domain::DeployStage::WaitingReboot
+                                | task_domain::DeployStage::EnablingSsh
+                                | task_domain::DeployStage::ConfiguringTopology
+                                | task_domain::DeployStage::VerifyingTopology
+                                | task_domain::DeployStage::Unconfirmed
+                        )
+                    })
+                });
+
+            for server in &retry_servers {
+                let stage = failed_stage_by_server
+                    .get(&server.id)
+                    .cloned()
+                    .unwrap_or(task_domain::DeployStage::WaitingReboot);
+                if matches!(
+                    stage,
+                    task_domain::DeployStage::WaitingReboot
+                        | task_domain::DeployStage::EnablingSsh
+                        | task_domain::DeployStage::ChangingPasswords
+                ) {
+                    deployment_post_install::run_server_post_install_from_stage(
+                        &app_handle,
+                        server,
+                        &post_install_actions,
+                        &stage,
+                        &should_cancel,
+                        Some(&tracking),
+                        framework_api_timeout_secs,
+                        !topology_needed,
+                    )
+                    .map_err(|error| {
+                        let _ = tracking.mark_failure(
+                            &server.id,
+                            error.stage.clone(),
+                            error.message.clone(),
+                        );
+                        error.message
+                    })?;
+                }
+            }
+
+            if topology_needed {
+                for server in &retry_servers {
+                    let _ = tracking.mark_stage(
+                        &server.id,
+                        task_domain::DeployStage::VerifyingTopology,
+                        Some(0.0),
+                        None,
+                    );
+                }
+                let topology_result = if topology_was_dispatched {
+                    deployment_post_install::query_topology_post_install(
+                        &post_install_actions.topology,
+                        post_install_actions.poll_interval_secs,
+                        post_install_actions.poll_attempts,
+                    )
+                } else {
+                    deployment_post_install::run_topology_post_install(
+                        &post_install_actions.topology,
+                        post_install_actions.poll_interval_secs,
+                        post_install_actions.poll_attempts,
+                    )
+                }?;
+                if topology_result.status != deployment_topology::TopologyResultStatus::Success {
+                    let stage = deployment_post_install::topology_stage(&topology_result);
+                    for server in &retry_servers {
+                        let _ = tracking.mark_checkpoint(
+                            &server.id,
+                            post_install_actions.poll_attempts,
+                            None,
+                            false,
+                            topology_was_dispatched
+                                || topology_result.status
+                                    == deployment_topology::TopologyResultStatus::Unconfirmed,
+                        );
+                        let _ = tracking.mark_failure(
+                            &server.id,
+                            stage.clone(),
+                            topology_result.message.clone(),
+                        );
+                    }
+                    return Err(topology_result.message);
+                }
+                for server in &retry_servers {
+                    deployment_post_install::run_password_post_install(
+                        &app_handle,
+                        server,
+                        &post_install_actions,
+                        Some(&tracking),
+                        framework_api_timeout_secs,
+                    )
+                    .map_err(|error| error.message)?;
+                    let _ = tracking.mark_success(&server.id);
+                }
+            } else {
+                for server in &retry_servers {
+                    let _ = tracking.mark_success(&server.id);
+                }
+            }
+            Ok(())
         })
         .await;
 
@@ -2338,6 +2798,207 @@ async fn retry_task_group_deploy(
                 emit_runtime_log(&app_handle_for_result, message, "error");
             }
         }
+    });
+
+    Ok(run_handle)
+}
+
+#[tauri::command]
+async fn start_deployment_topology_task(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    task_group_id: Option<String>,
+    request: deployment_topology::DeploymentTopologyRequest,
+) -> Result<task_manager::TaskRunHandle, String> {
+    let execution_reservation = reserve_manual_deploy_executor(state.inner())?;
+    let resume_dispatched_request = task_group_id
+        .as_deref()
+        .and_then(|id| state.task_manager.get_group_detail(id))
+        .and_then(|group| {
+            group
+                .runs
+                .iter()
+                .rev()
+                .find_map(|run| run.deploy_attempts.last())
+                .cloned()
+        })
+        .is_some_and(|attempt| {
+            attempt.topology_dispatched
+                || attempt.stage == task_domain::DeployStage::Unconfirmed
+                || attempt.error_phase == Some(task_domain::DeployStage::Unconfirmed)
+        });
+    state
+        .manual_deploy_should_cancel
+        .store(false, Ordering::SeqCst);
+    state.manual_deploy_is_paused.store(false, Ordering::SeqCst);
+    let mode = match request.mode {
+        deployment_topology::TopologyMode::Ha => "HA",
+        deployment_topology::TopologyMode::Replica => "Replica",
+        deployment_topology::TopologyMode::HaAndReplica => "HA + Replica",
+    };
+    let topology_summary = format!(
+        "{mode}: primary={}, standby={}, virtual={}, replicas={}",
+        request.primary_ip,
+        request.ha_replica_ip.as_deref().unwrap_or("-"),
+        request.virtual_ip.as_deref().unwrap_or("-"),
+        if request.replica_ips.is_empty() {
+            "-".to_string()
+        } else {
+            request.replica_ips.join(",")
+        }
+    );
+    let task_manager = state.task_manager.clone();
+    let run_handle = task_manager.begin_topology_run(
+        task_group_id.as_deref(),
+        "Deployment topology",
+        &topology_summary,
+        &request.primary_ip,
+    )?;
+    let target = task_manager::DeployTarget {
+        server_id: "topology".to_string(),
+        server_name: mode.to_string(),
+        server_host: request.primary_ip.clone(),
+        remote_target: topology_summary,
+        trigger_source: if task_group_id.is_some() {
+            task_domain::TaskTriggerSource::Recovery
+        } else {
+            task_domain::TaskTriggerSource::Manual
+        },
+    };
+    task_manager.register_deploy_targets(
+        &run_handle.task_group_id,
+        &run_handle.run_id,
+        std::slice::from_ref(&target),
+    )?;
+    let tracking =
+        task_manager.tracking_context(run_handle.task_group_id.clone(), run_handle.run_id.clone());
+    let _ = tracking.set_server_role(&target.server_id, "orchestrator".to_string());
+    let task_runtime = state.manual_deploy_task_runtime.clone();
+    let active =
+        task_runtime.activate(run_handle.task_group_id.clone(), run_handle.run_id.clone())?;
+    clear_stale_targeted_run_controls(
+        &active,
+        &state.manual_deploy_run_control_target,
+        &state.manual_deploy_should_cancel,
+        None,
+        &state.manual_deploy_is_paused,
+    );
+    let should_cancel = state.manual_deploy_should_cancel.clone();
+    let should_cancel_cleanup = should_cancel.clone();
+    let run_control_target = state.manual_deploy_run_control_target.clone();
+    let paused_cleanup = state.manual_deploy_is_paused.clone();
+    let run_handle_for_task = run_handle.clone();
+    let app_handle_for_result = app_handle.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let _execution_reservation = execution_reservation;
+        let initial_stage = if resume_dispatched_request {
+            task_domain::DeployStage::VerifyingTopology
+        } else {
+            task_domain::DeployStage::ConfiguringTopology
+        };
+        let _ = tracking.mark_stage(
+            &target.server_id,
+            initial_stage,
+            Some(0.0),
+            Some(target.remote_target.clone()),
+        );
+        let result = if resume_dispatched_request {
+            if should_cancel.load(Ordering::SeqCst) {
+                Err("主备从状态确认已取消".to_string())
+            } else {
+                deployment_topology::query_deployment_topology(request).await
+            }
+        } else {
+            deployment_topology::execute_deployment_topology_with_cancel(
+                request,
+                Some(should_cancel.clone()),
+            )
+            .await
+        };
+        match result {
+            Ok(result) if result.status == deployment_topology::TopologyResultStatus::Success => {
+                let _ = tracking.mark_stage(
+                    &target.server_id,
+                    task_domain::DeployStage::VerifyingTopology,
+                    Some(100.0),
+                    None,
+                );
+                let _ = tracking.mark_success(&target.server_id);
+                let _ = tracking.record_log(
+                    Some(&target.server_id),
+                    Some(&target.server_name),
+                    "success",
+                    &result.message,
+                );
+            }
+            Ok(result)
+                if result.status == deployment_topology::TopologyResultStatus::Unconfirmed =>
+            {
+                let _ = tracking.mark_checkpoint(&target.server_id, 0, None, false, true);
+                let _ = tracking.mark_failure(
+                    &target.server_id,
+                    task_domain::DeployStage::Unconfirmed,
+                    result.message,
+                );
+            }
+            Ok(result) => {
+                if result.message.contains("已取消") {
+                    let _ = tracking.cancel_pending();
+                } else if resume_dispatched_request {
+                    let _ = tracking.mark_checkpoint(&target.server_id, 0, None, false, true);
+                    let _ = tracking.mark_failure(
+                        &target.server_id,
+                        task_domain::DeployStage::Unconfirmed,
+                        result.message,
+                    );
+                } else {
+                    let _ = tracking.mark_failure(
+                        &target.server_id,
+                        task_domain::DeployStage::VerifyingTopology,
+                        result.message,
+                    );
+                }
+            }
+            Err(error) => {
+                if should_cancel.load(Ordering::SeqCst) {
+                    let _ = tracking.cancel_pending();
+                } else {
+                    let _ = tracking.mark_checkpoint(
+                        &target.server_id,
+                        0,
+                        None,
+                        true,
+                        resume_dispatched_request,
+                    );
+                    let _ = tracking.mark_failure(
+                        &target.server_id,
+                        if resume_dispatched_request {
+                            task_domain::DeployStage::VerifyingTopology
+                        } else {
+                            task_domain::DeployStage::ConfiguringTopology
+                        },
+                        error,
+                    );
+                }
+            }
+        }
+        let _ = task_runtime.clear(
+            &run_handle_for_task.task_group_id,
+            &run_handle_for_task.run_id,
+        );
+        clear_finished_targeted_run_controls(
+            &active,
+            &run_control_target,
+            &should_cancel_cleanup,
+            None,
+            &paused_cleanup,
+        );
+        emit_runtime_log(
+            &app_handle_for_result,
+            "Deployment topology task finished".to_string(),
+            "info",
+        );
     });
 
     Ok(run_handle)
@@ -2423,6 +3084,12 @@ async fn manual_deploy(
     );
     let tracking =
         task_manager.tracking_context(run_handle.task_group_id.clone(), run_handle.run_id.clone());
+    let post_install_actions = config::PostInstallActions::default();
+    let framework_api_timeout_secs = state
+        .config
+        .lock()
+        .unwrap()
+        .framework_password_api_timeout_secs;
 
     // This runs in async context, but deploy_manual uses blocking SSH.
     // We should spawn blocking.
@@ -2438,6 +3105,8 @@ async fn manual_deploy(
             should_cancel,
             is_paused,
             Some(tracking),
+            Some(&post_install_actions),
+            framework_api_timeout_secs,
         )
     })
     .await;
@@ -2549,6 +3218,9 @@ async fn temporary_copy(
         file_extensions,
         filename_includes,
         false,
+        None,
+        None,
+        None,
         None,
         false,
     )
@@ -4994,6 +5666,12 @@ fn main() {
                 clipboard: clipboard_state,
                 error_code: std::sync::Mutex::new(error_code::ErrorCodeStore::default()),
             });
+            if let Some(state) = app.try_state::<AppState>() {
+                sync_retention::start_automatic_sync_retention(
+                    state.config.clone(),
+                    state.task_manager.clone(),
+                );
+            }
 
             portal_login::start_if_enabled(
                 app.handle().clone(),
@@ -5261,6 +5939,7 @@ fn main() {
             start_manual_copy_task,
             start_manual_deploy_task,
             retry_task_group_deploy,
+            retry_failed_composite_modules,
             queue_temporary_copy,
             preview_temporary_copy,
             get_app_paths,
@@ -5277,6 +5956,11 @@ fn main() {
             remote_package_patch::remote_package_start_patch,
             save_text_file,
             ums_init_password::change_ums_init_password,
+            deployment_topology::configure_deployment_topology,
+            deployment_topology::query_deployment_topology,
+            start_deployment_topology_task,
+            sync_retention::preview_sync_retention,
+            sync_retention::apply_sync_retention,
             enable_appliance_ssh,
             portal_login::portal_login_get_runtime_status,
             portal_login::portal_login_check_status,

@@ -25,7 +25,7 @@ test('result table keeps each flow status on one line and lets long detail wrap'
   assert.match(pageSource, /const umsResultMessageCellClass = 'px-6 py-3 text-sm text-slate-600 break-all';/);
 });
 
-test('all three flows are selected by default and carry their own factory old password', () => {
+test('all three flows are selected by default and carry independent password defaults', () => {
   assert.match(
     formStoreSource,
     /enabledFlows: \{ framework: true, ums: true, cdm: true \}/,
@@ -34,12 +34,26 @@ test('all three flows are selected by default and carry their own factory old pa
     formStoreSource,
     /DEFAULT_OLD_PASSWORDS: Record<UmsInitPasswordKind, string> = \{\s*framework: '123456',\s*ums: 'admin_123',\s*cdm: 'admin',\s*\}/,
   );
+  assert.match(
+    formStoreSource,
+    /DEFAULT_NEW_PASSWORDS: Record<UmsInitPasswordKind, string> = \{\s*framework: 'admin_123',\s*ums: 'admin_1234',\s*cdm: 'admin_123',\s*\}/,
+  );
+  assert.match(formStoreSource, /DEFAULT_UMS_USERNAME = 'loadmin'/);
+});
+
+test('password fields are always shown in plain text without visibility controls', () => {
+  assert.equal((pageSource.match(/type="password"/g) ?? []).length, 0);
+  assert.match(pageSource, /v-model="form\.oldPasswords\[flow\.kind\]"\s*type="text"/);
+  assert.match(pageSource, /v-model="form\.newPasswords\[flow\.kind\]"\s*type="text"/);
+  for (const removedControl of ['showOldPassword', 'showNewPassword', 'EyeOff', 'Eye', 'showPassword', 'hidePassword']) {
+    assert.ok(!pageSource.includes(removedControl), `${removedControl} must not be present`);
+  }
 });
 
 test('same-password conflict is evaluated per selected flow, not globally', () => {
   assert.match(
     pageSource,
-    /const isSameAsNew = \(kind: UmsInitPasswordKind\) =>\s*form\.enabledFlows\[kind\] && form\.oldPasswords\[kind\] === form\.newPassword;/,
+    /const isSameAsNew = \(kind: UmsInitPasswordKind\) =>\s*form\.enabledFlows\[kind\] && form\.oldPasswords\[kind\] === form\.newPasswords\[kind\];/,
   );
   assert.match(pageSource, /samePasswordFor/);
   assert.ok(!pageSource.includes('samePasswordError'), 'the old global conflict message must be gone');
@@ -60,10 +74,11 @@ test('identical UMS passwords set the init flag instead of blocking', () => {
   assert.match(pageSource, /initFlagOnlyHint/);
 });
 
-test('execution is blocked unless a flow, an IP and a new password are all present', () => {
+test('execution is blocked unless selected flows have their own new password and UMS user', () => {
   assert.match(pageSource, /allSelectedIps\.value\.length > 0 &&/);
   assert.match(pageSource, /selectedFlowCount\.value > 0 &&/);
-  assert.match(pageSource, /form\.newPassword\.length > 0 &&/);
+  assert.match(pageSource, /form\.newPasswords\[flow\.kind\]\.length > 0/);
+  assert.match(pageSource, /form\.umsUsername\.trim\(\)\.length > 0/);
   assert.match(pageSource, /conflictingFlows\.value\.length === 0 &&/);
 });
 
@@ -73,7 +88,8 @@ test('form fields survive a tab switch by living in a module-scoped store', () =
   assert.match(pageSource, /umsInitialPasswordFormState as form/);
   for (const binding of [
     'v-model="form.manualIpInput"',
-    'v-model="form.newPassword"',
+    'form.newPasswords[flow.kind]',
+    'v-model="form.umsUsername"',
     'v-model="form.oldPasswords[flow.kind]"',
     ':checked="form.enabledFlows[flow.kind]"',
   ]) {
@@ -94,7 +110,7 @@ test('passwords are kept out of localStorage', () => {
     .split('\n')
     .map(line => line.trim().split(':')[0])
     .filter(Boolean);
-  assert.deepEqual(fields, ['selectedIps', 'manualIpTags', 'manualIpInput', 'enabledFlows']);
+  assert.deepEqual(fields, ['selectedIps', 'manualIpTags', 'manualIpInput', 'enabledFlows', 'umsUsername']);
   assert.ok(
     !fields.some(field => /password/i.test(field)),
     'PersistedShape must not carry password fields',

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from 'vue';
 import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw, Cpu, Monitor, Check, Search, ShieldCheck, ChevronDown } from 'lucide-vue-next';
-import { preflightManualDeploy, testSshConnection, type AppConfig, type ScanTask, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type ManualDeployTransferPolicy, type ManualDeployExtractPolicy, type ManualDeployPreflightResult, type StartManualDeployTaskRequest } from '@/lib/tauri';
+import { preflightManualDeploy, testSshConnection, type AppConfig, type ScanTask, type ScanTaskModule, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type ManualDeployTransferPolicy, type ManualDeployExtractPolicy, type ManualDeployPreflightResult, type StartManualDeployTaskRequest } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { configStore } from '@/lib/configStore';
@@ -9,6 +9,8 @@ import DirectoryPathInput from '@/components/settings/DirectoryPathInput.vue';
 import Empty from '@/components/Empty.vue';
 import AppConfirmDialog from '@/components/AppConfirmDialog.vue';
 import ManualDeployLogDialog from '@/components/sync/ManualDeployLogDialog.vue';
+import PostInstallActionsEditor from '@/components/sync/PostInstallActionsEditor.vue';
+import { createDefaultPostInstallActions, normalizePostInstallActions } from '@/lib/deploymentPostInstall';
 import { getDirectoryInputValue, getTaskLocalPathHint, getTaskLocalPathPlaceholder, toOptionalDirectoryValue } from '@/lib/settingsDirectoryPathState';
 import { useI18n } from 'vue-i18n';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -471,16 +473,19 @@ function removeLocalGroupCommand(cmdIndex: number) {
 // ── Task Management ───────────────────────────────────────────────────────────
 const isEditingTask = ref(false);
 const editingTaskIndex = ref(-1);
+const taskModulePathsText = ref('');
 const taskForm = ref<ScanTask>({
     id: '',
     enabled: true,
     name: '',
     remote_path: '',
     local_path: null,
-    rule: { type: 'VersionMatch', value: '' },
+    rule: { type: 'DateMatch', value: '%y%m%d' },
+    modules: [],
     server_bindings: [],
     local_script_binding: null,
     post_copy_execution_order: 'local_first',
+    post_install_actions: createDefaultPostInstallActions(),
 });
 
 const taskLocalPathInput = computed({
@@ -500,13 +505,16 @@ function resetTaskForm() {
         name: '',
         remote_path: '',
         local_path: null,
-        rule: { type: 'VersionMatch', value: '' },
+        rule: { type: 'DateMatch', value: '%y%m%d' },
+        modules: [],
         server_bindings: [],
         local_script_binding: null,
         post_copy_execution_order: 'local_first',
+        post_install_actions: createDefaultPostInstallActions(),
     };
     isEditingTask.value = false;
     editingTaskIndex.value = -1;
+    taskModulePathsText.value = '';
 }
 
 function addTask() {
@@ -520,13 +528,97 @@ function editTask(index: number) {
     taskForm.value = {
         ...task,
         rule: { ...task.rule },
+        modules: task.modules?.map(module => ({ ...module })) ?? [],
         server_bindings: task.server_bindings.map(b => ({ ...b, command_group_ids: [...b.command_group_ids] })),
         local_script_binding: task.local_script_binding
             ? { command_group_ids: [...task.local_script_binding.command_group_ids] }
             : null,
         post_copy_execution_order: task.post_copy_execution_order || 'local_first',
+        post_install_actions: normalizePostInstallActions(task.post_install_actions),
     };
+    taskModulePathsText.value = (task.modules?.length
+        ? task.modules.map(module => module.remote_path)
+        : [task.remote_path]).join('\n');
     isEditingTask.value = true;
+}
+
+const parsedTaskModulePaths = computed(() => Array.from(new Set(
+    taskModulePathsText.value
+        .split(/[\r\n]+/)
+        .map(path => path.trim())
+        .filter(Boolean),
+)));
+
+watch(parsedTaskModulePaths, (paths) => {
+    const existingModules = new Map((taskForm.value.modules ?? []).map(module => [module.remote_path, module]));
+    taskForm.value.modules = paths.map((remotePath, index) => {
+        const existing = existingModules.get(remotePath);
+        return existing ?? {
+            id: `${taskForm.value.id}-module-${index + 1}`,
+            enabled: true,
+            name: taskModuleName(remotePath),
+            remote_path: remotePath,
+            local_path: null,
+            rule: null,
+            server_bindings: null,
+            local_script_binding: null,
+            post_copy_execution_order: null,
+        };
+    });
+});
+
+function taskModuleName(path: string) {
+    const parts = path.split(/[\\/]+/).filter(Boolean);
+    return parts.at(-3) || parts.at(-1) || t('settings.taskModuleFallbackName');
+}
+
+function setModuleRuleOverride(module: ScanTaskModule, enabled: boolean) {
+    module.rule = enabled ? { ...taskForm.value.rule } : null;
+}
+
+function setModuleServerOverride(module: ScanTaskModule, enabled: boolean) {
+    module.server_bindings = enabled
+        ? taskForm.value.server_bindings.map(binding => ({
+            server_id: binding.server_id,
+            command_group_ids: [...binding.command_group_ids],
+        }))
+        : null;
+}
+
+function moduleServerSelected(module: ScanTaskModule, serverId: string): boolean {
+    return module.server_bindings?.some(binding => binding.server_id === serverId) ?? false;
+}
+
+function toggleModuleServer(module: ScanTaskModule, serverId: string) {
+    if (!module.server_bindings) module.server_bindings = [];
+    const index = module.server_bindings.findIndex(binding => binding.server_id === serverId);
+    if (index >= 0) {
+        module.server_bindings.splice(index, 1);
+        return;
+    }
+    const inherited = taskForm.value.server_bindings.find(binding => binding.server_id === serverId);
+    module.server_bindings.push({
+        server_id: serverId,
+        command_group_ids: [...(inherited?.command_group_ids ?? [])],
+    });
+}
+
+function setModuleScriptOverride(module: ScanTaskModule, enabled: boolean) {
+    module.local_script_binding = enabled
+        ? { command_group_ids: [...(taskForm.value.local_script_binding?.command_group_ids ?? [])] }
+        : null;
+}
+
+function moduleScriptSelected(module: ScanTaskModule, groupId: string): boolean {
+    return module.local_script_binding?.command_group_ids.includes(groupId) ?? false;
+}
+
+function toggleModuleScript(module: ScanTaskModule, groupId: string) {
+    if (!module.local_script_binding) module.local_script_binding = { command_group_ids: [] };
+    const ids = module.local_script_binding.command_group_ids;
+    const index = ids.indexOf(groupId);
+    if (index >= 0) ids.splice(index, 1);
+    else ids.push(groupId);
 }
 
 function saveTask() {
@@ -534,6 +626,22 @@ function saveTask() {
     const trimmedTask = JSON.parse(JSON.stringify(taskForm.value));
     trimmedTask.rule.value = trimmedTask.rule.value.trim();
     trimmedTask.local_path = toOptionalDirectoryValue(getDirectoryInputValue(trimmedTask.local_path));
+    const existingModules = new Map((taskForm.value.modules ?? []).map(module => [module.remote_path, module]));
+    trimmedTask.modules = parsedTaskModulePaths.value.map((remotePath, index) => {
+        const existing = existingModules.get(remotePath);
+        return {
+            id: existing?.id || `${trimmedTask.id}-module-${index + 1}`,
+            enabled: existing?.enabled ?? true,
+            name: existing?.name || taskModuleName(remotePath),
+            remote_path: remotePath,
+            local_path: existing?.local_path ?? null,
+            rule: existing?.rule ?? null,
+            server_bindings: existing?.server_bindings ?? null,
+            local_script_binding: existing?.local_script_binding ?? null,
+            post_copy_execution_order: existing?.post_copy_execution_order ?? null,
+        };
+    });
+    trimmedTask.remote_path = trimmedTask.modules[0]?.remote_path || '';
 
     if (editingTaskIndex.value > -1) {
         config.value.tasks[editingTaskIndex.value] = trimmedTask;
@@ -872,6 +980,7 @@ const manualDeployMsgType = ref<'info' | 'error' | ''>('');
 const manualDeployDialogOpen = ref(false);
 const isManualPreflighting = ref(false);
 const manualPreflightResults = ref<ManualDeployPreflightResult[]>([]);
+const manualPostInstallActions = ref(createDefaultPostInstallActions());
 
 const latestManualDeployGroup = computed(() => {
     const session = taskStateStore.latestManualDeploy;
@@ -1036,6 +1145,7 @@ function buildManualDeployRequest(): StartManualDeployTaskRequest {
         extract_policy: manualExtractPolicy.value,
         extract_dir: manualExtractDir.value.trim(),
         bindings,
+        post_install_actions: JSON.parse(JSON.stringify(manualPostInstallActions.value)),
     };
 }
 
@@ -1285,8 +1395,8 @@ onMounted(load);
                     {{ t('settings.taskDeployNone') }}
                   </span>
                 </div>
-                <div class="text-xs text-slate-500 font-mono truncate" :title="task.remote_path">
-                  {{ task.remote_path }}
+                <div class="text-xs text-slate-500 font-mono truncate" :title="(task.modules?.map(module => module.remote_path) ?? [task.remote_path]).join('\n')">
+                  {{ task.modules?.length ? t('settings.taskModuleCount', { count: task.modules.length }) : task.remote_path }}
                 </div>
               </div>
             </div>
@@ -1305,7 +1415,7 @@ onMounted(load);
 
     <!-- Task Edit Modal -->
     <div v-if="shows('tasks') && isEditingTask" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div class="bg-white rounded-xl p-6 w-full max-w-lg shadow-2xl transform transition-all max-h-[90vh] flex flex-col">
+      <div class="bg-white rounded-xl p-6 w-full max-w-5xl shadow-2xl transform transition-all max-h-[90vh] flex flex-col">
         <h3 class="text-lg font-bold mb-4 text-slate-800 shrink-0">{{ editingTaskIndex > -1 ? t('settings.editTask') : t('settings.addTask') }}</h3>
         <div class="space-y-4 overflow-y-auto flex-1 pr-1">
           <div>
@@ -1313,8 +1423,108 @@ onMounted(load);
             <input v-model="taskForm.name" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" :placeholder="t('settings.taskNamePlaceholder')" />
           </div>
           <div>
-            <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.remotePath') }}</label>
-            <input v-model="taskForm.remote_path" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="\\server\share\path" />
+            <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskModulePaths') }}</label>
+            <textarea v-model="taskModulePathsText" rows="5" class="w-full p-2 border border-slate-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-y" placeholder="\\server\share\product\VMS_U500_H16\B2101.12.1\x86_64\"></textarea>
+            <div class="mt-2 flex items-center justify-between text-xs">
+              <span class="text-slate-500">{{ t('settings.taskModulePathsHint') }}</span>
+              <span class="font-medium text-blue-700">{{ t('settings.taskModuleCount', { count: parsedTaskModulePaths.length }) }}</span>
+            </div>
+            <div v-if="parsedTaskModulePaths.length" class="mt-2 max-h-28 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-2 space-y-1">
+              <div v-for="(path, index) in parsedTaskModulePaths" :key="path" class="flex gap-2 text-xs">
+                <span class="w-5 text-right text-slate-400">{{ index + 1 }}</span>
+                <span class="font-medium text-slate-700 shrink-0">{{ taskModuleName(path) }}</span>
+                <span class="font-mono text-slate-500 truncate" :title="path">{{ path }}</span>
+              </div>
+            </div>
+            <div v-if="(taskForm.modules?.length ?? 0) > 0" class="mt-3 space-y-2">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-semibold text-slate-700">{{ t('settings.moduleOverrides') }}</span>
+                <span class="text-[11px] text-slate-400">{{ t('settings.moduleOverridesHint') }}</span>
+              </div>
+              <details
+                v-for="(module, moduleIndex) in taskForm.modules"
+                :key="module.id"
+                class="group rounded-lg border border-slate-200 bg-white open:border-blue-200 open:shadow-sm"
+              >
+                <summary class="flex min-h-11 cursor-pointer list-none items-center gap-2 px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <ChevronDown class="h-4 w-4 shrink-0 text-slate-400 transition-transform group-open:rotate-180" aria-hidden="true" />
+                  <span class="w-6 text-right text-xs tabular-nums text-slate-400">{{ moduleIndex + 1 }}</span>
+                  <span class="shrink-0 text-xs font-semibold text-slate-700">{{ module.name }}</span>
+                  <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-400" :title="module.remote_path">{{ module.remote_path }}</span>
+                  <span v-if="module.rule || module.server_bindings || module.local_script_binding || module.post_copy_execution_order || module.local_path" class="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
+                    {{ t('settings.overridden') }}
+                  </span>
+                </summary>
+                <div class="space-y-3 border-t border-slate-100 bg-slate-50/60 px-4 py-3">
+                  <label class="flex min-h-11 items-center gap-2 text-xs font-medium text-slate-700">
+                    <input v-model="module.enabled" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+                    {{ t('settings.moduleEnabled') }}
+                  </label>
+                  <div>
+                    <label class="mb-1 block text-xs font-medium text-slate-600">{{ t('settings.moduleLocalPathOverride') }}</label>
+                    <input v-model="module.local_path" type="text" class="min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 font-mono text-xs outline-none focus:ring-2 focus:ring-blue-500" :placeholder="t('settings.inheritTaskSetting')" />
+                  </div>
+                  <div class="rounded-lg border border-slate-200 bg-white p-3">
+                    <label class="flex min-h-8 items-center gap-2 text-xs font-medium text-slate-700">
+                      <input :checked="module.rule !== null" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" @change="setModuleRuleOverride(module, module.rule === null)" />
+                      {{ t('settings.overrideMatchRule') }}
+                    </label>
+                    <div v-if="module.rule" class="mt-2 grid grid-cols-2 gap-2">
+                      <select v-model="module.rule.type" class="min-h-11 rounded-lg border border-slate-300 bg-white px-2 text-xs outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="DateMatch">{{ t('settings.ruleDate') }}</option>
+                        <option value="VersionMatch">{{ t('settings.ruleVersion') }}</option>
+                      </select>
+                      <input v-model="module.rule.value" class="min-h-11 rounded-lg border border-slate-300 px-3 font-mono text-xs outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                  </div>
+                  <div v-if="config.deploy_enabled && config.servers.length" class="rounded-lg border border-slate-200 bg-white p-3">
+                    <label class="flex min-h-8 items-center gap-2 text-xs font-medium text-slate-700">
+                      <input :checked="module.server_bindings !== null" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" @change="setModuleServerOverride(module, module.server_bindings === null)" />
+                      {{ t('settings.overrideServers') }}
+                    </label>
+                    <div v-if="module.server_bindings" class="mt-2 flex flex-wrap gap-2">
+                      <button
+                        v-for="server in config.servers"
+                        :key="server.id"
+                        type="button"
+                        class="min-h-11 rounded-lg border px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                        :class="moduleServerSelected(module, server.id) ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'"
+                        @click="toggleModuleServer(module, server.id)"
+                      >
+                        {{ serverDisplayName(server) }}
+                      </button>
+                    </div>
+                  </div>
+                  <div v-if="config.local_command_groups.length" class="rounded-lg border border-slate-200 bg-white p-3">
+                    <label class="flex min-h-8 items-center gap-2 text-xs font-medium text-slate-700">
+                      <input :checked="module.local_script_binding !== null" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" @change="setModuleScriptOverride(module, module.local_script_binding === null)" />
+                      {{ t('settings.overrideLocalScripts') }}
+                    </label>
+                    <div v-if="module.local_script_binding" class="mt-2 flex flex-wrap gap-2">
+                      <button
+                        v-for="group in config.local_command_groups"
+                        :key="group.id"
+                        type="button"
+                        class="min-h-11 rounded-lg border px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                        :class="moduleScriptSelected(module, group.id) ? 'border-teal-300 bg-teal-50 text-teal-700' : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'"
+                        @click="toggleModuleScript(module, group.id)"
+                      >
+                        {{ group.name }}
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label class="mb-1 block text-xs font-medium text-slate-600">{{ t('settings.moduleExecutionOrderOverride') }}</label>
+                    <select v-model="module.post_copy_execution_order" class="min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-xs outline-none focus:ring-2 focus:ring-blue-500">
+                      <option :value="null">{{ t('settings.inheritTaskSetting') }}</option>
+                      <option value="local_first">{{ t('settings.localFirst') }}</option>
+                      <option value="remote_first">{{ t('settings.remoteFirst') }}</option>
+                      <option value="parallel">{{ t('settings.parallel') }}</option>
+                    </select>
+                  </div>
+                </div>
+              </details>
+            </div>
           </div>
           <div>
             <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskLocalPath') }}</label>
@@ -1331,8 +1541,8 @@ onMounted(load);
             <div>
               <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskRuleType') }}</label>
               <select v-model="taskForm.rule.type" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
-                <option value="VersionMatch">{{ t('settings.ruleVersion') }}</option>
                 <option value="DateMatch">{{ t('settings.ruleDate') }}</option>
+                <option value="VersionMatch">{{ t('settings.ruleVersion') }}</option>
               </select>
             </div>
             <div>
@@ -1452,6 +1662,11 @@ onMounted(load);
             </div>
           </div>
 
+          <PostInstallActionsEditor
+            v-if="config.deploy_enabled && taskForm.server_bindings.length > 0"
+            v-model="taskForm.post_install_actions"
+          />
+
           <!-- Post-Copy Execution Order & Local Script Binding -->
           <div v-if="config.local_command_groups.length > 0" class="space-y-4 pt-4 border-t border-slate-200">
             <div>
@@ -1509,7 +1724,7 @@ onMounted(load);
         </div>
         <div class="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-100">
           <button @click="isEditingTask = false" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">{{ t('console.cancel') }}</button>
-          <button @click="saveTask" :disabled="!taskForm.rule.value" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">{{ t('settings.save') }}</button>
+          <button @click="saveTask" :disabled="!taskForm.rule.value || parsedTaskModulePaths.length === 0" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">{{ t('settings.save') }}</button>
         </div>
       </div>
     </div>
@@ -2349,6 +2564,8 @@ onMounted(load);
               {{ t('settings.unavailableManualServer') }}
             </p>
           </div>
+
+          <PostInstallActionsEditor v-model="manualPostInstallActions" />
 
           <div class="rounded-lg border border-indigo-200 bg-indigo-50/60 px-4 py-3" aria-live="polite">
             <div class="flex items-start gap-3">

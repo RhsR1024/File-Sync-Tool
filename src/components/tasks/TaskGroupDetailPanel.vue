@@ -9,7 +9,7 @@ import {
 } from 'lucide-vue-next';
 import type {
   TaskGroup, TaskLogEntry,
-  TaskSummaryStatus, AttemptStatus, DeployState,
+  TaskSummaryStatus, AttemptStatus, DeployAttempt, DeployState, DeployStage,
 } from '@/lib/tauri';
 import { openPathParent } from '@/lib/tauri';
 import { buildTaskDetailSections, serverDisplayLabel } from '@/lib/taskStatusView';
@@ -169,6 +169,21 @@ function attemptStatusLabel(status: AttemptStatus): string {
   return map[status] ?? status;
 }
 
+function latestServerStage(serverId: string): DeployStage | null {
+  return latestServerAttempt(serverId)?.stage ?? null;
+}
+
+function latestServerAttempt(serverId: string): DeployAttempt | null {
+  if (!props.group) return null;
+  const attempts = props.group.runs.flatMap(run => run.deploy_attempts)
+    .filter(attempt => attempt.server_id === serverId);
+  return attempts.at(-1) ?? null;
+}
+
+function deployStageLabel(stage: DeployStage | null): string {
+  return stage ? t(`console.deployStages.${stage}`) : '';
+}
+
 function deployStatusLabel(status: DeployState): string {
   const map: Record<string, string> = {
     not_started: '-',
@@ -227,11 +242,25 @@ function formatFullTime(isoStr: string): string {
   return `${year}-${month}-${day} ${hour}:${min}:${sec}`;
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function serverRoleLabel(role: string | null): string {
+  if (!role) return '';
+  return t(`console.serverRole.${role}`);
+}
+
 function runTypeLabel(runType: string): string {
   const map: Record<string, string> = {
     copy_and_deploy: t('console.runTypeCopyAndDeploy'),
     deploy_retry: t('console.runTypeDeployRetry'),
     manual_deploy: t('console.runTypeManualDeploy'),
+    topology: t('console.runTypeTopology'),
+    post_install_retry: t('console.runTypePostInstallRetry'),
   };
   return map[runType] ?? runType;
 }
@@ -452,6 +481,40 @@ function phaseIconClass(status: string): string {
                 </div>
               </div>
 
+              <div v-if="group.composite_batch" class="rounded-lg border border-slate-200 p-4">
+                <div class="mb-3 flex items-center justify-between gap-3">
+                  <div class="text-sm font-semibold text-slate-700">{{ t('console.moduleList') }}</div>
+                  <div class="text-xs font-mono tabular-nums text-indigo-600">
+                    {{ t('console.moduleOutputProgress', {
+                      found: group.composite_batch.found_modules,
+                      expected: group.composite_batch.expected_modules,
+                    }) }}
+                  </div>
+                </div>
+                <div class="space-y-2">
+                  <div
+                    v-for="module in group.composite_batch.modules"
+                    :key="module.module_id"
+                    class="rounded-lg border border-slate-200 bg-slate-50/60 p-3"
+                  >
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <span class="font-semibold text-slate-800">{{ module.module_name }}</span>
+                      <span class="rounded bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 ring-1 ring-slate-200">
+                        {{ module.status === 'no_output' ? t('console.moduleNoOutput') : t(`console.moduleStatus.${module.status}`) }}
+                      </span>
+                    </div>
+                    <div class="mt-2 space-y-1 font-mono text-[11px] text-slate-500">
+                      <div class="break-all">{{ module.remote_path }}</div>
+                      <div class="break-all">→ {{ module.local_path }}</div>
+                      <div v-if="module.total_bytes > 0" class="tabular-nums">
+                        {{ formatBytes(module.copied_bytes) }} / {{ formatBytes(module.total_bytes) }}
+                      </div>
+                      <div v-if="module.error_message" class="break-words font-sans text-rose-600">{{ module.error_message }}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <!-- Local Exec & Deploy Status Cards (copy status removed — already shown in header badge) -->
               <div
                 v-if="group.local_exec_status !== 'not_started' || group.deploy_status !== 'not_started'"
@@ -498,8 +561,25 @@ function phaseIconClass(status: string): string {
                     :class="serverStatusRowClass(rollup.latest_status)"
                   >
                     <span class="w-2.5 h-2.5 rounded-full shrink-0" :class="serverStatusDotClass(rollup.latest_status)"></span>
-                    <span class="flex-1 font-mono text-slate-700 truncate" :title="serverDisplayLabel(rollup)">
-                      {{ serverDisplayLabel(rollup) }}
+                    <span class="min-w-0 flex-1">
+                      <span class="block truncate font-mono text-slate-700" :title="serverDisplayLabel(rollup)">{{ serverDisplayLabel(rollup) }}</span>
+                      <span v-if="latestServerStage(rollup.server_id)" class="mt-0.5 block truncate text-[11px] text-slate-500">
+                        {{ deployStageLabel(latestServerStage(rollup.server_id)) }}
+                      </span>
+                      <span v-if="rollup.server_role" class="mt-0.5 block text-[10px] font-semibold uppercase tracking-wide text-indigo-600">
+                        {{ serverRoleLabel(rollup.server_role) }}
+                      </span>
+                      <span
+                        v-if="latestServerAttempt(rollup.server_id)?.resumable"
+                        class="mt-1 block text-[10px] leading-4 text-amber-700"
+                      >
+                        {{ t('console.recoveryCheckpoint', {
+                          attempt: latestServerAttempt(rollup.server_id)?.poll_attempt ?? 0,
+                          next: latestServerAttempt(rollup.server_id)?.next_poll_at
+                            ? formatFullTime(latestServerAttempt(rollup.server_id)!.next_poll_at!)
+                            : '-',
+                        }) }}
+                      </span>
                     </span>
                     <span class="text-[11px] text-slate-500 tabular-nums">
                       {{ t('console.serverSuccessCount', {
@@ -538,7 +618,7 @@ function phaseIconClass(status: string): string {
               </div>
 
               <!-- Action buttons -->
-              <div v-if="group.had_failures && group.task_config_id" class="flex gap-2 flex-wrap">
+              <div v-if="group.had_failures && group.task_config_id && group.group_kind !== 'composite_batch'" class="flex gap-2 flex-wrap">
                 <button
                   @click="emit('retryDeploy', group.task_group_id)"
                   class="px-4 py-2 rounded-lg font-semibold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-all flex items-center gap-2 text-xs active:scale-95"

@@ -32,7 +32,21 @@ const run = computed(() => props.group?.runs.find(candidate => candidate.run_id 
 const attempts = computed(() => run.value?.deploy_attempts ?? []);
 const attemptByServer = computed(() => new Map(attempts.value.map(attempt => [attempt.server_id, attempt])));
 
-type DisplayStatus = 'waiting' | 'connecting' | 'uploading' | 'commands' | 'success' | 'failed' | 'cancelled' | 'interrupted';
+type DisplayStatus =
+  | 'waiting'
+  | 'connecting'
+  | 'uploading'
+  | 'commands'
+  | 'waitingReboot'
+  | 'enablingSsh'
+  | 'configuringTopology'
+  | 'verifyingTopology'
+  | 'changingPasswords'
+  | 'unconfirmed'
+  | 'success'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted';
 
 interface ServerDisplayItem {
   id: string;
@@ -51,6 +65,12 @@ function attemptDisplayStatus(attempt: DeployAttempt | null): DisplayStatus {
   if (attempt.stage === 'connecting') return 'connecting';
   if (attempt.stage === 'uploading') return 'uploading';
   if (attempt.stage === 'executing_commands') return 'commands';
+  if (attempt.stage === 'waiting_reboot') return 'waitingReboot';
+  if (attempt.stage === 'enabling_ssh') return 'enablingSsh';
+  if (attempt.stage === 'configuring_topology') return 'configuringTopology';
+  if (attempt.stage === 'verifying_topology') return 'verifyingTopology';
+  if (attempt.stage === 'changing_passwords') return 'changingPasswords';
+  if (attempt.stage === 'unconfirmed') return 'unconfirmed';
   return 'waiting';
 }
 
@@ -81,7 +101,17 @@ const filteredLogs = computed(() => {
 const visibleLogs = computed(() => filteredLogs.value.slice(-2_000));
 const successCount = computed(() => serverItems.value.filter(item => item.status === 'success').length);
 const failedCount = computed(() => serverItems.value.filter(item => item.status === 'failed').length);
-const activeCount = computed(() => serverItems.value.filter(item => ['connecting', 'uploading', 'commands'].includes(item.status)).length);
+const activeCount = computed(() => serverItems.value.filter(item => [
+  'connecting',
+  'uploading',
+  'commands',
+  'waitingReboot',
+  'enablingSsh',
+  'configuringTopology',
+  'verifyingTopology',
+  'changingPasswords',
+  'unconfirmed',
+].includes(item.status)).length);
 const waitingCount = computed(() => serverItems.value.filter(item => item.status === 'waiting').length);
 const isFinished = computed(() => Boolean(run.value?.finished_at));
 
@@ -95,6 +125,12 @@ function statusClass(status: DisplayStatus) {
     connecting: 'border-blue-200 bg-blue-50 text-blue-700',
     uploading: 'border-indigo-200 bg-indigo-50 text-indigo-700',
     commands: 'border-violet-200 bg-violet-50 text-violet-700',
+    waitingReboot: 'border-amber-200 bg-amber-50 text-amber-700',
+    enablingSsh: 'border-cyan-200 bg-cyan-50 text-cyan-700',
+    configuringTopology: 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700',
+    verifyingTopology: 'border-purple-200 bg-purple-50 text-purple-700',
+    changingPasswords: 'border-teal-200 bg-teal-50 text-teal-700',
+    unconfirmed: 'border-orange-200 bg-orange-50 text-orange-700',
     success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
     failed: 'border-rose-200 bg-rose-50 text-rose-700',
     cancelled: 'border-amber-200 bg-amber-50 text-amber-700',

@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter, State};
 pub const PLATFORM_RSA_PUBLIC_KEY_PATH: &str = "/openAPI/oauth/v1/rsa/publicKey/get";
 pub const PLATFORM_ADD_DEVICE_PATH: &str = "/openAPI/deviceManange/v1/encodeDevice/add";
 pub const PLATFORM_QUERY_DEVICE_PATH: &str = "/xapi/uap/v1/resource/query";
+pub const PLATFORM_BCP_QUERY_DEVICE_PATH: &str = "/BCP/HeadendEquipmentList/Query";
 pub const PLATFORM_DELETE_DEVICE_PATH: &str = "/openAPI/deviceManange/v1/encodeDevice/delete";
 
 const DEVICE_ORG_ID: &str = "2";
@@ -25,6 +26,9 @@ const DEVICE_ACCESS_USER: &str = "admin";
 const DEVICE_ACCESS_PASSWORD: &str = "Admin_1234";
 const DEVICE_TYPE: u8 = 1;
 const RESOURCE_QUERY_PAGE_SIZE: u32 = 200;
+const BCP_QUERY_PAGE_SIZE: u32 = 20;
+const BCP_ORG_CODE: &str = "iccsid";
+const RESOURCE_QUERY_NOT_FOUND_CODE: i64 = 70510;
 const PLATFORM_LOG_BODY_LIMIT: usize = 16_384;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,10 +112,11 @@ struct AddDeviceItem {
 
 #[derive(Debug, Deserialize)]
 struct OpenApiEnvelope<T> {
-    #[serde(default, alias = "Code")]
+    #[serde(default, alias = "Code", alias = "ErrCode")]
     code: i64,
-    #[serde(default, alias = "msg")]
+    #[serde(default, alias = "msg", alias = "ErrMsg")]
     message: String,
+    #[serde(default, alias = "Result")]
     data: Option<T>,
 }
 
@@ -168,6 +173,89 @@ struct QueryDeviceInfo {
     res_id: String,
     #[serde(default, rename = "IPAddr")]
     ip_address: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BcpQueryDeviceRequest {
+    #[serde(rename = "Userinfo")]
+    user_info: BcpUserInfo,
+    org: &'static str,
+    #[serde(rename = "QueryCondition")]
+    query_condition: BcpQueryCondition,
+    #[serde(rename = "QueryPageInfo")]
+    query_page_info: BcpQueryPageInfo,
+}
+
+#[derive(Debug, Serialize)]
+struct BcpUserInfo {
+    #[serde(rename = "UserCode")]
+    user_code: String,
+    #[serde(rename = "UserLoginCode")]
+    user_login_code: String,
+    #[serde(rename = "UserIpAddress")]
+    user_ip_address: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BcpQueryCondition {
+    #[serde(rename = "ItemNum")]
+    item_num: u8,
+    #[serde(rename = "QueryConditionList")]
+    query_condition_list: Vec<BcpQueryConditionItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct BcpQueryConditionItem {
+    #[serde(rename = "QueryType")]
+    query_type: u32,
+    #[serde(rename = "LogicFlag")]
+    logic_flag: u8,
+    #[serde(rename = "QueryData")]
+    query_data: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct BcpQueryPageInfo {
+    #[serde(rename = "QueryCount")]
+    query_count: u8,
+    #[serde(rename = "PageFirstRowNumber")]
+    page_first_row_number: u32,
+    #[serde(rename = "PageRowNum")]
+    page_row_num: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct BcpQueryResponse {
+    #[serde(default, rename = "ErrCode")]
+    error_code: i64,
+    #[serde(default, rename = "ErrMsg")]
+    error_message: String,
+    #[serde(rename = "Result")]
+    result: Option<BcpQueryResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BcpQueryResult {
+    #[serde(rename = "RspPageInfo")]
+    page_info: BcpResponsePageInfo,
+    #[serde(default, rename = "RspDevInfoList")]
+    devices: Vec<BcpDeviceInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BcpResponsePageInfo {
+    #[serde(default, rename = "RowNum")]
+    row_num: u64,
+    #[serde(default, rename = "TotalRowNum")]
+    total_row_num: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BcpDeviceInfo {
+    #[serde(default, rename = "UMSResID")]
+    ums_resource_id: String,
+    #[serde(default, rename = "DevAddr")]
+    device_address: String,
 }
 
 #[derive(Debug, Serialize)]

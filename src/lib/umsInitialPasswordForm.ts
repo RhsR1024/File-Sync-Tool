@@ -13,7 +13,8 @@ export interface UmsInitialPasswordFormState {
   manualIpTags: string[];
   manualIpInput: string;
   enabledFlows: Record<UmsInitPasswordKind, boolean>;
-  newPassword: string;
+  umsUsername: string;
+  newPasswords: Record<UmsInitPasswordKind, string>;
   oldPasswords: Record<UmsInitPasswordKind, string>;
 }
 
@@ -24,7 +25,13 @@ export const DEFAULT_OLD_PASSWORDS: Record<UmsInitPasswordKind, string> = {
   cdm: 'admin',
 };
 
-export const DEFAULT_NEW_PASSWORD = 'admin_123';
+export const DEFAULT_UMS_USERNAME = 'loadmin';
+
+export const DEFAULT_NEW_PASSWORDS: Record<UmsInitPasswordKind, string> = {
+  framework: 'admin_123',
+  ums: 'admin_1234',
+  cdm: 'admin_123',
+};
 
 const STORAGE_KEY = 'umsInitialPassword_form_state';
 
@@ -34,6 +41,7 @@ interface PersistedShape {
   manualIpTags: string[];
   manualIpInput: string;
   enabledFlows: Record<UmsInitPasswordKind, boolean>;
+  umsUsername: string;
 }
 
 function defaultState(): UmsInitialPasswordFormState {
@@ -42,7 +50,8 @@ function defaultState(): UmsInitialPasswordFormState {
     manualIpTags: [],
     manualIpInput: '',
     enabledFlows: { framework: true, ums: true, cdm: true },
-    newPassword: DEFAULT_NEW_PASSWORD,
+    umsUsername: DEFAULT_UMS_USERNAME,
+    newPasswords: { ...DEFAULT_NEW_PASSWORDS },
     oldPasswords: { ...DEFAULT_OLD_PASSWORDS },
   };
 }
@@ -73,6 +82,9 @@ function loadFromStorage(): UmsInitialPasswordFormState {
     state.manualIpTags = toStringArray(parsed.manualIpTags);
     state.manualIpInput = typeof parsed.manualIpInput === 'string' ? parsed.manualIpInput : '';
     state.enabledFlows = toFlowFlags(parsed.enabledFlows);
+    state.umsUsername = typeof parsed.umsUsername === 'string' && parsed.umsUsername.trim()
+      ? parsed.umsUsername
+      : DEFAULT_UMS_USERNAME;
   } catch {
     // Ignore malformed state from older builds and start clean.
   }
@@ -95,6 +107,7 @@ export function persistUmsInitialPasswordForm(): void {
     manualIpTags: [...umsInitialPasswordFormState.manualIpTags],
     manualIpInput: umsInitialPasswordFormState.manualIpInput,
     enabledFlows: { ...umsInitialPasswordFormState.enabledFlows },
+    umsUsername: umsInitialPasswordFormState.umsUsername,
   };
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));

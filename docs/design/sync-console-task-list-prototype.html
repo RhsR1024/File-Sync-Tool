@@ -1,0 +1,1086 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>File Sync Tool · 同步控制台交互原型</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --slate-950: #020617;
+      --slate-900: #0f172a;
+      --slate-800: #1e293b;
+      --slate-700: #334155;
+      --slate-600: #475569;
+      --slate-500: #64748b;
+      --slate-400: #94a3b8;
+      --slate-300: #cbd5e1;
+      --slate-200: #e2e8f0;
+      --slate-100: #f1f5f9;
+      --slate-50: #f8fafc;
+      --blue-700: #1d4ed8;
+      --blue-600: #2563eb;
+      --blue-500: #3b82f6;
+      --blue-100: #dbeafe;
+      --blue-50: #eff6ff;
+      --sky-600: #0284c7;
+      --sky-100: #e0f2fe;
+      --emerald-700: #047857;
+      --emerald-600: #059669;
+      --emerald-500: #10b981;
+      --emerald-100: #d1fae5;
+      --emerald-50: #ecfdf5;
+      --amber-700: #b45309;
+      --amber-600: #d97706;
+      --amber-100: #fef3c7;
+      --amber-50: #fffbeb;
+      --rose-700: #be123c;
+      --rose-600: #e11d48;
+      --rose-100: #ffe4e6;
+      --rose-50: #fff1f2;
+      --purple-700: #7e22ce;
+      --purple-100: #f3e8ff;
+      --purple-50: #faf5ff;
+      --shadow-sm: 0 1px 2px rgb(15 23 42 / 0.06);
+      --shadow-lg: 0 20px 45px rgb(15 23 42 / 0.18);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: var(--slate-100);
+      color: var(--slate-900);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+        "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    }
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+    [tabindex]:focus-visible {
+      outline: 3px solid rgb(59 130 246 / 0.32);
+      outline-offset: 2px;
+    }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+    .icon { width: 17px; height: 17px; flex: none; }
+    .icon-sm { width: 14px; height: 14px; flex: none; }
+    .mono { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+    .tabular { font-variant-numeric: tabular-nums; }
+
+    .window {
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--slate-50);
+    }
+    .accent-line {
+      height: 2px;
+      background: linear-gradient(90deg, #0ea5e9, #22d3ee, #2563eb);
+      flex: none;
+    }
+    .titlebar {
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-left: 10px;
+      border-bottom: 1px solid var(--slate-200);
+      background: white;
+      color: var(--slate-700);
+      flex: none;
+    }
+    .titlebar-title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 650; }
+    .prototype-mark {
+      border: 1px solid var(--blue-100);
+      border-radius: 999px;
+      padding: 1px 7px;
+      background: var(--blue-50);
+      color: var(--blue-700);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+    .window-controls { display: flex; height: 100%; }
+    .window-control {
+      width: 44px; border: 0; background: transparent; color: var(--slate-500);
+    }
+    .window-control:hover { background: var(--slate-100); }
+
+    .console-header {
+      flex: none;
+      border-bottom: 1px solid var(--slate-200);
+      background: white;
+      padding: 15px 24px 0;
+    }
+    .header-row {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 18px;
+    }
+    h1 { margin: 0; font-size: 20px; line-height: 1.25; letter-spacing: -.02em; }
+    .subtitle { margin: 3px 0 0; color: var(--slate-500); font-size: 12px; }
+    .header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .tabs { display: flex; gap: 4px; margin-top: 12px; overflow-x: auto; }
+    .tab {
+      display: inline-flex; align-items: center; gap: 7px;
+      min-height: 38px; border: 0; border-bottom: 2px solid transparent;
+      padding: 8px 12px; background: transparent; color: var(--slate-500);
+      font-size: 13px; font-weight: 650;
+    }
+    .tab:hover { color: var(--slate-800); background: var(--slate-50); }
+    .tab[aria-selected="true"] { color: var(--blue-700); border-bottom-color: var(--blue-600); }
+
+    .button {
+      min-height: 38px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      border: 1px solid var(--slate-200); border-radius: 8px;
+      padding: 7px 12px; background: white; color: var(--slate-700);
+      font-weight: 650; font-size: 12px; box-shadow: var(--shadow-sm);
+      transition: background .16s ease, border-color .16s ease, color .16s ease;
+    }
+    .button:hover { background: var(--slate-50); border-color: var(--slate-300); }
+    .button.primary { border-color: var(--blue-600); background: var(--blue-600); color: white; }
+    .button.primary:hover { background: var(--blue-700); }
+    .button.success { border-color: var(--emerald-600); background: var(--emerald-600); color: white; }
+    .button.danger-soft { border-color: var(--rose-100); background: var(--rose-50); color: var(--rose-700); }
+    .button.small { min-height: 32px; padding: 5px 9px; }
+    .icon-button {
+      width: 34px; height: 34px; display: inline-grid; place-items: center;
+      border: 1px solid var(--slate-200); border-radius: 7px;
+      background: white; color: var(--slate-500);
+    }
+    .icon-button:hover { background: var(--slate-50); color: var(--slate-800); }
+
+    .content { min-height: 0; flex: 1; overflow: hidden; }
+    .panel { display: none; height: 100%; overflow: auto; padding: 18px 24px 28px; }
+    .panel.active { display: block; }
+    .overview-layout { max-width: 1660px; margin: 0 auto; }
+
+    .review-strip {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      margin-bottom: 12px; border: 1px solid var(--blue-100); border-radius: 10px;
+      padding: 9px 12px; background: var(--blue-50); color: #1e3a8a;
+    }
+    .review-strip strong { font-size: 12px; }
+    .review-strip span { color: #3b5b92; font-size: 11px; }
+    .scenario-control { display: flex; align-items: center; gap: 7px; flex: none; }
+
+    .summary-grid {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
+      margin-bottom: 12px;
+    }
+    .summary-card {
+      min-width: 0; display: flex; align-items: center; gap: 12px;
+      border: 1px solid var(--slate-200); border-radius: 14px;
+      padding: 12px 14px; background: white; box-shadow: var(--shadow-sm);
+    }
+    .summary-icon {
+      width: 40px; height: 40px; display: grid; place-items: center; flex: none;
+      border-radius: 10px; background: var(--blue-50); color: var(--blue-600);
+    }
+    .summary-card.emerald .summary-icon { background: var(--emerald-50); color: var(--emerald-600); }
+    .summary-card.amber .summary-icon { background: var(--amber-50); color: var(--amber-600); }
+    .summary-card.rose .summary-icon { background: var(--rose-50); color: var(--rose-600); }
+    .summary-label { color: var(--slate-500); font-size: 10px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .summary-value { margin-top: 2px; font-size: 17px; font-weight: 760; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .summary-note { color: var(--slate-500); font-size: 10px; }
+
+    .task-card {
+      border: 1px solid var(--slate-200); border-radius: 14px;
+      background: white; box-shadow: var(--shadow-sm); overflow: hidden;
+    }
+    .task-toolbar {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 11px 12px; border-bottom: 1px solid var(--slate-200); background: rgb(248 250 252 / .78);
+    }
+    .filters { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+    .search-wrap { position: relative; }
+    .search-wrap .icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--slate-400); }
+    .field, .select {
+      min-height: 34px; border: 1px solid var(--slate-200); border-radius: 7px;
+      background: white; color: var(--slate-700); padding: 6px 9px;
+    }
+    .search { width: 245px; padding-left: 32px; }
+    .select { padding-right: 28px; }
+    .toolbar-note { color: var(--slate-500); font-size: 11px; white-space: nowrap; }
+
+    .table-scroll { overflow: auto; max-height: calc(100vh - 332px); }
+    table { width: 100%; border-collapse: collapse; min-width: 1120px; }
+    th {
+      position: sticky; top: 0; z-index: 3;
+      border-bottom: 1px solid var(--slate-200); padding: 9px 8px;
+      background: #f8fafc; color: var(--slate-500);
+      font-size: 10px; font-weight: 750; letter-spacing: .055em; text-align: left;
+      text-transform: uppercase;
+    }
+    td { border-bottom: 1px solid var(--slate-100); padding: 10px 8px; vertical-align: middle; }
+    tbody tr.task-row:hover td { background: rgb(248 250 252 / .7); }
+    .task-row.selected td { background: rgb(239 246 255 / .7); }
+    .task-identity { display: flex; align-items: flex-start; gap: 8px; min-width: 260px; }
+    .expand-button {
+      width: 28px; height: 28px; display: grid; place-items: center; flex: none;
+      border: 0; border-radius: 6px; background: transparent; color: var(--slate-500);
+    }
+    .expand-button:hover { background: var(--slate-100); color: var(--slate-900); }
+    .expand-button svg { transition: transform .18s ease; }
+    .expand-button[aria-expanded="true"] svg { transform: rotate(90deg); }
+    .name { color: var(--slate-800); font-size: 13px; font-weight: 720; }
+    .meta { display: flex; align-items: center; gap: 5px; margin-top: 3px; color: var(--slate-500); font-size: 10px; flex-wrap: wrap; }
+    .meta b { color: var(--slate-600); font-weight: 650; }
+    .tag {
+      display: inline-flex; align-items: center; gap: 4px; border-radius: 5px;
+      padding: 2px 6px; background: var(--slate-100); color: var(--slate-600);
+      font-size: 10px; font-weight: 650;
+    }
+    .tag.blue { background: var(--blue-50); color: var(--blue-700); }
+    .tag.purple { background: var(--purple-50); color: var(--purple-700); }
+
+    .status-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      border-radius: 999px; padding: 3px 7px;
+      background: var(--slate-100); color: var(--slate-700);
+      font-size: 10px; font-weight: 750; white-space: nowrap;
+      box-shadow: inset 0 0 0 1px var(--slate-200);
+    }
+    .status-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--slate-400); }
+    .status-badge.running { background: var(--blue-50); color: var(--blue-700); box-shadow: inset 0 0 0 1px var(--blue-100); }
+    .status-badge.running::before { background: var(--blue-500); box-shadow: 0 0 0 3px rgb(59 130 246 / .14); }
+    .status-badge.success { background: var(--emerald-50); color: var(--emerald-700); box-shadow: inset 0 0 0 1px var(--emerald-100); }
+    .status-badge.success::before { background: var(--emerald-500); }
+    .status-badge.warning { background: var(--amber-50); color: var(--amber-700); box-shadow: inset 0 0 0 1px var(--amber-100); }
+    .status-badge.warning::before { background: var(--amber-600); }
+    .status-badge.failed { background: var(--rose-50); color: var(--rose-700); box-shadow: inset 0 0 0 1px var(--rose-100); }
+    .status-badge.failed::before { background: var(--rose-600); }
+    .status-badge.muted::before { background: var(--slate-300); }
+    .dot-pulse { animation: pulse 1.6s ease-in-out infinite; }
+
+    .output-count { font-size: 12px; font-weight: 720; color: var(--slate-800); }
+    .output-note { margin-top: 2px; color: var(--slate-500); font-size: 10px; }
+    .progress-cell { min-width: 150px; }
+    .progress-top { display: flex; justify-content: space-between; gap: 10px; color: var(--slate-600); font-size: 10px; }
+    .progress-top strong { color: var(--slate-800); }
+    .progress-track { height: 6px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: var(--slate-100); }
+    .progress-bar { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue-600), #38bdf8); transition: width .3s ease; }
+    .progress-bar.success { background: var(--emerald-500); }
+    .progress-bar.warning { background: var(--amber-600); }
+    .progress-detail { margin-top: 3px; color: var(--slate-500); font-size: 9px; }
+
+    .pipeline { display: flex; align-items: center; min-width: 280px; }
+    .stage { display: flex; align-items: center; min-width: 0; }
+    .stage-node {
+      width: 20px; height: 20px; display: grid; place-items: center;
+      border: 1px solid var(--slate-200); border-radius: 50%;
+      background: white; color: var(--slate-400); font-size: 9px; font-weight: 800;
+    }
+    .stage.done .stage-node { border-color: var(--emerald-100); background: var(--emerald-50); color: var(--emerald-700); }
+    .stage.active .stage-node { border-color: var(--blue-100); background: var(--blue-50); color: var(--blue-700); box-shadow: 0 0 0 3px rgb(59 130 246 / .1); }
+    .stage.failed .stage-node { border-color: var(--rose-100); background: var(--rose-50); color: var(--rose-700); }
+    .stage-line { width: 14px; height: 2px; background: var(--slate-200); }
+    .stage.done + .stage-line, .stage-line.done { background: var(--emerald-300, #6ee7b7); }
+    .pipeline-labels { display: flex; gap: 10px; margin-top: 4px; color: var(--slate-400); font-size: 8px; }
+    .pipeline-wrap { min-width: 300px; }
+
+    .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; white-space: nowrap; }
+    .link-button {
+      border: 0; background: transparent; color: var(--blue-700);
+      padding: 5px 4px; font-size: 11px; font-weight: 700;
+    }
+    .link-button:hover { text-decoration: underline; }
+    .time { color: var(--slate-600); font-size: 10px; white-space: nowrap; }
+    .time strong { display: block; color: var(--slate-800); font-size: 11px; }
+
+    .children-row { display: none; }
+    .children-row.open { display: table-row; }
+    .children-row > td { padding: 0; background: var(--slate-50); }
+    .module-shell { padding: 10px 13px 13px 44px; border-bottom: 1px solid var(--slate-200); }
+    .module-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      margin-bottom: 7px;
+    }
+    .module-title { display: flex; align-items: center; gap: 7px; color: var(--slate-700); font-size: 11px; font-weight: 750; }
+    .module-legend { display: flex; gap: 10px; color: var(--slate-500); font-size: 9px; }
+    .module-list { display: grid; gap: 5px; }
+    .module-row {
+      display: grid; grid-template-columns: minmax(250px, 1.45fr) 118px 118px minmax(160px, .8fr) 94px 30px;
+      align-items: center; gap: 10px; min-height: 42px;
+      border: 1px solid var(--slate-200); border-radius: 8px; padding: 6px 8px;
+      background: white;
+    }
+    .module-row.current { border-color: #93c5fd; box-shadow: 0 0 0 2px rgb(59 130 246 / .08); }
+    .module-name { min-width: 0; font-size: 11px; font-weight: 700; color: var(--slate-700); }
+    .module-name span { display: block; overflow: hidden; color: var(--slate-500); font-size: 9px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+    .module-build { color: var(--slate-600); font-size: 9px; }
+    .module-build strong { display: block; color: var(--slate-700); font-size: 10px; }
+    .mini-progress { display: flex; align-items: center; gap: 7px; }
+    .mini-progress .progress-track { width: 92px; margin: 0; height: 5px; }
+    .mini-progress span { color: var(--slate-600); font-size: 9px; }
+
+    .section-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 14px; max-width: 1500px; margin: 0 auto; }
+    .card { border: 1px solid var(--slate-200); border-radius: 14px; background: white; box-shadow: var(--shadow-sm); overflow: hidden; }
+    .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--slate-100); background: rgb(248 250 252 / .65); }
+    .card-title { margin: 0; font-size: 14px; font-weight: 760; }
+    .card-description { margin: 2px 0 0; color: var(--slate-500); font-size: 11px; }
+    .card-body { padding: 16px; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .form-group label { display: block; margin-bottom: 5px; color: var(--slate-600); font-size: 10px; font-weight: 750; }
+    .form-group input, .form-group select, .form-group textarea {
+      width: 100%; border: 1px solid var(--slate-200); border-radius: 8px;
+      padding: 8px 10px; background: white; color: var(--slate-800);
+    }
+    .form-group textarea { min-height: 210px; resize: vertical; font: 10px/1.6 "Cascadia Code", Consolas, monospace; }
+    .hint { margin-top: 5px; color: var(--slate-500); font-size: 9px; }
+    .switch-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 14px;
+      padding: 10px 0; border-bottom: 1px solid var(--slate-100);
+    }
+    .switch-row:last-child { border-bottom: 0; }
+    .switch-title { color: var(--slate-700); font-size: 11px; font-weight: 700; }
+    .switch-note { margin-top: 2px; color: var(--slate-500); font-size: 9px; }
+    .switch { position: relative; width: 38px; height: 22px; flex: none; }
+    .switch input { position: absolute; opacity: 0; }
+    .switch-track { position: absolute; inset: 0; border-radius: 999px; background: var(--slate-300); transition: background .18s ease; }
+    .switch-track::after { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgb(15 23 42 / .25); transition: transform .18s ease; }
+    .switch input:checked + .switch-track { background: var(--blue-600); }
+    .switch input:checked + .switch-track::after { transform: translateX(16px); }
+
+    .parsed-list { display: grid; gap: 6px; max-height: 390px; overflow: auto; }
+    .parsed-item { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 1px solid var(--slate-200); border-radius: 8px; padding: 7px; }
+    .parsed-index { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; background: var(--slate-100); color: var(--slate-600); font-size: 9px; font-weight: 750; }
+    .parsed-product { overflow: hidden; color: var(--slate-700); font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+    .parsed-path { overflow: hidden; color: var(--slate-500); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+    .empty-preview { display: grid; place-items: center; min-height: 220px; color: var(--slate-400); text-align: center; }
+
+    .topology-box { border: 1px solid var(--slate-200); border-radius: 10px; padding: 11px; background: var(--slate-50); }
+    .topology-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .role-card { position: relative; border: 1px solid var(--slate-200); border-radius: 9px; padding: 9px; background: white; }
+    .role-card::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 0 3px 3px 0; background: var(--blue-500); }
+    .role-card.backup::before { background: var(--purple-700); }
+    .role-card.replica::before { background: var(--amber-600); }
+    .role-label { color: var(--slate-500); font-size: 9px; font-weight: 750; text-transform: uppercase; }
+    .role-ip { margin-top: 2px; color: var(--slate-800); font-size: 11px; font-weight: 750; }
+    .role-state { margin-top: 3px; color: var(--emerald-700); font-size: 9px; }
+    .security-notice { display: flex; gap: 8px; margin-top: 10px; border: 1px solid var(--amber-100); border-radius: 8px; padding: 8px 9px; background: var(--amber-50); color: #92400e; font-size: 9px; }
+
+    .drawer-backdrop, .modal-backdrop {
+      position: fixed; inset: 0; z-index: 40; display: none; background: rgb(15 23 42 / .38);
+      backdrop-filter: blur(1px);
+    }
+    .drawer-backdrop.open, .modal-backdrop.open { display: block; }
+    .drawer {
+      position: fixed; z-index: 41; top: 0; right: 0; bottom: 0; width: min(620px, 94vw);
+      display: flex; flex-direction: column; background: white; box-shadow: var(--shadow-lg);
+      transform: translateX(100%); transition: transform .22s ease;
+    }
+    .drawer.open { transform: translateX(0); }
+    .drawer-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--slate-200); background: var(--slate-50); }
+    .drawer-body { min-height: 0; flex: 1; overflow: auto; padding: 15px 18px 24px; }
+    .detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+    .detail-stat { border: 1px solid var(--slate-200); border-radius: 8px; padding: 8px; background: var(--slate-50); }
+    .detail-stat span { display: block; color: var(--slate-500); font-size: 8px; font-weight: 750; text-transform: uppercase; }
+    .detail-stat strong { display: block; margin-top: 2px; color: var(--slate-800); font-size: 11px; }
+    .detail-section { margin-top: 14px; }
+    .detail-section h3 { margin: 0 0 7px; color: var(--slate-700); font-size: 11px; }
+    .path-box { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; border: 1px solid var(--slate-200); border-radius: 8px; padding: 8px; background: var(--slate-50); color: var(--slate-600); font-size: 9px; word-break: break-all; }
+    .timeline { display: grid; gap: 6px; }
+    .timeline-item { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+    .timeline-icon { width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; background: var(--emerald-50); color: var(--emerald-700); font-size: 9px; font-weight: 800; }
+    .timeline-icon.active { background: var(--blue-50); color: var(--blue-700); }
+    .timeline-icon.pending { background: var(--slate-100); color: var(--slate-400); }
+    .timeline-label { color: var(--slate-700); font-size: 10px; font-weight: 700; }
+    .timeline-note { color: var(--slate-500); font-size: 8px; }
+    .timeline-time { color: var(--slate-500); font-size: 8px; }
+    .log {
+      max-height: 185px; overflow: auto; border-radius: 8px; padding: 10px;
+      background: #0f172a; color: #cbd5e1; font: 9px/1.65 "Cascadia Code", Consolas, monospace;
+    }
+    .log .info { color: #7dd3fc; }
+    .log .ok { color: #6ee7b7; }
+    .log .warn { color: #fcd34d; }
+
+    .modal {
+      position: fixed; z-index: 51; left: 50%; top: 50%; width: min(520px, calc(100vw - 32px));
+      display: none; transform: translate(-50%, -50%);
+      border: 1px solid var(--slate-200); border-radius: 14px; background: white; box-shadow: var(--shadow-lg);
+    }
+    .modal.open { display: block; }
+    .modal-header { display: flex; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--slate-200); }
+    .modal-body { padding: 14px 16px; }
+    .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--slate-100); background: var(--slate-50); border-radius: 0 0 14px 14px; }
+    .cleanup-preview { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 10px 0; }
+    .cleanup-stat { border: 1px solid var(--slate-200); border-radius: 8px; padding: 9px; }
+    .cleanup-stat b { display: block; font-size: 16px; }
+    .cleanup-stat span { color: var(--slate-500); font-size: 9px; }
+    .check-row { display: flex; align-items: flex-start; gap: 8px; margin-top: 9px; color: var(--slate-700); font-size: 10px; }
+    .check-row input { margin-top: 2px; accent-color: var(--blue-600); }
+
+    .toast {
+      position: fixed; z-index: 70; left: 50%; bottom: 22px; display: none;
+      transform: translateX(-50%); border-radius: 9px; padding: 9px 13px;
+      background: var(--slate-900); color: white; box-shadow: var(--shadow-lg); font-size: 11px;
+    }
+    .toast.show { display: block; animation: toast-in .18s ease; }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+    @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 5px); } to { opacity: 1; transform: translate(-50%, 0); } }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+    }
+    @media (max-width: 1050px) {
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .section-grid { grid-template-columns: 1fr; }
+      .table-scroll { max-height: calc(100vh - 405px); }
+    }
+    @media (max-width: 720px) {
+      .console-header, .panel { padding-left: 12px; padding-right: 12px; }
+      .header-row, .task-toolbar, .review-strip { align-items: stretch; flex-direction: column; }
+      .header-actions { justify-content: flex-start; }
+      .summary-grid { grid-template-columns: 1fr; }
+      .search { width: min(100%, 280px); }
+      .form-grid, .topology-grid { grid-template-columns: 1fr; }
+      .detail-grid { grid-template-columns: 1fr; }
+      .module-row { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" class="sr-only">
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 8L9 4l-3 8H2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-box" viewBox="0 0 24 24"><path d="m4 7 8-4 8 4v10l-8 4-8-4Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m4 7 8 4 8-4M12 11v10" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.8 19h18.4Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 9v4m0 3h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0 1 5M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="19" cy="12" r="1.5" fill="currentColor"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m21 3-7 18-3-8-8-3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m21 3-10 10" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19 13.5v-3l-2-.7-.8-1.8.9-1.9-2.2-2.2-1.9.9-1.8-.8-.7-2h-3l-.7 2-1.8.8-1.9-.9-2.2 2.2.9 1.9-.8 1.8-2 .7v3l2 .7.8 1.8-.9 1.9 2.2 2.2 1.9-.9 1.8.8.7 2h3l.7-2 1.8-.8 1.9.9 2.2-2.2-.9-1.9.8-1.8Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 5 3 8 7 10 4-2 7-5 7-10V6Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  </svg>
+
+  <div class="window">
+    <div class="accent-line"></div>
+    <div class="titlebar">
+      <div class="titlebar-title">
+        <svg class="icon-sm"><use href="#i-refresh"></use></svg>
+        File Sync Tool
+        <span class="prototype-mark">交互原型 · 模拟数据</span>
+      </div>
+      <div class="window-controls" aria-hidden="true">
+        <button class="window-control" tabindex="-1">—</button>
+        <button class="window-control" tabindex="-1">□</button>
+        <button class="window-control" tabindex="-1">×</button>
+      </div>
+    </div>
+
+    <header class="console-header">
+      <div class="header-row">
+        <div>
+          <h1>同步控制台</h1>
+          <p class="subtitle">集中查看文件同步状态，并管理任务、扫描策略与部署配置。</p>
+        </div>
+        <div class="header-actions">
+          <span id="schedulerBadge" class="status-badge success"><span>调度器运行中</span></span>
+          <button id="schedulerButton" class="button danger-soft"><svg class="icon-sm"><use href="#i-pause"></use></svg>停止调度</button>
+          <button class="button" data-toast="已触发一次模拟扫描"><svg class="icon-sm"><use href="#i-refresh"></use></svg>立即扫描</button>
+        </div>
+      </div>
+      <nav class="tabs" aria-label="同步控制台导航">
+        <button class="tab" data-tab="overview" aria-selected="true"><svg class="icon"><use href="#i-activity"></use></svg>概览</button>
+        <button class="tab" data-tab="tasks" aria-selected="false"><svg class="icon"><use href="#i-list"></use></svg>任务与策略</button>
+        <button class="tab" data-tab="delivery" aria-selected="false"><svg class="icon"><use href="#i-send"></use></svg>部署配置</button>
+      </nav>
+    </header>
+
+    <main class="content">
+      <section id="panel-overview" class="panel active" aria-label="同步概览">
+        <div class="overview-layout">
+          <div class="review-strip">
+            <div>
+              <strong>决策提示：重点查看复合任务的信息密度、模块展开方式和部署流水线。</strong>
+              <span>所有按钮只改变原型状态，不会执行真实任务。</span>
+            </div>
+            <label class="scenario-control">
+              <span>演示场景</span>
+              <select id="scenarioSelect" class="select" aria-label="选择演示场景">
+                <option value="running">复合任务正在复制</option>
+                <option value="topology">安装后等待主备从</option>
+                <option value="partial">部分失败待处理</option>
+                <option value="completed">全部完成</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="summary-grid">
+            <div class="summary-card emerald">
+              <div class="summary-icon"><svg class="icon"><use href="#i-activity"></use></svg></div>
+              <div><div class="summary-label">调度状态</div><div class="summary-value">运行中</div><div class="summary-note">下次扫描 09:30</div></div>
+            </div>
+            <div class="summary-card">
+              <div class="summary-icon"><svg class="icon"><use href="#i-box"></use></svg></div>
+              <div><div class="summary-label">今日构建</div><div id="summaryBuilds" class="summary-value tabular">7 / 12</div><div class="summary-note">5 个模块今日无产出</div></div>
+            </div>
+            <div class="summary-card amber">
+              <div class="summary-icon"><svg class="icon"><use href="#i-clock"></use></svg></div>
+              <div><div class="summary-label">正在处理</div><div id="summaryActive" class="summary-value">3 / 5 模块</div><div id="summaryActiveNote" class="summary-note">复制阶段 · 79%</div></div>
+            </div>
+            <div class="summary-card rose">
+              <div class="summary-icon"><svg class="icon"><use href="#i-alert"></use></svg></div>
+              <div><div class="summary-label">需要处理</div><div id="summaryIssues" class="summary-value">1</div><div id="summaryIssuesNote" class="summary-note">1 个历史任务部分失败</div></div>
+            </div>
+          </div>
+
+          <section class="task-card" aria-labelledby="taskListTitle">
+            <div class="task-toolbar">
+              <div class="filters">
+                <div class="search-wrap">
+                  <svg class="icon"><use href="#i-search"></use></svg>
+                  <input id="taskSearch" class="field search" placeholder="搜索产品、版本、构建 ID 或路径" aria-label="搜索任务">
+                </div>
+                <select id="statusFilter" class="select" aria-label="按状态筛选">
+                  <option value="all">全部状态</option>
+                  <option value="active">运行中</option>
+                  <option value="completed">已完成</option>
+                  <option value="failed">失败或部分失败</option>
+                </select>
+                <select id="typeFilter" class="select" aria-label="按任务类型筛选">
+                  <option value="all">全部类型</option>
+                  <option value="composite">复合任务</option>
+                  <option value="single">单路径任务</option>
+                </select>
+                <button id="failedOnly" class="button small" aria-pressed="false">仅看异常</button>
+              </div>
+              <div class="filters">
+                <span id="visibleCount" class="toolbar-note">当前显示 3 / 3 个任务</span>
+                <button id="openCleanup" class="button small"><svg class="icon-sm"><use href="#i-trash"></use></svg>历史清理</button>
+              </div>
+            </div>
+
+            <div class="table-scroll">
+              <table aria-labelledby="taskListTitle">
+                <caption id="taskListTitle" class="sr-only">同步任务列表</caption>
+                <colgroup>
+                  <col style="width:30%">
+                  <col style="width:10%">
+                  <col style="width:14%">
+                  <col style="width:26%">
+                  <col style="width:9%">
+                  <col style="width:6%">
+                  <col style="width:5%">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>任务 / 构建</th>
+                    <th>今日产出</th>
+                    <th>复制进度</th>
+                    <th>执行流水线</th>
+                    <th>状态</th>
+                    <th>时间</th>
+                    <th style="text-align:right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr class="task-row selected" data-type="composite" data-status="active" data-search="B2106.12.1 组件化 UMS VX x86_64 C1788473722875460505 nt03" data-detail="composite">
+                    <td>
+                      <div class="task-identity">
+                        <button class="expand-button" aria-expanded="true" aria-controls="moduleChildren" title="展开或收起模块">
+                          <svg class="icon-sm"><use href="#i-chevron"></use></svg>
+                        </button>
+                        <div>
+                          <div class="name">B2106.12.1 组件化每日构建</div>
+                          <div class="meta">
+                            <span class="tag blue">复合任务 · 10 模块</span>
+                            <b>x86_64</b><span>·</span><span>源目录时间 09-04 09:00</span>
+                          </div>
+                          <div class="meta mono">…\Jenkins\new\product\{模块}\B2106.12.1\x86_64</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div class="output-count tabular">5 / 10 模块</div>
+                      <div class="output-note">5 个今日无产出</div>
+                    </td>
+                    <td class="progress-cell">
+                      <div class="progress-top"><span id="currentModuleLabel">正在处理 3 / 5</span><strong id="mainProgressText">79%</strong></div>
+                      <div class="progress-track"><div id="mainProgressBar" class="progress-bar" style="width:79%"></div></div>
+                      <div id="mainProgressDetail" class="progress-detail tabular">8.6 / 10.9 GB · 42.3 MB/s</div>
+                    </td>
+                    <td>
+                      <div class="pipeline-wrap" aria-label="扫描完成，复制进行中，后续步骤等待">
+                        <div id="mainPipeline" class="pipeline">
+                          <span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span>
+                          <span class="stage active"><span class="stage-node">2</span></span><span class="stage-line"></span>
+                          <span class="stage"><span class="stage-node">3</span></span><span class="stage-line"></span>
+                          <span class="stage"><span class="stage-node">4</span></span><span class="stage-line"></span>
+                          <span class="stage"><span class="stage-node">5</span></span><span class="stage-line"></span>
+                          <span class="stage"><span class="stage-node">6</span></span><span class="stage-line"></span>
+                          <span class="stage"><span class="stage-node">7</span></span>
+                        </div>
+                        <div class="pipeline-labels"><span>扫描</span><span>复制</span><span>脚本</span><span>部署</span><span>重启</span><span>拓扑</span><span>改密</span></div>
+                      </div>
+                    </td>
+                    <td><span id="mainStatus" class="status-badge running"><span class="dot-pulse">复制中</span></span><div id="mainStatusNote" class="output-note">当前：IntegratedSecurity</div></td>
+                    <td><div class="time"><strong>09:02</strong><span id="mainElapsed">已用 06:18</span></div></td>
+                    <td><div class="row-actions"><button class="icon-button" title="暂停任务" data-toast="模拟：任务已暂停"><svg class="icon-sm"><use href="#i-pause"></use></svg></button><button class="link-button open-detail">详情</button><button class="icon-button" title="更多操作" data-toast="可放置取消、重试、清除等次要操作"><svg class="icon-sm"><use href="#i-more"></use></svg></button></div></td>
+                  </tr>
+
+                  <tr id="moduleChildren" class="children-row open">
+                    <td colspan="7">
+                      <div class="module-shell">
+                        <div class="module-head">
+                          <div class="module-title"><svg class="icon-sm"><use href="#i-list"></use></svg>模块执行明细 <span class="tag">今日产出 5</span><span class="tag">无产出 5</span></div>
+                          <div class="module-legend"><span>成功不是只靠颜色表达</span><button id="collapseModules" class="link-button">收起</button></div>
+                        </div>
+                        <div class="module-list">
+                          <div class="module-row" tabindex="0" data-detail="module1">
+                            <div class="module-name">UMS_VideoConnection_Module<span>…\UMS_VideoConnection_Module\B2106.12.1\x86_64\0904\C1788473722875460311</span></div>
+                            <div class="module-build"><strong>09-04 02:30</strong>C178847…0311</div>
+                            <span class="status-badge success">复制完成</span>
+                            <div class="mini-progress"><div class="progress-track"><div class="progress-bar success" style="width:100%"></div></div><span>100%</span></div>
+                            <div class="module-build"><strong>3.8 GB</strong>03:10</div>
+                            <button class="icon-button open-detail" title="查看模块详情"><svg class="icon-sm"><use href="#i-chevron"></use></svg></button>
+                          </div>
+                          <div class="module-row" tabindex="0" data-detail="module2">
+                            <div class="module-name">UMS_VideoManagement_Base<span>…\UMS_VideoManagement_Base\B2106.12.1\x86_64\0904\C1788473722875460428</span></div>
+                            <div class="module-build"><strong>09-04 02:36</strong>C178847…0428</div>
+                            <span class="status-badge success">复制完成</span>
+                            <div class="mini-progress"><div class="progress-track"><div class="progress-bar success" style="width:100%"></div></div><span>100%</span></div>
+                            <div class="module-build"><strong>4.2 GB</strong>02:47</div>
+                            <button class="icon-button open-detail" title="查看模块详情"><svg class="icon-sm"><use href="#i-chevron"></use></svg></button>
+                          </div>
+                          <div class="module-row current" tabindex="0" data-detail="module3">
+                            <div class="module-name">UMS_IntegratedSecurity_Base<span>…\UMS_IntegratedSecurity_Base\B2106.12.1\x86_64\0904\C1788473722875460505</span></div>
+                            <div class="module-build"><strong>09-04 09:00</strong>C178847…0505</div>
+                            <span class="status-badge running"><span class="dot-pulse">复制中</span></span>
+                            <div class="mini-progress"><div class="progress-track"><div class="progress-bar" style="width:61%"></div></div><span>61%</span></div>
+                            <div class="module-build"><strong>42.3 MB/s</strong>剩余 00:58</div>
+                            <button class="icon-button open-detail" title="查看模块详情"><svg class="icon-sm"><use href="#i-chevron"></use></svg></button>
+                          </div>
+                          <div class="module-row" tabindex="0" data-detail="module4">
+                            <div class="module-name">VX_U_MOD<span>…\VX_U_MOD\B2106.12.1\x86_64\0904\C1788473722875460579</span></div>
+                            <div class="module-build"><strong>09-04 09:04</strong>C178847…0579</div>
+                            <span class="status-badge muted">等待处理</span>
+                            <div class="mini-progress"><div class="progress-track"><div class="progress-bar" style="width:0%"></div></div><span>--</span></div>
+                            <div class="module-build"><strong>1.4 GB</strong>已发现</div>
+                            <button class="icon-button open-detail" title="查看模块详情"><svg class="icon-sm"><use href="#i-chevron"></use></svg></button>
+                          </div>
+                          <div class="module-row" tabindex="0" data-detail="module5">
+                            <div class="module-name">UMS_CDM5.0<span>…\UMS_CDM5.0\B2106.12.1\x86_64\0904\C1788473722875460612</span></div>
+                            <div class="module-build"><strong>09-04 09:07</strong>C178847…0612</div>
+                            <span class="status-badge muted">等待处理</span>
+                            <div class="mini-progress"><div class="progress-track"><div class="progress-bar" style="width:0%"></div></div><span>--</span></div>
+                            <div class="module-build"><strong>0.9 GB</strong>已发现</div>
+                            <button class="icon-button open-detail" title="查看模块详情"><svg class="icon-sm"><use href="#i-chevron"></use></svg></button>
+                          </div>
+                          <div class="module-row" tabindex="0">
+                            <div class="module-name">UMS_CDV5.0<span>已扫描今日目录，未发现符合过滤条件的包</span></div>
+                            <div class="module-build"><strong>09-04</strong>今日目录</div>
+                            <span class="status-badge muted">今日无产出</span><div class="output-note">不回退旧包</div><div class="module-build"><strong>--</strong>正常跳过</div><button class="icon-button" title="无产出说明" data-toast="该模块今日没有构建，不计为失败"><svg class="icon-sm"><use href="#i-more"></use></svg></button>
+                          </div>
+                          <div class="module-row" tabindex="0">
+                            <div class="module-name">UMS_VOD5.0<span>已扫描今日目录，未发现符合过滤条件的包</span></div>
+                            <div class="module-build"><strong>09-04</strong>今日目录</div>
+                            <span class="status-badge muted">今日无产出</span><div class="output-note">不回退旧包</div><div class="module-build"><strong>--</strong>正常跳过</div><button class="icon-button" title="无产出说明" data-toast="该模块今日没有构建，不计为失败"><svg class="icon-sm"><use href="#i-more"></use></svg></button>
+                          </div>
+                          <div class="module-row" tabindex="0">
+                            <div class="module-name">UMS_BM5.0<span>已扫描今日目录，未发现符合过滤条件的包</span></div>
+                            <div class="module-build"><strong>09-04</strong>今日目录</div>
+                            <span class="status-badge muted">今日无产出</span><div class="output-note">不回退旧包</div><div class="module-build"><strong>--</strong>正常跳过</div><button class="icon-button" title="无产出说明" data-toast="该模块今日没有构建，不计为失败"><svg class="icon-sm"><use href="#i-more"></use></svg></button>
+                          </div>
+                          <div class="module-row" tabindex="0">
+                            <div class="module-name">UMS_ParkingLots_Base<span>已扫描今日目录，未发现符合过滤条件的包</span></div>
+                            <div class="module-build"><strong>09-04</strong>今日目录</div>
+                            <span class="status-badge muted">今日无产出</span><div class="output-note">不回退旧包</div><div class="module-build"><strong>--</strong>正常跳过</div><button class="icon-button" title="无产出说明" data-toast="该模块今日没有构建，不计为失败"><svg class="icon-sm"><use href="#i-more"></use></svg></button>
+                          </div>
+                          <div class="module-row" tabindex="0">
+                            <div class="module-name">UMS_MS5.0<span>已扫描今日目录，未发现符合过滤条件的包</span></div>
+                            <div class="module-build"><strong>09-04</strong>今日目录</div>
+                            <span class="status-badge muted">今日无产出</span><div class="output-note">不回退旧包</div><div class="module-build"><strong>--</strong>正常跳过</div><button class="icon-button" title="无产出说明" data-toast="该模块今日没有构建，不计为失败"><svg class="icon-sm"><use href="#i-more"></use></svg></button>
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+
+                  <tr class="task-row" data-type="single" data-status="completed" data-search="VMS_U500_H16 B2101.12.1 x86_64 0903 C178846">
+                    <td><div class="task-identity"><span style="width:28px"></span><div><div class="name">VMS_U500_H16</div><div class="meta"><span class="tag">单路径</span><b>B2101.12.1</b><span>·</span><b>x86_64</b></div><div class="meta mono">0903 02:30 · C17884695310742</div></div></div></td>
+                    <td><div class="output-count">1 个构建</div><div class="output-note">源目录时间 02:30</div></td>
+                    <td class="progress-cell"><div class="progress-top"><span>复制完成</span><strong>100%</strong></div><div class="progress-track"><div class="progress-bar success" style="width:100%"></div></div><div class="progress-detail">4.7 / 4.7 GB</div></td>
+                    <td><div class="pipeline-wrap"><div class="pipeline"><span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span><span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span><span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span><span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span><span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span><span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span><span class="stage done"><span class="stage-node">✓</span></span></div><div class="pipeline-labels"><span>扫描</span><span>复制</span><span>脚本</span><span>部署</span><span>重启</span><span>拓扑</span><span>改密</span></div></div></td>
+                    <td><span class="status-badge success">已完成</span><div class="output-note">主备从 3 台正常</div></td>
+                    <td><div class="time"><strong>09-03 02:31</strong>已用 11:42</div></td>
+                    <td><div class="row-actions"><button class="link-button open-detail" data-detail="single">详情</button><button class="icon-button" title="更多操作" data-toast="可重新执行或清除记录"><svg class="icon-sm"><use href="#i-more"></use></svg></button></div></td>
+                  </tr>
+
+                  <tr class="task-row" data-type="single" data-status="failed" data-search="UNV_Guard B1102.12.1 windows_x64 partial failed">
+                    <td><div class="task-identity"><span style="width:28px"></span><div><div class="name">UNV_Guard</div><div class="meta"><span class="tag">单路径</span><b>B1102.12.1</b><span>·</span><b>windows_x64</b></div><div class="meta mono">0903 09:00 · C17884582190418</div></div></div></td>
+                    <td><div class="output-count">1 个构建</div><div class="output-note">源目录时间 09:00</div></td>
+                    <td class="progress-cell"><div class="progress-top"><span>复制完成</span><strong>100%</strong></div><div class="progress-track"><div class="progress-bar warning" style="width:100%"></div></div><div class="progress-detail">2.1 / 2.1 GB</div></td>
+                    <td><div class="pipeline-wrap"><div class="pipeline"><span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span><span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span><span class="stage done"><span class="stage-node">✓</span></span><span class="stage-line done"></span><span class="stage failed"><span class="stage-node">!</span></span><span class="stage-line"></span><span class="stage"><span class="stage-node">5</span></span><span class="stage-line"></span><span class="stage"><span class="stage-node">6</span></span><span class="stage-line"></span><span class="stage"><span class="stage-node">7</span></span></div><div class="pipeline-labels"><span>扫描</span><span>复制</span><span>脚本</span><span>部署</span><span>重启</span><span>拓扑</span><span>改密</span></div></div></td>
+                    <td><span class="status-badge warning">部分失败</span><div class="output-note">1 / 3 服务器失败</div></td>
+                    <td><div class="time"><strong>09-03 09:01</strong>已用 08:26</div></td>
+                    <td><div class="row-actions"><button class="link-button" data-toast="模拟：仅重试失败服务器">重试部署</button><button class="link-button open-detail" data-detail="failed">详情</button><button class="icon-button" title="更多操作"><svg class="icon-sm"><use href="#i-more"></use></svg></button></div></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="panel-tasks" class="panel" aria-label="任务与策略">
+        <div class="section-grid">
+          <section class="card">
+            <div class="card-header"><div><h2 class="card-title">新增复合任务</h2><p class="card-description">一次粘贴多个组件路径，保存为一个任务并按模块独立跟踪。</p></div><span class="tag blue">组件化（日期目录匹配）</span></div>
+            <div class="card-body">
+              <div class="form-grid">
+                <div class="form-group"><label for="batchName">任务名称</label><input id="batchName" value="B2106.12.1 组件化每日构建"></div>
+                <div class="form-group"><label for="batchRule">规则类型</label><select id="batchRule"><option>组件化（日期目录匹配）</option><option>主线（版本号匹配）</option></select></div>
+              </div>
+              <div class="form-group" style="margin-top:12px">
+                <label for="pathInput">模块路径（每行一个）</label>
+                <textarea id="pathInput">\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_VideoConnection_Module\B2106.12.1\x86_64\
+\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_VideoManagement_Base\B2106.12.1\x86_64\
+\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_IntegratedSecurity_Base\B2106.12.1\x86_64\
+\\nt03\每日编译1\组件项目\Jenkins\new\product\VX_U_MOD\B2106.12.1\x86_64\
+\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_CDM5.0\B2106.12.1\x86_64\
+\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_CDV5.0\B2106.12.1\x86_64\
+\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_VOD5.0\B2106.12.1\x86_64\
+\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_BM5.0\B2106.12.1\x86_64\
+\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_ParkingLots_Base\B2106.12.1\x86_64\
+\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_MS5.0\B2106.12.1\x86_64\</textarea>
+                <div class="hint">组件化复合任务当天无产出时标记“今日无产出”，不会回退获取前三天旧包。</div>
+              </div>
+              <div style="display:flex;justify-content:space-between;gap:8px;margin-top:12px">
+                <button class="button" data-toast="已清空重复行（模拟）">去重与校验</button>
+                <button id="parsePaths" class="button primary"><svg class="icon-sm"><use href="#i-list"></use></svg>解析路径并预览</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-header"><div><h2 class="card-title">模块预览</h2><p id="parseSummary" class="card-description">点击“解析路径并预览”检查产品、版本和架构。</p></div><span id="moduleCountTag" class="tag">0 个模块</span></div>
+            <div class="card-body">
+              <div id="parsedList" class="parsed-list"><div class="empty-preview"><div><svg class="icon" style="width:28px;height:28px"><use href="#i-list"></use></svg><div>尚未解析模块路径</div></div></div></div>
+              <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px"><button class="button">取消</button><button class="button success" data-toast="模拟：复合任务已保存">保存复合任务</button></div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="panel-delivery" class="panel" aria-label="部署配置">
+        <div class="section-grid">
+          <div style="display:grid;gap:14px">
+            <section class="card">
+              <div class="card-header"><div><h2 class="card-title">安装后自动操作</h2><p class="card-description">版本安装并等待设备重启后，按顺序执行 SSH、拓扑和密码操作。</p></div><span class="status-badge success">默认启用</span></div>
+              <div class="card-body">
+                <div class="switch-row"><div><div class="switch-title">开启一体机 SSH</div><div class="switch-note">默认白名单：全部 TCP 端口，来源 0.0.0.0/0 全部放行</div></div><label class="switch"><input type="checkbox" checked><span class="switch-track"></span></label></div>
+                <div class="switch-row"><div><div class="switch-title">安装后搭建主备从</div><div class="switch-note">接口断开视为已触发切换，随后每 30 秒验证，最长 10 分钟</div></div><label class="switch"><input type="checkbox" checked><span class="switch-track"></span></label></div>
+                <div class="switch-row"><div><div class="switch-title">修改初始密码</div><div class="switch-note">拓扑验证完成后执行；框架、UMS、CDM 可分别设置</div></div><label class="switch"><input type="checkbox" checked><span class="switch-track"></span></label></div>
+                <div class="form-grid" style="margin-top:12px">
+                  <div class="form-group"><label>框架新密码</label><input type="password" value="admin_123"></div>
+                  <div class="form-group"><label>UMS 用户名</label><input value="loadmin"></div>
+                  <div class="form-group"><label>UMS 新密码</label><input type="password" value="admin_1234"></div>
+                  <div class="form-group"><label>CDM 新密码</label><input type="password" value="admin_123"></div>
+                </div>
+                <div class="security-notice"><svg class="icon-sm"><use href="#i-alert"></use></svg><div><strong>高风险白名单范围</strong><br>按需求默认允许任意来源访问全部 TCP 端口，正式界面会明确展示该范围。</div></div>
+              </div>
+            </section>
+
+            <section class="card">
+              <div class="card-header"><div><h2 class="card-title">独立搭建主备从</h2><p class="card-description">无需部署版本，直接对两台或多台一体机执行拓扑搭建。</p></div><button class="button small" data-toast="已加载最近一次拓扑配置（模拟）">最近配置</button></div>
+              <div class="card-body">
+                <div class="form-grid">
+                  <div class="form-group"><label>拓扑模式</label><select><option>主备从</option><option>单主备</option><option>单主从</option></select></div>
+                  <div class="form-group"><label>重启验证</label><input value="每 30 秒，最长 10 分钟" readonly></div>
+                  <div class="form-group"><label>主机 IP</label><input value="192.115.1.17"></div>
+                  <div class="form-group"><label>备机 IP</label><input value="192.115.1.55"></div>
+                  <div class="form-group"><label>虚拟 IP</label><input value="192.115.1.128"></div>
+                  <div class="form-group"><label>从机 IP（可多个）</label><input value="192.115.1.18"></div>
+                </div>
+                <div style="display:flex;justify-content:space-between;gap:8px;margin-top:12px"><button id="addReplica" class="button"><svg class="icon-sm"><use href="#i-plus"></use></svg>添加从机</button><button class="button primary" data-toast="模拟：已创建独立主备从搭建任务"><svg class="icon-sm"><use href="#i-play"></use></svg>校验并开始搭建</button></div>
+              </div>
+            </section>
+          </div>
+
+          <section class="card">
+            <div class="card-header"><div><h2 class="card-title">拓扑预览与完成判据</h2><p class="card-description">数量、IP、haType 和 HA 服务状态全部满足才算完成。</p></div><span class="tag purple">主备从 · 3 台</span></div>
+            <div class="card-body">
+              <div class="topology-box">
+                <div class="topology-grid">
+                  <div class="role-card"><div class="role-label">主机 · haType 1</div><div class="role-ip mono">192.115.1.17</div><div class="role-state">online · PDT running</div></div>
+                  <div class="role-card backup"><div class="role-label">备机 · haType 2</div><div class="role-ip mono">192.115.1.55</div><div class="role-state">online · PDT stop（正常）</div></div>
+                  <div class="role-card replica"><div class="role-label">从机 · haType 4</div><div class="role-ip mono">192.115.1.18</div><div class="role-state">已部署 · 服务正常</div></div>
+                </div>
+                <div style="display:grid;gap:6px;margin-top:10px">
+                  <div class="timeline-item"><span class="timeline-icon">✓</span><div><div class="timeline-label">服务器列表验证</div><div class="timeline-note">21900 query：total=3，角色与配置 IP 一致</div></div><span class="timeline-time">09:22:00</span></div>
+                  <div class="timeline-item"><span class="timeline-icon">✓</span><div><div class="timeline-label">主备状态验证</div><div class="timeline-note">虚拟 IP 9820：master/slave online，HASTARTSTATUS=YES</div></div><span class="timeline-time">09:22:02</span></div>
+                  <div class="timeline-item"><span class="timeline-icon">✓</span><div><div class="timeline-label">密码初始化</div><div class="timeline-note">框架、UMS、CDM 均修改成功</div></div><span class="timeline-time">09:22:18</span></div>
+                </div>
+              </div>
+              <div class="detail-section"><h3>断连处理示例</h3><div class="log"><span class="info">[09:15:00] POST singleToHA 请求已发送</span><br><span class="warn">[09:15:01] 远端主动断开连接，按“切换已触发”处理</span><br>[09:15:31] 第 1/20 次恢复检测：21900 尚未就绪<br>[09:18:31] 第 7/20 次恢复检测：框架登录成功<br><span class="ok">[09:18:33] 主备角色验证通过，继续添加从机</span></div></div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="drawerBackdrop" class="drawer-backdrop"></div>
+  <aside id="detailDrawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-hidden="true">
+    <div class="drawer-header">
+      <div><h2 id="drawerTitle" class="card-title">任务详情</h2><p id="drawerSubtitle" class="card-description">B2106.12.1 组件化每日构建</p></div>
+      <button id="closeDrawer" class="icon-button" aria-label="关闭详情"><svg class="icon"><use href="#i-x"></use></svg></button>
+    </div>
+    <div class="drawer-body">
+      <div id="drawerStatus" class="status-badge running"><span>复制中</span></div>
+      <div class="detail-grid">
+        <div class="detail-stat"><span>今日产出</span><strong id="detailOutput">5 / 10 模块</strong></div>
+        <div class="detail-stat"><span>正在处理</span><strong id="detailCurrent">3 / 5</strong></div>
+        <div class="detail-stat"><span>复制进度</span><strong id="detailProgress">79%</strong></div>
+      </div>
+      <div class="detail-section"><h3>当前源路径</h3><div class="path-box mono"><span id="detailPath">\\nt03\每日编译1\组件项目\Jenkins\new\product\UMS_IntegratedSecurity_Base\B2106.12.1\x86_64\0904\C1788473722875460505</span><button class="icon-button copy-path" aria-label="复制源路径"><svg class="icon-sm"><use href="#i-copy"></use></svg></button></div></div>
+      <div class="detail-section"><h3>运行流水线</h3><div id="detailTimeline" class="timeline">
+        <div class="timeline-item"><span class="timeline-icon">✓</span><div><div class="timeline-label">扫描 10 个模块</div><div class="timeline-note">发现 5 个今日构建，5 个今日无产出</div></div><span class="timeline-time">09:02:01</span></div>
+        <div class="timeline-item"><span class="timeline-icon active">3</span><div><div class="timeline-label">复制今日第 3 / 5 个模块</div><div class="timeline-note">IntegratedSecurity · 61% · 42.3 MB/s</div></div><span class="timeline-time">进行中</span></div>
+        <div class="timeline-item"><span class="timeline-icon pending">3</span><div><div class="timeline-label">本地脚本</div><div class="timeline-note">等待全部模块复制完成</div></div><span class="timeline-time">等待</span></div>
+        <div class="timeline-item"><span class="timeline-icon pending">4</span><div><div class="timeline-label">部署与安装</div><div class="timeline-note">等待前置阶段</div></div><span class="timeline-time">等待</span></div>
+        <div class="timeline-item"><span class="timeline-icon pending">5</span><div><div class="timeline-label">重启、SSH、主备从、改密</div><div class="timeline-note">后台任务将每 30 秒检查设备恢复</div></div><span class="timeline-time">等待</span></div>
+      </div></div>
+      <div class="detail-section"><h3>最近日志</h3><div class="log"><span class="info">[09:02:01] 扫描完成：今日产出 5/10 个模块</span><br>[09:02:02] UMS_VideoConnection_Module 复制完成<br>[09:05:12] UMS_VideoManagement_Base 复制完成<br><span class="info">[09:07:59] 正在复制 UMS_IntegratedSecurity_Base</span><br>[09:08:18] 8.6 / 10.9 GB · 42.3 MB/s · ETA 00:58</div></div>
+    </div>
+  </aside>
+
+  <div id="modalBackdrop" class="modal-backdrop"></div>
+  <div id="cleanupModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="cleanupTitle" aria-hidden="true">
+    <div class="modal-header"><div><h2 id="cleanupTitle" class="card-title">清理同步历史</h2><p class="card-description">预览 5 天前可安全清理的本地包和任务记录。</p></div><button id="closeCleanup" class="icon-button" aria-label="关闭清理设置"><svg class="icon"><use href="#i-x"></use></svg></button></div>
+    <div class="modal-body">
+      <div class="cleanup-preview"><div class="cleanup-stat"><b>18.6 GB</b><span>7 个本地历史包</span></div><div class="cleanup-stat"><b>42 条</b><span>5 天前任务记录</span></div></div>
+      <label class="check-row"><input type="checkbox" checked><span><strong>删除 5 天前本地包</strong><br>仅处理配置的本地同步目录，不删除远程源文件。</span></label>
+      <label class="check-row"><input type="checkbox" checked><span><strong>删除 5 天前任务记录</strong><br>运行中、待部署和后处理中的任务不会删除。</span></label>
+      <label class="check-row"><input type="checkbox" checked><span><strong>每个模块至少保留最近一个成功包</strong><br>即使最近成功包已经超过 5 天也继续保留。</span></label>
+      <label class="check-row"><input type="checkbox" checked><span><strong>以后每天自动清理</strong><br>应用启动后每日检查一次。</span></label>
+    </div>
+    <div class="modal-footer"><button id="cancelCleanup" class="button">取消</button><button class="button danger-soft" data-toast="模拟：已创建历史清理任务">确认清理</button></div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    (function () {
+      var lastFocused = null;
+      var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
+      var panels = Array.prototype.slice.call(document.querySelectorAll(".panel"));
+      var toastTimer = null;
+
+      function iconUse(id) {
+        return '<svg class="icon-sm"><use href="#' + id + '"></use></svg>';
+      }
+
+      function showToast(message) {
+        var toast = document.getElementById("toast");
+        toast.textContent = message;
+        toast.classList.add("show");
+        window.clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(function () { toast.classList.remove("show"); }, 2200);
+      }
+
+      tabs.forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          var target = tab.getAttribute("data-tab");
+          tabs.forEach(function (item) { item.setAttribute("aria-selected", item === tab ? "true" : "false"); });
+          panels.forEach(function (panel) { panel.classList.toggle("active", panel.id === "panel-" + target); });
+        });
+      });
+
+      document.querySelectorAll("[data-toast]").forEach(function (button) {
+        button.addEventListener("click", function () { showToast(button.getAttribute("data-toast")); });
+      });
+
+      var schedulerRunning = true;
+      document.getElementById("schedulerButton").addEventListener("click", function () {
+        schedulerRunning = !schedulerRunning;
+        var badge = document.getElementById("schedulerBadge");
+        var button = document.getElementById("schedulerButton");
+        badge.className = schedulerRunning ? "status-badge success" : "status-badge muted";
+        badge.innerHTML = "<span>" + (schedulerRunning ? "调度器运行中" : "调度器已停止") + "</span>";
+        button.className = schedulerRunning ? "button danger-soft" : "button success";
+        button.innerHTML = iconUse(schedulerRunning ? "i-pause" : "i-play") + (schedulerRunning ? "停止调度" : "启动调度");
+        showToast(schedulerRunning ? "模拟：调度器已启动" : "模拟：调度器已停止");
+      });
+
+      var expand = document.querySelector(".expand-button");
+      var children = document.getElementById("moduleChildren");
+      function setExpanded(value) {
+        expand.setAttribute("aria-expanded", value ? "true" : "false");
+        children.classList.toggle("open", value);
+      }
+      expand.addEventListener("click", function () { setExpanded(expand.getAttribute("aria-expanded") !== "true"); });
+      document.getElementById("collapseModules").addEventListener("click", function () { setExpanded(false); expand.focus(); });
+
+      var scenarioData = {
+        running: { status: "复制中", statusClass: "running", note: "当前：IntegratedSecurity", progress: 79, current: "正在处理 3 / 5", detail: "8.6 / 10.9 GB · 42.3 MB/s", elapsed: "已用 06:18", issues: "1", issueNote: "1 个历史任务部分失败", active: "3 / 5 模块", activeNote: "复制阶段 · 79%", activeStage: 1 },
+        topology: { status: "等待主备从", statusClass: "running", note: "第 7 / 20 次恢复检测", progress: 100, current: "复制与安装已完成", detail: "设备服务重启中 · 下次检测 00:18", elapsed: "已用 18:32", issues: "1", issueNote: "1 个任务等待设备恢复", active: "拓扑验证中", activeNote: "主备完成，正在添加从机", activeStage: 5 },
+        partial: { status: "部分失败", statusClass: "warning", note: "从机 192.115.1.18 未确认", progress: 100, current: "5 / 5 已处理", detail: "复制完成 · 后处理存在失败", elapsed: "已用 26:41", issues: "2", issueNote: "2 个任务需要处理", active: "后处理失败", activeNote: "可从失败步骤继续", activeStage: 5 },
+        completed: { status: "已完成", statusClass: "success", note: "5 个有产出 · 5 个无产出", progress: 100, current: "5 / 5 已处理", detail: "10.9 / 10.9 GB · 全部完成", elapsed: "已用 24:08", issues: "1", issueNote: "1 个历史任务部分失败", active: "当前无任务", activeNote: "下次扫描 09:30", activeStage: 6 }
+      };
+
+      document.getElementById("scenarioSelect").addEventListener("change", function (event) {
+        var data = scenarioData[event.target.value];
+        var status = document.getElementById("mainStatus");
+        status.className = "status-badge " + data.statusClass;
+        status.innerHTML = "<span>" + data.status + "</span>";
+        document.getElementById("mainStatusNote").textContent = data.note;
+        document.getElementById("mainProgressText").textContent = data.progress + "%";
+        document.getElementById("mainProgressBar").style.width = data.progress + "%";
+        document.getElementById("currentModuleLabel").textContent = data.current;
+        document.getElementById("mainProgressDetail").textContent = data.detail;
+        document.getElementById("mainElapsed").textContent = data.elapsed;
+        document.getElementById("summaryIssues").textContent = data.issues;
+        document.getElementById("summaryIssuesNote").textContent = data.issueNote;
+        document.getElementById("summaryActive").textContent = data.active;
+        document.getElementById("summaryActiveNote").textContent = data.activeNote;
+
+        var stages = Array.prototype.slice.call(document.querySelectorAll("#mainPipeline .stage"));
+        var lines = Array.prototype.slice.call(document.querySelectorAll("#mainPipeline .stage-line"));
+        stages.forEach(function (stage, index) {
+          stage.className = "stage";
+          stage.querySelector(".stage-node").textContent = index < data.activeStage ? "✓" : String(index + 1);
+          if (index < data.activeStage) stage.classList.add("done");
+          if (index === data.activeStage && event.target.value !== "completed") stage.classList.add(event.target.value === "partial" ? "failed" : "active");
+          if (event.target.value === "completed") { stage.classList.add("done"); stage.querySelector(".stage-node").textContent = "✓"; }
+        });
+        lines.forEach(function (line, index) { line.className = "stage-line" + ((index < data.activeStage || event.target.value === "completed") ? " done" : ""); });
+        showToast("已切换到“" + event.target.options[event.target.selectedIndex].text + "”场景");
+      });
+
+      var taskRows = Array.prototype.slice.call(document.querySelectorAll(".task-row"));
+      function applyFilters() {
+        var search = document.getElementById("taskSearch").value.trim().toLowerCase();
+        var status = document.getElementById("statusFilter").value;
+        var type = document.getElementById("typeFilter").value;
+        var failedOnly = document.getElementById("failedOnly").getAttribute("aria-pressed") === "true";
+        var shown = 0;
+        taskRows.forEach(function (row, index) {
+          var matches = (!search || row.getAttribute("data-search").toLowerCase().indexOf(search) >= 0)
+            && (status === "all" || row.getAttribute("data-status") === status)
+            && (type === "all" || row.getAttribute("data-type") === type)
+            && (!failedOnly || row.getAttribute("data-status") === "failed");
+          row.style.display = matches ? "" : "none";
+          if (index === 0 && !matches) children.style.display = "none";
+          else if (index === 0) children.style.display = "";
+          if (matches) shown += 1;
+        });
+        document.getElementById("visibleCount").textContent = "当前显示 " + shown + " / " + taskRows.length + " 个任务";
+      }
+      ["taskSearch", "statusFilter", "typeFilter"].forEach(function (id) {
+        document.getElementById(id).addEventListener(id === "taskSearch" ? "input" : "change", applyFilters);
+      });
+      document.getElementById("failedOnly").addEventListener("click", function (event) {
+        var next = event.currentTarget.getAttribute("aria-pressed") !== "true";
+        event.currentTarget.setAttribute("aria-pressed", next ? "true" : "false");
+        event.currentTarget.classList.toggle("primary", next);
+        applyFilters();
+      });
+
+      var drawer = document.getElementById("detailDrawer");
+      var drawerBackdrop = document.getElementById("drawerBackdrop");
+      function openDrawer(kind, source) {
+        lastFocused = source || document.activeElement;
+        var title = "B2106.12.1 组件化每日构建";
+        var subtitle = "复合任务 · 10 个模块";
+        if (kind === "single") { title = "VMS_U500_H16"; subtitle = "B2101.12.1 · x86_64 · C17884695310742"; }
+        if (kind === "failed") { title = "UNV_Guard"; subtitle = "B1102.12.1 · windows_x64 · 部署部分失败"; }
+        if (kind && kind.indexOf("module") === 0) { title = source.closest(".module-row").querySelector(".module-name").childNodes[0].textContent; subtitle = "B2106.12.1 · x86_64 · 模块详情"; }
+        document.getElementById("drawerTitle").textContent = title;
+        document.getElementById("drawerSubtitle").textContent = subtitle;
+        drawer.classList.add("open"); drawerBackdrop.classList.add("open");
+        drawer.setAttribute("aria-hidden", "false");
+        document.getElementById("closeDrawer").focus();
+      }
+      function closeDrawer() {
+        drawer.classList.remove("open"); drawerBackdrop.classList.remove("open");
+        drawer.setAttribute("aria-hidden", "true");
+        if (lastFocused) lastFocused.focus();
+      }
+      document.querySelectorAll(".open-detail, .module-row[data-detail]").forEach(function (item) {
+        item.addEventListener("click", function (event) {
+          event.stopPropagation();
+          openDrawer(item.getAttribute("data-detail") || item.closest("[data-detail]").getAttribute("data-detail"), item);
+        });
+        if (item.classList.contains("module-row")) item.addEventListener("keydown", function (event) { if (event.key === "Enter") openDrawer(item.getAttribute("data-detail"), item); });
+      });
+      document.getElementById("closeDrawer").addEventListener("click", closeDrawer);
+      drawerBackdrop.addEventListener("click", closeDrawer);
+      document.querySelector(".copy-path").addEventListener("click", function () {
+        var value = document.getElementById("detailPath").textContent;
+        if (navigator.clipboard) navigator.clipboard.writeText(value).catch(function () {});
+        showToast("源路径已复制");
+      });
+
+      var cleanup = document.getElementById("cleanupModal");
+      var modalBackdrop = document.getElementById("modalBackdrop");
+      function openCleanup() {
+        lastFocused = document.activeElement;
+        cleanup.classList.add("open"); modalBackdrop.classList.add("open");
+        cleanup.setAttribute("aria-hidden", "false"); document.getElementById("closeCleanup").focus();
+      }
+      function closeCleanup() {
+        cleanup.classList.remove("open"); modalBackdrop.classList.remove("open");
+        cleanup.setAttribute("aria-hidden", "true"); if (lastFocused) lastFocused.focus();
+      }
+      document.getElementById("openCleanup").addEventListener("click", openCleanup);
+      document.getElementById("closeCleanup").addEventListener("click", closeCleanup);
+      document.getElementById("cancelCleanup").addEventListener("click", closeCleanup);
+      modalBackdrop.addEventListener("click", closeCleanup);
+
+      document.addEventListener("keydown", function (event) {
+        if (event.key === "Escape") {
+          if (cleanup.classList.contains("open")) closeCleanup();
+          else if (drawer.classList.contains("open")) closeDrawer();
+        }
+      });
+
+      document.getElementById("parsePaths").addEventListener("click", function () {
+        var lines = document.getElementById("pathInput").value.split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean);
+        var list = document.getElementById("parsedList");
+        list.innerHTML = "";
+        lines.forEach(function (path, index) {
+          var parts = path.replace(/[\\\/]+$/, "").split(/[\\\/]+/).filter(Boolean);
+          var arch = parts[parts.length - 1] || "待识别";
+          var version = parts[parts.length - 2] || "待识别";
+          var product = parts[parts.length - 3] || "待识别";
+          var item = document.createElement("div");
+          item.className = "parsed-item";
+          var number = document.createElement("div"); number.className = "parsed-index"; number.textContent = index + 1;
+          var body = document.createElement("div");
+          var productLine = document.createElement("div"); productLine.className = "parsed-product"; productLine.textContent = product;
+          var pathLine = document.createElement("div"); pathLine.className = "parsed-path mono"; pathLine.textContent = path;
+          body.appendChild(productLine); body.appendChild(pathLine);
+          var tags = document.createElement("div"); tags.className = "meta";
+          var versionTag = document.createElement("span"); versionTag.className = "tag blue"; versionTag.textContent = version;
+          var archTag = document.createElement("span"); archTag.className = "tag"; archTag.textContent = arch;
+          tags.appendChild(versionTag); tags.appendChild(archTag);
+          item.appendChild(number); item.appendChild(body); item.appendChild(tags); list.appendChild(item);
+        });
+        document.getElementById("moduleCountTag").textContent = lines.length + " 个模块";
+        document.getElementById("parseSummary").textContent = "已识别 " + lines.length + " 个模块；保存后作为一个复合任务运行。";
+        showToast("路径解析完成");
+      });
+
+      document.getElementById("addReplica").addEventListener("click", function () {
+        showToast("模拟：已新增第 2 个从机输入项");
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import {
   Trash2, Activity, Eye, Pause, PlayCircle, XCircle, RotateCcw, RefreshCw,
+  ChevronRight, ChevronDown,
 } from 'lucide-vue-next';
+import { ref } from 'vue';
 import type { TaskGroupListItem, TaskSummaryStatus } from '@/lib/tauri';
 import { appStore, type ProgressState } from '@/lib/store';
 import { useI18n } from 'vue-i18n';
@@ -9,6 +11,7 @@ import { useI18n } from 'vue-i18n';
 defineProps<{
   rows: TaskGroupListItem[];
   selectedTaskGroupId: string | null;
+  moduleProgressByGroup?: Record<string, { found: number; expected: number; current: number }>;
 }>();
 
 const emit = defineEmits<{
@@ -19,11 +22,20 @@ const emit = defineEmits<{
   cancelRun: [taskGroupId: string, runId: string];
   retryDeploy: [taskGroupId: string];
   retryRun: [taskGroupId: string];
+  retryModules: [taskGroupId: string];
 }>();
 
 const { t } = useI18n();
 const startTimeTextClass = 'text-[12px] text-slate-500 font-medium tabular-nums whitespace-nowrap';
 const inactiveMetricPlaceholderClass = 'inline-flex w-full items-center justify-center text-[12px] text-slate-300';
+const expandedRows = ref<Set<string>>(new Set());
+
+function toggleExpanded(taskGroupId: string) {
+  const next = new Set(expandedRows.value);
+  if (next.has(taskGroupId)) next.delete(taskGroupId);
+  else next.add(taskGroupId);
+  expandedRows.value = next;
+}
 
 function isTerminal(status: TaskSummaryStatus): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled'
@@ -45,6 +57,37 @@ function formatStartTime(isoStr: string): string {
   const min = String(d.getMinutes()).padStart(2, '0');
   const sec = String(d.getSeconds()).padStart(2, '0');
   return `${year}-${month}-${day} ${hour}:${min}:${sec}`;
+}
+
+function artifactIdentity(row: TaskGroupListItem) {
+  if (row.group_kind === 'composite_batch') {
+    return {
+      product: row.display_name,
+      version: row.composite_batch?.batch_key || '',
+      architecture: '',
+      buildId: `${row.composite_batch?.found_modules ?? 0}/${row.composite_batch?.expected_modules ?? 0}`,
+    };
+  }
+  if (row.artifact?.product) {
+    return {
+      product: row.artifact.product,
+      version: row.artifact.version || '',
+      architecture: row.artifact.architecture || '',
+      buildId: row.artifact.build_id || row.folder_name,
+    };
+  }
+  const parts = row.source_path.split(/[\\/]+/).filter(Boolean);
+  const versionIndex = parts.findIndex(part => /^B\d+(?:\.\d+)+$/i.test(part));
+  const buildId = [...parts].reverse().find(part => /^C\d+$/i.test(part)) || row.folder_name;
+  if (versionIndex <= 0) {
+    return { product: row.display_name, version: '', architecture: '', buildId };
+  }
+  return {
+    product: parts[versionIndex - 1],
+    version: parts[versionIndex],
+    architecture: parts[versionIndex + 1] || '',
+    buildId,
+  };
 }
 
 function formatDuration(seconds: number): string {
@@ -177,6 +220,9 @@ function isLiveCopying(row: TaskGroupListItem): boolean {
 }
 
 function progressPercent(row: TaskGroupListItem): number {
+  if (row.composite_batch?.total_bytes) {
+    return Math.min(100, row.composite_batch.copied_bytes / row.composite_batch.total_bytes * 100);
+  }
   const p = getRowProgress(row);
   if (p) return Math.min(100, Math.max(0, p.percentage));
   if (row.summary_status === 'completed') return 100;
@@ -184,6 +230,7 @@ function progressPercent(row: TaskGroupListItem): number {
 }
 
 function progressPercentText(row: TaskGroupListItem): string {
+  if (row.composite_batch?.total_bytes) return `${progressPercent(row).toFixed(1)}%`;
   if (row.summary_status === 'completed') return '100%';
   const p = getRowProgress(row);
   if (!p) return '-';
@@ -191,6 +238,9 @@ function progressPercentText(row: TaskGroupListItem): string {
 }
 
 function progressSizeText(row: TaskGroupListItem): string {
+  if (row.composite_batch?.total_bytes) {
+    return formatSizePair(row.composite_batch.copied_bytes, row.composite_batch.total_bytes);
+  }
   const p = getRowProgress(row);
   if (!p) return '';
   return formatSizePair(p.copied, p.total);
@@ -203,7 +253,7 @@ function progressSizeText(row: TaskGroupListItem): string {
       <table class="w-full table-fixed" style="min-width: 1150px">
         <colgroup>
           <col style="width: 140px">
-          <col style="width: 220px">
+          <col style="width: 320px">
           <col style="width: 110px">
           <col style="width: 200px">
           <col style="width: 96px">
@@ -214,7 +264,7 @@ function progressSizeText(row: TaskGroupListItem): string {
         </colgroup>
         <thead>
           <tr class="bg-slate-50/80 text-[11px] text-slate-500 font-semibold uppercase tracking-wider border-b border-slate-200 select-none">
-            <th scope="col" class="text-left py-3 px-4">{{ t('console.startTime') }}</th>
+            <th scope="col" class="text-left py-3 px-4">{{ t('console.sourceModifiedTime') }}</th>
             <th scope="col" class="text-left py-3 px-4">{{ t('console.name') }}</th>
             <th scope="col" class="text-center py-3 px-2">{{ t('console.status') }}</th>
             <th scope="col" class="text-left py-3 px-4">{{ t('console.progress') }}</th>
@@ -227,9 +277,8 @@ function progressSizeText(row: TaskGroupListItem): string {
         </thead>
 
         <tbody class="divide-y divide-slate-100/70">
+          <template v-for="row in rows" :key="row.task_group_id">
           <tr
-            v-for="row in rows"
-            :key="row.task_group_id"
             class="group transition-colors relative"
             :class="[
               row.task_group_id === selectedTaskGroupId
@@ -240,13 +289,24 @@ function progressSizeText(row: TaskGroupListItem): string {
             <!-- Start Time -->
             <td class="py-2.5 px-3 align-middle">
               <span :class="startTimeTextClass">
-                {{ formatStartTime(row.started_at) }}
+                {{ formatStartTime(row.artifact?.source_modified_at || row.started_at) }}
               </span>
             </td>
 
             <!-- Name -->
             <td class="py-2.5 px-3 align-middle">
               <div class="flex items-center gap-2 min-w-0">
+                <button
+                  v-if="row.composite_batch"
+                  type="button"
+                  class="inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-100 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
+                  :aria-expanded="expandedRows.has(row.task_group_id)"
+                  :aria-label="expandedRows.has(row.task_group_id) ? t('console.collapseModules') : t('console.expandModules')"
+                  @click.stop="toggleExpanded(row.task_group_id)"
+                >
+                  <ChevronDown v-if="expandedRows.has(row.task_group_id)" class="h-4 w-4" aria-hidden="true" />
+                  <ChevronRight v-else class="h-4 w-4" aria-hidden="true" />
+                </button>
                 <div
                   class="w-5 h-5 rounded-md flex items-center justify-center shrink-0"
                   :class="row.merge_key.startsWith('manual')
@@ -255,12 +315,20 @@ function progressSizeText(row: TaskGroupListItem): string {
                 >
                   <Activity class="w-3 h-3" />
                 </div>
-                <span
-                  class="truncate font-medium text-slate-700 text-[13px] min-w-0 flex-1"
-                  :title="row.display_name"
-                >
-                  {{ row.display_name }}
-                </span>
+                <div class="min-w-0 flex-1" :title="row.source_path">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <span class="truncate text-[13px] font-semibold text-slate-800">{{ artifactIdentity(row).product }}</span>
+                    <span v-if="artifactIdentity(row).version" class="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 font-mono text-[11px] font-medium text-blue-700">{{ artifactIdentity(row).version }}</span>
+                    <span v-if="artifactIdentity(row).architecture" class="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600">{{ artifactIdentity(row).architecture }}</span>
+                  </div>
+                  <div class="mt-0.5 truncate font-mono text-[11px] text-slate-500">{{ artifactIdentity(row).buildId }}</div>
+                  <div v-if="moduleProgressByGroup?.[row.task_group_id]" class="mt-0.5 truncate text-[11px] font-medium text-indigo-600">
+                    {{ t('console.moduleOutputProgress', moduleProgressByGroup[row.task_group_id]) }}
+                    <template v-if="isActive(row.summary_status)">
+                      · {{ t('console.moduleCurrentProgress', moduleProgressByGroup[row.task_group_id]) }}
+                    </template>
+                  </div>
+                </div>
               </div>
             </td>
 
@@ -276,7 +344,7 @@ function progressSizeText(row: TaskGroupListItem): string {
 
             <!-- Progress: % + size pair + bar -->
             <td class="py-2.5 px-3 align-middle">
-              <template v-if="getRowProgress(row) || row.summary_status === 'completed'">
+              <template v-if="getRowProgress(row) || row.composite_batch?.total_bytes || row.summary_status === 'completed'">
                 <div class="flex items-center justify-between gap-2 mb-1">
                   <span
                     class="text-[12px] font-mono tabular-nums font-semibold"
@@ -357,7 +425,16 @@ function progressSizeText(row: TaskGroupListItem): string {
                 <!-- Terminal: retry deploy (if had_failures) / retry run (if cancelled or interrupted) + clear -->
                 <template v-else-if="isTerminal(row.summary_status)">
                   <button
-                    v-if="row.summary_status === 'cancelled' || row.summary_status === 'interrupted'"
+                    v-if="row.group_kind === 'composite_batch' && row.had_failures"
+                    @click.stop="emit('retryModules', row.task_group_id)"
+                    class="inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-amber-200 bg-amber-50 text-amber-600 transition-colors hover:bg-amber-100 hover:text-amber-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50"
+                    :title="t('console.retryFailedModules')"
+                    :aria-label="t('console.retryFailedModules')"
+                  >
+                    <RotateCcw class="h-4 w-4" aria-hidden="true" />
+                  </button>
+                  <button
+                    v-else-if="(row.summary_status === 'cancelled' || row.summary_status === 'interrupted') && !(row.had_failures && row.task_config_id)"
                     @click.stop="emit('retryRun', row.task_group_id)"
                     class="inline-flex w-8 h-8 items-center justify-center rounded-md bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 border border-emerald-200 transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 focus-visible:ring-offset-1"
                     :title="t('console.retryRun')"
@@ -400,6 +477,44 @@ function progressSizeText(row: TaskGroupListItem): string {
               </button>
             </td>
           </tr>
+          <tr v-if="row.composite_batch && expandedRows.has(row.task_group_id)" class="bg-slate-50/70">
+            <td colspan="9" class="px-5 py-3">
+              <div class="ml-8 grid gap-2" role="list" :aria-label="t('console.moduleList')">
+                <div
+                  v-for="module in row.composite_batch.modules"
+                  :key="module.module_id"
+                  role="listitem"
+                  class="grid grid-cols-[minmax(160px,1fr)_110px_minmax(220px,2fr)_150px] items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs"
+                >
+                  <div class="min-w-0">
+                    <div class="truncate font-semibold text-slate-800">{{ module.module_name }}</div>
+                    <div class="truncate font-mono text-[10px] text-slate-500" :title="module.module_id">{{ module.module_id }}</div>
+                  </div>
+                  <span
+                    class="inline-flex w-fit items-center rounded px-2 py-0.5 font-semibold ring-1 ring-inset"
+                    :class="module.status === 'no_output'
+                      ? 'bg-slate-100 text-slate-600 ring-slate-200'
+                      : module.status === 'failed'
+                        ? 'bg-rose-50 text-rose-700 ring-rose-200'
+                        : module.status === 'completed'
+                          ? 'bg-emerald-50 text-emerald-700 ring-emerald-200'
+                          : 'bg-blue-50 text-blue-700 ring-blue-200'"
+                  >
+                    {{ module.status === 'no_output' ? t('console.moduleNoOutput') : t(`console.moduleStatus.${module.status}`) }}
+                  </span>
+                  <div class="min-w-0 font-mono text-[10px] text-slate-500">
+                    <div class="truncate" :title="module.remote_path">{{ module.remote_path }}</div>
+                    <div class="truncate" :title="module.local_path">→ {{ module.local_path }}</div>
+                  </div>
+                  <div class="text-right font-mono tabular-nums text-slate-600">
+                    <template v-if="module.total_bytes > 0">{{ formatSizePair(module.copied_bytes, module.total_bytes) }}</template>
+                    <template v-else>{{ module.found_builds }} build(s)</template>
+                  </div>
+                </div>
+              </div>
+            </td>
+          </tr>
+          </template>
         </tbody>
       </table>
     </div>

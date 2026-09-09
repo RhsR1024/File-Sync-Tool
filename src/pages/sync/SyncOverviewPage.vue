@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onActivated } from 'vue';
-import { RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, Gauge, ListChecks, Play, Square, Trash2 } from 'lucide-vue-next';
+import { RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, Gauge, ListChecks, Play, Search, Square, Trash2 } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
 import TaskGroupsTable from '@/components/tasks/TaskGroupsTable.vue';
 import TaskGroupDetailPanel from '@/components/tasks/TaskGroupDetailPanel.vue';
-import { getConfig, type AppConfig, previewTemporaryCopy, queueTemporaryCopy, type ManualCopyPreview } from '@/lib/tauri';
+import AppConfirmDialog from '@/components/AppConfirmDialog.vue';
+import { applySyncRetention, getConfig, previewSyncRetention, type AppConfig, previewTemporaryCopy, queueTemporaryCopy, type ManualCopyPreview, type SyncRetentionPreview, updateSyncConfig } from '@/lib/tauri';
+import { buildSyncPatch } from '@/lib/configDomains';
 import {
   clearTaskGroup,
   clearTaskGroups,
@@ -14,6 +16,7 @@ import {
   pauseTaskRun,
   resumeTaskRun,
   retryTaskGroupDeploy,
+  retryFailedCompositeModules,
 } from '@/lib/tauri';
 import { useI18n } from 'vue-i18n';
 import { appStore, addLog } from '@/lib/store';
@@ -30,6 +33,11 @@ const { t } = useI18n();
 const config = ref<AppConfig | null>(null);
 const isManualCopyModalOpen = ref(false);
 const manualCopyTriggerRef = ref<HTMLButtonElement | null>(null);
+const retentionDays = ref(5);
+const retentionEnabled = ref(true);
+const retentionPreview = ref<SyncRetentionPreview | null>(null);
+const retentionBusy = ref(false);
+const retentionConfirmOpen = ref(false);
 
 // Tracks whether the first hydrate of taskStateStore has resolved during this
 // page lifecycle so we can show a skeleton instead of a blank panel on cold
@@ -47,7 +55,66 @@ function notify(message: string, tone: ToastTone = 'info') {
 const retryTargetPreview = ref<ManualCopyPreview | null>(null);
 const pendingRetryRequest = ref<{ taskGroupId: string; source: string; target: string } | null>(null);
 
-const rows = computed(() => buildTaskRows(taskStateStore.groups));
+const allRows = computed(() => buildTaskRows(
+  taskStateStore.groups.filter(group => !group.parent_task_group_id),
+));
+const moduleProgressByGroup = computed(() => {
+  const result: Record<string, { found: number; expected: number; current: number }> = {};
+  for (const row of allRows.value) {
+    if (row.composite_batch) {
+      result[row.task_group_id] = {
+        found: row.composite_batch.found_modules,
+        expected: row.composite_batch.expected_modules,
+        current: row.composite_batch.current_module_index,
+      };
+    }
+  }
+  return result;
+});
+const taskSearch = ref('');
+const taskStatusFilter = ref('all');
+const taskTypeFilter = ref('all');
+const taskPage = ref(1);
+const taskPageSize = 50;
+
+const filteredRows = computed(() => {
+  const query = taskSearch.value.trim().toLowerCase();
+  return allRows.value.filter(row => {
+    const matchesQuery = !query || [
+      row.display_name,
+      row.folder_name,
+      row.source_path,
+      row.artifact?.product ?? '',
+      row.artifact?.version ?? '',
+      row.artifact?.architecture ?? '',
+      row.artifact?.build_id ?? '',
+      ...(row.composite_batch?.modules.flatMap(module => [
+        module.module_name,
+        module.remote_path,
+        module.local_path,
+      ]) ?? []),
+    ]
+      .some(value => value.toLowerCase().includes(query));
+    const matchesStatus = taskStatusFilter.value === 'all'
+      || (taskStatusFilter.value === 'exception'
+        ? ['failed', 'partial_failed', 'cancelled', 'interrupted'].includes(row.summary_status)
+        : row.summary_status === taskStatusFilter.value);
+    const isManual = row.task_config_id === null;
+    const matchesType = taskTypeFilter.value === 'all'
+      || (taskTypeFilter.value === 'manual' ? isManual : !isManual);
+    return matchesQuery && matchesStatus && matchesType;
+  });
+});
+
+const taskPageCount = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / taskPageSize)));
+const effectiveTaskPage = computed(() => Math.min(taskPage.value, taskPageCount.value));
+const rows = computed(() => {
+  const offset = (effectiveTaskPage.value - 1) * taskPageSize;
+  return filteredRows.value.slice(offset, offset + taskPageSize);
+});
+const selectedTaskLogs = computed(() => taskStateStore.selectedTaskGroupId
+  ? taskStateStore.taskLogsByGroup[taskStateStore.selectedTaskGroupId] ?? []
+  : []);
 
 const currentSpeed = computed(() => {
   const bytesPerSecond = appStore.progress?.speed ?? 0;
@@ -58,7 +125,7 @@ const currentSpeed = computed(() => {
   return `${(bytesPerSecond / (1024 * 1024 * 1024)).toFixed(2)} GB/s`;
 });
 
-const terminalTaskCount = computed(() => rows.value.filter(r => {
+const terminalTaskCount = computed(() => allRows.value.filter(r => {
   const s = r.summary_status;
   return s === 'completed' || s === 'failed' || s === 'cancelled'
     || s === 'interrupted' || s === 'partial_failed';
@@ -136,7 +203,7 @@ async function handleRetryDeploy(taskGroupId: string) {
 
 async function handleRetryRun(taskGroupId: string) {
   // Find the task group from the rows
-  const taskRow = rows.value.find(r => r.task_group_id === taskGroupId);
+  const taskRow = allRows.value.find(r => r.task_group_id === taskGroupId);
   if (!taskRow) {
     notify('Task not found', 'error');
     return;
@@ -232,6 +299,56 @@ function handleCloseDetail() {
   taskStateStore.selectedGroupDetail = null;
 }
 
+async function handleRetryModules(taskGroupId: string) {
+  try {
+    await retryFailedCompositeModules(taskGroupId);
+    notify(t('console.retryFailedModulesStarted'), 'success');
+  } catch (error) {
+    notify(`${t('console.retryFailedModules')} - ${error}`, 'error');
+  }
+}
+
+function formatRetentionBytes(bytes: number) {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+async function handlePreviewRetention() {
+  retentionBusy.value = true;
+  try {
+    retentionPreview.value = await previewSyncRetention(retentionDays.value);
+  } catch (error) {
+    notify(String(error), 'error');
+  } finally {
+    retentionBusy.value = false;
+  }
+}
+
+async function saveRetentionSettings() {
+  if (!config.value) return;
+  config.value.sync_retention_enabled = retentionEnabled.value;
+  config.value.sync_retention_days = Math.min(365, Math.max(1, Math.round(retentionDays.value)));
+  retentionDays.value = config.value.sync_retention_days;
+  await updateSyncConfig(buildSyncPatch(config.value));
+  notify(t('console.retentionSaved'), 'success');
+}
+
+async function handleApplyRetention() {
+  retentionConfirmOpen.value = false;
+  retentionBusy.value = true;
+  try {
+    const cleaned = await applySyncRetention(retentionDays.value);
+    notify(t('console.retentionCompleted', { packages: cleaned.removedPackages, records: cleaned.removedRecords }), cleaned.errors.length ? 'warning' : 'success');
+    retentionPreview.value = null;
+    await taskStateStore.hydrateTaskState();
+  } catch (error) {
+    notify(String(error), 'error');
+  } finally {
+    retentionBusy.value = false;
+  }
+}
+
 async function handleManualCopyQueued() {
   await taskStateStore.hydrateTaskState();
 }
@@ -252,6 +369,8 @@ function toggleScheduler() {
 async function loadConfig() {
   try {
     config.value = await getConfig();
+    retentionDays.value = config.value.sync_retention_days;
+    retentionEnabled.value = config.value.sync_retention_enabled;
   } catch (e) {
     addLog(t('console.failedLoadConfig', { error: e }), 'error');
   }
@@ -413,6 +532,51 @@ function handleManualCopyClose() {
             <Trash2 class="h-4 w-4" aria-hidden="true" />
             {{ t('console.clearAllGroups') }}
           </button>
+          <button type="button" class="flex min-h-11 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:opacity-50" :disabled="retentionBusy" @click="handlePreviewRetention">
+            <Trash2 class="h-4 w-4" />
+            {{ t('console.retentionCleanup') }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="retentionPreview" class="border-b border-blue-100 bg-blue-50/70 px-4 py-3">
+        <div class="flex flex-wrap items-center gap-3">
+          <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+            <input v-model="retentionEnabled" type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+            {{ t('console.retentionAuto') }}
+          </label>
+          <label class="inline-flex items-center gap-2 text-sm text-slate-700">
+            {{ t('console.retentionOlderThan') }}
+            <input v-model.number="retentionDays" type="number" min="1" max="365" class="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center tabular-nums outline-none focus:ring-2 focus:ring-blue-500/20" />
+            {{ t('console.retentionDays') }}
+          </label>
+          <button type="button" class="rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-100" @click="saveRetentionSettings">{{ t('console.retentionSave') }}</button>
+          <span class="text-sm text-slate-600">{{ t('console.retentionPreviewSummary', { packages: retentionPreview.eligiblePackages, records: retentionPreview.eligibleRecords, size: formatRetentionBytes(retentionPreview.totalBytes) }) }}</span>
+          <button type="button" :disabled="retentionPreview.eligibleRecords === 0 || retentionBusy" class="ml-auto rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-40" @click="retentionConfirmOpen = true">{{ t('console.retentionApply') }}</button>
+          <button type="button" class="rounded-lg px-3 py-1.5 text-sm text-slate-600 hover:bg-white" @click="retentionPreview = null">{{ t('common.close') }}</button>
+        </div>
+        <p class="mt-2 text-xs text-slate-500">{{ t('console.retentionProtectionHint') }}</p>
+      </div>
+
+      <div class="border-b border-slate-200 bg-white px-4 py-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <label class="relative min-w-[240px] flex-1">
+            <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input v-model="taskSearch" type="search" :placeholder="t('console.taskSearchPlaceholder')" class="min-h-10 w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-500/20" @input="taskPage = 1" />
+          </label>
+          <select v-model="taskStatusFilter" class="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/20" @change="taskPage = 1">
+            <option value="all">{{ t('console.filterAllStatus') }}</option>
+            <option value="copying">{{ t('console.phaseCopying') }}</option>
+            <option value="deploying">{{ t('console.phaseDeploying') }}</option>
+            <option value="completed">{{ t('console.phaseCompleted') }}</option>
+            <option value="exception">{{ t('console.filterExceptions') }}</option>
+          </select>
+          <select v-model="taskTypeFilter" class="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/20" @change="taskPage = 1">
+            <option value="all">{{ t('console.filterAllTypes') }}</option>
+            <option value="scheduled">{{ t('console.filterScheduled') }}</option>
+            <option value="manual">{{ t('console.filterManual') }}</option>
+          </select>
+          <span class="text-xs tabular-nums text-slate-500">{{ t('console.filteredTaskCount', { count: filteredRows.length }) }}</span>
         </div>
       </div>
 
@@ -441,6 +605,7 @@ function handleManualCopyClose() {
           v-else
           :rows="rows"
           :selected-task-group-id="taskStateStore.selectedTaskGroupId"
+          :module-progress-by-group="moduleProgressByGroup"
           @select="handleSelect"
           @clear="handleClearGroup"
           @pause-run="handlePause"
@@ -448,17 +613,35 @@ function handleManualCopyClose() {
           @cancel-run="handleCancel"
           @retry-deploy="handleRetryDeploy"
           @retry-run="handleRetryRun"
+          @retry-modules="handleRetryModules"
         />
+        <div v-if="filteredRows.length > taskPageSize" class="mt-3 flex items-center justify-end gap-2 text-sm text-slate-600">
+          <button type="button" class="min-h-9 rounded-lg border border-slate-300 bg-white px-3 disabled:opacity-40" :disabled="taskPage <= 1" @click="taskPage--">{{ t('console.previousPage') }}</button>
+          <span class="tabular-nums">{{ effectiveTaskPage }} / {{ taskPageCount }}</span>
+          <button type="button" class="min-h-9 rounded-lg border border-slate-300 bg-white px-3 disabled:opacity-40" :disabled="taskPage >= taskPageCount" @click="taskPage++">{{ t('console.nextPage') }}</button>
+        </div>
       </div>
     </section>
 
     <!-- Detail panel (slide-in) -->
     <TaskGroupDetailPanel
       :group="taskStateStore.selectedGroupDetail"
-      :task-logs="taskStateStore.taskLogs"
+      :task-logs="selectedTaskLogs"
       :is-loading="taskStateStore.isLoadingDetail"
       @retry-deploy="handleRetryDeploy"
       @close="handleCloseDetail"
+    />
+
+    <AppConfirmDialog
+      :open="retentionConfirmOpen"
+      :title="t('console.retentionConfirmTitle')"
+      :description="t('console.retentionConfirmDescription', { days: retentionDays })"
+      :confirm-label="t('console.retentionApply')"
+      :cancel-label="t('common.cancel')"
+      :busy="retentionBusy"
+      tone="danger"
+      @confirm="handleApplyRetention"
+      @cancel="retentionConfirmOpen = false"
     />
 
     <!-- Manual Copy Modal -->

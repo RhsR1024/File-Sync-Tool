@@ -1,4 +1,4 @@
-import { reactive } from 'vue';
+import { shallowReactive } from 'vue';
 
 import type {
   StartManualCopyTaskRequest,
@@ -59,7 +59,7 @@ export interface ManualDeploySession {
 
 export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = {}) {
   const api = { ...defaultApi, ...apiOverrides };
-  const state = reactive({
+  const state = shallowReactive({
     groups: [] as TaskGroupListItem[],
     selectedTaskGroupId: null as string | null,
     selectedGroupDetail: null as TaskGroup | null,
@@ -67,6 +67,7 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
     isHydrated: false,
     isLoadingDetail: false,
     taskLogs: [] as TaskLogEntry[],
+    taskLogsByGroup: {} as Record<string, TaskLogEntry[]>,
     latestManualDeploy: null as ManualDeploySession | null,
   });
 
@@ -81,13 +82,17 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
     try {
       const detail = await api.getTaskGroupDetail(taskGroupId);
       state.selectedGroupDetail = detail;
-      state.groupDetails[taskGroupId] = detail;
+      state.groupDetails = { ...state.groupDetails, [taskGroupId]: detail };
     } finally {
       state.isLoadingDetail = false;
     }
   }
 
-  function applyGroupsSnapshot(payload: { groups: TaskGroupListItem[] }) {
+  let latestRevision = 0;
+
+  function applyGroupsSnapshot(payload: { revision?: number; groups: TaskGroupListItem[] }) {
+    if (payload.revision && payload.revision <= latestRevision) return;
+    latestRevision = payload.revision ?? latestRevision + 1;
     state.groups = payload.groups;
     if (
       state.selectedTaskGroupId
@@ -99,16 +104,21 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
   }
 
   function applyDetailSnapshot(payload: { task_group_id: string; group: TaskGroup }) {
-    state.groupDetails[payload.task_group_id] = payload.group;
+    state.groupDetails = { ...state.groupDetails, [payload.task_group_id]: payload.group };
     if (payload.task_group_id === state.selectedTaskGroupId) {
       state.selectedGroupDetail = payload.group;
     }
   }
 
   function appendTaskLog(entry: TaskLogEntry) {
-    state.taskLogs.push(entry);
-    if (state.taskLogs.length > MAX_TASK_LOG_ENTRIES) {
-      state.taskLogs.splice(0, state.taskLogs.length - MAX_TASK_LOG_ENTRIES);
+    state.taskLogs = [...state.taskLogs, entry].slice(-MAX_TASK_LOG_ENTRIES);
+    if (entry.task_group_id) {
+      const groupLogs = state.taskLogsByGroup[entry.task_group_id] ?? [];
+      const nextGroupLogs = [...groupLogs, entry].slice(-2_000);
+      state.taskLogsByGroup = {
+        ...state.taskLogsByGroup,
+        [entry.task_group_id]: nextGroupLogs,
+      };
     }
   }
 
@@ -129,7 +139,10 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
     };
     await hydrateTaskState();
     try {
-      state.groupDetails[handle.task_group_id] = await api.getTaskGroupDetail(handle.task_group_id);
+      state.groupDetails = {
+        ...state.groupDetails,
+        [handle.task_group_id]: await api.getTaskGroupDetail(handle.task_group_id),
+      };
     } catch {
       // The global detail-snapshot listener will populate this as the run advances.
     }

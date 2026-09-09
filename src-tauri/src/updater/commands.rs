@@ -1,14 +1,16 @@
 //! Tauri command handlers and startup orchestration for the updater feature.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::watch;
 
 use crate::config::AppConfig;
+use crate::device_simulator_commands::DeviceSimulatorCommandState;
 use crate::updater::{
     download, installer, manifest, pending, self_heal, DownloadCompletePayload, DownloadProgress,
     Manifest, ManifestVersion, PendingUpdate, SharedUpdaterState, TestServerResult,
@@ -141,6 +143,7 @@ pub async fn cancel_update_download(state: State<'_, AppState>) -> Result<(), St
 pub async fn apply_update_now(
     app_handle: AppHandle,
     state: State<'_, AppState>,
+    simulator_state: State<'_, DeviceSimulatorCommandState>,
 ) -> Result<(), String> {
     if crate::updater::is_debug_build() {
         return Err(UpdaterError::DebugBuild.to_string());
@@ -161,26 +164,29 @@ pub async fn apply_update_now(
     let current_exe_path = std::env::current_exe().map_err(|error| format!("io: {error}"))?;
     let target_exe_path = resolve_apply_target_path(&current_exe_path, &pending.target_file_name)?;
 
-    let snapshot = {
-        let mut config = state
-            .config
-            .lock()
-            .map_err(|_| "config_poisoned".to_string())?;
-        config.pending_update = None;
-        config.clone()
-    };
-    config::save_config(&app_handle, &snapshot)?;
-
-    installer::spawn_helper(&temp_path, &current_exe_path, &target_exe_path)
-        .map_err(|error| error.to_string())?;
-
-    let _ = emit_state_changed(&app_handle, &state.config, &state.updater);
-
-    for window in app_handle.webview_windows().values() {
-        let _ = window.close();
+    if state.is_quitting.swap(true, Ordering::SeqCst) {
+        return Err("shutdown_in_progress".to_string());
     }
-    std::thread::sleep(Duration::from_millis(50));
-    app_handle.exit(0);
+
+    if let Err(error) = crate::prepare_application_exit(&app_handle, simulator_state.inner()).await
+    {
+        state.is_quitting.store(false, Ordering::SeqCst);
+        return Err(error);
+    }
+
+    crate::quiesce_application_tasks(state.inner());
+    if let Err(error) = installer::spawn_helper(&temp_path, &current_exe_path, &target_exe_path) {
+        state.is_quitting.store(false, Ordering::SeqCst);
+        return Err(error.to_string());
+    }
+
+    log::info!(
+        "[updater] helper started; exiting {} so {} can launch",
+        current_exe_path.display(),
+        target_exe_path.display()
+    );
+    let _ = emit_state_changed(&app_handle, &state.config, &state.updater);
+    crate::finish_application_exit(&app_handle, state.inner());
     Ok(())
 }
 
@@ -273,7 +279,7 @@ pub fn initialize_on_startup(app_handle: AppHandle, state: &AppState) {
         match perform_check(&app_handle, config_state.clone(), updater_state.clone()).await {
             Ok(result) => {
                 if matches!(
-                    self_heal::check_and_repair_filename(&app_handle, &updater_state),
+                    self_heal::check_and_repair_filename(&app_handle, &updater_state).await,
                     self_heal::HealOutcome::Spawned
                 ) {
                     return;
@@ -375,7 +381,7 @@ fn restore_pending_update(
             Err(_) => return,
         };
         let original = config.pending_update.clone();
-        let validated = pending::validate(original.clone());
+        let validated = validate_pending_for_current_version(original.clone());
         config.pending_update = validated;
         let changed = config.pending_update != original;
         let snapshot = config.clone();
@@ -389,6 +395,18 @@ fn restore_pending_update(
     if changed {
         let _ = config::save_config(app_handle, &snapshot);
     }
+}
+
+fn validate_pending_for_current_version(
+    pending_update: Option<PendingUpdate>,
+) -> Option<PendingUpdate> {
+    if pending_update
+        .as_ref()
+        .is_some_and(|pending| !manifest::is_newer(&pending.target_version, CURRENT_VERSION))
+    {
+        return None;
+    }
+    pending::validate(pending_update)
 }
 
 fn should_skip_auto_check(config_state: &SharedConfig, updater_state: &SharedUpdaterState) -> bool {
@@ -812,6 +830,31 @@ mod tests {
         finalize_part_file(&path, &path).expect("noop");
         assert!(path.exists());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pending_update_for_installed_version_is_cleared_without_deleting_binary() {
+        let path = std::env::temp_dir().join(format!(
+            "fst-installed-pending-{}-{}.exe",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let bytes = b"verified update payload";
+        std::fs::write(&path, bytes).expect("write pending binary");
+        let pending_update = PendingUpdate {
+            target_version: CURRENT_VERSION.to_string(),
+            temp_path: path.to_string_lossy().into_owned(),
+            target_file_name: "file-sync-tool-current.exe".into(),
+            sha256: crate::updater::download::sha256_hex(bytes),
+            downloaded_at: Utc::now().to_rfc3339(),
+        };
+
+        assert!(validate_pending_for_current_version(Some(pending_update)).is_none());
+        assert!(
+            path.exists(),
+            "the installed executable must not be deleted"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

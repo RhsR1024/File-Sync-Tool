@@ -1,4 +1,6 @@
-use crate::task_domain::{ServerRollup, TaskGroup};
+use crate::task_domain::{
+    ArtifactMetadata, CompositeBatchSummary, ServerRollup, TaskGroup, TaskGroupKind,
+};
 use serde::{Deserialize, Serialize};
 
 pub const TASK_GROUPS_SNAPSHOT_EVENT: &str = "task-groups-snapshot";
@@ -25,6 +27,7 @@ pub struct TaskGroupListItem {
     pub folder_name: String,
     pub source_path: String,
     pub local_target_path: String,
+    pub artifact: ArtifactMetadata,
     pub copy_status: crate::task_domain::CopyState,
     pub local_exec_status: crate::task_domain::LocalExecState,
     pub deploy_status: crate::task_domain::DeployState,
@@ -35,6 +38,9 @@ pub struct TaskGroupListItem {
     pub latest_run_id: Option<String>,
     pub had_failures: bool,
     pub server_rollups: Vec<ServerRollup>,
+    pub group_kind: TaskGroupKind,
+    pub parent_task_group_id: Option<String>,
+    pub composite_batch: Option<CompositeBatchSummary>,
 }
 
 impl From<&TaskGroup> for TaskGroupListItem {
@@ -47,6 +53,7 @@ impl From<&TaskGroup> for TaskGroupListItem {
             folder_name: group.folder_name.clone(),
             source_path: group.source_path.clone(),
             local_target_path: group.local_target_path.clone(),
+            artifact: group.artifact.clone(),
             copy_status: group.copy_status.clone(),
             local_exec_status: group.local_exec_status.clone(),
             deploy_status: group.deploy_status.clone(),
@@ -57,12 +64,16 @@ impl From<&TaskGroup> for TaskGroupListItem {
             latest_run_id: group.latest_run_id.clone(),
             had_failures: group.had_failures,
             server_rollups: group.server_rollups.clone(),
+            group_kind: group.group_kind.clone(),
+            parent_task_group_id: group.parent_task_group_id.clone(),
+            composite_batch: group.composite_batch.clone(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskGroupsSnapshot {
+    pub revision: u64,
     pub groups: Vec<TaskGroupListItem>,
 }
 

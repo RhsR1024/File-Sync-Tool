@@ -159,6 +159,30 @@ assert.match(page, /serversEditableWhileRunning/, 'running devices must explain 
 assert.match(composable, /platformServersApplyPending\.value = true[\s\S]*updatePlatformServers/, 'a persisted configuration must remain pending until the Worker applies it');
 assert.match(page, /platformServersApplyPending\.value[\s\S]*serverInfoSavedApplyFailed/, 'partial save/apply failure must be explained without losing the retry state');
 assert.match(page, /simulator\.platformServersDirty\.value[\s\S]*deviceSimulator\.platformAdd\.saveBeforeRetry/, 'retry must wait until edited server credentials are saved');
+assert.match(page, /:disabled="simulator\.busyAction\.value !== null \|\| platformServerCredentialsMissing\(serverItem\.id\) \|\| serverItem\.host\.trim\(\) === ''"/, 'the per-server add action must stay available for valid edited credentials');
+assert.match(composable, /if \(platformServerDirty\(serverId\)\)[\s\S]*savePlatformServers\(\)[\s\S]*server\.auto_register_devices/, 'adding with edited credentials must save and apply before using the saved server account');
+assert.match(messages, /notRegistered: 'Not added yet'/, 'English server status must use add terminology');
+assert.match(messages, /notRegistered: '待添加'/, 'Chinese server status must use add terminology');
+for (const legacyPlatformAddLabel of [
+  "title: 'UMS registration result'",
+  "summary: 'Added {added}/{total} device registrations.'",
+  "partialSummary: 'Completed {added}/{total} device registrations. Review the failures below.'",
+  "retry: 'Retry registration'",
+  "registered: 'Registered'",
+  "registrationFailed: 'Registration failed'",
+  "notRegistered: 'Not registered'",
+  "registerNow: 'Register devices'",
+  "registerAgain: 'Register again'",
+  "registered: '已注册'",
+  "registrationFailed: '注册失败'",
+  "notRegistered: '未注册'",
+  "registerNow: '注册设备'",
+  "registerAgain: '重新注册'",
+  "autoAddNeedsConfig: '请为每台已开启自动注册的服务器填写有效的 IP、用户名和密码。'",
+  "replaceConfirmDescription: '本次注册会先删除 UMS 中与当前虚拟设备 IP 相同的设备，再重新添加。'",
+]) {
+  assert.ok(!messages.includes(legacyPlatformAddLabel), `legacy platform-add label remains: ${legacyPlatformAddLabel}`);
+}
 assert.match(page, /v-model="serverItem\.auto_register_devices"/, 'every server row must expose automatic registration');
 assert.match(messages, /autoRegisterDevices: '开启或保存后自动添加'/, 'automatic addition must use the requested startup/save wording');
 assert.match(composable, /auto_register_devices: true/, 'automatic registration must be checked for new servers by default');

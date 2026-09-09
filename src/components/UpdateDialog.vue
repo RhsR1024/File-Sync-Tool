@@ -23,6 +23,7 @@ const { t } = useI18n();
 const { state, progress, dialogOpen, dialogState, dialogError } = useUpdater();
 
 const dialogPanel = ref<HTMLElement | null>(null);
+const isApplying = ref(false);
 let previouslyFocused: HTMLElement | null = null;
 
 const TITLE_ID = 'update-dialog-title';
@@ -45,7 +46,7 @@ const percent = computed(() => {
   return Math.min(100, Math.round((payload.downloaded / payload.total) * 100));
 });
 
-const canCloseViaChrome = computed(() => dialogState.value !== 'downloading');
+const canCloseViaChrome = computed(() => dialogState.value !== 'downloading' && !isApplying.value);
 
 const changelogCount = computed(() => latestEntry.value?.changelog.length ?? 0);
 
@@ -95,9 +96,12 @@ async function cancelDownload() {
 }
 
 async function applyNow() {
+  if (isApplying.value) return;
+  isApplying.value = true;
   try {
     await updaterApi.applyNow();
   } catch (error) {
+    isApplying.value = false;
     dialogState.value = 'network_error';
     dialogError.value = String(error);
     addLog(`[updater] ${t('updater.toast.restartFailed', { detail: String(error) })}`, 'error');
@@ -442,18 +446,21 @@ onBeforeUnmount(() => {
             <div class="shrink-0 flex justify-end gap-3">
               <button
                 type="button"
-                class="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+                class="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="isApplying"
                 @click="remindLater"
               >
                 {{ t('updater.dialog.actionLaterRestart') }}
               </button>
               <button
                 type="button"
-                class="inline-flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+                class="inline-flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-wait disabled:opacity-70"
+                :disabled="isApplying"
+                :aria-busy="isApplying"
                 @click="applyNow"
               >
-                <RefreshCw class="h-4 w-4" aria-hidden="true" />
-                {{ t('updater.dialog.actionRestart') }}
+                <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': isApplying }" aria-hidden="true" />
+                {{ t(isApplying ? 'updater.dialog.actionApplying' : 'updater.dialog.actionRestart') }}
               </button>
             </div>
           </template>
