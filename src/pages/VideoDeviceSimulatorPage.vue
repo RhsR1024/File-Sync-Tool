@@ -61,7 +61,7 @@ const { t, te } = useI18n();
 const router = useRouter();
 const simulator = useDeviceSimulator();
 const activeTab = ref<'configuration' | 'runtime' | 'alarms' | 'logs'>('configuration');
-const configSection = ref<'server' | 'network' | 'media' | 'devices'>('server');
+const configSection = ref<'server' | 'network' | 'media'>('server');
 const LOG_LEVEL_OPTIONS: SimulatorLogLevel[] = ['trace', 'debug', 'info', 'warning', 'error'];
 const LOG_LEVEL_PRIORITY: Record<SimulatorLogLevel, number> = {
   trace: 0,
@@ -419,10 +419,6 @@ watch(alarmProfileOptions, (profiles) => {
   }
 }, { immediate: true });
 
-watch(() => simulator.busyAction.value, (action) => {
-  if (action === 'add-to-platform') activeTab.value = 'runtime';
-});
-
 watch(subscriptionRecords, (records) => {
   if (!records.some((record) => record.id === selectedAlarmSubscriptionId.value)) {
     selectedAlarmSubscriptionId.value = null;
@@ -491,7 +487,7 @@ const configSections = computed(() => [
     icon: RadioTower,
     title: t('deviceSimulator.sections.network'),
     hint: t('deviceSimulator.sections.networkHint'),
-    summary: `${plannedAddressSummary.value || '—'} · ${simulator.selectedInterface.value?.name || '—'}`,
+    summary: `${profileLabel(simulator.request.groups[0]?.profile_id ?? STRUCTURED_PROFILE_ID)} × ${configuredDeviceCount.value} · ${plannedAddressSummary.value || '—'}`,
   },
   {
     id: 'media' as const,
@@ -499,13 +495,6 @@ const configSections = computed(() => [
     title: t('deviceSimulator.sections.media'),
     hint: t('deviceSimulator.mediaThemes.description'),
     summary: selectedMediaTheme.value ? mediaThemeLabel(selectedMediaTheme.value) : '—',
-  },
-  {
-    id: 'devices' as const,
-    icon: Video,
-    title: t('deviceSimulator.sections.devices'),
-    hint: t('deviceSimulator.sections.devicesHint'),
-    summary: `${profileLabel(simulator.request.groups[0]?.profile_id ?? STRUCTURED_PROFILE_ID)} × ${configuredDeviceCount.value}`,
   },
 ]);
 const visibleAttentionChecks = computed(() => attentionChecks.value.slice(0, 3));
@@ -1192,7 +1181,19 @@ function revealPreflightDetails() {
             </button>
           </aside>
 
-          <div class="h-full min-h-0 min-w-0 flex-1">
+          <div class="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3">
+            <section v-if="running" class="flex flex-none flex-col gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 shadow-sm sm:flex-row sm:items-center" role="status" aria-live="polite" aria-labelledby="configuration-runtime-title">
+              <CheckCircle2 class="h-5 w-5 shrink-0 text-emerald-700" aria-hidden="true" />
+              <div class="min-w-0 flex-1">
+                <h2 id="configuration-runtime-title" class="text-sm font-bold text-emerald-950">{{ t('deviceSimulator.configuration.runningTitle') }}</h2>
+                <p class="mt-0.5 text-xs leading-5 text-emerald-800">{{ t('deviceSimulator.configuration.runningSummary', { devices: configuredDeviceCount, channels: configuredChannelCount, addresses: plannedAddressSummary || '—' }) }}</p>
+                <p v-if="simulator.busyAction.value === 'add-to-platform'" class="mt-1 flex items-center gap-1.5 text-xs font-semibold text-sky-800"><LoaderCircle class="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />{{ t('deviceSimulator.platformAdd.adding') }}</p>
+                <p v-else-if="simulator.platformAddReport.value" class="mt-1 flex items-center gap-1.5 text-xs font-semibold" :class="platformAddIncomplete ? 'text-amber-800' : 'text-emerald-800'"><AlertTriangle v-if="platformAddIncomplete" class="h-3.5 w-3.5" aria-hidden="true" /><CheckCircle2 v-else class="h-3.5 w-3.5" aria-hidden="true" />{{ t(platformAddIncomplete ? 'deviceSimulator.platformAdd.partialSummary' : 'deviceSimulator.platformAdd.summary', { added: simulator.platformAddReport.value.addedDevices, total: simulator.platformAddReport.value.totalDevices }) }}</p>
+              </div>
+              <button type="button" class="inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-900 transition-colors duration-200 hover:bg-emerald-100 motion-reduce:transition-none" :class="buttonFocus" @click="activeTab = 'runtime'"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.viewRuntime') }}</button>
+            </section>
+
+            <div class="min-h-0 flex-1">
             <section v-if="configSection === 'server'" class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="platform-title">
               <div class="flex h-13 flex-none items-center gap-3 border-b border-slate-100 px-[22px]"><Server class="h-[17px] w-[17px] text-sky-700" aria-hidden="true" /><h2 id="platform-title" class="text-[15px] font-bold text-slate-900">{{ t('deviceSimulator.sections.server') }}</h2><HintTip :text="t('deviceSimulator.configuration.serversHint')" /></div>
               <div class="min-h-0 flex-1 overflow-auto p-[22px]">
@@ -1366,7 +1367,20 @@ function revealPreflightDetails() {
             <section v-if="configSection === 'network'" class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="network-title">
               <div class="flex h-13 flex-none items-center gap-3 border-b border-slate-100 px-[22px]"><RadioTower class="h-[17px] w-[17px] text-sky-700" aria-hidden="true" /><h2 id="network-title" class="text-[15px] font-bold text-slate-900">{{ t('deviceSimulator.sections.network') }}</h2><HintTip :text="t('deviceSimulator.sections.networkHint')" /></div>
               <div class="min-h-0 flex-1 overflow-auto p-[22px]">
-              <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5">
+              <section aria-labelledby="device-scale-title">
+                <div class="flex items-center gap-2"><h3 id="device-scale-title" class="text-xs font-bold text-slate-800">{{ t('deviceSimulator.configuration.deviceScale') }}</h3><HintTip :text="t('deviceSimulator.sections.devicesHint')" /><span class="h-px flex-1 bg-slate-100" /></div>
+                <div class="mt-3 space-y-3">
+                  <article v-for="group in simulator.request.groups" :key="group.id" class="grid items-end gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-[minmax(280px,1fr)_150px_36px]">
+                    <p class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.profile') }}<span :class="[fieldClass, 'mt-1 flex items-center bg-white text-slate-900']">{{ profileLabel(group.profile_id) }}</span></p>
+                    <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.count') }}<input v-model.number="group.count" :class="[fieldClass, 'mt-1 border-sky-500 ring-[3px] ring-sky-500/15']" type="number" min="1" max="500" inputmode="numeric" /></label>
+                    <button type="button" class="mt-5 inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40" :class="buttonFocus" :disabled="simulator.request.groups.length <= 1" :aria-label="t('deviceSimulator.actions.removeGroup')" @click="simulator.removeGroup(group.id)"><Trash2 class="h-5 w-5" aria-hidden="true" /></button>
+                  </article>
+                </div>
+                <button type="button" class="mt-3 inline-flex min-h-9 cursor-pointer items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 text-xs font-semibold text-slate-700 transition-colors hover:border-sky-400 hover:bg-sky-50" :class="buttonFocus" @click="simulator.addGroup()"><Plus class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.addGroup') }}</button>
+                <p class="mt-3 text-xs text-slate-500">{{ t('deviceSimulator.launch.channelsPerDevice', { profile: profileLabel(simulator.request.groups[0]?.profile_id ?? STRUCTURED_PROFILE_ID) }) }}</p>
+              </section>
+
+              <div class="mt-5 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div class="flex min-w-0 items-start gap-3">
                     <Cable class="mt-0.5 h-5 w-5 shrink-0 text-sky-700" aria-hidden="true" />
@@ -1385,11 +1399,11 @@ function revealPreflightDetails() {
                       </p>
                     </div>
                   </div>
-                   <div class="flex shrink-0 gap-2"><button type="button" class="inline-flex min-h-8 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.interfaces.value.length === 0" :aria-expanded="interfaceSelectorOpen" @click="interfaceSelectorOpen = !interfaceSelectorOpen">
+                   <div class="flex shrink-0 gap-2"><button type="button" class="inline-flex min-h-8 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" :class="buttonFocus" :disabled="simulator.interfaces.value.length === 0" :aria-expanded="interfaceSelectorOpen" aria-controls="network-interface-selector" @click="interfaceSelectorOpen = !interfaceSelectorOpen">
                      <Pencil class="h-4 w-4" aria-hidden="true" />{{ t(interfaceSelectorOpen ? 'deviceSimulator.networkAdapter.done' : 'deviceSimulator.networkAdapter.change') }}
                    </button><button type="button" class="inline-flex min-h-8 cursor-pointer items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50" :class="buttonFocus" @click="openPingScanner"><Search class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.pingScan') }}</button></div>
                 </div>
-                <div v-if="interfaceSelectorOpen" class="mt-4 flex flex-col gap-2 sm:flex-row sm:items-end">
+                 <div v-if="interfaceSelectorOpen" id="network-interface-selector" class="mt-4 flex flex-col gap-2 sm:flex-row sm:items-end">
                   <label class="min-w-0 flex-1 text-sm font-semibold text-slate-700">{{ t('deviceSimulator.fields.interface') }}
                     <select :value="simulator.request.interface_id" :class="[fieldClass, 'mt-2']" @change="selectNetworkInterface"><option value="">{{ t('deviceSimulator.fields.selectInterface') }}</option><option v-for="item in simulator.interfaces.value" :key="item.id" :value="item.id">{{ item.name }} · {{ item.description }}</option></select>
                   </label>
@@ -1408,7 +1422,7 @@ function revealPreflightDetails() {
               </div>
             </section>
 
-            <section v-else-if="configSection === 'media'" class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="media-theme-title">
+            <section v-else class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="media-theme-title">
               <div class="flex h-13 flex-none items-center gap-3 border-b border-slate-100 px-[22px]"><Video class="h-[17px] w-[17px] text-sky-700" aria-hidden="true" /><h2 id="media-theme-title" class="text-[15px] font-bold text-slate-900">{{ t('deviceSimulator.sections.media') }}</h2><HintTip :text="t('deviceSimulator.mediaThemes.description')" /></div>
               <div class="min-h-0 flex-1 overflow-auto p-[22px]">
               <div class="grid gap-3 sm:grid-cols-2 min-[1400px]:grid-cols-5" role="radiogroup" :aria-label="t('deviceSimulator.mediaThemes.title')">
@@ -1477,21 +1491,8 @@ function revealPreflightDetails() {
               </div>
             </section>
 
-            <section v-else class="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm" aria-labelledby="groups-title">
-              <div class="flex h-13 flex-none items-center gap-3 border-b border-slate-100 px-[22px]"><Video class="h-[17px] w-[17px] text-sky-700" aria-hidden="true" /><h2 id="groups-title" class="text-[15px] font-bold text-slate-900">{{ t('deviceSimulator.sections.devices') }}</h2><HintTip :text="t('deviceSimulator.sections.devicesHint')" /></div>
-              <div class="min-h-0 flex-1 overflow-auto p-[22px]">
-              <div class="space-y-3">
-                <article v-for="group in simulator.request.groups" :key="group.id" class="grid items-end gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-[minmax(280px,1fr)_150px_36px]">
-                  <p class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.profile') }}<span :class="[fieldClass, 'mt-1 flex items-center bg-white text-slate-900']">{{ profileLabel(group.profile_id) }}</span></p>
-                  <label class="text-xs font-semibold text-slate-600">{{ t('deviceSimulator.fields.count') }}<input v-model.number="group.count" :class="[fieldClass, 'mt-1 border-sky-500 ring-[3px] ring-sky-500/15']" type="number" min="1" max="500" inputmode="numeric" /></label>
-                  <button type="button" class="mt-5 inline-flex min-h-11 cursor-pointer items-center justify-center rounded-xl text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-40" :class="buttonFocus" :disabled="simulator.request.groups.length <= 1" :aria-label="t('deviceSimulator.actions.removeGroup')" @click="simulator.removeGroup(group.id)"><Trash2 class="h-5 w-5" aria-hidden="true" /></button>
-                </article>
-              </div>
-              <button type="button" class="mt-3 inline-flex min-h-9 cursor-pointer items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 text-xs font-semibold text-slate-700 hover:border-sky-400 hover:bg-sky-50" :class="buttonFocus" @click="simulator.addGroup()"><Plus class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.addGroup') }}</button>
-              <p class="mt-4 text-xs text-slate-500">{{ t('deviceSimulator.launch.channelsPerDevice', { profile: profileLabel(simulator.request.groups[0]?.profile_id ?? STRUCTURED_PROFILE_ID) }) }}</p>
-              </div>
-            </section>
             </fieldset>
+            </div>
           </div>
         </div>
       </template>

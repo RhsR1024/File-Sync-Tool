@@ -42,7 +42,11 @@ for (const legacyLabel of ['服务器配置', '虚拟设备起始 IP', '虚拟�
 assert.match(page, /min-h-11/, 'primary controls should meet the 44px target');
 assert.match(page, /focus-visible:ring-2/, 'keyboard focus must remain visible');
 assert.match(page, /prefers-reduced-motion: reduce/, 'reduced motion must be respected');
-assert.match(page, /configSection = ref<'server' \| 'network' \| 'media' \| 'devices'>\('server'\)/, 'server must be the default configuration section');
+assert.match(page, /configSection = ref<'server' \| 'network' \| 'media'>\('server'\)/, 'server must be the default configuration section');
+assert.doesNotMatch(page, /configSection === 'devices'/, 'device scale must not remain a separate configuration destination');
+assert.match(page, /configSection === 'network'[\s\S]*device-scale-title[\s\S]*simulator\.request\.groups/, 'device scale and network topology must share one configuration panel');
+assert.ok(messages.includes("network: 'Devices & network'"));
+assert.ok(messages.includes("network: '设备与网络'"));
 assert.match(page, /<HintTip/, 'dense configuration guidance must remain keyboard-accessible on demand');
 assert.match(page, /min-h-\[68px\][^>]*border-t/, 'launch controls must stay in the fixed bottom action bar');
 assert.doesNotMatch(page, /xl:sticky xl:top-5/, 'the duplicated launch summary card must be removed');
@@ -194,7 +198,12 @@ assert.match(composable, /deviceSimulatorApi\.saveSettings\(next\)/, 'the projec
 assert.match(page, /platformAutoAddNeedsConfig/, 'automatic registration must surface incomplete configuration before start');
 assert.match(page, /simulator\.platformAddReport\.value/, 'registration outcomes must be visible on the runtime tab');
 assert.match(page, /simulator\.addDevicesToPlatform/, 'partial or failed registration must be retryable without restarting devices');
-assert.match(page, /action === 'add-to-platform'[\s\S]*activeTab\.value = 'runtime'/, 'registration progress and results must move into view on the runtime tab');
+assert.doesNotMatch(page, /action === 'add-to-platform'[\s\S]*activeTab\.value = 'runtime'/, 'automatic registration must not pull the user away from device configuration');
+assert.match(page, /configuration-runtime-title[\s\S]*deviceSimulator\.configuration\.runningSummary[\s\S]*@click="activeTab = 'runtime'"/, 'device configuration must show the active run and offer an explicit live-view action');
+assert.ok(messages.includes("runningTitle: 'Virtual devices are running'"));
+assert.ok(messages.includes("runningTitle: '虚拟设备已开启'"));
+assert.ok(messages.includes("viewRuntime: 'View live status'"));
+assert.ok(messages.includes("viewRuntime: '查看实况'"));
 assert.match(platformAddAction, /preview\.value\?\.devices[\s\S]*address: device\.ip[\s\S]*port: request\.device_http_port/, 'registration must use every previewed device and its active HTTP port');
 assert.match(platformAddAction, /run\('add-to-platform'[\s\S]*deviceSimulatorApi\.addDevicesToPlatform\(\{/, 'platform registration must have a busy/error boundary separate from start');
 assert.match(composable, /applyStatus\(result\);[\s\S]*addDevicesToPlatform\(\{ automaticOnly: true \}\)/, 'automatic registration must run only after the simulator status is applied');
