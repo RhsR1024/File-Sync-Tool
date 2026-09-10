@@ -5,6 +5,7 @@ const page = readFileSync(new URL('./VideoDeviceSimulatorPage.vue', import.meta.
 const composable = readFileSync(new URL('../composables/useDeviceSimulator.ts', import.meta.url), 'utf8');
 const deviceSimulatorTypes = readFileSync(new URL('../lib/deviceSimulator.ts', import.meta.url), 'utf8');
 const platformRegistration = readFileSync(new URL('../../src-tauri/src/device_simulator/platform_registration.rs', import.meta.url), 'utf8');
+const alarmRuntime = readFileSync(new URL('../../src-tauri/src/device_simulator/alarm_runtime.rs', import.meta.url), 'utf8');
 const platformReplaceDialog = readFileSync(new URL('../components/DevicePlatformReplaceConfirmDialog.vue', import.meta.url), 'utf8');
 const materialResetDialog = readFileSync(new URL('../components/DeviceMaterialResetConfirmDialog.vue', import.meta.url), 'utf8');
 const materialMigrationDialog = readFileSync(new URL('../components/DeviceMaterialMigrationConfirmDialog.vue', import.meta.url), 'utf8');
@@ -199,11 +200,11 @@ assert.match(page, /platformAutoAddNeedsConfig/, 'automatic registration must su
 assert.match(page, /simulator\.platformAddReport\.value/, 'registration outcomes must be visible on the runtime tab');
 assert.match(page, /simulator\.addDevicesToPlatform/, 'partial or failed registration must be retryable without restarting devices');
 assert.doesNotMatch(page, /action === 'add-to-platform'[\s\S]*activeTab\.value = 'runtime'/, 'automatic registration must not pull the user away from device configuration');
-assert.match(page, /configuration-runtime-title[\s\S]*deviceSimulator\.configuration\.runningSummary[\s\S]*@click="activeTab = 'runtime'"/, 'device configuration must show the active run and offer an explicit live-view action');
+assert.match(page, /configuration-runtime-title[\s\S]*deviceSimulator\.configuration\.runningSummary/, 'device configuration must show the active run summary');
+assert.doesNotMatch(page, /deviceSimulator\.actions\.viewRuntime|@click="activeTab = 'runtime'"/, 'the running banner must not duplicate the live tab navigation');
 assert.ok(messages.includes("runningTitle: 'Virtual devices are running'"));
 assert.ok(messages.includes("runningTitle: '虚拟设备已开启'"));
-assert.ok(messages.includes("viewRuntime: 'View live status'"));
-assert.ok(messages.includes("viewRuntime: '查看实况'"));
+assert.match(page, /rounded-full bg-emerald-100[\s\S]*deviceSimulator\.configuration\.runningSummary/, 'the running banner must use a compact status treatment');
 assert.match(platformAddAction, /preview\.value\?\.devices[\s\S]*address: device\.ip[\s\S]*port: request\.device_http_port/, 'registration must use every previewed device and its active HTTP port');
 assert.match(platformAddAction, /run\('add-to-platform'[\s\S]*deviceSimulatorApi\.addDevicesToPlatform\(\{/, 'platform registration must have a busy/error boundary separate from start');
 assert.match(composable, /applyStatus\(result\);[\s\S]*addDevicesToPlatform\(\{ automaticOnly: true \}\)/, 'automatic registration must run only after the simulator status is applied');
@@ -237,6 +238,10 @@ assert.match(page, /deviceSimulator\.subscription\.waitingTitle/, 'the page must
 assert.match(page, /deviceSimulator\.subscription\.expiredTitle/, 'the page must call out an expired platform subscription');
 assert.match(page, /subscription\.destinations\.join/, 'the effective alarm destination must be rendered');
 assert.match(messages, /waitingDescription: '平台通常在添加设备时、或设备离线再上线后才下发订阅。/, 'the waiting copy must explain when a platform normally subscribes');
+assert.match(messages, /count: '已收到 \{count\} 个订阅'/, 'the Chinese subscription count must describe received subscriptions');
+assert.doesNotMatch(page, /:disabled="subscriptionRecordExpired\(record\)/, 'expired subscriptions must remain selectable');
+assert.match(page, /target_subscription_id: selectedAlarmSubscriptionAvailable\.value/, 'an explicitly selected expired subscription must be sent to the backend');
+assert.doesNotMatch(alarmRuntime, /if endpoint\.is_expired_at\(/, 'the backend must attempt delivery to an explicitly selected expired subscription');
 
 // The real failure code was previously dropped, leaving only one generic
 // sentence for every distinct cause.

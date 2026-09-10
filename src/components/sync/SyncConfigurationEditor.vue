@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from 'vue';
-import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw, Cpu, Monitor, Check, Search, ShieldCheck, ChevronDown } from 'lucide-vue-next';
-import { preflightManualDeploy, testSshConnection, type AppConfig, type ScanTask, type ScanTaskModule, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type ManualDeployTransferPolicy, type ManualDeployExtractPolicy, type ManualDeployPreflightResult, type StartManualDeployTaskRequest } from '@/lib/tauri';
+import { Save, Plus, Trash2, FolderOpen, Server, Terminal, Clock, UploadCloud, ListChecks, Edit, XCircle, FileText, Copy, Layers, ArrowUp, ArrowDown, X, RotateCcw, Cpu, Monitor, Check, Search, ShieldCheck, ChevronDown, History } from 'lucide-vue-next';
+import { preflightManualDeploy, testSshConnection, type AppConfig, type ScanTask, type ScanTaskModule, type MatchRule, type DeployServer, type CommandGroup, type TaskServerBinding, type LocalCommandGroup, type OnFailure, type ManualDeployTransferPolicy, type ManualDeployExtractPolicy, type ManualDeployPreflightResult, type StartManualDeployTaskRequest } from '@/lib/tauri';
 import { appStore } from '@/lib/store';
 import { taskStateStore } from '@/lib/taskStateStore';
 import { configStore } from '@/lib/configStore';
@@ -10,6 +10,7 @@ import Empty from '@/components/Empty.vue';
 import AppConfirmDialog from '@/components/AppConfirmDialog.vue';
 import ManualDeployLogDialog from '@/components/sync/ManualDeployLogDialog.vue';
 import PostInstallActionsEditor from '@/components/sync/PostInstallActionsEditor.vue';
+import ToggleSwitch from '@/components/ToggleSwitch.vue';
 import { createDefaultPostInstallActions, normalizePostInstallActions } from '@/lib/deploymentPostInstall';
 import { getDirectoryInputValue, getTaskLocalPathHint, getTaskLocalPathPlaceholder, toOptionalDirectoryValue } from '@/lib/settingsDirectoryPathState';
 import { useI18n } from 'vue-i18n';
@@ -74,7 +75,13 @@ const enabledServerCount = computed(() => config.value.servers.filter(server => 
 const intervalError = computed(() => config.value.interval_minutes < 5 ? t('settings.minIntervalError', { min: 5 }) : '');
 const stabilityCheckError = computed(() => config.value.stability_check_secs < 60 ? t('settings.minStabilityCheckError', { min: 60 }) : '');
 const recentFileGuardError = computed(() => config.value.recent_file_guard_mins < 3 ? t('settings.minRecentFileGuardError', { min: 3 }) : '');
-const hasConfigErrors = computed(() => Boolean(intervalError.value || stabilityCheckError.value || recentFileGuardError.value));
+const retentionDaysError = computed(() => {
+    const days = Number(config.value.sync_retention_days);
+    return !Number.isInteger(days) || days < 1 || days > 365
+        ? t('settings.retentionDaysError')
+        : '';
+});
+const hasConfigErrors = computed(() => Boolean(intervalError.value || stabilityCheckError.value || recentFileGuardError.value || retentionDaysError.value));
 function shows(section: 'tasks' | 'strategy' | 'delivery') {
     return props.section === 'all'
         || props.section === section
@@ -471,6 +478,7 @@ function removeLocalGroupCommand(cmdIndex: number) {
 }
 
 // ── Task Management ───────────────────────────────────────────────────────────
+const DEFAULT_DATE_MATCH_VALUE = '%y%m%d';
 const isEditingTask = ref(false);
 const editingTaskIndex = ref(-1);
 const taskModulePathsText = ref('');
@@ -480,7 +488,7 @@ const taskForm = ref<ScanTask>({
     name: '',
     remote_path: '',
     local_path: null,
-    rule: { type: 'DateMatch', value: '%y%m%d' },
+    rule: { type: 'DateMatch', value: DEFAULT_DATE_MATCH_VALUE },
     modules: [],
     server_bindings: [],
     local_script_binding: null,
@@ -505,7 +513,7 @@ function resetTaskForm() {
         name: '',
         remote_path: '',
         local_path: null,
-        rule: { type: 'DateMatch', value: '%y%m%d' },
+        rule: { type: 'DateMatch', value: DEFAULT_DATE_MATCH_VALUE },
         modules: [],
         server_bindings: [],
         local_script_binding: null,
@@ -527,7 +535,10 @@ function editTask(index: number) {
     const task = config.value.tasks[index];
     taskForm.value = {
         ...task,
-        rule: { ...task.rule },
+        rule: {
+            ...task.rule,
+            value: task.rule.type === 'DateMatch' ? DEFAULT_DATE_MATCH_VALUE : task.rule.value,
+        },
         modules: task.modules?.map(module => ({ ...module })) ?? [],
         server_bindings: task.server_bindings.map(b => ({ ...b, command_group_ids: [...b.command_group_ids] })),
         local_script_binding: task.local_script_binding
@@ -548,6 +559,19 @@ const parsedTaskModulePaths = computed(() => Array.from(new Set(
         .map(path => path.trim())
         .filter(Boolean),
 )));
+
+const isTaskRuleValueEditable = computed(() => taskForm.value.rule.type === 'VersionMatch');
+const taskRuleValueError = computed(() => (
+    isTaskRuleValueEditable.value && !taskForm.value.rule.value.trim()
+        ? t('settings.taskRuleVersionRequired')
+        : ''
+));
+
+function handleTaskRuleTypeChange(event: Event) {
+    const type = (event.target as HTMLSelectElement).value as MatchRule['type'];
+    taskForm.value.rule.type = type;
+    taskForm.value.rule.value = type === 'DateMatch' ? DEFAULT_DATE_MATCH_VALUE : '';
+}
 
 watch(parsedTaskModulePaths, (paths) => {
     const existingModules = new Map((taskForm.value.modules ?? []).map(module => [module.remote_path, module]));
@@ -622,9 +646,16 @@ function toggleModuleScript(module: ScanTaskModule, groupId: string) {
 }
 
 function saveTask() {
-    // Trim rule value to remove any leading/trailing whitespace
+    const ruleValue = taskForm.value.rule.type === 'DateMatch'
+        ? DEFAULT_DATE_MATCH_VALUE
+        : taskForm.value.rule.value.trim();
+    if (!ruleValue) {
+        pushToast(t('settings.taskRuleVersionRequired'), 'warning');
+        return;
+    }
+
     const trimmedTask = JSON.parse(JSON.stringify(taskForm.value));
-    trimmedTask.rule.value = trimmedTask.rule.value.trim();
+    trimmedTask.rule.value = ruleValue;
     trimmedTask.local_path = toOptionalDirectoryValue(getDirectoryInputValue(trimmedTask.local_path));
     const existingModules = new Map((taskForm.value.modules ?? []).map(module => [module.remote_path, module]));
     trimmedTask.modules = parsedTaskModulePaths.value.map((remotePath, index) => {
@@ -1292,13 +1323,6 @@ async function save(): Promise<boolean> {
     }
 }
 
-// Watch for rule type changes and auto-fill default value for DateMatch
-watch(() => taskForm.value.rule.type, (newType) => {
-    if (newType === 'DateMatch' && !taskForm.value.rule.value) {
-        taskForm.value.rule.value = '%y%m%d';
-    }
-});
-
 onMounted(load);
 </script>
 
@@ -1539,17 +1563,30 @@ onMounted(load);
 
           <div class="grid grid-cols-2 gap-4">
             <div>
-              <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskRuleType') }}</label>
-              <select v-model="taskForm.rule.type" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white">
+              <label for="task-rule-type" class="mb-1 block text-sm font-medium text-slate-700">{{ t('settings.taskRuleType') }}</label>
+              <select
+                id="task-rule-type"
+                v-model="taskForm.rule.type"
+                class="min-w-0 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition-colors focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/30 focus-visible:ring-offset-1"
+                @change="handleTaskRuleTypeChange"
+              >
                 <option value="DateMatch">{{ t('settings.ruleDate') }}</option>
                 <option value="VersionMatch">{{ t('settings.ruleVersion') }}</option>
               </select>
             </div>
             <div>
-              <label class="block text-sm font-medium mb-1 text-slate-700">{{ t('settings.taskRuleValue') }}</label>
-              <input v-model="taskForm.rule.value" class="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-                :placeholder="taskForm.rule.type === 'VersionMatch' ? t('settings.ruleValuePlaceholderVersion') : t('settings.ruleValuePlaceholderDate')" />
-              <p class="text-xs text-slate-400 mt-1" v-if="taskForm.rule.type === 'DateMatch'">{{ t('settings.ruleDateHint') }}</p>
+              <label for="task-rule-value" class="mb-1 block text-sm font-medium text-slate-700">{{ t('settings.taskRuleValue') }}</label>
+              <input
+                id="task-rule-value"
+                v-model="taskForm.rule.value"
+                :disabled="!isTaskRuleValueEditable"
+                :aria-invalid="taskRuleValueError ? 'true' : 'false'"
+                :aria-describedby="taskRuleValueError || taskForm.rule.type === 'DateMatch' ? 'task-rule-value-hint' : undefined"
+                class="min-w-0 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-800 outline-none transition-colors placeholder:text-slate-400 focus-visible:border-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500/30 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+                :placeholder="t('settings.ruleValuePlaceholderVersion')"
+              />
+              <p v-if="taskRuleValueError" id="task-rule-value-hint" class="mt-1 text-xs text-rose-600" role="alert">{{ taskRuleValueError }}</p>
+              <p v-else-if="taskForm.rule.type === 'DateMatch'" id="task-rule-value-hint" class="mt-1 text-xs text-slate-400">{{ t('settings.ruleDateHint') }}</p>
             </div>
           </div>
 
@@ -1724,7 +1761,7 @@ onMounted(load);
         </div>
         <div class="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-100">
           <button @click="isEditingTask = false" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">{{ t('console.cancel') }}</button>
-          <button @click="saveTask" :disabled="!taskForm.rule.value || parsedTaskModulePaths.length === 0" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">{{ t('settings.save') }}</button>
+          <button @click="saveTask" :disabled="Boolean(taskRuleValueError) || parsedTaskModulePaths.length === 0" class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">{{ t('settings.save') }}</button>
         </div>
       </div>
     </div>
@@ -1810,18 +1847,16 @@ onMounted(load);
           <p id="settings-fallback-recent-package-desc" class="mt-1 max-w-3xl text-xs leading-5 text-slate-500">
             {{ t('settings.fallbackRecentPackageDesc') }}
           </p>
-        </div>
-        <label class="relative inline-flex h-11 shrink-0 cursor-pointer items-center">
-          <input
-            id="settings-fallback-recent-package"
-            v-model="config.fallback_recent_package_enabled"
-            type="checkbox"
-            class="peer sr-only"
-            :aria-label="t('settings.fallbackRecentPackage')"
-            aria-describedby="settings-fallback-recent-package-desc"
-          >
-          <span class="h-6 w-11 rounded-full bg-slate-200 peer-focus-visible:ring-4 peer-focus-visible:ring-blue-200 peer-checked:bg-blue-600 after:absolute after:left-[2px] after:top-[10px] after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-transform after:content-[''] peer-checked:after:translate-x-full motion-reduce:after:transition-none"></span>
-        </label>
+          </div>
+          <label class="relative inline-flex h-11 shrink-0 cursor-pointer items-center">
+            <ToggleSwitch
+              id="settings-fallback-recent-package"
+              v-model="config.fallback_recent_package_enabled"
+              tone="blue"
+              :aria-label="t('settings.fallbackRecentPackage')"
+              aria-describedby="settings-fallback-recent-package-desc"
+            />
+          </label>
       </div>
 
       <fieldset class="space-y-3 border-t border-slate-100 pt-5" aria-describedby="settings-copy-mode-desc">
@@ -1917,6 +1952,64 @@ onMounted(load);
       </div>
     </div>
 
+    <!-- History Retention -->
+    <div
+      v-if="shows('strategy')"
+      class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
+    >
+      <div class="flex items-center gap-3 border-b border-slate-200 bg-white px-5 py-3">
+        <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-rose-100 text-rose-600">
+          <History class="h-4 w-4" aria-hidden="true" />
+        </div>
+        <div>
+          <h3 class="text-sm font-semibold text-slate-700">{{ t('settings.retentionTitle') }}</h3>
+          <p class="mt-0.5 text-xs leading-5 text-slate-500">{{ t('settings.retentionDescription') }}</p>
+        </div>
+      </div>
+      <div class="space-y-5 p-5">
+        <div class="flex items-start justify-between gap-5">
+          <div class="min-w-0">
+            <label for="settings-retention-enabled" class="text-sm font-semibold text-slate-700">
+              {{ t('settings.retentionAuto') }}
+            </label>
+            <p id="settings-retention-enabled-desc" class="mt-1 max-w-3xl text-xs leading-5 text-slate-500">
+              {{ t('settings.retentionAutoDescription') }}
+            </p>
+          </div>
+          <label class="relative inline-flex h-11 shrink-0 cursor-pointer items-center">
+            <ToggleSwitch
+              id="settings-retention-enabled"
+              v-model="config.sync_retention_enabled"
+              tone="rose"
+              :aria-label="t('settings.retentionAuto')"
+              aria-describedby="settings-retention-enabled-desc"
+            />
+          </label>
+        </div>
+
+        <div class="space-y-2 border-t border-slate-100 pt-5">
+          <label for="settings-retention-days" class="block text-sm font-semibold text-slate-700">{{ t('settings.retentionPeriod') }}</label>
+          <div class="flex flex-wrap items-center gap-2">
+            <input
+              id="settings-retention-days"
+              v-model.number="config.sync_retention_days"
+              type="number"
+              min="1"
+              max="365"
+              class="h-10 w-28 rounded-lg border px-3 text-slate-700 outline-none focus:ring-2"
+              :class="retentionDaysError ? 'border-red-400 bg-red-50 focus:border-red-400 focus:ring-red-200' : 'border-slate-300 focus:border-blue-500 focus:ring-blue-500'"
+              :aria-invalid="retentionDaysError ? 'true' : 'false'"
+              aria-describedby="settings-retention-days-help"
+            >
+            <span class="text-sm font-medium text-slate-500">{{ t('settings.days') }}</span>
+          </div>
+          <p v-if="retentionDaysError" class="text-xs leading-5 text-red-500" role="alert">{{ retentionDaysError }}</p>
+          <p id="settings-retention-days-help" class="text-xs leading-5 text-slate-500">{{ t('settings.retentionProtectionHint') }}</p>
+          <p class="text-xs leading-5 text-slate-400">{{ t('settings.retentionScheduleHint') }}</p>
+        </div>
+      </div>
+    </div>
+
     <!-- File Filters -->
     <div
       v-if="shows('strategy')"
@@ -1983,8 +2076,7 @@ onMounted(load);
           <h3 class="text-base font-semibold text-slate-700">{{ t('settings.remoteDeployment') }}</h3>
         </div>
         <label class="relative inline-flex items-center cursor-pointer" :title="t('settings.tooltip.deployEnabled')">
-          <input type="checkbox" v-model="config.deploy_enabled" class="sr-only peer">
-          <div class="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 motion-reduce:after:transition-none"></div>
+          <ToggleSwitch v-model="config.deploy_enabled" tone="blue" :aria-label="t('settings.enable')" />
           <span class="ml-3 text-sm font-medium text-slate-700">{{ t('settings.enable') }}</span>
         </label>
       </div>

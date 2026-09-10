@@ -52,6 +52,69 @@ struct ScanWorkItem {
     composite: bool,
 }
 
+fn scan_work_is_enabled(config: &AppConfig, task_id: &str, module_id: Option<&str>) -> bool {
+    let Some(task) = config.tasks.iter().find(|task| task.id == task_id) else {
+        return false;
+    };
+    if !task.enabled {
+        return false;
+    }
+
+    module_id.map_or(true, |module_id| {
+        task.modules
+            .iter()
+            .any(|module| module.id == module_id && module.enabled)
+    })
+}
+
+fn lock_scan_work_if_enabled<'a>(
+    live_config: &'a Mutex<AppConfig>,
+    task_id: &str,
+    module_id: Option<&str>,
+) -> Option<std::sync::MutexGuard<'a, AppConfig>> {
+    let config = live_config.lock().unwrap();
+    scan_work_is_enabled(&config, task_id, module_id).then_some(config)
+}
+
+fn scan_work_is_still_enabled(live_config: &Arc<Mutex<AppConfig>>, work: &ScanWorkItem) -> bool {
+    let config = live_config.lock().unwrap();
+    scan_work_is_enabled(&config, &work.task.id, work.module_id.as_deref())
+}
+
+fn mark_scan_selection_disabled<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    task_manager: &TaskManager,
+    selection_name: &str,
+    parent_task_group_id: Option<&str>,
+    module_id: Option<&str>,
+) {
+    emit_log(
+        app_handle,
+        format!(
+            "Task [{}] was disabled while this scan was running. Skipping its pending work.",
+            selection_name
+        ),
+        "info",
+    );
+    if let (Some(parent_id), Some(module_id)) = (parent_task_group_id, module_id) {
+        let _ = task_manager.mark_composite_module_cancelled(parent_id, module_id);
+    }
+}
+
+fn mark_scan_work_disabled<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    task_manager: &TaskManager,
+    work: &ScanWorkItem,
+) {
+    mark_scan_selection_disabled(
+        app_handle,
+        task_manager,
+        &work.task.name,
+        work.parent_task_group_id.as_deref(),
+        work.module_id.as_deref(),
+    );
+}
+
 /// Whether copies the user has already queued are still waiting to run.
 ///
 /// A scan cycle copies its candidates one after another while holding the single copy
@@ -1247,6 +1310,32 @@ async fn perform_copy<R: tauri::Runtime>(
     filter_includes: &[String],
     cached_task_records: &[PersistedTaskRecord],
 ) {
+    // Keep the live configuration locked until the scheduled run is marked started.
+    // This makes disabling a task and starting its next copy a linearizable boundary:
+    // whichever acquires the configuration lock first takes effect first.
+    let live_config_guard = if source == "scheduled" {
+        if let Some(task_id) = task_id.as_deref() {
+            if let Some(config_guard) =
+                lock_scan_work_if_enabled(live_config.as_ref(), task_id, module_id.as_deref())
+            {
+                Some(config_guard)
+            } else {
+                mark_scan_selection_disabled(
+                    app_handle,
+                    &task_manager,
+                    module_name.as_deref().unwrap_or(task_id),
+                    parent_task_group_id.as_deref(),
+                    module_id.as_deref(),
+                );
+                return;
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let target_full_path = target_parent_path.join(&folder_name);
     let module_id_for_config = module_id.clone();
     let task_handle = task_handle.or_else(|| {
@@ -1304,6 +1393,8 @@ async fn perform_copy<R: tauri::Runtime>(
             let _ = task_manager.mark_copy_started(&handle.task_group_id, &handle.run_id);
         }
     }
+
+    drop(live_config_guard);
 
     if target_full_path.exists() && !target_full_path.is_dir() {
         let err_msg = format!(
@@ -2842,6 +2933,9 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
     let mut scan_tasks = Vec::<ScanWorkItem>::new();
     let mut composite_positions = HashMap::<String, u32>::new();
     for task in &config.tasks {
+        if !task.enabled {
+            continue;
+        }
         if task.modules.is_empty() {
             scan_tasks.push(ScanWorkItem {
                 task: task.clone(),
@@ -3024,10 +3118,11 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
         }
     }
 
-    for work in &scan_tasks {
+    'scan_tasks: for work in &scan_tasks {
         let task = &work.task;
-        if !task.enabled {
-            continue;
+        if !task.enabled || !scan_work_is_still_enabled(&live_config, work) {
+            mark_scan_work_disabled(app_handle, &task_manager, work);
+            continue 'scan_tasks;
         }
 
         if let (Some(parent_id), Some(module_id)) = (
@@ -3176,6 +3271,11 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                         if copy_was_cancelled(&task_manager, &latest.path, &local_target_path) {
                             emit_log(app_handle, cancelled_skip_message(&latest.name), "info");
                             continue;
+                        }
+
+                        if !scan_work_is_still_enabled(&live_config, work) {
+                            mark_scan_work_disabled(app_handle, &task_manager, work);
+                            continue 'scan_tasks;
                         }
 
                         if defer_for_copy_queue(app_handle, &copy_queue_pending, &mut result) {
@@ -3414,6 +3514,11 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
                             }
                         }
 
+                        if !scan_work_is_still_enabled(&live_config, work) {
+                            mark_scan_work_disabled(app_handle, &task_manager, work);
+                            continue 'scan_tasks;
+                        }
+
                         if defer_for_copy_queue(app_handle, &copy_queue_pending, &mut result) {
                             return result;
                         }
@@ -3469,6 +3574,7 @@ pub async fn scan_and_copy<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ScanTaskModule;
     use std::fs;
     use std::sync::atomic::AtomicBool;
     use tempfile::tempdir;
@@ -3647,5 +3753,76 @@ mod tests {
             assert!(copy_state_blocks_fallback(&state), "state: {state:?}");
         }
         assert!(!copy_state_blocks_fallback(&CopyState::Failed));
+    }
+
+    #[test]
+    fn scheduled_scan_rechecks_live_task_and_module_enabled_state() {
+        let mut config = AppConfig::default();
+        config.tasks.push(ScanTask {
+            id: "task-a".into(),
+            enabled: true,
+            name: "Task A".into(),
+            remote_path: r"\\server\task-a".into(),
+            local_path: None,
+            rule: MatchRule::DateMatch("%y%m%d".into()),
+            modules: vec![ScanTaskModule {
+                id: "module-a".into(),
+                enabled: true,
+                name: "Module A".into(),
+                remote_path: r"\\server\task-a\module-a".into(),
+                local_path: None,
+                rule: None,
+                server_bindings: None,
+                local_script_binding: None,
+                post_copy_execution_order: None,
+            }],
+            server_bindings: vec![],
+            local_script_binding: None,
+            post_copy_execution_order: PostCopyExecutionOrder::default(),
+            post_install_actions: Default::default(),
+        });
+
+        assert!(scan_work_is_enabled(&config, "task-a", None));
+        assert!(scan_work_is_enabled(&config, "task-a", Some("module-a")));
+        assert!(!scan_work_is_enabled(&config, "missing-task", None));
+        assert!(!scan_work_is_enabled(
+            &config,
+            "task-a",
+            Some("missing-module")
+        ));
+
+        config.tasks[0].modules[0].enabled = false;
+        assert!(!scan_work_is_enabled(&config, "task-a", Some("module-a")));
+
+        config.tasks[0].modules[0].enabled = true;
+        config.tasks[0].enabled = false;
+        assert!(!scan_work_is_enabled(&config, "task-a", None));
+        assert!(!scan_work_is_enabled(&config, "task-a", Some("module-a")));
+    }
+
+    #[test]
+    fn scheduled_copy_start_guard_keeps_config_change_outside_start_boundary() {
+        let mut config = AppConfig::default();
+        config.tasks.push(ScanTask {
+            id: "task-a".into(),
+            enabled: true,
+            name: "Task A".into(),
+            remote_path: r"\\server\task-a".into(),
+            local_path: None,
+            rule: MatchRule::DateMatch("%y%m%d".into()),
+            modules: vec![],
+            server_bindings: vec![],
+            local_script_binding: None,
+            post_copy_execution_order: PostCopyExecutionOrder::default(),
+            post_install_actions: Default::default(),
+        });
+        let live_config = Mutex::new(config);
+
+        let start_guard = lock_scan_work_if_enabled(&live_config, "task-a", None).unwrap();
+        assert!(live_config.try_lock().is_err());
+        drop(start_guard);
+
+        live_config.lock().unwrap().tasks[0].enabled = false;
+        assert!(lock_scan_work_if_enabled(&live_config, "task-a", None).is_none());
     }
 }

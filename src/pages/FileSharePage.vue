@@ -42,6 +42,7 @@ import {
 } from '../lib/tauri';
 import { pushToast } from '../composables/useToast';
 import RootAccessList from '../components/file-share/RootAccessList.vue';
+import ToggleSwitch from '../components/ToggleSwitch.vue';
 
 defineOptions({ name: 'FileSharePage' });
 
@@ -623,12 +624,12 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.guest_access_enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.guest_access_enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.guest_access_enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.guestAccess') }}</span></label>
-              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.image_preview_enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.image_preview_enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.image_preview_enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.imagePreview') }}</span></label>
-              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.thumbnail_enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.thumbnail_enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.thumbnail_enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.thumbnails') }}</span></label>
-              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.remember_settings" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.remember_settings ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.remember_settings ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.rememberSettings') }}</span></label>
-              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.auto_start_on_page_open" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.auto_start_on_page_open ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.auto_start_on_page_open ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.autoStartOnPageOpen') }}</span></label>
-              <label class="fs-toggle-line"><span class="fs-toggle"><input v-model="draft.auto_start_with_windows" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.auto_start_with_windows ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.auto_start_with_windows ? 'translate-x-4' : 'translate-x-0'"></span></span></span><span>{{ t('tools.fileShare.restoreOnStartup') }}</span></label>
+              <label class="fs-toggle-line"><ToggleSwitch v-model="draft.guest_access_enabled" tone="teal" :disabled="formDisabled" :aria-label="t('tools.fileShare.guestAccess')" /><span>{{ t('tools.fileShare.guestAccess') }}</span></label>
+              <label class="fs-toggle-line"><ToggleSwitch v-model="draft.image_preview_enabled" tone="teal" :disabled="formDisabled" :aria-label="t('tools.fileShare.imagePreview')" /><span>{{ t('tools.fileShare.imagePreview') }}</span></label>
+              <label class="fs-toggle-line"><ToggleSwitch v-model="draft.thumbnail_enabled" tone="teal" :disabled="formDisabled" :aria-label="t('tools.fileShare.thumbnails')" /><span>{{ t('tools.fileShare.thumbnails') }}</span></label>
+              <label class="fs-toggle-line"><ToggleSwitch v-model="draft.remember_settings" tone="teal" :disabled="formDisabled" :aria-label="t('tools.fileShare.rememberSettings')" /><span>{{ t('tools.fileShare.rememberSettings') }}</span></label>
+              <label class="fs-toggle-line"><ToggleSwitch v-model="draft.auto_start_on_page_open" tone="teal" :disabled="formDisabled" :aria-label="t('tools.fileShare.autoStartOnPageOpen')" /><span>{{ t('tools.fileShare.autoStartOnPageOpen') }}</span></label>
+              <label class="fs-toggle-line"><ToggleSwitch v-model="draft.auto_start_with_windows" tone="teal" :disabled="formDisabled" :aria-label="t('tools.fileShare.restoreOnStartup')" /><span>{{ t('tools.fileShare.restoreOnStartup') }}</span></label>
             </div>
             <div v-if="draft.ip_filter_mode !== 'off'" class="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
               <div class="flex flex-col gap-2 sm:flex-row">
@@ -665,10 +666,7 @@ onUnmounted(() => {
                   </div>
                   <div class="fs-root-actions">
                     <label class="fs-inline-toggle">
-                      <span class="fs-toggle">
-                        <input v-model="root.enabled" type="checkbox" :disabled="formDisabled" class="sr-only">
-                        <span class="fs-toggle-track" :class="root.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="root.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span>
-                      </span>
+                      <ToggleSwitch v-model="root.enabled" tone="teal" :disabled="formDisabled" :aria-label="t('tools.fileShare.enabledLabel')" />
                       <span>{{ t('tools.fileShare.enabledLabel') }}</span>
                     </label>
 
@@ -697,7 +695,7 @@ onUnmounted(() => {
             <div class="fs-account">
               <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div class="flex items-center gap-3">
-                  <label class="fs-toggle-line" :title="t('tools.fileShare.guestAccess')"><span class="fs-toggle"><input v-model="draft.guest_access_enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="draft.guest_access_enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="draft.guest_access_enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span></label>
+                  <label class="fs-toggle-line" :title="t('tools.fileShare.guestAccess')"><ToggleSwitch v-model="draft.guest_access_enabled" tone="teal" :disabled="formDisabled" :aria-label="t('tools.fileShare.guestAccess')" /></label>
                   <div class="font-semibold text-slate-900">{{ t('tools.fileShare.guestAccount') }}</div>
                 </div>
                 <span class="rounded-full border px-2 py-1 text-xs" :class="guest.password_set || guest.new_password ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'">
@@ -730,7 +728,7 @@ onUnmounted(() => {
               <div v-for="account in customAccounts" :key="account.draft_key" class="fs-account">
                 <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
                   <div class="flex items-center gap-3">
-                    <label class="fs-toggle-line" :title="t('tools.fileShare.accountEnabled')"><span class="fs-toggle"><input v-model="account.enabled" type="checkbox" :disabled="formDisabled" class="sr-only"><span class="fs-toggle-track" :class="account.enabled ? 'bg-teal-600' : 'bg-slate-300'"><span class="fs-toggle-thumb" :class="account.enabled ? 'translate-x-4' : 'translate-x-0'"></span></span></span></label>
+                    <label class="fs-toggle-line" :title="t('tools.fileShare.accountEnabled')"><ToggleSwitch v-model="account.enabled" tone="teal" :disabled="formDisabled" :aria-label="t('tools.fileShare.accountEnabled')" /></label>
                     <div class="font-semibold text-slate-900">{{ account.username || t('tools.fileShare.newAccountDefaultUsername') }}</div>
                   </div>
                   <button type="button" :disabled="formDisabled" class="fs-btn fs-btn-danger" @click="draft.accounts = draft.accounts.filter((a) => a.draft_key !== account.draft_key)"><Trash2 class="h-4 w-4" /></button>
@@ -863,7 +861,6 @@ onUnmounted(() => {
 .fs-select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364758b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:2.25rem}
 .fs-input:focus,.fs-select:focus{border-color:rgb(13 148 136);box-shadow:0 0 0 3px rgb(13 148 136 / .12)}
 .fs-input:disabled,.fs-select:disabled{cursor:not-allowed;background:rgb(248 250 252);color:rgb(148 163 184)}
-.fs-toggle{position:relative;display:inline-flex}.fs-toggle-track{display:block;height:20px;width:36px;flex-shrink:0;border-radius:9999px;transition:background-color .2s ease}.fs-toggle-thumb{position:absolute;top:2px;left:2px;height:16px;width:16px;border-radius:9999px;background:#fff;box-shadow:0 1px 3px rgb(15 23 42 /.2);transition:transform .2s ease}
 .fs-toggle-line{display:flex;align-items:center;gap:.75rem;border:1px solid rgb(226 232 240 / .8);border-radius:.75rem;background:#fff;padding:.9rem 1rem;font-size:.875rem;font-weight:500;color:rgb(51 65 85)}
 .fs-btn{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;min-height:2.75rem;flex-shrink:0;border-radius:.75rem;padding:.8rem 1rem;font-size:.875rem;font-weight:600;white-space:nowrap;transition:all .15s ease}
 .fs-btn svg{flex-shrink:0}

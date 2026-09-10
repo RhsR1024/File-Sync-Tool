@@ -20,10 +20,13 @@ pub const PLATFORM_ADD_DEVICE_PATH: &str = "/openAPI/deviceManange/v1/encodeDevi
 pub const PLATFORM_QUERY_DEVICE_PATH: &str = "/xapi/uap/v1/resource/query";
 pub const PLATFORM_BCP_QUERY_DEVICE_PATH: &str = "/BCP/HeadendEquipmentList/Query";
 pub const PLATFORM_DELETE_DEVICE_PATH: &str = "/openAPI/deviceManange/v1/encodeDevice/delete";
+pub const PLATFORM_LAPI_ADD_DEVICE_PATH: &str = "/VIID/hadesadapter/lapi/batch/add";
+pub const PLATFORM_LAPI_DELETE_DEVICE_PATH: &str = "/VIID/hadesadapter/lapi/batch/del";
 
 const DEVICE_ORG_ID: &str = "2";
 const DEVICE_ACCESS_USER: &str = "admin";
 const DEVICE_ACCESS_PASSWORD: &str = "Admin_1234";
+const LAPI_DEVICE_ACCESS_PASSWORD: &str = "123456";
 const DEVICE_TYPE: u8 = 1;
 const RESOURCE_QUERY_PAGE_SIZE: u32 = 200;
 const BCP_QUERY_PAGE_SIZE: u32 = 20;
@@ -252,10 +255,22 @@ struct BcpResponsePageInfo {
 
 #[derive(Debug, Deserialize)]
 struct BcpDeviceInfo {
-    #[serde(default, rename = "UMSResID")]
-    ums_resource_id: String,
+    #[serde(default, rename = "DevCode")]
+    device_code: String,
     #[serde(default, rename = "DevAddr")]
     device_address: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlatformDeviceApi {
+    OpenApi,
+    BcpLapi,
+}
+
+#[derive(Debug)]
+struct ExistingDeviceQuery {
+    device_ids: Vec<String>,
+    api: PlatformDeviceApi,
 }
 
 #[derive(Debug, Serialize)]
@@ -275,6 +290,100 @@ struct DeleteDeviceData {
 #[serde(rename_all = "camelCase")]
 struct DeleteDeviceSuccess {
     device_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LapiDeleteDeviceRequest {
+    #[serde(rename = "LapiDevNum")]
+    device_count: usize,
+    #[serde(rename = "LapiDevInfo")]
+    devices: Vec<LapiDeleteDeviceItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct LapiDeleteDeviceItem {
+    #[serde(rename = "DevCode")]
+    device_code: String,
+    #[serde(rename = "OrgCode")]
+    org_code: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct LapiAddDeviceRequest {
+    #[serde(rename = "LapiDevNum")]
+    device_count: usize,
+    #[serde(rename = "LapiDevInfo")]
+    devices: Vec<LapiAddDeviceItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct LapiAddDeviceItem {
+    #[serde(rename = "PlaybackMSMode")]
+    playback_ms_mode: u8,
+    #[serde(rename = "LapiDevCode")]
+    lapi_device_code: &'static str,
+    #[serde(rename = "LapiName")]
+    lapi_name: String,
+    #[serde(rename = "LapiType")]
+    lapi_type: u8,
+    #[serde(rename = "OrgCode")]
+    org_code: &'static str,
+    #[serde(rename = "UserName")]
+    user_name: &'static str,
+    #[serde(rename = "Password")]
+    password: String,
+    #[serde(rename = "DevAddr")]
+    device_address: Ipv4Addr,
+    #[serde(rename = "DevPort")]
+    device_port: u16,
+    #[serde(rename = "Protocal")]
+    protocol: u8,
+    #[serde(rename = "StreamProtocal")]
+    stream_protocol: u8,
+    #[serde(rename = "IsAutofit")]
+    is_autofit: u8,
+    #[serde(rename = "MSCode")]
+    ms_code: &'static str,
+    #[serde(rename = "UseMSNum")]
+    use_ms_num: u8,
+    #[serde(rename = "AlarmEnabled")]
+    alarm_enabled: u8,
+    #[serde(rename = "TimeSyncEnabled")]
+    time_sync_enabled: u8,
+    #[serde(rename = "IPAddressType")]
+    ip_address_type: u8,
+}
+
+#[derive(Debug, Deserialize)]
+struct LapiBatchResponse {
+    #[serde(default, rename = "ErrCode")]
+    error_code: i64,
+    #[serde(default, rename = "ErrMsg")]
+    error_message: String,
+    #[serde(rename = "Result")]
+    result: Option<LapiBatchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LapiBatchResult {
+    #[serde(default, rename = "TotalNum")]
+    total_count: usize,
+    #[serde(default, rename = "SucceedNum")]
+    succeed_count: usize,
+    #[serde(default, rename = "ErrorNum")]
+    error_count: usize,
+    #[serde(default, rename = "ResultItem")]
+    items: Vec<LapiBatchResultItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LapiBatchResultItem {
+    #[serde(default, rename = "DevCode")]
+    device_code: String,
+    #[serde(default, rename = "OperResult")]
+    operation_result: i64,
+    #[serde(default, rename = "OperMsg")]
+    operation_message: String,
 }
 
 #[tauri::command]
@@ -513,17 +622,57 @@ async fn register_server(
         }
     };
 
+    let mut device_api = PlatformDeviceApi::OpenApi;
     if replace_existing {
-        let existing_device_ids =
+        let existing_devices =
             match query_existing_device_ids(app_handle, client, server, &token, devices).await {
-                Ok(device_ids) => device_ids,
+                Ok(result) => result,
                 Err(message) => return failure("query", message),
             };
-        if let Err(message) =
-            delete_existing_devices(app_handle, client, server, &token, &existing_device_ids).await
-        {
+        device_api = existing_devices.api;
+        let delete_result = match device_api {
+            PlatformDeviceApi::OpenApi => {
+                delete_existing_devices(
+                    app_handle,
+                    client,
+                    server,
+                    &token,
+                    &existing_devices.device_ids,
+                )
+                .await
+            }
+            PlatformDeviceApi::BcpLapi => {
+                delete_existing_devices_via_lapi(
+                    app_handle,
+                    client,
+                    server,
+                    &token,
+                    &existing_devices.device_ids,
+                )
+                .await
+            }
+        };
+        if let Err(message) = delete_result {
             return failure("delete", message);
         }
+    }
+
+    if device_api == PlatformDeviceApi::BcpLapi {
+        return match add_devices_via_lapi(app_handle, client, server, &token, devices).await {
+            Ok(outcomes) => {
+                let success = outcomes.iter().all(|outcome| outcome.added);
+                PlatformServerAddResult {
+                    server_id: server.id.clone(),
+                    host: server.host.clone(),
+                    port: server.port,
+                    success,
+                    failed_at: (!success).then(|| "add".to_string()),
+                    message: (!success).then(|| "部分设备通过 LAPI 添加失败".to_string()),
+                    devices: outcomes,
+                }
+            }
+            Err(message) => failure("add", message),
+        };
     }
 
     let public_key_url = match server_url(&server.host, server.port, PLATFORM_RSA_PUBLIC_KEY_PATH) {
@@ -668,7 +817,7 @@ async fn query_existing_device_ids(
     server: &PlatformServerSettings,
     token: &str,
     devices: &[PlatformDeviceEntry],
-) -> Result<Vec<String>, String> {
+) -> Result<ExistingDeviceQuery, String> {
     let url = server_url(&server.host, server.port, PLATFORM_QUERY_DEVICE_PATH)?;
     let url_for_log = url.as_str().to_owned();
     let target_addresses = devices
@@ -765,7 +914,10 @@ async fn query_existing_device_ids(
         None,
         format!("平台设备查询完成，找到 {} 台同 IP 设备", device_ids.len()),
     );
-    Ok(device_ids)
+    Ok(ExistingDeviceQuery {
+        device_ids,
+        api: PlatformDeviceApi::OpenApi,
+    })
 }
 
 fn build_bcp_query_request(
@@ -833,7 +985,7 @@ async fn query_existing_device_ids_via_bcp(
     server: &PlatformServerSettings,
     token: &str,
     devices: &[PlatformDeviceEntry],
-) -> Result<Vec<String>, String> {
+) -> Result<ExistingDeviceQuery, String> {
     let url = server_url(&server.host, server.port, PLATFORM_BCP_QUERY_DEVICE_PATH)?;
     let url_for_log = url.as_str().to_owned();
     let target_addresses = devices
@@ -897,10 +1049,10 @@ async fn query_existing_device_ids_via_bcp(
             .ok_or_else(|| "BCP 平台设备查询响应缺少 Result".to_string())?;
         for device in result.devices {
             if target_addresses.contains(device.device_address.trim())
-                && !device.ums_resource_id.trim().is_empty()
-                && seen_device_ids.insert(device.ums_resource_id.clone())
+                && !device.device_code.trim().is_empty()
+                && seen_device_ids.insert(device.device_code.clone())
             {
-                device_ids.push(device.ums_resource_id);
+                device_ids.push(device.device_code);
             }
         }
         let total_row_num = result.page_info.total_row_num;
@@ -926,7 +1078,10 @@ async fn query_existing_device_ids_via_bcp(
             device_ids.len()
         ),
     );
-    Ok(device_ids)
+    Ok(ExistingDeviceQuery {
+        device_ids,
+        api: PlatformDeviceApi::BcpLapi,
+    })
 }
 
 async fn delete_existing_devices(
@@ -1017,6 +1172,254 @@ async fn delete_existing_devices(
         format!("已删除 {} 台同 IP 平台设备，准备重新添加", device_ids.len()),
     );
     Ok(())
+}
+
+fn build_lapi_delete_request(device_ids: &[String]) -> LapiDeleteDeviceRequest {
+    LapiDeleteDeviceRequest {
+        device_count: device_ids.len(),
+        devices: device_ids
+            .iter()
+            .map(|device_id| LapiDeleteDeviceItem {
+                device_code: device_id.clone(),
+                org_code: BCP_ORG_CODE,
+            })
+            .collect(),
+    }
+}
+
+fn build_lapi_add_request(devices: &[PlatformDeviceEntry]) -> LapiAddDeviceRequest {
+    let encoded_password = BASE64.encode(LAPI_DEVICE_ACCESS_PASSWORD);
+    LapiAddDeviceRequest {
+        device_count: devices.len(),
+        devices: devices
+            .iter()
+            .map(|device| LapiAddDeviceItem {
+                playback_ms_mode: 1,
+                lapi_device_code: "",
+                lapi_name: device.address.to_string(),
+                lapi_type: 1,
+                org_code: BCP_ORG_CODE,
+                user_name: DEVICE_ACCESS_USER,
+                password: encoded_password.clone(),
+                device_address: device.address,
+                device_port: device.port,
+                protocol: 0,
+                stream_protocol: 1,
+                is_autofit: 1,
+                ms_code: "",
+                use_ms_num: 0,
+                alarm_enabled: 1,
+                time_sync_enabled: 0,
+                ip_address_type: 1,
+            })
+            .collect(),
+    }
+}
+
+async fn delete_existing_devices_via_lapi(
+    app_handle: &AppHandle,
+    client: &reqwest::Client,
+    server: &PlatformServerSettings,
+    token: &str,
+    device_ids: &[String],
+) -> Result<(), String> {
+    if device_ids.is_empty() {
+        return Ok(());
+    }
+    let url = server_url(&server.host, server.port, PLATFORM_LAPI_DELETE_DEVICE_PATH)?;
+    let url_for_log = url.as_str().to_owned();
+    let request = build_lapi_delete_request(device_ids);
+    emit_log(
+        app_handle,
+        "info",
+        None,
+        format!(
+            "HTTP request: DELETE {url_for_log} | authorization=<redacted> | Content-Type=application/json | body={}",
+            json_for_log(&request)
+        ),
+    );
+    let response = client
+        .delete(url)
+        .header("authorization", token)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("LAPI 删除平台设备请求失败: {error}"))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<missing>")
+        .to_owned();
+    let text = response
+        .text()
+        .await
+        .map_err(|error| format!("读取 LAPI 平台设备删除响应失败: {error}"))?;
+    emit_http_response_log(
+        app_handle,
+        "DELETE",
+        &url_for_log,
+        status,
+        &content_type,
+        &text,
+    );
+    if !status.is_success() {
+        return Err(format!(
+            "LAPI 删除平台设备接口返回 HTTP {}",
+            status.as_u16()
+        ));
+    }
+    let response: LapiBatchResponse = serde_json::from_str(&text)
+        .map_err(|error| format!("LAPI 平台设备删除响应不是有效 JSON: {error}"))?;
+    if response.error_code != 0 {
+        return Err(format!(
+            "LAPI 删除平台设备失败：code={} {}",
+            response.error_code, response.error_message
+        ));
+    }
+    let result = response
+        .result
+        .ok_or_else(|| "LAPI 平台设备删除响应缺少 Result".to_string())?;
+    let successful_ids = result
+        .items
+        .iter()
+        .filter(|item| item.operation_result == 0)
+        .map(|item| item.device_code.as_str())
+        .collect::<HashSet<_>>();
+    let failed_ids = device_ids
+        .iter()
+        .filter(|device_id| !successful_ids.contains(device_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if result.total_count != device_ids.len()
+        || result.succeed_count != device_ids.len()
+        || result.error_count != 0
+        || result.items.len() != device_ids.len()
+        || successful_ids.len() != device_ids.len()
+        || !failed_ids.is_empty()
+    {
+        return Err(format!(
+            "LAPI 平台设备未全部删除：成功 {}/{}，失败设备: {}",
+            result.succeed_count,
+            device_ids.len(),
+            if failed_ids.is_empty() {
+                "<响应计数不一致>".to_string()
+            } else {
+                failed_ids.join(", ")
+            }
+        ));
+    }
+    emit_log(
+        app_handle,
+        "info",
+        None,
+        format!(
+            "已通过 LAPI 删除 {} 台同 IP 平台设备，准备重新添加",
+            device_ids.len()
+        ),
+    );
+    Ok(())
+}
+
+async fn add_devices_via_lapi(
+    app_handle: &AppHandle,
+    client: &reqwest::Client,
+    server: &PlatformServerSettings,
+    token: &str,
+    devices: &[PlatformDeviceEntry],
+) -> Result<Vec<PlatformAddDeviceOutcome>, String> {
+    let url = server_url(&server.host, server.port, PLATFORM_LAPI_ADD_DEVICE_PATH)?;
+    let url_for_log = url.as_str().to_owned();
+    let request = build_lapi_add_request(devices);
+    emit_log(
+        app_handle,
+        "info",
+        None,
+        format!(
+            "HTTP request: POST {url_for_log} | authorization=<redacted> | Content-Type=application/json | body={}",
+            json_for_log(&request)
+        ),
+    );
+    let response = client
+        .post(url)
+        .header("authorization", token)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("LAPI 添加平台设备请求失败: {error}"))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<missing>")
+        .to_owned();
+    let text = response
+        .text()
+        .await
+        .map_err(|error| format!("读取 LAPI 平台设备添加响应失败: {error}"))?;
+    emit_http_response_log(
+        app_handle,
+        "POST",
+        &url_for_log,
+        status,
+        &content_type,
+        &text,
+    );
+    if !status.is_success() {
+        return Err(format!(
+            "LAPI 添加平台设备接口返回 HTTP {}",
+            status.as_u16()
+        ));
+    }
+    let response: LapiBatchResponse = serde_json::from_str(&text)
+        .map_err(|error| format!("LAPI 平台设备添加响应不是有效 JSON: {error}"))?;
+    if response.error_code != 0 {
+        return Err(format!(
+            "LAPI 添加平台设备失败：code={} {}",
+            response.error_code, response.error_message
+        ));
+    }
+    let result = response
+        .result
+        .ok_or_else(|| "LAPI 平台设备添加响应缺少 Result".to_string())?;
+    if result.total_count != devices.len() || result.items.len() != devices.len() {
+        return Err(format!(
+            "LAPI 平台设备添加响应数量不匹配：请求 {}，TotalNum={}，ResultItem={}",
+            devices.len(),
+            result.total_count,
+            result.items.len()
+        ));
+    }
+    let outcomes = devices
+        .iter()
+        .zip(result.items)
+        .map(|(device, item)| {
+            let added = item.operation_result == 0 && !item.device_code.trim().is_empty();
+            PlatformAddDeviceOutcome {
+                address: device.address.to_string(),
+                added,
+                device_id: added.then_some(item.device_code),
+                message: (!added).then_some(if item.operation_message.trim().is_empty() {
+                    format!("LAPI 添加失败，OperResult={}", item.operation_result)
+                } else {
+                    item.operation_message
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    let unique_device_ids = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.device_id.as_deref())
+        .collect::<HashSet<_>>();
+    if result.succeed_count != outcomes.iter().filter(|outcome| outcome.added).count()
+        || result.error_count != outcomes.iter().filter(|outcome| !outcome.added).count()
+        || unique_device_ids.len() != result.succeed_count
+    {
+        return Err("LAPI 平台设备添加响应的成功/失败计数与 ResultItem 不一致".to_string());
+    }
+    Ok(outcomes)
 }
 
 async fn fetch_public_key(
@@ -1564,14 +1967,14 @@ mod tests {
     }
 
     #[test]
-    fn bcp_query_response_reads_resource_id_and_device_address() {
+    fn bcp_query_response_reads_device_code_and_device_address() {
         let response: BcpQueryResponse = serde_json::from_value(json!({
             "ErrCode": 0,
             "ErrMsg": "Succeed",
             "Result": {
                 "RspPageInfo": {"RowNum": 2, "TotalRowNum": 2},
                 "RspDevInfoList": [{
-                    "UMSResID": "635932266987520600",
+                    "DevCode": "635932266970743384",
                     "DevAddr": "213.213.16.14"
                 }]
             }
@@ -1582,7 +1985,7 @@ mod tests {
         assert_eq!(response.error_code, 0);
         assert_eq!(result.page_info.row_num, 2);
         assert_eq!(result.page_info.total_row_num, 2);
-        assert_eq!(result.devices[0].ums_resource_id, "635932266987520600");
+        assert_eq!(result.devices[0].device_code, "635932266970743384");
         assert_eq!(result.devices[0].device_address, "213.213.16.14");
     }
 
@@ -1594,6 +1997,88 @@ mod tests {
         .unwrap();
 
         assert_eq!(request, json!({"deviceList": ["630621988062232867"]}));
+    }
+
+    #[test]
+    fn lapi_delete_request_matches_the_bcp_platform_contract() {
+        let request = serde_json::to_value(build_lapi_delete_request(&[
+            "635494323265209217".to_string()
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            request,
+            json!({
+                "LapiDevNum": 1,
+                "LapiDevInfo": [{
+                    "DevCode": "635494323265209217",
+                    "OrgCode": "iccsid"
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn lapi_add_request_matches_the_bcp_platform_contract() {
+        let request = serde_json::to_value(build_lapi_add_request(&[PlatformDeviceEntry {
+            address: "192.115.1.62".parse().unwrap(),
+            port: 81,
+        }]))
+        .unwrap();
+
+        assert_eq!(
+            request,
+            json!({
+                "LapiDevNum": 1,
+                "LapiDevInfo": [{
+                    "PlaybackMSMode": 1,
+                    "LapiDevCode": "",
+                    "LapiName": "192.115.1.62",
+                    "LapiType": 1,
+                    "OrgCode": "iccsid",
+                    "UserName": "admin",
+                    "Password": "MTIzNDU2",
+                    "DevAddr": "192.115.1.62",
+                    "DevPort": 81,
+                    "Protocal": 0,
+                    "StreamProtocal": 1,
+                    "IsAutofit": 1,
+                    "MSCode": "",
+                    "UseMSNum": 0,
+                    "AlarmEnabled": 1,
+                    "TimeSyncEnabled": 0,
+                    "IPAddressType": 1
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn lapi_batch_response_reads_operation_results() {
+        let response: LapiBatchResponse = serde_json::from_value(json!({
+            "ErrCode": 0,
+            "ErrMsg": "Succeed",
+            "Result": {
+                "TotalNum": 1,
+                "SucceedNum": 1,
+                "ErrorNum": 0,
+                "ResultItem": [{
+                    "DevCode": "636652367462269333",
+                    "OperResult": 0,
+                    "OperMsg": "Success."
+                }]
+            }
+        }))
+        .unwrap();
+        let result = response.result.unwrap();
+
+        assert_eq!(response.error_code, 0);
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.succeed_count, 1);
+        assert_eq!(result.error_count, 0);
+        assert_eq!(result.items[0].device_code, "636652367462269333");
+        assert_eq!(result.items[0].operation_result, 0);
+        assert_eq!(result.items[0].operation_message, "Success.");
     }
 
     #[test]

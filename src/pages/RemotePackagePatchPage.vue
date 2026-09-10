@@ -25,6 +25,7 @@ import { useI18n } from 'vue-i18n';
 
 import BrowserDialog from '@/components/remote-package-patch/BrowserDialog.vue';
 import RemoteDirBrowser from '@/components/remote-package-patch/RemoteDirBrowser.vue';
+import ToggleSwitch from '@/components/ToggleSwitch.vue';
 import {
   enableApplianceSsh,
   getConfig,
@@ -1126,16 +1127,7 @@ onBeforeUnmount(() => {
                       <div class="text-sm font-semibold text-slate-800">{{ t('remotePackagePatch.target.overwriteTitle') }}</div>
                       <div class="mt-0.5 text-[11px] text-slate-500">{{ t('remotePackagePatch.target.overwriteNote') }}</div>
                     </div>
-                    <button
-                      type="button"
-                      class="rpp-toggle"
-                      :class="overwrite ? 'rpp-toggle-on' : ''"
-                      role="switch"
-                      :aria-checked="overwrite"
-                      @click="overwrite = !overwrite"
-                    >
-                      <span class="rpp-toggle-knob"></span>
-                    </button>
+                    <ToggleSwitch v-model="overwrite" tone="amber" size="compact" :aria-label="t('remotePackagePatch.target.overwriteTitle')" />
                   </div>
                   <div v-if="!overwrite" class="grid grid-cols-12 gap-3">
                     <div class="col-span-12 md:col-span-9">
@@ -1533,42 +1525,6 @@ onBeforeUnmount(() => {
 
 .rpp-div-active {
   background: linear-gradient(90deg, #10b981 0%, #cbd5e1 50%, #cbd5e1 100%);
-}
-
-/* Toggle 开关 */
-.rpp-toggle {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  width: 40px;
-  height: 22px;
-  border-radius: 999px;
-  background: #cbd5e1;
-  cursor: pointer;
-  transition: background 0.2s;
-  flex-shrink: 0;
-  border: none;
-  padding: 0;
-}
-
-.rpp-toggle-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 18px;
-  height: 18px;
-  background: #fff;
-  border-radius: 50%;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
-  transition: transform 0.2s;
-}
-
-.rpp-toggle-on {
-  background: #f59e0b;
-}
-
-.rpp-toggle-on .rpp-toggle-knob {
-  transform: translateX(18px);
 }
 
 /* 脉冲点 */

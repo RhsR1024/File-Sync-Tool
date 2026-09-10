@@ -37,6 +37,7 @@ import {
 } from 'lucide-vue-next';
 
 import HintTip from '@/components/HintTip.vue';
+import ToggleSwitch from '@/components/ToggleSwitch.vue';
 import DeviceMaterialMigrationConfirmDialog from '@/components/DeviceMaterialMigrationConfirmDialog.vue';
 import DeviceMaterialResetConfirmDialog from '@/components/DeviceMaterialResetConfirmDialog.vue';
 import DevicePlatformReplaceConfirmDialog from '@/components/DevicePlatformReplaceConfirmDialog.vue';
@@ -328,10 +329,9 @@ const activeSubscriptionRecords = computed(() => subscriptionRecords.value.filte
 const selectedAlarmSubscription = computed(() => subscriptionRecords.value.find(
   (record) => record.id === selectedAlarmSubscriptionId.value,
 ) ?? null);
-const selectedAlarmSubscriptionUsable = computed(() => selectedAlarmSubscription.value !== null
-  && !subscriptionRecordExpired(selectedAlarmSubscription.value));
+const selectedAlarmSubscriptionAvailable = computed(() => selectedAlarmSubscription.value !== null);
 const subscriptionSelectionRequired = computed(() => Boolean(
-  subscription.value?.selection_required && !selectedAlarmSubscriptionUsable.value,
+  subscription.value?.selection_required && !selectedAlarmSubscriptionAvailable.value,
 ));
 const subscriptionExpired = computed(() => {
   const current = subscription.value;
@@ -837,7 +837,7 @@ function alarmRequest(): AlarmJobRequest {
     recovery_delay_secs: Number.isFinite(recoveryDelay) && recoveryDelay >= 0
       ? recoveryDelay
       : null,
-    target_subscription_id: selectedAlarmSubscriptionUsable.value
+    target_subscription_id: selectedAlarmSubscriptionAvailable.value
       ? selectedAlarmSubscriptionId.value
       : null,
   };
@@ -1182,15 +1182,18 @@ function revealPreflightDetails() {
           </aside>
 
           <div class="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3">
-            <section v-if="running" class="flex flex-none flex-col gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 shadow-sm sm:flex-row sm:items-center" role="status" aria-live="polite" aria-labelledby="configuration-runtime-title">
-              <CheckCircle2 class="h-5 w-5 shrink-0 text-emerald-700" aria-hidden="true" />
+            <section v-if="running" class="flex flex-none items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 shadow-sm" role="status" aria-live="polite" aria-labelledby="configuration-runtime-title">
+              <span class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+                <CheckCircle2 class="h-5 w-5" aria-hidden="true" />
+              </span>
               <div class="min-w-0 flex-1">
-                <h2 id="configuration-runtime-title" class="text-sm font-bold text-emerald-950">{{ t('deviceSimulator.configuration.runningTitle') }}</h2>
-                <p class="mt-0.5 text-xs leading-5 text-emerald-800">{{ t('deviceSimulator.configuration.runningSummary', { devices: configuredDeviceCount, channels: configuredChannelCount, addresses: plannedAddressSummary || '—' }) }}</p>
+                <div class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                  <h2 id="configuration-runtime-title" class="text-sm font-bold text-emerald-950">{{ t('deviceSimulator.configuration.runningTitle') }}</h2>
+                  <p class="text-xs leading-5 text-emerald-800">{{ t('deviceSimulator.configuration.runningSummary', { devices: configuredDeviceCount, channels: configuredChannelCount, addresses: plannedAddressSummary || '—' }) }}</p>
+                </div>
                 <p v-if="simulator.busyAction.value === 'add-to-platform'" class="mt-1 flex items-center gap-1.5 text-xs font-semibold text-sky-800"><LoaderCircle class="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />{{ t('deviceSimulator.platformAdd.adding') }}</p>
                 <p v-else-if="simulator.platformAddReport.value" class="mt-1 flex items-center gap-1.5 text-xs font-semibold" :class="platformAddIncomplete ? 'text-amber-800' : 'text-emerald-800'"><AlertTriangle v-if="platformAddIncomplete" class="h-3.5 w-3.5" aria-hidden="true" /><CheckCircle2 v-else class="h-3.5 w-3.5" aria-hidden="true" />{{ t(platformAddIncomplete ? 'deviceSimulator.platformAdd.partialSummary' : 'deviceSimulator.platformAdd.summary', { added: simulator.platformAddReport.value.addedDevices, total: simulator.platformAddReport.value.totalDevices }) }}</p>
               </div>
-              <button type="button" class="inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg border border-emerald-300 bg-white px-3 text-xs font-semibold text-emerald-900 transition-colors duration-200 hover:bg-emerald-100 motion-reduce:transition-none" :class="buttonFocus" @click="activeTab = 'runtime'"><Activity class="h-4 w-4" aria-hidden="true" />{{ t('deviceSimulator.actions.viewRuntime') }}</button>
             </section>
 
             <div class="min-h-0 flex-1">
@@ -1305,24 +1308,21 @@ function revealPreflightDetails() {
                 </p>
                 <div class="mt-3 flex items-center justify-between gap-3 text-xs text-slate-500">
                   <span>{{ subscriptionCountLabel }}</span>
-                  <span v-if="selectedAlarmSubscriptionUsable" class="font-semibold text-emerald-700">{{ t('deviceSimulator.subscription.selected') }}</span>
+                  <span v-if="selectedAlarmSubscriptionAvailable" class="font-semibold text-emerald-700">{{ t('deviceSimulator.subscription.selected') }}</span>
                 </div>
                 <div class="mt-2 max-h-64 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50" role="radiogroup" :aria-label="t('deviceSimulator.subscription.targetTitle')">
                   <label
                     v-for="record in subscriptionRecords"
                     :key="record.id"
                     class="flex min-h-11 cursor-pointer items-start gap-3 border-b border-slate-200 px-3 py-2.5 last:border-b-0 transition-colors hover:bg-white"
-                    :class="[
-                      selectedAlarmSubscriptionId === record.id ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : '',
-                      subscriptionRecordExpired(record) ? 'opacity-60' : '',
-                    ]"
+                    :class="selectedAlarmSubscriptionId === record.id ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : ''"
                   >
                     <input
                       v-model="selectedAlarmSubscriptionId"
                       type="radio"
                       name="alarm-subscription-target"
                       :value="record.id"
-                      :disabled="subscriptionRecordExpired(record) || Boolean(subscription?.overridden)"
+                      :disabled="Boolean(subscription?.overridden)"
                       class="mt-1 h-4 w-4 shrink-0 border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45"
                     >
                     <span class="min-w-0 flex-1">
@@ -1479,8 +1479,7 @@ function revealPreflightDetails() {
                 </div>
               </div>
               <label class="mt-4 flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 transition-colors duration-200 hover:border-sky-300 hover:bg-sky-50/60 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60 motion-reduce:transition-none">
-                <input v-model="simulator.request.stream.time_watermark_enabled" class="peer sr-only" type="checkbox" role="switch" :disabled="simulator.topologyLocked.value" />
-                <span class="relative h-7 w-12 shrink-0 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 after:content-[''] peer-checked:bg-sky-600 peer-checked:after:translate-x-5 peer-focus-visible:ring-2 peer-focus-visible:ring-sky-500 peer-focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:after:transition-none" aria-hidden="true" />
+                <ToggleSwitch v-model="simulator.request.stream.time_watermark_enabled" tone="sky" size="lg" :disabled="simulator.topologyLocked.value" :aria-label="t('deviceSimulator.mediaThemes.timeWatermark')" />
                 <Clock3 class="h-5 w-5 shrink-0 text-sky-700" aria-hidden="true" />
                 <span class="text-sm font-semibold text-slate-900">{{ t('deviceSimulator.mediaThemes.timeWatermark') }}</span><HintTip :text="t('deviceSimulator.mediaThemes.timeWatermarkHint')" />
               </label>
@@ -1673,17 +1672,14 @@ function revealPreflightDetails() {
                   v-for="record in subscriptionRecords"
                   :key="record.id"
                   class="flex min-h-11 cursor-pointer items-start gap-3 border-b border-slate-200 px-3 py-2.5 last:border-b-0 transition-colors hover:bg-white"
-                  :class="[
-                    selectedAlarmSubscriptionId === record.id ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : '',
-                    subscriptionRecordExpired(record) ? 'opacity-60' : '',
-                  ]"
+                  :class="selectedAlarmSubscriptionId === record.id ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : ''"
                 >
                   <input
                     v-model="selectedAlarmSubscriptionId"
                     type="radio"
                     name="alarm-send-subscription-target"
                     :value="record.id"
-                    :disabled="subscriptionRecordExpired(record) || Boolean(subscription?.overridden)"
+                    :disabled="Boolean(subscription?.overridden)"
                     class="mt-1 h-4 w-4 shrink-0 border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45"
                   >
                   <span class="min-w-0 flex-1">

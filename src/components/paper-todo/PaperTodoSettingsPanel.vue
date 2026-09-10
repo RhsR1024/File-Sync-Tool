@@ -13,6 +13,7 @@ import { useI18n } from 'vue-i18n';
 
 import { usePaperTodo } from '@/composables/usePaperTodo';
 import type { PaperSkin, PaperTodoSettings } from '@/lib/paperTodo';
+import ToggleSwitch from '@/components/ToggleSwitch.vue';
 import {
   PAPER_TODO_HOTKEY_IDS,
   PAPER_TODO_SETTINGS_TABS,
@@ -97,8 +98,8 @@ function setLauncherEdge(edge: PaperTodoSettings['launcherEdge']): void {
   });
 }
 
-function setBoolean(key: keyof PaperTodoSettings, event: Event): void {
-  setSetting(key, (event.target as HTMLInputElement).checked as never);
+function setBoolean(key: keyof PaperTodoSettings, value: boolean): void {
+  setSetting(key, value as never);
 }
 
 function setString(key: keyof PaperTodoSettings, event: Event): void {
@@ -203,11 +204,11 @@ onBeforeUnmount(() => systemThemeQuery?.removeEventListener('change', onSystemTh
         <div class="settings-card">
           <label class="settings-row">
             <span><strong>{{ t('paperTodo.settings.launcherEnabled') }}</strong><small>{{ t('paperTodo.settings.launcherEnabledHint') }}</small></span>
-            <input class="paper-switch" type="checkbox" :checked="settings.launcherEnabled" @change="setBoolean('launcherEnabled', $event)">
+            <ToggleSwitch :model-value="settings.launcherEnabled" tone="sky" size="xs" :aria-label="t('paperTodo.settings.launcherEnabled')" @update:model-value="setBoolean('launcherEnabled', $event)" />
           </label>
           <label class="settings-row">
             <span><strong>{{ t('paperTodo.settings.autoCollapseLauncher') }}</strong><small>{{ t('paperTodo.settings.autoCollapseLauncherHint') }}</small></span>
-            <input class="paper-switch" type="checkbox" :checked="settings.autoCollapseLauncher" :disabled="!settings.launcherEnabled" @change="setBoolean('autoCollapseLauncher', $event)">
+            <ToggleSwitch :model-value="settings.autoCollapseLauncher" tone="sky" size="xs" :disabled="!settings.launcherEnabled" :aria-label="t('paperTodo.settings.autoCollapseLauncher')" @update:model-value="setBoolean('autoCollapseLauncher', $event)" />
           </label>
           <div class="settings-row">
             <span><strong>{{ t('paperTodo.settings.launcherEdge') }}</strong><small>{{ t('paperTodo.settings.launcherEdgeHint') }}</small></span>
@@ -267,7 +268,7 @@ onBeforeUnmount(() => systemThemeQuery?.removeEventListener('change', onSystemTh
         <div class="settings-card">
           <label v-for="field in PAPER_TODO_TOGGLE_GROUPS.appearance" :key="field.key" class="settings-row">
             <span><strong>{{ t(field.label) }}</strong><small>{{ t(field.description) }}</small></span>
-            <input class="paper-switch" type="checkbox" :checked="Boolean(settings[field.key])" @change="setBoolean(field.key, $event)">
+            <ToggleSwitch :model-value="Boolean(settings[field.key])" tone="sky" size="xs" :aria-label="t(field.label)" @update:model-value="setBoolean(field.key, $event)" />
           </label>
         </div>
       </template>
@@ -276,7 +277,7 @@ onBeforeUnmount(() => systemThemeQuery?.removeEventListener('change', onSystemTh
         <div class="settings-card">
           <label v-for="field in PAPER_TODO_TOGGLE_GROUPS.papers" :key="field.key" class="settings-row">
             <span><strong>{{ t(field.label) }}</strong><small>{{ t(field.description) }}</small></span>
-            <input class="paper-switch" type="checkbox" :checked="Boolean(settings[field.key])" @change="setBoolean(field.key, $event)">
+            <ToggleSwitch :model-value="Boolean(settings[field.key])" tone="sky" size="xs" :aria-label="t(field.label)" @update:model-value="setBoolean(field.key, $event)" />
           </label>
           <label class="settings-row"><span><strong>{{ t('paperTodo.settings.externalExtension') }}</strong></span><input class="settings-input" :value="settings.externalExtension" maxlength="11" placeholder=".md" @change="setString('externalExtension', $event)"></label>
         </div>
@@ -404,12 +405,6 @@ onBeforeUnmount(() => systemThemeQuery?.removeEventListener('change', onSystemTh
 .paper-setting-field select,.paper-setting-field input:not([type='range']) { min-height: 38px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; padding: 0 10px; outline: none; color: #0f172a; font-size: 13px; font-weight: 400; }
 .paper-setting-field input[type='range'] { accent-color: #0284c7; }
 .paper-setting-field select:focus,.paper-setting-field input:focus { border-color: #0ea5e9; box-shadow: 0 0 0 3px rgb(14 165 233 / .12); }
-.paper-switch { position: relative; width: 40px; height: 22px; flex: 0 0 40px; cursor: pointer; appearance: none; border-radius: 999px; background: #cbd5e1; transition: background-color 180ms ease; }
-.paper-switch::after { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 999px; background: #fff; box-shadow: 0 1px 2px rgb(15 23 42 / .25); content: ''; transition: transform 180ms ease; }
-.paper-switch:checked { background: #0284c7; }
-.paper-switch:checked::after { transform: translateX(18px); }
-.paper-switch:focus-visible { outline: 2px solid rgb(14 165 233 / .7); outline-offset: 2px; }
-.paper-switch:disabled { cursor: default; opacity: .45; }
 .data-card { padding-bottom: 14px; }
 .data-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px; }
 .data-actions button { display: inline-flex; min-height: 38px; cursor: pointer; align-items: center; gap: 7px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 0 12px; color: #334155; font-size: 12px; font-weight: 600; }
@@ -468,5 +463,5 @@ onBeforeUnmount(() => systemThemeQuery?.removeEventListener('change', onSystemTh
 @media (max-width: 1180px) { .paper-settings-layout { grid-template-columns: 190px minmax(340px,1fr) 260px; } .skin-grid { grid-template-columns: 1fr; } .paper-settings-content { padding-inline: 18px; } }
 @media (max-width: 900px) { .paper-settings-layout { grid-template-columns: 180px minmax(0,1fr); } .paper-settings-preview { grid-column: 1 / -1; border-top: 1px solid #e2e8f0; border-left: 0; } }
 @media (max-width: 720px) { .paper-settings-layout { grid-template-columns: minmax(0,1fr); overflow: visible; } .paper-settings-nav { border-right: 0; border-bottom: 1px solid #e2e8f0; } .paper-settings-tablist { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); } .paper-settings-stats { margin-top: 10px; } .paper-settings-content { padding: 18px 14px; } .paper-settings-preview { grid-column: 1; } .settings-grid-card,.shortcut-grid { grid-template-columns: 1fr; } .desktop-paper-card { flex-wrap: wrap; } }
-@media (prefers-reduced-motion: reduce) { .paper-settings-tablist button,.skin-option,.paper-switch,.paper-switch::after { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .paper-settings-tablist button,.skin-option { transition: none; } }
 </style>

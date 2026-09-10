@@ -7,6 +7,7 @@ import { useI18n } from 'vue-i18n';
 import { pushToast } from '@/composables/useToast';
 import { configStore } from '@/lib/configStore';
 import { getAppPaths, getCustomDataDir, openPathParent, setCustomDataDir } from '@/lib/tauri';
+import ToggleSwitch from '@/components/ToggleSwitch.vue';
 
 defineOptions({ name: 'SettingsPage' });
 
@@ -113,8 +114,7 @@ onMounted(load);
               <span class="mt-1 block text-xs text-slate-400">{{ t('settings.launchAndAutoScanDesc') }}</span>
             </span>
             <span class="relative inline-flex shrink-0 cursor-pointer items-center">
-              <input v-model="config.launch_and_auto_scan" type="checkbox" class="peer sr-only" @change="save">
-              <span class="h-6 w-11 rounded-full bg-slate-200 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-all peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></span>
+              <ToggleSwitch v-model="config.launch_and_auto_scan" tone="blue" :aria-label="t('settings.launchAndAutoScan')" @update:model-value="save" />
             </span>
           </label>
 
@@ -124,8 +124,7 @@ onMounted(load);
               <span class="mt-1 block text-xs text-slate-400">{{ t('settings.launchAndAutoStartFileShareDesc') }}</span>
             </span>
             <span class="relative inline-flex shrink-0 cursor-pointer items-center">
-              <input v-model="config.launch_and_auto_start_file_share" type="checkbox" class="peer sr-only" @change="save">
-              <span class="h-6 w-11 rounded-full bg-slate-200 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-all peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></span>
+              <ToggleSwitch v-model="config.launch_and_auto_start_file_share" tone="blue" :aria-label="t('settings.launchAndAutoStartFileShare')" @update:model-value="save" />
             </span>
           </label>
 
@@ -135,8 +134,7 @@ onMounted(load);
               <span class="mt-1 block text-xs text-slate-400">{{ t('settings.closeToTrayDesc') }}</span>
             </span>
             <span class="relative inline-flex shrink-0 cursor-pointer items-center">
-              <input v-model="config.close_to_tray" type="checkbox" class="peer sr-only" @change="save">
-              <span class="h-6 w-11 rounded-full bg-slate-200 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-all peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></span>
+              <ToggleSwitch v-model="config.close_to_tray" tone="blue" :aria-label="t('settings.closeToTray')" @update:model-value="save" />
             </span>
           </label>
 
@@ -151,14 +149,13 @@ onMounted(load);
               </span>
             </span>
             <span class="relative inline-flex shrink-0 cursor-pointer items-center">
-              <input
+              <ToggleSwitch
                 v-model="config.sync_task_notifications_enabled"
-                type="checkbox"
-                class="peer sr-only"
+                tone="blue"
+                :aria-label="t('settings.syncTaskNotifications')"
                 aria-describedby="settings-sync-task-notifications-desc"
-                @change="save"
-              >
-              <span class="h-6 w-11 rounded-full bg-slate-200 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-all peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white peer-focus-visible:ring-2 peer-focus-visible:ring-blue-500 peer-focus-visible:ring-offset-2"></span>
+                @update:model-value="save"
+              />
             </span>
           </label>
 
@@ -191,8 +188,7 @@ onMounted(load);
               <span class="mt-1 block text-xs text-slate-400">{{ t('settings.update.notifyHelp') }}</span>
             </span>
             <span class="relative inline-flex shrink-0 cursor-pointer items-center">
-              <input v-model="config.notify_on_new_version" type="checkbox" class="peer sr-only" @change="save">
-              <span class="h-6 w-11 rounded-full bg-slate-200 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:border after:border-slate-300 after:bg-white after:transition-all peer-checked:bg-sky-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></span>
+              <ToggleSwitch v-model="config.notify_on_new_version" tone="sky" :aria-label="t('settings.update.notifyToggle')" @update:model-value="save" />
             </span>
           </label>
           <label for="settings-update-server-url" class="block space-y-2">

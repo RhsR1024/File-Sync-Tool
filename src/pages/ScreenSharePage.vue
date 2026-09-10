@@ -34,6 +34,7 @@ import {
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import HintTip from '../components/HintTip.vue';
+import ToggleSwitch from '../components/ToggleSwitch.vue';
 import { LAN_SHARE_STATUS_REFRESH_INTERVAL_MS } from '../lib/lanShareStatus';
 import {
   screenShareListMonitors,
@@ -942,12 +943,7 @@ onUnmounted(() => {
             <div class="ss-card">
               <div class="mb-3 flex items-center justify-between gap-3">
                 <p class="ss-section-label !mb-0">{{ t('tools.screenShare.usernameToggle') }}</p>
-                <label class="ss-toggle">
-                  <input v-model="usernameEnabled" type="checkbox" :disabled="isActive" class="sr-only">
-                  <span class="ss-toggle-track" :class="usernameEnabled ? 'bg-violet-600' : 'bg-slate-300'">
-                    <span class="ss-toggle-thumb" :class="usernameEnabled ? 'translate-x-4' : 'translate-x-0'"></span>
-                  </span>
-                </label>
+                <ToggleSwitch v-model="usernameEnabled" tone="violet" size="sm" :disabled="isActive" :aria-label="t('tools.screenShare.usernameToggle')" />
               </div>
               <input
                 v-if="usernameEnabled"
@@ -965,12 +961,7 @@ onUnmounted(() => {
             <div class="ss-card">
               <div class="mb-3 flex items-center justify-between gap-3">
                 <p class="ss-section-label !mb-0">{{ t('tools.screenShare.passwordToggle') }}</p>
-                <label class="ss-toggle">
-                  <input v-model="passwordEnabled" type="checkbox" :disabled="isActive" class="sr-only">
-                  <span class="ss-toggle-track" :class="passwordEnabled ? 'bg-violet-600' : 'bg-slate-300'">
-                    <span class="ss-toggle-thumb" :class="passwordEnabled ? 'translate-x-4' : 'translate-x-0'"></span>
-                  </span>
-                </label>
+                <ToggleSwitch v-model="passwordEnabled" tone="violet" size="sm" :disabled="isActive" :aria-label="t('tools.screenShare.passwordToggle')" />
               </div>
               <input
                 v-if="passwordEnabled"
@@ -1106,45 +1097,19 @@ onUnmounted(() => {
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label class="ss-toggle-card">
               <span class="flex items-center gap-3">
-                <span class="ss-toggle">
-                  <input v-model="showCursor" type="checkbox" :disabled="isActive" class="sr-only">
-                  <span class="ss-toggle-track" :class="showCursor ? 'bg-violet-600' : 'bg-slate-300'">
-                    <span class="ss-toggle-thumb" :class="showCursor ? 'translate-x-4' : 'translate-x-0'"></span>
-                  </span>
-                </span>
+                <ToggleSwitch v-model="showCursor" tone="violet" size="sm" :disabled="isActive" :aria-label="t('tools.screenShare.showCursor')" />
                 <span class="text-sm font-medium text-slate-700">{{ t('tools.screenShare.showCursor') }}</span>
               </span>
             </label>
             <label class="ss-toggle-card">
               <span class="flex items-center gap-3">
-                <span class="ss-toggle">
-                  <input
-                    v-model="autoStart"
-                    type="checkbox"
-                    :disabled="isActive"
-                    class="sr-only"
-                    @change="saveSettings"
-                  >
-                  <span class="ss-toggle-track" :class="autoStart ? 'bg-violet-600' : 'bg-slate-300'">
-                    <span class="ss-toggle-thumb" :class="autoStart ? 'translate-x-4' : 'translate-x-0'"></span>
-                  </span>
-                </span>
+                <ToggleSwitch v-model="autoStart" tone="violet" size="sm" :disabled="isActive" :aria-label="t('tools.screenShare.autoStart')" @update:model-value="saveSettings" />
                 <span class="text-sm font-medium text-slate-700">{{ t('tools.screenShare.autoStart') }}</span>
               </span>
             </label>
             <label class="ss-toggle-card">
               <span class="flex items-center gap-3">
-                <span class="ss-toggle">
-                  <input
-                    v-model="controlRequestsEnabled"
-                    type="checkbox"
-                    :disabled="isActive"
-                    class="sr-only"
-                  >
-                  <span class="ss-toggle-track" :class="controlRequestsEnabled ? 'bg-emerald-600' : 'bg-slate-300'">
-                    <span class="ss-toggle-thumb" :class="controlRequestsEnabled ? 'translate-x-4' : 'translate-x-0'"></span>
-                  </span>
-                </span>
+                <ToggleSwitch v-model="controlRequestsEnabled" tone="emerald" size="sm" :disabled="isActive" :aria-label="t('tools.screenShare.allowControlRequests')" />
                 <span class="text-sm font-medium text-slate-700">{{ t('tools.screenShare.allowControlRequests') }}</span>
               </span>
             </label>
@@ -1157,17 +1122,7 @@ onUnmounted(() => {
                 class="flex min-w-0 flex-1 items-center gap-3"
                 :class="isActive || !controlRequestsEnabled ? 'cursor-not-allowed' : 'cursor-pointer'"
               >
-                <span class="ss-toggle">
-                  <input
-                    v-model="keyboardControlEnabled"
-                    type="checkbox"
-                    :disabled="isActive || !controlRequestsEnabled"
-                    class="sr-only"
-                  >
-                  <span class="ss-toggle-track" :class="keyboardControlEnabled && controlRequestsEnabled ? 'bg-emerald-600' : 'bg-slate-300'">
-                    <span class="ss-toggle-thumb" :class="keyboardControlEnabled && controlRequestsEnabled ? 'translate-x-4' : 'translate-x-0'"></span>
-                  </span>
-                </span>
+                <ToggleSwitch v-model="keyboardControlEnabled" tone="emerald" size="sm" :disabled="isActive || !controlRequestsEnabled" :aria-label="t('tools.screenShare.allowKeyboardControl')" />
                 <span class="text-sm font-medium text-slate-700">{{ t('tools.screenShare.allowKeyboardControl') }}</span>
               </label>
               <HintTip
@@ -1606,32 +1561,6 @@ onUnmounted(() => {
   cursor: not-allowed;
   background-color: rgb(248 250 252);
   color: rgb(148 163 184);
-}
-
-.ss-toggle {
-  position: relative;
-  display: inline-flex;
-}
-
-.ss-toggle-track {
-  display: block;
-  height: 20px;
-  width: 36px;
-  flex-shrink: 0;
-  border-radius: 9999px;
-  transition: background-color 0.2s ease;
-}
-
-.ss-toggle-thumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  height: 16px;
-  width: 16px;
-  border-radius: 9999px;
-  background: white;
-  box-shadow: 0 1px 3px rgb(15 23 42 / 0.2);
-  transition: transform 0.2s ease;
 }
 
 .ss-range,

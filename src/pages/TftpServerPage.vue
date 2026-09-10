@@ -21,6 +21,7 @@ import {
 import { pushToast } from '@/composables/useToast';
 import { setToolRuntime } from '@/lib/store';
 import { buildTftpCommand, type TftpCommandMode } from '@/lib/tftpCommands';
+import ToggleSwitch from '@/components/ToggleSwitch.vue';
 import {
   screenShareListInterfaces,
   tftpServerGetStatus,
@@ -472,8 +473,7 @@ onUnmounted(() => {
                   <span class="block text-sm font-semibold text-slate-800">{{ t('tools.tftpServer.allowUpload') }}</span>
                   <span class="mt-0.5 block text-xs text-slate-500">WRQ</span>
                 </span>
-                <input v-model="config.allow_upload" type="checkbox" class="peer sr-only" :disabled="status.is_active" />
-                <span class="relative h-6 w-11 shrink-0 rounded-full bg-slate-300 transition-colors peer-checked:bg-cyan-600 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan-500 peer-focus-visible:ring-offset-2 after:absolute after:left-1 after:top-1 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition-transform peer-checked:after:translate-x-5"></span>
+                <ToggleSwitch v-model="config.allow_upload" tone="cyan" :disabled="status.is_active" :aria-label="t('tools.tftpServer.allowUpload')" />
               </label>
               <label class="flex min-h-16 cursor-pointer items-center gap-3 rounded-lg border border-slate-200 px-3.5 py-3 transition-colors hover:bg-slate-50" :class="status.is_active || !config.allow_upload ? 'cursor-not-allowed opacity-60' : ''">
                 <input v-model="config.allow_overwrite" type="checkbox" class="h-4 w-4 cursor-pointer rounded border-slate-300 text-cyan-600 focus:ring-cyan-500 disabled:cursor-not-allowed" :disabled="status.is_active || !config.allow_upload" />

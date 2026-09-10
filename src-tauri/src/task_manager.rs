@@ -292,6 +292,17 @@ impl TaskManager {
         })
     }
 
+    pub fn mark_composite_module_cancelled(
+        &self,
+        parent_id: &str,
+        module_id: &str,
+    ) -> Result<(), String> {
+        self.update_composite_module(parent_id, module_id, |module| {
+            module.status = ModuleTaskStatus::Cancelled;
+            module.error_message = None;
+        })
+    }
+
     pub fn mark_composite_module_failed(
         &self,
         parent_id: &str,
@@ -2631,6 +2642,43 @@ mod tests {
         assert_eq!(batch.modules[2].status, ModuleTaskStatus::Cancelled);
         assert_eq!(detail.summary_status, TaskSummaryStatus::PartialFailed);
         assert!(detail.had_failures);
+    }
+
+    #[test]
+    fn composite_batch_can_cancel_module_before_child_run_is_created() {
+        let manager = TaskManager::new_in_memory();
+        let parent = manager.begin_composite_batch(
+            "task-components",
+            "Components",
+            "2026-09-10",
+            vec![
+                CompositeBatchModuleRequest {
+                    module_id: "module-a".into(),
+                    module_name: "A".into(),
+                    remote_path: r"\\t03\A".into(),
+                    local_path: r"E:\A".into(),
+                },
+                CompositeBatchModuleRequest {
+                    module_id: "module-b".into(),
+                    module_name: "B".into(),
+                    remote_path: r"\\t03\B".into(),
+                    local_path: r"E:\B".into(),
+                },
+            ],
+        );
+        manager
+            .mark_composite_module_no_output(&parent, "module-a")
+            .unwrap();
+        manager
+            .mark_composite_module_cancelled(&parent, "module-b")
+            .unwrap();
+
+        let detail = manager.get_group_detail(&parent).unwrap();
+        let batch = detail.composite_batch.unwrap();
+        assert_eq!(batch.modules[0].status, ModuleTaskStatus::NoOutput);
+        assert_eq!(batch.modules[1].status, ModuleTaskStatus::Cancelled);
+        assert_eq!(detail.summary_status, TaskSummaryStatus::Cancelled);
+        assert!(!detail.had_failures);
     }
 
     #[test]

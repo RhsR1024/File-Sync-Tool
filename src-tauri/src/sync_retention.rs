@@ -128,6 +128,36 @@ fn safe_existing_target(root: &Path, target: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+fn remove_empty_ancestors(root: &Path, removed_target: &Path) -> Result<(), String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("本地包根目录不可访问: {error}"))?;
+    let mut current = removed_target.parent();
+
+    while let Some(directory) = current {
+        if directory == root {
+            break;
+        }
+        if !directory.starts_with(&root) {
+            return Err("待清理父目录不在本地包根目录内".to_string());
+        }
+        match fs::remove_dir(directory) {
+            Ok(()) => current = directory.parent(),
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = directory.parent();
+            }
+            Err(error) => {
+                return Err(format!(
+                    "清理空父目录 {} 失败: {error}",
+                    directory.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn build_preview(
     root: &Path,
     groups: &[TaskGroup],
@@ -279,6 +309,9 @@ fn apply_retention(
             }
             result.removed_packages += 1;
             result.freed_bytes += candidate.bytes;
+            if let Err(error) = remove_empty_ancestors(root, &target) {
+                result.errors.push(error);
+            }
         }
         match manager.clear_task_group(&candidate.task_group_id) {
             Ok(()) => result.removed_records += 1,
@@ -316,13 +349,21 @@ pub fn start_automatic_sync_retention(
                 .await
                 {
                     Ok(Ok(result)) => {
-                        log::info!(
-                            "[sync-retention] removed packages={}, records={}, errors={}",
-                            result.removed_packages,
-                            result.removed_records,
-                            result.errors.len()
-                        );
-                        last_run_date = Some(today);
+                        if result.errors.is_empty() {
+                            log::info!(
+                                "[sync-retention] removed packages={}, records={}",
+                                result.removed_packages,
+                                result.removed_records
+                            );
+                            last_run_date = Some(today);
+                        } else {
+                            log::warn!(
+                                "[sync-retention] cleanup incomplete: removed packages={}, records={}, errors={}",
+                                result.removed_packages,
+                                result.removed_records,
+                                result.errors.len()
+                            );
+                        }
                     }
                     Ok(Err(error)) => {
                         log::warn!("[sync-retention] automatic cleanup failed: {error}")
@@ -348,5 +389,36 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         assert!(safe_existing_target(root.path(), root.path()).is_err());
         assert!(safe_existing_target(root.path(), outside.path()).is_err());
+    }
+
+    #[test]
+    fn empty_parent_directories_are_removed_without_removing_root() {
+        let root = tempfile::tempdir().unwrap();
+        let date_dir = root.path().join("260901");
+        let package_dir = date_dir.join("C1788588453133140433");
+        fs::create_dir_all(&package_dir).unwrap();
+        let target = safe_existing_target(root.path(), &package_dir).unwrap();
+
+        fs::remove_dir_all(&target).unwrap();
+        remove_empty_ancestors(root.path(), &target).unwrap();
+
+        assert!(!date_dir.exists());
+        assert!(root.path().exists());
+    }
+
+    #[test]
+    fn ancestor_cleanup_stops_at_the_first_non_empty_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let date_dir = root.path().join("260901");
+        let package_dir = date_dir.join("C1788588453133140433");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(date_dir.join("keep.txt"), b"keep").unwrap();
+        let target = safe_existing_target(root.path(), &package_dir).unwrap();
+
+        fs::remove_dir_all(&target).unwrap();
+        remove_empty_ancestors(root.path(), &target).unwrap();
+
+        assert!(date_dir.exists());
+        assert!(date_dir.join("keep.txt").exists());
     }
 }

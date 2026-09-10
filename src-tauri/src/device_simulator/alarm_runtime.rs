@@ -483,25 +483,21 @@ impl AlarmRuntime {
             return Ok(None);
         }
 
-        let timestamp_ms = now_ms();
         let learned = self.learned_subscriptions.read();
         if let Some(id) = requested_id {
-            let endpoint = learned.get(id).ok_or_else(|| {
+            learned.get(id).ok_or_else(|| {
                 runtime_error(
                     "device_simulator.alarm.subscription_unknown",
                     format!("alarm subscription '{id}' is not available in this session"),
                 )
             })?;
-            if endpoint.is_expired_at(timestamp_ms) {
-                return Err(runtime_error(
-                    "device_simulator.alarm.subscription_expired",
-                    format!("alarm subscription '{id}' has expired"),
-                ));
-            }
+            // Expiry is advisory for an explicitly selected target. UMS may
+            // still accept alarms after its advertised lifetime has elapsed,
+            // so let the real delivery attempt determine success or failure.
             return Ok(Some(format!("{LEARNED_DESTINATION_PREFIX}{id}")));
         }
 
-        let active = learned.active_entries(timestamp_ms);
+        let active = learned.active_entries(now_ms());
         match active.as_slice() {
             [] => Ok(None),
             [endpoint] => Ok(Some(format!(
@@ -873,15 +869,6 @@ impl AlarmSender for HttpAlarmSender {
                             "alarm subscription '{subscription_id}' is no longer available"
                         ))
                 })?;
-                if endpoint.is_expired_at(now_ms()) {
-                    return Err(AlarmSendError::new(
-                        "device_simulator.alarm.subscription_expired",
-                        false,
-                    )
-                    .with_details(format!(
-                        "alarm subscription '{subscription_id}' expired before dispatch"
-                    )));
-                }
                 let configured = self.destinations.values().next().ok_or_else(|| {
                     AlarmSendError::new("device_simulator.alarm.destination_unknown", false)
                         .with_details("no configured destination is available")

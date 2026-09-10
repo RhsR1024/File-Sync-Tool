@@ -158,3 +158,13 @@ test('composite task modules expose inheritable per-module overrides', () => {
   assert.match(editorSource, /module\.post_copy_execution_order/);
   assert.match(editorSource, /<details[\s\S]*v-for="\(module, moduleIndex\) in taskForm\.modules"/);
 });
+
+test('task rule value follows the selected rule type', () => {
+  assert.match(editorSource, /const DEFAULT_DATE_MATCH_VALUE = '%y%m%d'/);
+  assert.match(editorSource, /function handleTaskRuleTypeChange\(event: Event\)/);
+  assert.match(editorSource, /taskForm\.value\.rule\.value = type === 'DateMatch' \? DEFAULT_DATE_MATCH_VALUE : ''/);
+  assert.match(editorSource, /:disabled="!isTaskRuleValueEditable"/);
+  assert.match(editorSource, /taskRuleVersionRequired/);
+  assert.match(editorSource, /:disabled="Boolean\(taskRuleValueError\) \|\| parsedTaskModulePaths\.length === 0"/);
+  assert.match(editorSource, /focus-visible:ring-offset-1/);
+});

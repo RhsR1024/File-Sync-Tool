@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onActivated } from 'vue';
-import { RefreshCw, Clock, Activity, Copy, AlertTriangle, FilePlus2, Gauge, ListChecks, Play, Search, Square, Trash2 } from 'lucide-vue-next';
+import { RefreshCw, Clock, Activity, Copy, AlertTriangle, ChevronDown, FilePlus2, Gauge, ListChecks, Play, Search, Square, Trash2 } from 'lucide-vue-next';
 import Empty from '@/components/Empty.vue';
 import LoadingSkeleton from '@/components/LoadingSkeleton.vue';
 import ManualCopyModal from '@/components/ManualCopyModal.vue';
 import TaskGroupsTable from '@/components/tasks/TaskGroupsTable.vue';
 import TaskGroupDetailPanel from '@/components/tasks/TaskGroupDetailPanel.vue';
 import AppConfirmDialog from '@/components/AppConfirmDialog.vue';
-import { applySyncRetention, getConfig, previewSyncRetention, type AppConfig, previewTemporaryCopy, queueTemporaryCopy, type ManualCopyPreview, type SyncRetentionPreview, updateSyncConfig } from '@/lib/tauri';
-import { buildSyncPatch } from '@/lib/configDomains';
+import { applySyncRetention, getConfig, previewSyncRetention, previewTemporaryCopy, queueTemporaryCopy, type ManualCopyPreview, type SyncRetentionPreview } from '@/lib/tauri';
 import {
   clearTaskGroup,
   clearTaskGroups,
@@ -30,11 +29,9 @@ defineOptions({
 });
 
 const { t } = useI18n();
-const config = ref<AppConfig | null>(null);
 const isManualCopyModalOpen = ref(false);
 const manualCopyTriggerRef = ref<HTMLButtonElement | null>(null);
 const retentionDays = ref(5);
-const retentionEnabled = ref(true);
 const retentionPreview = ref<SyncRetentionPreview | null>(null);
 const retentionBusy = ref(false);
 const retentionConfirmOpen = ref(false);
@@ -315,6 +312,10 @@ function formatRetentionBytes(bytes: number) {
 }
 
 async function handlePreviewRetention() {
+  const requestedDays = Number(retentionDays.value);
+  retentionDays.value = Number.isFinite(requestedDays)
+    ? Math.min(365, Math.max(1, Math.round(requestedDays)))
+    : 5;
   retentionBusy.value = true;
   try {
     retentionPreview.value = await previewSyncRetention(retentionDays.value);
@@ -325,13 +326,13 @@ async function handlePreviewRetention() {
   }
 }
 
-async function saveRetentionSettings() {
-  if (!config.value) return;
-  config.value.sync_retention_enabled = retentionEnabled.value;
-  config.value.sync_retention_days = Math.min(365, Math.max(1, Math.round(retentionDays.value)));
-  retentionDays.value = config.value.sync_retention_days;
-  await updateSyncConfig(buildSyncPatch(config.value));
-  notify(t('console.retentionSaved'), 'success');
+async function toggleRetentionPreview() {
+  if (retentionPreview.value) {
+    retentionConfirmOpen.value = false;
+    retentionPreview.value = null;
+    return;
+  }
+  await handlePreviewRetention();
 }
 
 async function handleApplyRetention() {
@@ -368,9 +369,8 @@ function toggleScheduler() {
 
 async function loadConfig() {
   try {
-    config.value = await getConfig();
-    retentionDays.value = config.value.sync_retention_days;
-    retentionEnabled.value = config.value.sync_retention_enabled;
+    const loadedConfig = await getConfig();
+    retentionDays.value = loadedConfig.sync_retention_days;
   } catch (e) {
     addLog(t('console.failedLoadConfig', { error: e }), 'error');
   }
@@ -532,30 +532,26 @@ function handleManualCopyClose() {
             <Trash2 class="h-4 w-4" aria-hidden="true" />
             {{ t('console.clearAllGroups') }}
           </button>
-          <button type="button" class="flex min-h-11 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:opacity-50" :disabled="retentionBusy" @click="handlePreviewRetention">
-            <Trash2 class="h-4 w-4" />
+          <button type="button" class="flex min-h-11 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:opacity-50 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2" :disabled="retentionBusy" :aria-expanded="Boolean(retentionPreview)" aria-controls="sync-retention-panel" @click="toggleRetentionPreview">
+            <Trash2 class="h-4 w-4" aria-hidden="true" />
             {{ t('console.retentionCleanup') }}
+            <ChevronDown class="h-4 w-4 transition-transform motion-reduce:transition-none" :class="retentionPreview ? 'rotate-180' : ''" aria-hidden="true" />
           </button>
         </div>
       </div>
 
-      <div v-if="retentionPreview" class="border-b border-blue-100 bg-blue-50/70 px-4 py-3">
+      <div v-if="retentionPreview" id="sync-retention-panel" class="border-b border-blue-100 bg-blue-50/70 px-4 py-3">
         <div class="flex flex-wrap items-center gap-3">
-          <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
-            <input v-model="retentionEnabled" type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
-            {{ t('console.retentionAuto') }}
-          </label>
           <label class="inline-flex items-center gap-2 text-sm text-slate-700">
             {{ t('console.retentionOlderThan') }}
-            <input v-model.number="retentionDays" type="number" min="1" max="365" class="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center tabular-nums outline-none focus:ring-2 focus:ring-blue-500/20" />
+            <input v-model.number="retentionDays" type="number" min="1" max="365" class="min-h-10 w-20 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center tabular-nums outline-none focus:ring-2 focus:ring-blue-500/20" aria-describedby="sync-retention-protection-hint" @change="handlePreviewRetention" />
             {{ t('console.retentionDays') }}
           </label>
-          <button type="button" class="rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-100" @click="saveRetentionSettings">{{ t('console.retentionSave') }}</button>
           <span class="text-sm text-slate-600">{{ t('console.retentionPreviewSummary', { packages: retentionPreview.eligiblePackages, records: retentionPreview.eligibleRecords, size: formatRetentionBytes(retentionPreview.totalBytes) }) }}</span>
-          <button type="button" :disabled="retentionPreview.eligibleRecords === 0 || retentionBusy" class="ml-auto rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-40" @click="retentionConfirmOpen = true">{{ t('console.retentionApply') }}</button>
-          <button type="button" class="rounded-lg px-3 py-1.5 text-sm text-slate-600 hover:bg-white" @click="retentionPreview = null">{{ t('common.close') }}</button>
+          <button type="button" :disabled="retentionPreview.eligibleRecords === 0 || retentionBusy" class="ml-auto min-h-10 rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-rose-700 disabled:opacity-40 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/50 focus-visible:ring-offset-2" @click="retentionConfirmOpen = true">{{ t('console.retentionApply') }}</button>
+          <button type="button" class="min-h-10 rounded-lg px-3 py-1.5 text-sm text-slate-600 transition-colors hover:bg-white motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50" @click="retentionPreview = null">{{ t('common.close') }}</button>
         </div>
-        <p class="mt-2 text-xs text-slate-500">{{ t('console.retentionProtectionHint') }}</p>
+        <p id="sync-retention-protection-hint" class="mt-2 text-xs text-slate-500">{{ t('console.retentionProtectionHint') }}</p>
       </div>
 
       <div class="border-b border-slate-200 bg-white px-4 py-3">
