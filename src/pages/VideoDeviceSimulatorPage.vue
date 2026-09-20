@@ -49,6 +49,7 @@ import {
   isDeviceSimulatorRuntimeActive,
   type AddressConflictAssessment,
   type AlarmJobRequest,
+  type AlarmSubscriptionRecord,
   type ConflictEvidence,
   type MediaThemeSummary,
   type PlatformAccessMode,
@@ -57,6 +58,7 @@ import {
   type SimulatorLogLevel,
 } from '@/lib/deviceSimulator';
 import { openDirectory, openPathParent, saveTextFile } from '@/lib/tauri';
+import { indexSubscriptionsByDevice, reconcileSubscriptionSelection } from '@/lib/deviceSimulatorSubscriptions';
 
 const { t, te } = useI18n();
 const router = useRouter();
@@ -184,9 +186,10 @@ const alarm = reactive<AlarmJobRequest>({
   recovery_delay_secs: null,
   image_variant: null,
   user_image_id: null,
+  target_subscription_ids_by_device: {},
   target_subscription_id: null,
 });
-const selectedAlarmSubscriptionId = ref<string | null>(null);
+const selectedAlarmSubscriptionIdsByDevice = reactive<Record<string, string[]>>({});
 
 const fieldClass = 'h-9 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-800 shadow-sm transition-colors placeholder:text-slate-400 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/25 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500';
 const buttonFocus = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/45 focus-visible:ring-offset-2';
@@ -323,16 +326,42 @@ const alarmErrorSummary = computed(() => {
 
 const subscription = computed(() => simulator.alarmSubscription.value);
 const subscriptionRecords = computed(() => subscription.value?.subscriptions ?? []);
+const subscriptionsByDevice = computed(() => indexSubscriptionsByDevice(subscriptionRecords.value));
 const activeSubscriptionRecords = computed(() => subscriptionRecords.value.filter(
   (record) => !subscriptionRecordExpired(record),
 ));
-const selectedAlarmSubscription = computed(() => subscriptionRecords.value.find(
-  (record) => record.id === selectedAlarmSubscriptionId.value,
-) ?? null);
-const selectedAlarmSubscriptionAvailable = computed(() => selectedAlarmSubscription.value !== null);
-const subscriptionSelectionRequired = computed(() => Boolean(
-  subscription.value?.selection_required && !selectedAlarmSubscriptionAvailable.value,
+const alarmTargetDevices = computed(() => simulator.preview.value?.devices.filter(
+  (device) => device.profile_id === selectedAlarmProfileId.value,
+) ?? []);
+interface AlarmSubscriptionTargetGroup {
+  device_id: string;
+  device_ip: string;
+  records: AlarmSubscriptionRecord[];
+}
+const subscriptionTargetGroups = computed<AlarmSubscriptionTargetGroup[]>(() => alarmTargetDevices.value.map(
+  (device) => ({
+    device_id: device.device_id,
+    device_ip: device.ip,
+    records: subscriptionsByDevice.value.get(device.device_id) ?? [],
+  }),
 ));
+const selectedAlarmSubscriptionCount = computed(() => subscriptionTargetGroups.value.reduce(
+  (count, group) => {
+    const availableIds = new Set(group.records.map((record) => record.id));
+    return count + selectedSubscriptionIds(group.device_id).filter((id) => availableIds.has(id)).length;
+  },
+  0,
+));
+const subscriptionSelectionRequired = computed(() => {
+  if (subscription.value?.overridden) return false;
+  return subscriptionTargetGroups.value.some((group) => {
+    const active = group.records.filter((record) => !subscriptionRecordExpired(record));
+    if (active.length <= 1) return false;
+    const availableIds = new Set(group.records.map((record) => record.id));
+    return !(selectedAlarmSubscriptionIdsByDevice[group.device_id] ?? [])
+      .some((id) => availableIds.has(id));
+  });
+});
 const subscriptionExpired = computed(() => {
   const current = subscription.value;
   if (subscriptionRecords.value.length > 0) return activeSubscriptionRecords.value.length === 0;
@@ -404,6 +433,47 @@ function subscriptionRecordLifetime(record: (typeof subscriptionRecords.value)[n
   const remaining = Math.max(0, Math.round((record.expires_at_ms - now.value) / 1_000));
   return t('deviceSimulator.subscription.remaining', { seconds: record.duration_secs, remaining });
 }
+function selectedSubscriptionIds(deviceId: string) {
+  return selectedAlarmSubscriptionIdsByDevice[deviceId] ?? [];
+}
+function subscriptionRecordSelected(deviceId: string, subscriptionId: string) {
+  return selectedSubscriptionIds(deviceId).includes(subscriptionId);
+}
+function updateAlarmSubscriptionSelection(deviceId: string, subscriptionId: string, event: Event) {
+  const selected = new Set(selectedSubscriptionIds(deviceId));
+  if ((event.currentTarget as HTMLInputElement).checked) selected.add(subscriptionId);
+  else selected.delete(subscriptionId);
+  selectedAlarmSubscriptionIdsByDevice[deviceId] = [...selected];
+}
+function activeGroupSubscriptionIds(group: AlarmSubscriptionTargetGroup) {
+  return group.records
+    .filter((record) => !subscriptionRecordExpired(record))
+    .map((record) => record.id);
+}
+function allActiveGroupSubscriptionsSelected(group: AlarmSubscriptionTargetGroup) {
+  const activeIds = activeGroupSubscriptionIds(group);
+  const selected = new Set(selectedSubscriptionIds(group.device_id));
+  return activeIds.length > 0 && activeIds.every((id) => selected.has(id));
+}
+function subscriptionRecordIsAutomatic(
+  group: AlarmSubscriptionTargetGroup,
+  record: AlarmSubscriptionRecord,
+) {
+  const activeIds = activeGroupSubscriptionIds(group);
+  return activeIds.length === 1 && activeIds[0] === record.id;
+}
+function toggleAllActiveGroupSubscriptions(group: AlarmSubscriptionTargetGroup) {
+  const activeIds = activeGroupSubscriptionIds(group);
+  const selected = new Set(selectedSubscriptionIds(group.device_id));
+  if (activeIds.every((id) => selected.has(id))) activeIds.forEach((id) => selected.delete(id));
+  else activeIds.forEach((id) => selected.add(id));
+  selectedAlarmSubscriptionIdsByDevice[group.device_id] = [...selected];
+}
+function clearAlarmSubscriptionSelections() {
+  Object.keys(selectedAlarmSubscriptionIdsByDevice).forEach((deviceId) => {
+    delete selectedAlarmSubscriptionIdsByDevice[deviceId];
+  });
+}
 
 watch(
   () => simulator.request.groups.map((group) => group.profile_id).join(','),
@@ -419,15 +489,28 @@ watch(alarmProfileOptions, (profiles) => {
   }
 }, { immediate: true });
 
-watch(subscriptionRecords, (records) => {
-  if (!records.some((record) => record.id === selectedAlarmSubscriptionId.value)) {
-    selectedAlarmSubscriptionId.value = null;
-  }
-  if (subscription.value?.overridden) selectedAlarmSubscriptionId.value = null;
-});
+watch(
+  [subscriptionsByDevice, alarmTargetDevices, () => now.value, () => subscription.value?.overridden],
+  ([recordsByDevice, devices, currentTime, overridden]) => {
+    if (overridden) {
+      clearAlarmSubscriptionSelections();
+      return;
+    }
+    const knownDeviceIds = new Set(simulator.preview.value?.devices.map((device) => device.device_id) ?? []);
+    Object.keys(selectedAlarmSubscriptionIdsByDevice).forEach((deviceId) => {
+      if (!knownDeviceIds.has(deviceId)) delete selectedAlarmSubscriptionIdsByDevice[deviceId];
+    });
+    devices.forEach((device) => {
+      const previous = selectedSubscriptionIds(device.device_id);
+      const selected = reconcileSubscriptionSelection(recordsByDevice.get(device.device_id) ?? [], previous, currentTime);
+      if (selected !== previous) selectedAlarmSubscriptionIdsByDevice[device.device_id] = selected;
+    });
+  },
+  { immediate: true },
+);
 
 watch(() => simulator.status.value.session_id, () => {
-  selectedAlarmSubscriptionId.value = null;
+  clearAlarmSubscriptionSelections();
 });
 
 watch(selectedAlarmProfileId, () => {
@@ -837,9 +920,12 @@ function alarmRequest(): AlarmJobRequest {
     recovery_delay_secs: Number.isFinite(recoveryDelay) && recoveryDelay >= 0
       ? recoveryDelay
       : null,
-    target_subscription_id: selectedAlarmSubscriptionAvailable.value
-      ? selectedAlarmSubscriptionId.value
-      : null,
+    target_subscription_ids_by_device: Object.fromEntries(
+      alarm.target_device_ids
+        .map((deviceId): [string, string[]] => [deviceId, [...selectedSubscriptionIds(deviceId)]])
+        .filter(([, ids]) => ids.length > 0),
+    ),
+    target_subscription_id: null,
   };
 }
 
@@ -1288,7 +1374,7 @@ function revealPreflightDetails() {
                         <dt class="font-semibold" :class="subscriptionTone.body">{{ t('deviceSimulator.subscription.destination') }}</dt>
                         <dd class="min-w-0 break-all font-mono" :class="subscriptionTone.body">{{ subscription.destinations.join('、') || '—' }}</dd>
                       </div>
-                      <div v-if="subscription.learned" class="flex flex-wrap gap-x-2">
+                      <div v-if="subscription.host || subscription.port" class="flex flex-wrap gap-x-2">
                         <dt class="font-semibold" :class="subscriptionTone.body">{{ t('deviceSimulator.subscription.advertised') }}</dt>
                         <dd class="min-w-0 break-all font-mono" :class="subscriptionTone.body">{{ [subscription.host, subscription.port].filter(Boolean).join(':') }}</dd>
                       </div>
@@ -1301,41 +1387,38 @@ function revealPreflightDetails() {
                 </div>
               </div>
 
-              <fieldset v-if="subscriptionRecords.length > 0" class="mt-5 rounded-xl border border-slate-200 bg-white p-4" aria-describedby="alarm-subscription-selection-hint">
+              <fieldset v-if="subscriptionTargetGroups.length > 0" class="mt-5 rounded-xl border border-slate-200 bg-white p-4" aria-describedby="alarm-subscription-selection-hint">
                 <legend class="px-1 text-sm font-bold text-slate-900">{{ t('deviceSimulator.subscription.targetTitle') }}</legend>
                 <p id="alarm-subscription-selection-hint" class="mt-1 text-xs leading-5 text-slate-600">
                   {{ subscriptionSelectionRequired ? t('deviceSimulator.subscription.selectionRequired') : t('deviceSimulator.subscription.targetDescription') }}
                 </p>
                 <div class="mt-3 flex items-center justify-between gap-3 text-xs text-slate-500">
                   <span>{{ subscriptionCountLabel }}</span>
-                  <span v-if="selectedAlarmSubscriptionAvailable" class="font-semibold text-emerald-700">{{ t('deviceSimulator.subscription.selected') }}</span>
+                  <span v-if="selectedAlarmSubscriptionCount > 0" class="font-semibold text-emerald-700">{{ t('deviceSimulator.subscription.selectedCount', { count: selectedAlarmSubscriptionCount }) }}</span>
                 </div>
-                <div class="mt-2 max-h-64 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50" role="radiogroup" :aria-label="t('deviceSimulator.subscription.targetTitle')">
-                  <label
-                    v-for="record in subscriptionRecords"
-                    :key="record.id"
-                    class="flex min-h-11 cursor-pointer items-start gap-3 border-b border-slate-200 px-3 py-2.5 last:border-b-0 transition-colors hover:bg-white"
-                    :class="selectedAlarmSubscriptionId === record.id ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : ''"
-                  >
-                    <input
-                      v-model="selectedAlarmSubscriptionId"
-                      type="radio"
-                      name="alarm-subscription-target"
-                      :value="record.id"
-                      :disabled="Boolean(subscription?.overridden)"
-                      class="mt-1 h-4 w-4 shrink-0 border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45"
-                    >
-                    <span class="min-w-0 flex-1">
-                      <span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-slate-800">
-                        <span class="font-mono">{{ subscriptionEndpointLabel(record) }}</span>
-                        <span v-if="subscriptionRecordExpired(record)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-bold text-amber-800">{{ t('deviceSimulator.subscription.expired') }}</span>
-                      </span>
-                      <span class="mt-1 block text-[11px] leading-4 text-slate-500">
-                        {{ t('deviceSimulator.subscription.source') }}: <span class="font-mono">{{ record.source_ip }}</span>
-                        <span class="mx-1" aria-hidden="true">/</span>{{ subscriptionRecordLifetime(record) }}
-                      </span>
-                    </span>
-                  </label>
+                <div class="mt-2 max-h-80 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+                  <section v-for="group in subscriptionTargetGroups" :key="group.device_id" class="overflow-hidden rounded-lg border border-slate-200 bg-white" :aria-labelledby="`subscription-device-${group.device_id}`">
+                    <div class="flex min-h-11 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
+                      <div class="min-w-0">
+                        <h4 :id="`subscription-device-${group.device_id}`" class="font-mono text-xs font-bold text-slate-900">{{ group.device_ip }}</h4>
+                        <p class="mt-0.5 text-[11px] text-slate-500">{{ t('deviceSimulator.subscription.deviceSubscriptionCount', { count: group.records.length }) }}</p>
+                      </div>
+                      <button v-if="activeGroupSubscriptionIds(group).length > 1" type="button" class="min-h-11 cursor-pointer rounded-lg px-3 text-xs font-bold text-sky-700 transition-colors hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50" :class="buttonFocus" :disabled="Boolean(subscription?.overridden)" @click="toggleAllActiveGroupSubscriptions(group)">
+                        {{ t(allActiveGroupSubscriptionsSelected(group) ? 'deviceSimulator.subscription.clearAll' : 'deviceSimulator.subscription.selectAll') }}
+                      </button>
+                    </div>
+                    <p v-if="group.records.length === 0" class="px-3 py-3 text-xs leading-5 text-amber-800">{{ t('deviceSimulator.subscription.noDeviceSubscription') }}</p>
+                    <template v-else>
+                      <label v-for="record in group.records" :key="record.id" class="flex min-h-11 cursor-pointer items-start gap-3 border-b border-slate-100 px-3 py-2.5 last:border-b-0 transition-colors hover:bg-sky-50" :class="subscriptionRecordSelected(group.device_id, record.id) ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : ''">
+                        <input type="checkbox" :checked="subscriptionRecordSelected(group.device_id, record.id)" :disabled="Boolean(subscription?.overridden) || subscriptionRecordIsAutomatic(group, record)" class="mt-1 h-4 w-4 shrink-0 rounded border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45" @change="updateAlarmSubscriptionSelection(group.device_id, record.id, $event)">
+                        <span class="min-w-0 flex-1">
+                          <span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-slate-800"><span class="font-mono">{{ subscriptionEndpointLabel(record) }}</span><span v-if="subscriptionRecordExpired(record)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-bold text-amber-800">{{ t('deviceSimulator.subscription.expired') }}</span></span>
+                          <span class="mt-1 block text-[11px] leading-4 text-slate-500">{{ t('deviceSimulator.subscription.source') }}: <span class="font-mono">{{ record.source_ip }}</span><span class="mx-1" aria-hidden="true">/</span>{{ subscriptionRecordLifetime(record) }}</span>
+                        </span>
+                      </label>
+                    </template>
+                    <p v-if="group.records.some((record) => subscriptionRecordIsAutomatic(group, record))" class="border-t border-emerald-100 bg-emerald-50 px-3 py-1.5 text-[11px] font-semibold text-emerald-700">{{ t('deviceSimulator.subscription.autoSelected') }}</p>
+                  </section>
                 </div>
               </fieldset>
               <p v-else-if="subscription && !subscription.overridden" class="mt-5 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-medium leading-5 text-amber-900" role="status">
@@ -1662,37 +1745,34 @@ function revealPreflightDetails() {
                 </div>
               </div>
             </fieldset>
-            <fieldset v-if="subscriptionRecords.length > 0" class="mt-5 border-t border-slate-200 pt-4" aria-describedby="alarm-send-target-hint">
+            <fieldset v-if="subscriptionTargetGroups.length > 0" class="mt-5 border-t border-slate-200 pt-4" aria-describedby="alarm-send-target-hint">
               <legend class="pr-2 text-sm font-bold text-slate-900">{{ t('deviceSimulator.subscription.targetTitle') }}</legend>
               <p id="alarm-send-target-hint" class="mt-1 text-xs leading-5" :class="subscriptionSelectionRequired ? 'text-rose-700' : 'text-slate-600'">
                 {{ subscriptionSelectionRequired ? t('deviceSimulator.subscription.selectionRequired') : t('deviceSimulator.subscription.targetDescription') }}
               </p>
-              <div class="mt-3 max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50" role="radiogroup" :aria-label="t('deviceSimulator.subscription.targetTitle')">
-                <label
-                  v-for="record in subscriptionRecords"
-                  :key="record.id"
-                  class="flex min-h-11 cursor-pointer items-start gap-3 border-b border-slate-200 px-3 py-2.5 last:border-b-0 transition-colors hover:bg-white"
-                  :class="selectedAlarmSubscriptionId === record.id ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : ''"
-                >
-                  <input
-                    v-model="selectedAlarmSubscriptionId"
-                    type="radio"
-                    name="alarm-send-subscription-target"
-                    :value="record.id"
-                    :disabled="Boolean(subscription?.overridden)"
-                    class="mt-1 h-4 w-4 shrink-0 border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45"
-                  >
-                  <span class="min-w-0 flex-1">
-                    <span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-slate-800">
-                      <span class="font-mono">{{ subscriptionEndpointLabel(record) }}</span>
-                      <span v-if="subscriptionRecordExpired(record)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-bold text-amber-800">{{ t('deviceSimulator.subscription.expired') }}</span>
-                    </span>
-                    <span class="mt-1 block text-[11px] leading-4 text-slate-500">
-                      {{ t('deviceSimulator.subscription.source') }}: <span class="font-mono">{{ record.source_ip }}</span>
-                      <span class="mx-1" aria-hidden="true">/</span>{{ subscriptionRecordLifetime(record) }}
-                    </span>
-                  </span>
-                </label>
+              <div class="mt-3 max-h-72 space-y-2 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+                <section v-for="group in subscriptionTargetGroups" :key="group.device_id" class="overflow-hidden rounded-lg border border-slate-200 bg-white" :aria-labelledby="`alarm-send-device-${group.device_id}`">
+                  <div class="flex min-h-11 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
+                    <div class="min-w-0">
+                      <h4 :id="`alarm-send-device-${group.device_id}`" class="font-mono text-xs font-bold text-slate-900">{{ group.device_ip }}</h4>
+                      <p class="mt-0.5 text-[11px] text-slate-500">{{ t('deviceSimulator.subscription.deviceSubscriptionCount', { count: group.records.length }) }}</p>
+                    </div>
+                    <button v-if="activeGroupSubscriptionIds(group).length > 1" type="button" class="min-h-11 cursor-pointer rounded-lg px-3 text-xs font-bold text-sky-700 transition-colors hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50" :class="buttonFocus" :disabled="Boolean(subscription?.overridden) || alarmConfigurationLocked" @click="toggleAllActiveGroupSubscriptions(group)">
+                      {{ t(allActiveGroupSubscriptionsSelected(group) ? 'deviceSimulator.subscription.clearAll' : 'deviceSimulator.subscription.selectAll') }}
+                    </button>
+                  </div>
+                  <p v-if="group.records.length === 0" class="px-3 py-3 text-xs leading-5 text-amber-800">{{ t('deviceSimulator.subscription.noDeviceSubscription') }}</p>
+                  <template v-else>
+                    <label v-for="record in group.records" :key="record.id" class="flex min-h-11 cursor-pointer items-start gap-3 border-b border-slate-100 px-3 py-2.5 last:border-b-0 transition-colors hover:bg-sky-50" :class="subscriptionRecordSelected(group.device_id, record.id) ? 'bg-sky-50 ring-1 ring-inset ring-sky-300' : ''">
+                      <input type="checkbox" :checked="subscriptionRecordSelected(group.device_id, record.id)" :disabled="Boolean(subscription?.overridden) || alarmConfigurationLocked || subscriptionRecordIsAutomatic(group, record)" class="mt-1 h-4 w-4 shrink-0 rounded border-slate-300 text-sky-600 focus-visible:ring-2 focus-visible:ring-sky-500/45" @change="updateAlarmSubscriptionSelection(group.device_id, record.id, $event)">
+                      <span class="min-w-0 flex-1">
+                        <span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-slate-800"><span class="font-mono">{{ subscriptionEndpointLabel(record) }}</span><span v-if="subscriptionRecordExpired(record)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-bold text-amber-800">{{ t('deviceSimulator.subscription.expired') }}</span></span>
+                        <span class="mt-1 block text-[11px] leading-4 text-slate-500">{{ t('deviceSimulator.subscription.source') }}: <span class="font-mono">{{ record.source_ip }}</span><span class="mx-1" aria-hidden="true">/</span>{{ subscriptionRecordLifetime(record) }}</span>
+                      </span>
+                    </label>
+                  </template>
+                  <p v-if="group.records.some((record) => subscriptionRecordIsAutomatic(group, record))" class="border-t border-emerald-100 bg-emerald-50 px-3 py-1.5 text-[11px] font-semibold text-emerald-700">{{ t('deviceSimulator.subscription.autoSelected') }}</p>
+                </section>
               </div>
             </fieldset>
             <p v-else-if="subscription && !subscription.overridden" class="mt-5 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-medium leading-5 text-amber-900" role="status">

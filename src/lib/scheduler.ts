@@ -1,127 +1,121 @@
 import { appStore, addLog } from './store';
-import { scanNow, getConfig, type ScanResult } from './tauri';
+import { scanNow, getConfig } from './tauri';
 import { i18n } from '../i18n';
 
-// Helper to access translation function outside components
-const t = (key: string, args?: any) => {
-    return i18n.global.t(key, args);
-};
-
-let timer: ReturnType<typeof setInterval> | null = null;
-
-/**
- * How long to wait before retrying a cycle that stood aside for the copy queue.
- * Short enough that postponed candidates do not sit until the next interval tick,
- * long enough that a busy queue is not polled aggressively.
- */
+const t = (key: string, args?: Record<string, unknown>) => i18n.global.t(key, args ?? {});
 const DEFERRED_SCAN_RETRY_MS = 60 * 1000;
-let deferredRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
+let scanInFlight: Promise<void> | null = null;
+let intervalMs = DEFERRED_SCAN_RETRY_MS;
+let startRevision = 0;
+let startPending = false;
 
-function clearDeferredRetry() {
-    if (deferredRetryTimer) {
-        clearTimeout(deferredRetryTimer);
-        deferredRetryTimer = null;
-    }
+function clearTimer() {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    appStore.nextRunAt = null;
 }
 
-/** Re-run a postponed cycle once the copy queue has had time to drain. */
-function scheduleDeferredRetry() {
-    if (deferredRetryTimer) return;
-    deferredRetryTimer = setTimeout(() => {
-        deferredRetryTimer = null;
-        if (!appStore.isRunning) return;
+function scheduleNextScan(delayMs: number) {
+    clearTimer();
+    if (!appStore.isRunning || scanInFlight) return;
+    appStore.nextRunAt = Date.now() + delayMs;
+    timer = setTimeout(() => {
+        timer = null;
         void executeScan();
-    }, DEFERRED_SCAN_RETRY_MS);
+    }, delayMs);
 }
 
-export async function executeScan() {
-    addLog(t('console.running'), 'info');
-    try {
-        const result: ScanResult = await scanNow();
-        addLog(t('console.scanComplete', { scanned: result.scanned_paths, found: result.found_folders.length, copied: result.copied_folders.length }), 'success');
+/** Scheduled, deferred and manual scans share one in-flight operation. */
+export function executeScan(): Promise<void> {
+    if (scanInFlight) return scanInFlight;
+    clearTimer();
+    appStore.scanInProgress = true;
+    appStore.scanStartedAt = Date.now();
+    appStore.scanWaitingForQueue = false;
+    appStore.lastScanError = '';
+    addLog(t('console.scanning'), 'info');
 
-        if (result.found_folders.length > 0) {
+    let retryDeferred = false;
+    let completedScan = false;
+    // The microtask also ensures the guard is installed before scanNow can throw.
+    scanInFlight = Promise.resolve().then(async () => {
+        try {
+            const result = await scanNow();
+            completedScan = true;
+            addLog(t('console.scanComplete', { scanned: result.scanned_paths, found: result.found_folders.length, copied: result.copied_folders.length }), 'success');
             result.found_folders.forEach(f => addLog(`Checked: ${f}`, 'info'));
-        }
-        if (result.copied_folders.length > 0) {
             result.copied_folders.forEach(f => addLog(`Copied new files: ${f}`, 'success'));
-        }
-        if (result.errors.length > 0) {
             result.errors.forEach(e => addLog(`Error: ${e}`, 'error'));
+            appStore.lastScanError = result.errors.join('\n');
+            retryDeferred = result.deferred_for_copy_queue;
+            if (retryDeferred) addLog(t('console.scanDeferredForQueue'), 'info');
+        } catch (error) {
+            const message = String(error);
+            if (message.includes('already in progress')) {
+                addLog(t('console.scanSkipped'), 'info');
+                retryDeferred = true;
+            } else {
+                appStore.lastScanError = message;
+                addLog(t('console.scanFailed', { error: message }), 'error');
+            }
+        } finally {
+            scanInFlight = null;
+            appStore.scanInProgress = false;
+            appStore.scanStartedAt = null;
+            appStore.scanWaitingForQueue = retryDeferred;
+            // Progress belongs to copy events; a busy scan must not erase the
+            // progress of a manual copy that currently owns the executor.
+            if (completedScan && appStore.progress?.source === 'scheduled') {
+                appStore.progress = null;
+            }
+            scheduleNextScan(retryDeferred ? DEFERRED_SCAN_RETRY_MS : intervalMs);
         }
-        if (result.deferred_for_copy_queue) {
-            addLog(t('console.scanDeferredForQueue'), 'info');
-            scheduleDeferredRetry();
-        } else {
-            clearDeferredRetry();
-        }
-    } catch (e) {
-        const errMsg = String(e);
-        if (errMsg.includes('already in progress') || errMsg.includes('queue already in progress')) {
-            // Previous scan/deploy still running — this is normal, just skip quietly
-            addLog(t('console.scanSkipped'), 'info');
-            scheduleDeferredRetry();
-        } else {
-            addLog(t('console.scanFailed', { error: e }), 'error');
-        }
-    } finally {
-        appStore.progress = null; // Ensure progress is cleared when scan finishes
-    }
-}
-
-function updateNextRunTime(delayMs: number) {
-    const next = new Date(Date.now() + delayMs);
-    appStore.nextRunTime = next.toLocaleTimeString();
+    });
+    return scanInFlight;
 }
 
 export async function startScheduler(isRestart = false) {
-    if (appStore.isRunning && !isRestart) return;
-    
-    const config = await getConfig();
-    if (!config) {
-        addLog(t('console.failedLoadConfig', { error: 'Config is null' }), 'error');
-        return;
+    if (!isRestart && (appStore.isRunning || startPending)) return;
+    const revision = ++startRevision;
+    startPending = true;
+    try {
+        const config = await getConfig();
+        // Stop/restart during the configuration request invalidates this start.
+        if (revision !== startRevision) return;
+        if (!config) throw new Error('Config is null');
+        const minutes = Number(config.interval_minutes);
+        intervalMs = Number.isFinite(minutes) && minutes > 0
+            ? Math.min(minutes * 60 * 1000, 2_147_483_647)
+            : DEFERRED_SCAN_RETRY_MS;
+        appStore.isRunning = true;
+        clearTimer();
+        if (!isRestart) {
+            addLog(t('console.schedulerStarted', { interval: intervalMs / 60_000 }), 'info');
+            // Restarting while a scan is still running adopts that operation;
+            // it must finish before the new interval can begin.
+            void executeScan();
+        } else {
+            scheduleNextScan(appStore.scanWaitingForQueue ? DEFERRED_SCAN_RETRY_MS : intervalMs);
+        }
+    } catch (error) {
+        if (revision === startRevision) {
+            addLog(t('console.failedLoadConfig', { error: String(error) }), 'error');
+        }
+    } finally {
+        if (revision === startRevision) startPending = false;
     }
-
-    // Clear existing timer if any
-    if (timer) {
-        clearInterval(timer);
-        timer = null;
-    }
-
-    appStore.isRunning = true;
-    
-    if (!isRestart) {
-        const msg = t('console.schedulerStarted', { interval: config.interval_minutes });
-        addLog(msg, 'info');
-        
-        // Execute first scan immediately
-        executeScan();
-    }
-    
-    const intervalMs = config.interval_minutes * 60 * 1000;
-    updateNextRunTime(intervalMs);
-    
-    timer = setInterval(() => {
-        executeScan();
-        updateNextRunTime(intervalMs);
-    }, intervalMs);
 }
 
 export function stopScheduler() {
+    ++startRevision;
+    startPending = false;
     appStore.isRunning = false;
-    clearDeferredRetry();
-    if (timer) {
-        clearInterval(timer);
-        timer = null;
-    }
-    appStore.nextRunTime = '-';
-    const msg = t('console.schedulerStopped');
-    addLog(msg, 'info');
+    clearTimer();
+    addLog(t('console.schedulerStopped'), 'info');
 }
 
-/** Called after saving config while scheduler is running — reloads interval without re-triggering an immediate scan */
+/** Reload the interval without starting another scan. */
 export async function restartSchedulerInterval() {
-    if (!appStore.isRunning) return;
-    await startScheduler(true);
+    if (appStore.isRunning) await startScheduler(true);
 }

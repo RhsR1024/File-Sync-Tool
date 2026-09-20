@@ -194,6 +194,9 @@ function createDeviceSimulator() {
   const initialized = ref(false);
   const manualInterfaceSelection = ref(false);
   let unlisteners: UnlistenFn[] = [];
+  let subscriptionPromise: Promise<boolean> | null = null;
+  let initializationPromise: Promise<void> | null = null;
+  let lifecycleGeneration = 0;
   let previewTimer: number | null = null;
 
   const topologyLocked = computed(() => isDeviceSimulatorTopologyLocked(status.value.state));
@@ -438,69 +441,102 @@ function createDeviceSimulator() {
   }
 
   async function run<T>(action: string, operation: () => Promise<T>): Promise<T | null> {
+    const generation = lifecycleGeneration;
     busyAction.value = action;
     errorMessage.value = '';
     try {
-      return await operation();
+      const result = await operation();
+      return generation === lifecycleGeneration ? result : null;
     } catch (error) {
+      if (generation !== lifecycleGeneration) return null;
       errorMessage.value = errorText(error);
       appendErrorLog(action, error);
       return null;
     } finally {
-      busyAction.value = null;
+      if (generation === lifecycleGeneration) busyAction.value = null;
     }
   }
 
   async function subscribeEvents() {
-    if (unlisteners.length > 0) return;
-    const listeners = await Promise.all([
-      listen<SimulatorStatus>(DEVICE_SIMULATOR_EVENTS.status, ({ payload }) => {
-        applyStatus(payload);
-        if (payload.last_error) appendErrorLog('backend', payload.last_error);
-      }),
-      listen<AssetProgress>(DEVICE_SIMULATOR_EVENTS.assetProgress, ({ payload }) => {
-        assetProgress.value = payload;
-        if (payload.state === 'ready' || payload.state === 'failed') {
-          void deviceSimulatorApi.getAssetStatus(selectedProfileIds.value)
-            .then(async (status) => {
-              assets.value = status;
-              if (payload.state === 'ready') {
-                await Promise.all([refreshAlarmTypes(), refreshMediaThemes()]);
-              } else {
-                alarmTypes.value = [];
-              }
-            })
-            .catch(() => undefined);
-        }
-      }),
-      listen<DeviceStatusBatch>(DEVICE_SIMULATOR_EVENTS.deviceStatus, ({ payload }) => { deviceStatus.value = payload; }),
-      listen<RtspStats>(DEVICE_SIMULATOR_EVENTS.rtspStats, ({ payload }) => { rtspStats.value = payload; }),
-      listen<AlarmJobStats>(DEVICE_SIMULATOR_EVENTS.alarmStats, ({ payload }) => {
-        alarmStats.value = payload;
-        logAlarmFailure(payload);
-        if (activeAlarmJobId.value === payload.job_id
-          && (payload.state === 'completed' || payload.state === 'failed')) {
-          activeAlarmJobId.value = null;
-        }
-      }),
-      listen<AlarmSubscription>(DEVICE_SIMULATOR_EVENTS.alarmSubscription, ({ payload }) => {
-        alarmSubscription.value = payload;
-      }),
-      listen<CleanupProgress>(DEVICE_SIMULATOR_EVENTS.cleanupProgress, ({ payload }) => { cleanupProgress.value = payload; }),
-      listen<SimulatorLogEvent>(DEVICE_SIMULATOR_EVENTS.log, ({ payload }) => {
-        appendLog(payload);
-      }),
-    ]);
-    unlisteners = listeners;
+    if (unlisteners.length > 0) return true;
+    if (subscriptionPromise) return subscriptionPromise;
+    const generation = lifecycleGeneration;
+    const registration = (async () => {
+      const results = await Promise.allSettled([
+        listen<SimulatorStatus>(DEVICE_SIMULATOR_EVENTS.status, ({ payload }) => {
+          applyStatus(payload);
+          if (payload.last_error) appendErrorLog('backend', payload.last_error);
+        }),
+        listen<AssetProgress>(DEVICE_SIMULATOR_EVENTS.assetProgress, ({ payload }) => {
+          assetProgress.value = payload;
+          if (payload.state === 'ready' || payload.state === 'failed') {
+            void deviceSimulatorApi.getAssetStatus(selectedProfileIds.value)
+              .then(async (status) => {
+                if (generation !== lifecycleGeneration) return;
+                assets.value = status;
+                if (payload.state === 'ready') {
+                  await Promise.all([refreshAlarmTypes(), refreshMediaThemes()]);
+                } else {
+                  alarmTypes.value = [];
+                }
+              })
+              .catch(() => undefined);
+          }
+        }),
+        listen<DeviceStatusBatch>(DEVICE_SIMULATOR_EVENTS.deviceStatus, ({ payload }) => { deviceStatus.value = payload; }),
+        listen<RtspStats>(DEVICE_SIMULATOR_EVENTS.rtspStats, ({ payload }) => { rtspStats.value = payload; }),
+        listen<AlarmJobStats>(DEVICE_SIMULATOR_EVENTS.alarmStats, ({ payload }) => {
+          alarmStats.value = payload;
+          logAlarmFailure(payload);
+          if (activeAlarmJobId.value === payload.job_id
+            && (payload.state === 'completed' || payload.state === 'failed')) {
+            activeAlarmJobId.value = null;
+          }
+        }),
+        listen<AlarmSubscription>(DEVICE_SIMULATOR_EVENTS.alarmSubscription, ({ payload }) => {
+          alarmSubscription.value = payload;
+        }),
+        listen<CleanupProgress>(DEVICE_SIMULATOR_EVENTS.cleanupProgress, ({ payload }) => { cleanupProgress.value = payload; }),
+        listen<SimulatorLogEvent>(DEVICE_SIMULATOR_EVENTS.log, ({ payload }) => {
+          appendLog(payload);
+        }),
+      ]);
+      const listeners = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+      const failure = results.find((result) => result.status === 'rejected');
+      if (failure || generation !== lifecycleGeneration) {
+        for (const unlisten of listeners) unlisten();
+        if (failure?.status === 'rejected') throw failure.reason;
+        return false;
+      }
+      unlisteners = listeners;
+      return true;
+    })();
+    subscriptionPromise = registration;
+    try {
+      return await registration;
+    } finally {
+      if (subscriptionPromise === registration) subscriptionPromise = null;
+    }
   }
 
   async function initialize() {
+    if (initializationPromise) return initializationPromise;
     if (initialized.value) {
       // Re-entering the page re-checks the required files without resetting the draft.
       if (busyAction.value === null && selectedProfileIds.value.length > 0) await refreshAssets();
       return;
     }
-    await subscribeEvents();
+    const initialization = initializeOnce(lifecycleGeneration);
+    initializationPromise = initialization;
+    try {
+      await initialization;
+    } finally {
+      if (initializationPromise === initialization) initializationPromise = null;
+    }
+  }
+
+  async function initializeOnce(generation: number) {
+    if (!await subscribeEvents() || generation !== lifecycleGeneration) return;
     busyAction.value = 'initialize';
     errorMessage.value = '';
     const [settingsResult, interfaceResult, profileResult, statusResult, materialPathResult] = await Promise.allSettled([
@@ -510,6 +546,7 @@ function createDeviceSimulator() {
       deviceSimulatorApi.getStatus(),
       deviceSimulatorApi.getLocalMaterialsPath(),
     ]);
+    if (generation !== lifecycleGeneration) return;
     if (settingsResult.status === 'fulfilled') {
       applySavedSettings(settingsResult.value);
       savedLocalMaterialsDirectory.value = settingsResult.value.local_materials_directory;
@@ -528,6 +565,7 @@ function createDeviceSimulator() {
     busyAction.value = null;
     initialized.value = true;
     await refreshPreview();
+    if (generation !== lifecycleGeneration) return;
     if (selectedProfileIds.value.length > 0) await refreshAssets();
   }
 
@@ -554,11 +592,15 @@ function createDeviceSimulator() {
   }
 
   function dispose() {
+    lifecycleGeneration += 1;
+    subscriptionPromise = null;
+    initializationPromise = null;
     for (const unlisten of unlisteners) unlisten();
     unlisteners = [];
     if (previewTimer !== null) window.clearTimeout(previewTimer);
     previewTimer = null;
     initialized.value = false;
+    busyAction.value = null;
   }
 
   async function refreshAfterSettingsSave() {
@@ -645,6 +687,7 @@ function createDeviceSimulator() {
   }
 
   async function applyAssetStatus(status: AssetStatus) {
+    const generation = lifecycleGeneration;
     assets.value = status;
     if (status.state === 'ready' || status.state === 'update_available') {
       try {
@@ -652,10 +695,10 @@ function createDeviceSimulator() {
           deviceSimulatorApi.listAlarmTypes(),
           refreshMediaThemes(),
         ]);
-        alarmTypes.value = nextAlarmTypes;
+        if (generation === lifecycleGeneration) alarmTypes.value = nextAlarmTypes;
       } catch {
         // Alarm names are an optional convenience; sending all types still works.
-        alarmTypes.value = [];
+        if (generation === lifecycleGeneration) alarmTypes.value = [];
       }
     } else {
       alarmTypes.value = [];
@@ -686,16 +729,20 @@ function createDeviceSimulator() {
   }
 
   async function refreshAlarmTypes() {
+    const generation = lifecycleGeneration;
     try {
-      alarmTypes.value = await deviceSimulatorApi.listAlarmTypes();
+      const next = await deviceSimulatorApi.listAlarmTypes();
+      if (generation === lifecycleGeneration) alarmTypes.value = next;
     } catch {
-      alarmTypes.value = [];
+      if (generation === lifecycleGeneration) alarmTypes.value = [];
     }
   }
 
   async function refreshMediaThemes() {
+    const generation = lifecycleGeneration;
     try {
       const next = await deviceSimulatorApi.listMediaThemes();
+      if (generation !== lifecycleGeneration) return;
       mediaThemes.value = next;
       if (next.length === 0) return;
       if (!next.some((theme) => theme.id === request.media_theme_id)) {
@@ -718,8 +765,10 @@ function createDeviceSimulator() {
    * needs to see, and `start` reports the real validation result.
    */
   async function refreshPreview() {
+    const generation = lifecycleGeneration;
     try {
-      preview.value = await deviceSimulatorApi.previewDevices(request);
+      const next = await deviceSimulatorApi.previewDevices(request);
+      if (generation === lifecycleGeneration) preview.value = next;
     } catch {
       // Keep the last layout that resolved; the draft is mid-edit.
     }

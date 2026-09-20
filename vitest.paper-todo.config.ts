@@ -13,6 +13,7 @@ export default defineConfig({
       'src/lib/paperTodo.test.ts',
       'src/composables/usePaperTodo.test.ts',
       'src/pages/PaperTodoWindowPage.test.ts',
+      'src/pages/PaperTodoLauncherPage.test.ts',
     ],
   },
 });

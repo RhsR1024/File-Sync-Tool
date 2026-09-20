@@ -90,7 +90,15 @@ export function createSyncTaskNotificationDispatcher(
 export function createSyncTaskNotificationTracker(initialGroups: TaskGroupListItem[] = []) {
   const trackedRuns = new Map<string, TrackedTaskRun>();
 
+  function pruneMissingGroups(groups: TaskGroupListItem[]) {
+    const ids = new Set(groups.map(group => group.task_group_id));
+    for (const id of trackedRuns.keys()) {
+      if (!ids.has(id)) trackedRuns.delete(id);
+    }
+  }
+
   function remember(groups: TaskGroupListItem[]) {
+    pruneMissingGroups(groups);
     for (const group of groups) {
       if (group.task_config_id === null || group.latest_run_id === null) continue;
       trackedRuns.set(group.task_group_id, {
@@ -114,11 +122,19 @@ export function createSyncTaskNotificationTracker(initialGroups: TaskGroupListIt
         matchedTrackedRun = true;
       }
     }
-    if (!matchedTrackedRun) queuedRunIds.add(runId);
+    if (!matchedTrackedRun) {
+      queuedRunIds.add(runId);
+      // A queued event can outlive a discarded no-op run or arrive without a
+      // matching snapshot. Keep enough pending IDs for bursts, but never forever.
+      if (queuedRunIds.size > 1_000) {
+        queuedRunIds.delete(queuedRunIds.values().next().value!);
+      }
+    }
   }
 
   function collect(groups: TaskGroupListItem[]): SyncTaskNotificationEvent[] {
     const notifications: SyncTaskNotificationEvent[] = [];
+    pruneMissingGroups(groups);
 
     for (const group of groups) {
       if (group.task_config_id === null || group.latest_run_id === null) continue;

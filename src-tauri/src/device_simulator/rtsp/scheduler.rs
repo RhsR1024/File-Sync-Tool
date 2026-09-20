@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Notify};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedNal {
@@ -53,6 +53,7 @@ pub struct SharedFrameScheduler {
     clock_rate: u32,
     frame_duration_ticks: u32,
     producer_started: Arc<AtomicBool>,
+    subscriber_added: Arc<Notify>,
 }
 
 /// Producer side of a live media source. The session-level media hub owns this
@@ -126,6 +127,7 @@ impl SharedFrameScheduler {
             clock_rate: media.manifest().clock_rate,
             frame_duration_ticks,
             producer_started: Arc::new(AtomicBool::new(false)),
+            subscriber_added: Arc::new(Notify::new()),
         })
     }
 
@@ -154,6 +156,7 @@ impl SharedFrameScheduler {
                 clock_rate,
                 frame_duration_ticks,
                 producer_started: Arc::new(AtomicBool::new(false)),
+                subscriber_added: Arc::new(Notify::new()),
             },
             SharedFramePublisher { sender },
         ))
@@ -190,11 +193,14 @@ impl SharedFrameScheduler {
             clock_rate,
             frame_duration_ticks,
             producer_started: Arc::new(AtomicBool::new(false)),
+            subscriber_added: Arc::new(Notify::new()),
         })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ScheduledAccessUnit> {
-        self.sender.subscribe()
+        let receiver = self.sender.subscribe();
+        self.subscriber_added.notify_one();
+        receiver
     }
 
     pub fn frames(&self) -> &[Arc<SharedAccessUnit>] {
@@ -224,6 +230,7 @@ impl SharedFrameScheduler {
         let frames = Arc::clone(&self.frames);
         let media = self.media.clone();
         let sender = self.sender.clone();
+        let subscriber_added = Arc::clone(&self.subscriber_added);
         let clock_rate = self.clock_rate;
         let frame_duration_ticks = self.frame_duration_ticks;
         tokio::spawn(async move {
@@ -237,20 +244,49 @@ impl SharedFrameScheduler {
                 .as_ref()
                 .map_or_else(|| frames.len(), |source| source.frames().len());
             loop {
+                if *shutdown.borrow() {
+                    break;
+                }
+                if sender.receiver_count() == 0 {
+                    // No per-frame wakeups while nobody is watching. Advance
+                    // the live clock in one step when a subscriber returns.
+                    let idle_started = tokio::time::Instant::now();
+                    tokio::select! {
+                        _ = subscriber_added.notified() => {},
+                        _ = shutdown.changed() => break,
+                    }
+                    let skipped = idle_started.elapsed().as_nanos() / period.as_nanos();
+                    frame_index =
+                        (frame_index + (skipped % frame_count as u128) as usize) % frame_count;
+                    timestamp = timestamp
+                        .wrapping_add((skipped as u32).wrapping_mul(frame_duration_ticks));
+                    interval.reset_immediately();
+                    continue;
+                }
                 tokio::select! {
                     _ = interval.tick() => {
-                        // Preserve a live timeline while idle, but do no disk IO
-                        // or frame allocation until at least one RTSP client is
-                        // actually subscribed.
+                        // The last subscriber may have left during this tick.
                         if sender.receiver_count() > 0 {
                             let access_unit = if let Some(source) = media.as_ref() {
-                                match source.read_frame_nals(frame_index) {
-                                    Ok((keyframe, nals)) => Arc::new(SharedAccessUnit {
+                                let source = Arc::clone(source);
+                                // Indexed reads may hit a slow disk. Never pin
+                                // a Tokio protocol/heartbeat thread on file IO.
+                                let read = tokio::task::spawn_blocking(move || source.read_frame_nals(frame_index));
+                                let result = tokio::select! {
+                                    result = read => result,
+                                    _ = shutdown.changed() => break,
+                                };
+                                match result {
+                                    Ok(Ok((keyframe, nals))) => Arc::new(SharedAccessUnit {
                                         nals: nals.into_iter().map(SharedNal::from_bytes).collect::<Vec<_>>().into(),
                                         keyframe,
                                     }),
-                                    Err(error) => {
+                                    Ok(Err(error)) => {
                                         log::error!("device simulator media read failed: {error}");
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        log::error!("device simulator media reader failed: {error}");
                                         break;
                                     }
                                 }
@@ -305,6 +341,26 @@ mod tests {
             }),
         ]
         .into()
+    }
+
+    #[tokio::test]
+    async fn idle_scheduler_wakes_for_a_subscriber_and_stops_without_one() {
+        let scheduler = SharedFrameScheduler::new(frames(), 90_000, 25, 2).unwrap();
+        let (stop, stop_rx) = watch::channel(false);
+        let task = scheduler.spawn(stop_rx);
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        let mut receiver = scheduler.subscribe();
+        let frame = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(frame.timestamp >= 7_200);
+        drop(receiver);
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

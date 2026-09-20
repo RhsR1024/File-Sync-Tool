@@ -390,9 +390,13 @@ pub struct AlarmJobRequest {
     pub recovery_delay_secs: Option<u64>,
     pub image_variant: Option<String>,
     pub user_image_id: Option<String>,
-    /// Learned subscription endpoint selected by the operator. When omitted,
-    /// a single active subscription is used for backwards compatibility;
-    /// multiple active subscriptions require an explicit selection.
+    /// Device-scoped learned subscription endpoints selected by the operator.
+    /// A device may name more than one endpoint to broadcast the same alarm.
+    #[serde(default)]
+    pub target_subscription_ids_by_device: BTreeMap<String, Vec<String>>,
+    /// Legacy global selection retained for request compatibility. New callers
+    /// should use `target_subscription_ids_by_device` so a subscription cannot
+    /// accidentally be applied to a different virtual device.
     #[serde(default)]
     pub target_subscription_id: Option<String>,
 }
@@ -489,7 +493,8 @@ pub struct AlarmSubscriptionSnapshot {
     /// Every subscription endpoint observed during this simulator session.
     #[serde(default)]
     pub subscriptions: Vec<AlarmSubscriptionRecordSnapshot>,
-    /// True when more than one non-expired subscription needs operator choice.
+    /// True when at least one device has more than one non-expired subscription
+    /// and therefore needs an operator choice.
     #[serde(default)]
     pub selection_required: bool,
 }
@@ -498,6 +503,8 @@ pub struct AlarmSubscriptionSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct AlarmSubscriptionRecordSnapshot {
     pub id: String,
+    pub device_id: String,
+    pub device_ip: String,
     pub source_ip: String,
     pub host: Option<String>,
     pub port: u16,
@@ -521,6 +528,68 @@ pub struct RuntimeEventBatch {
 pub struct RuntimeTelemetrySnapshot {
     pub status: SimulatorStatusSnapshot,
     pub events: RuntimeEventBatch,
+}
+
+/// One bounded cursor for periodic polling. Explicit full snapshots do not
+/// advance it, so opening a page cannot consume another poller's changes.
+#[derive(Debug, Default)]
+pub struct RuntimeTelemetryCache {
+    device_status: Option<DeviceStatusBatch>,
+    rtsp_stats: Option<RtspStatsSnapshot>,
+    alarm_stats: Vec<AlarmJobStatsSnapshot>,
+    alarm_subscription: Option<AlarmSubscriptionSnapshot>,
+}
+
+impl RuntimeTelemetryCache {
+    pub fn retain_changed(&mut self, events: &mut RuntimeEventBatch) {
+        if let Some(current) = &events.device_status {
+            if self.device_status.as_ref().is_some_and(|previous| {
+                current.session_id == previous.session_id && current.devices == previous.devices
+            }) {
+                events.device_status = None;
+            } else {
+                self.device_status = Some(current.clone());
+            }
+        }
+        retain_changed_value(&mut events.rtsp_stats, &mut self.rtsp_stats);
+        retain_changed_value(&mut events.alarm_subscription, &mut self.alarm_subscription);
+        // The collector supplies the complete current job list. Keep only that
+        // list (no historical accumulation) and preserve its event order: the
+        // frontend displays the last job in an emitted alarm batch.
+        if events.alarm_stats == self.alarm_stats {
+            events.alarm_stats.clear();
+        } else {
+            self.alarm_stats.clone_from(&events.alarm_stats);
+        }
+    }
+}
+
+fn retain_changed_value<T: Clone + PartialEq>(current: &mut Option<T>, previous: &mut Option<T>) {
+    if current.is_none() {
+        return;
+    }
+    if current == previous {
+        *current = None;
+    } else {
+        previous.clone_from(current);
+    }
+}
+
+impl RuntimeTelemetrySnapshot {
+    /// Batch sequence advances on every poll; it is not a device state change.
+    pub fn same_runtime_state(&self, previous: &Self) -> bool {
+        self.status == previous.status
+            && self.events.rtsp_stats == previous.events.rtsp_stats
+            && self.events.alarm_stats == previous.events.alarm_stats
+            && self.events.alarm_subscription == previous.events.alarm_subscription
+            && match (&self.events.device_status, &previous.events.device_status) {
+                (Some(current), Some(previous)) => {
+                    current.session_id == previous.session_id && current.devices == previous.devices
+                }
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -889,6 +958,140 @@ fn validation_error(code: &'static str, details: impl Into<String>) -> Simulator
 mod tests {
     use super::*;
     use crate::device_simulator::models::{AlarmJobState, SessionState};
+
+    #[test]
+    fn telemetry_dedup_ignores_sequence_but_preserves_runtime_changes() {
+        let baseline = RuntimeTelemetrySnapshot {
+            status: SimulatorStatusSnapshot::from(SimulatorStatus::default()),
+            events: RuntimeEventBatch {
+                device_status: Some(DeviceStatusBatch {
+                    session_id: "session".into(),
+                    sequence: 1,
+                    devices: vec![DeviceRuntimeStatusSnapshot {
+                        device_id: "device".into(),
+                        online: true,
+                        active_http_connections: 0,
+                        active_rtsp_clients: 0,
+                        last_error_code: None,
+                    }],
+                }),
+                rtsp_stats: None,
+                alarm_stats: vec![],
+                alarm_subscription: None,
+            },
+        };
+        let mut next = baseline.clone();
+        next.events.device_status.as_mut().unwrap().sequence = 7_200;
+        assert!(next.same_runtime_state(&baseline));
+        next.events.device_status.as_mut().unwrap().devices[0].active_http_connections = 1;
+        assert!(!next.same_runtime_state(&baseline));
+        next = baseline.clone();
+        next.status.state = crate::device_simulator::models::SessionState::Running;
+        assert!(!next.same_runtime_state(&baseline));
+        next = baseline.clone();
+        next.events.rtsp_stats = Some(RtspStatsSnapshot {
+            session_id: "session".into(),
+            active_clients: 1,
+            bitrate_kbps: 1,
+            bytes_sent: 100,
+            disconnected_clients: 0,
+        });
+        assert!(!next.same_runtime_state(&baseline));
+    }
+
+    #[test]
+    fn telemetry_cursor_filters_each_domain_and_bounds_job_history() {
+        let mut cache = RuntimeTelemetryCache::default();
+        let mut full = RuntimeEventBatch {
+            device_status: Some(DeviceStatusBatch {
+                session_id: "session".into(),
+                sequence: 1,
+                devices: vec![DeviceRuntimeStatusSnapshot {
+                    device_id: "device".into(),
+                    online: true,
+                    active_http_connections: 0,
+                    active_rtsp_clients: 0,
+                    last_error_code: None,
+                }],
+            }),
+            rtsp_stats: Some(RtspStatsSnapshot {
+                session_id: "session".into(),
+                active_clients: 1,
+                bitrate_kbps: 1,
+                bytes_sent: 10,
+                disconnected_clients: 0,
+            }),
+            alarm_stats: vec![AlarmJobStatsSnapshot {
+                job_id: "job".into(),
+                state: AlarmJobState::Running,
+                attempted: 1,
+                succeeded: 1,
+                failed: 0,
+                unverified: 0,
+                in_flight: 0,
+                average_duration_ms: 1.0,
+                last_http_status: Some(200),
+                last_error: None,
+            }],
+            alarm_subscription: Some(AlarmSubscriptionSnapshot {
+                destinations: vec![],
+                learned: false,
+                host: None,
+                port: None,
+                duration_secs: None,
+                learned_at_ms: None,
+                expires_at_ms: None,
+                overridden: false,
+                subscriptions: vec![],
+                selection_required: false,
+            }),
+        };
+        let mut first = full.clone();
+        cache.retain_changed(&mut first);
+        assert_eq!(first, full);
+        full.device_status.as_mut().unwrap().sequence += 1;
+        let mut unchanged = full.clone();
+        cache.retain_changed(&mut unchanged);
+        assert!(unchanged.device_status.is_none());
+        assert!(unchanged.rtsp_stats.is_none());
+        assert!(unchanged.alarm_stats.is_empty());
+        assert!(unchanged.alarm_subscription.is_none());
+
+        full.rtsp_stats.as_mut().unwrap().bytes_sent += 10;
+        let mut video_only = full.clone();
+        cache.retain_changed(&mut video_only);
+        assert!(video_only.rtsp_stats.is_some());
+        assert!(video_only.device_status.is_none());
+        assert!(video_only.alarm_stats.is_empty());
+        assert!(video_only.alarm_subscription.is_none());
+
+        full.alarm_stats[0].state = AlarmJobState::Completed;
+        full.alarm_subscription.as_mut().unwrap().expires_at_ms = Some(100);
+        full.device_status.as_mut().unwrap().devices[0].active_http_connections = 1;
+        let mut changed = full.clone();
+        cache.retain_changed(&mut changed);
+        assert!(changed.device_status.is_some());
+        assert!(changed.rtsp_stats.is_none());
+        assert_eq!(changed.alarm_stats.len(), 1);
+        assert!(changed.alarm_subscription.is_some());
+        let mut second_job = full.alarm_stats[0].clone();
+        second_job.job_id = "second-job".into();
+        full.alarm_stats.push(second_job);
+        cache.retain_changed(&mut full.clone());
+        full.alarm_stats[0].attempted += 1;
+        let mut first_job_changed = full.clone();
+        cache.retain_changed(&mut first_job_changed);
+        assert_eq!(first_job_changed.alarm_stats, full.alarm_stats);
+        full.alarm_stats.truncate(1);
+        for id in 0..1_000 {
+            full.alarm_stats[0].job_id = format!("job-{id}");
+            cache.retain_changed(&mut full.clone());
+            assert_eq!(cache.alarm_stats.len(), 1);
+        }
+        full.alarm_stats.clear();
+        cache.retain_changed(&mut full);
+        assert!(cache.alarm_stats.is_empty());
+    }
 
     fn start_request() -> SimulatorStartRequest {
         SimulatorStartRequest {

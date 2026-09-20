@@ -14,7 +14,7 @@ import {
   isDeviceSimulatorRuntimeActive,
   type SimulatorStatus,
 } from '@/lib/deviceSimulator';
-import { startScheduler } from '@/lib/scheduler';
+import { startScheduler, stopScheduler } from '@/lib/scheduler';
 import { appStore, addLog, setToolRuntime, startLiveTicker, stopLiveTicker } from '@/lib/store';
 import {
   createSyncTaskNotificationDispatcher,
@@ -67,6 +67,7 @@ let unlistenDeviceSimulatorStatus: (() => void) | null = null;
 let unlistenOpenClipboardSettings: (() => void) | null = null;
 let unlistenMainWindowResize: (() => void) | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let taskRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let initialSyncTaskNotificationsEnabled = true;
 let syncTaskNotificationTracker = createSyncTaskNotificationTracker();
 
@@ -235,7 +236,16 @@ async function respondToScreenShareControlRequest(allow: boolean) {
   }
 }
 
-watch(() => appStore.logs.length, scheduleSave);
+watch(() => appStore.logs[appStore.logs.length - 1], scheduleSave);
+
+function refreshVisibleTaskState() {
+  if (document.visibilityState === 'hidden') return;
+  // Hydration coalesces overlapping focus/timer requests and cannot overwrite
+  // newer live events. This also repairs a missed snapshot after sleep/resume.
+  void taskStateStore.hydrateTaskState().catch(() => {
+    // The next focus or timer tick retries without flooding the console.
+  });
+}
 
 // One failing tool must not blank out the runtime flags of the others, so each
 // query is settled on its own.
@@ -313,6 +323,9 @@ onMounted(async () => {
   }
 
   startLiveTicker();
+  taskRefreshTimer = setInterval(refreshVisibleTaskState, 30_000);
+  window.addEventListener('focus', refreshVisibleTaskState);
+  document.addEventListener('visibilitychange', refreshVisibleTaskState);
   let cfg = null;
   try {
     cfg = await getConfig();
@@ -391,10 +404,10 @@ onMounted(async () => {
   try {
     unlistenTaskGroups = await listen('task-groups-snapshot', (event) => {
       const snapshot = event.payload as TaskGroupsSnapshot;
+      if (!taskStateStore.applyGroupsSnapshot(snapshot)) return;
       for (const notification of syncTaskNotificationTracker.collect(snapshot.groups)) {
         queueSyncTaskNotification(notification);
       }
-      taskStateStore.applyGroupsSnapshot(snapshot);
     });
   } catch (error) {
     addLog(`Sync task notification listener failed: ${error}`, 'error');
@@ -511,6 +524,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopLiveTicker();
+  stopScheduler();
+  if (taskRefreshTimer !== null) clearInterval(taskRefreshTimer);
+  window.removeEventListener('focus', refreshVisibleTaskState);
+  document.removeEventListener('visibilitychange', refreshVisibleTaskState);
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;

@@ -606,8 +606,9 @@ fn initialize_pipeline(
         .len()
         .saturating_add(32)
         .min(PREWARM_FRAME_LIMIT);
+    let mut input = Vec::new();
     for _ in 0..attempts {
-        let input = source_annex_b_access_unit(media, state.source_frame_index)?;
+        source_annex_b_access_unit(media, state.source_frame_index, &mut input)?;
         let outputs = transcoder.transcode(&input, state.input_time_100ns, |nv12| {
             render_current_time(nv12, width, height)?;
             Ok(())
@@ -674,6 +675,7 @@ fn run_active_pipeline(
     let mut active_input_wall_base = None::<Instant>;
     let mut active_input_time_base_100ns = state.input_time_100ns;
     let mut diagnostics_window = WatermarkTimingDiagnostics::new(Instant::now());
+    let mut input = Vec::new();
     while !shutdown.load(Ordering::Acquire) {
         let current_subscribers = publisher.receiver_count();
         if current_subscribers == 0 {
@@ -730,7 +732,7 @@ fn run_active_pipeline(
         let input_time_100ns =
             media_time_for_elapsed(active_input_time_base_100ns, elapsed, frame_duration_100ns)?
                 .max(state.input_time_100ns);
-        let input = source_annex_b_access_unit(media, state.source_frame_index)?;
+        source_annex_b_access_unit(media, state.source_frame_index, &mut input)?;
         let transcode_started_at = Instant::now();
         let outputs = transcoder.transcode(&input, input_time_100ns, |nv12| {
             render_current_time(nv12, width_height.0, width_height.1)?;
@@ -936,25 +938,10 @@ fn frame_duration_100ns(media: &SharedMediaPack) -> Result<i64, String> {
 fn source_annex_b_access_unit(
     media: &SharedMediaPack,
     frame_index: usize,
-) -> Result<Vec<u8>, String> {
-    let frame = media
-        .frames()
-        .get(frame_index)
-        .ok_or_else(|| "watermark source frame index is invalid".to_string())?;
-    let capacity = frame
-        .nals
-        .iter()
-        .try_fold(0usize, |total, nal| total.checked_add(nal.length + 4))
-        .ok_or_else(|| "watermark source access unit is too large".to_string())?;
-    let mut bytes = Vec::with_capacity(capacity);
-    for nal in frame.nals.iter() {
-        let payload = media
-            .read_nal(nal)
-            .map_err(|error| format!("watermark source NAL read failed: {error}"))?;
-        bytes.extend_from_slice(&[0, 0, 0, 1]);
-        bytes.extend_from_slice(&payload);
-    }
-    Ok(bytes)
+    bytes: &mut Vec<u8>,
+) -> Result<(), String> {
+    media.read_annex_b_frame_into(frame_index, bytes)
+        .map_err(|error| format!("watermark source NAL read failed: {error}"))
 }
 
 #[cfg(target_os = "windows")]

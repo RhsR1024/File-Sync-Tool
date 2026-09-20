@@ -99,19 +99,18 @@ describe('paper todo standalone window lifecycle', () => {
 
   it('makes the whole master capsule the drag handle instead of a grip icon', () => {
     expect(launcherSource).toContain('class="launcher-master-capsule launcher-drag-handle"');
-    expect(launcherSource).toContain('@mousedown.stop.prevent="startLauncherDrag"');
+    expect(launcherSource).toContain('@pointerdown.stop.prevent="startLauncherPress"');
     expect(launcherSource).not.toContain('GripVertical');
     expect(launcherSource).not.toContain('launcher-master-drag');
     expect(launcherSource).not.toContain('launcher-master-toggle');
 
-    // A press cannot be classified in the webview: the native loop reports
-    // whether it travelled, and a press that never moved is the toggle.
+    // Drag intent is decided before IPC; a late native result cannot click.
     const dragHandler = launcherSource.slice(
       launcherSource.indexOf('async function startLauncherDrag'),
       launcherSource.indexOf('function toggleFromKeyboard'),
     );
     expect(dragHandler).toContain('await dragPaperLauncher(event.clientX, event.clientY)');
-    expect(dragHandler).toContain('await setExpanded(!requestedExpanded)');
+    expect(dragHandler).not.toContain('setExpanded(!requestedExpanded)');
     // Keyboard activation never reaches the drag loop, so it still toggles.
     expect(launcherSource).toContain('if (event.detail !== 0) return;');
     expect(launcherSource).toContain('@click="toggleFromKeyboard"');
@@ -182,7 +181,7 @@ describe('paper todo standalone window lifecycle', () => {
 
   it('toggles rapid clicks from the latest requested state instead of stale DOM', () => {
     expect(launcherSource).toContain('let requestedExpanded = false;');
-    expect(launcherSource).toContain('await setExpanded(!requestedExpanded);');
+    expect(launcherSource).toContain('void setExpanded(!requestedExpanded).catch');
     expect(launcherSource).toContain('void setExpanded(!requestedExpanded);');
     expect(launcherSource).not.toContain('setExpanded(!expanded.value)');
     expect(launcherSource).toMatch(

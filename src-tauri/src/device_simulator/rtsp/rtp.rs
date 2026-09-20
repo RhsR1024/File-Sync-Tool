@@ -21,6 +21,12 @@ pub struct RtpPacket {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterleavedPacketStats {
+    pub packets: usize,
+    pub payload_octets: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtpPacketError {
     pub code: &'static str,
@@ -28,6 +34,131 @@ pub struct RtpPacketError {
 }
 
 impl RtpPacketizer {
+    /// Writes a complete access unit into its outgoing batch without allocating
+    /// temporary NAL references, fragment payloads, RTP packets or TCP frames.
+    pub fn write_interleaved_access_unit<N: AsRef<[u8]>>(
+        &mut self,
+        codec: Codec,
+        nals: &[N],
+        timestamp: u32,
+        channel: u8,
+        batch: &mut Vec<u8>,
+    ) -> Result<InterleavedPacketStats, RtpPacketError> {
+        let (nal_header_bytes, fragment_header_bytes, minimum_payload) = match codec {
+            Codec::H264 => (1, 2, 3),
+            Codec::H265 => (2, 3, 4),
+        };
+        if !(96..=127).contains(&self.payload_type)
+            || self.max_payload_bytes < minimum_payload
+            || nals.is_empty()
+        {
+            return Err(error(
+                "device_simulator.rtp.configuration_invalid",
+                "invalid RTP packetizer configuration",
+            ));
+        }
+        let fragment_size = self.max_payload_bytes - fragment_header_bytes;
+        let mut required = 0usize;
+        for nal in nals {
+            let nal = nal.as_ref();
+            if nal.len() < nal_header_bytes {
+                return Err(error(
+                    "device_simulator.rtp.nal_invalid",
+                    "NAL unit has an incomplete header",
+                ));
+            }
+            let (packets, payload_bytes, largest_payload) = if nal.len() <= self.max_payload_bytes {
+                (1, nal.len(), nal.len())
+            } else {
+                let bytes = nal.len() - nal_header_bytes;
+                let packets = bytes.div_ceil(fragment_size);
+                (
+                    packets,
+                    bytes + packets * fragment_header_bytes,
+                    self.max_payload_bytes,
+                )
+            };
+            if largest_payload > usize::from(u16::MAX) - RTP_HEADER_BYTES {
+                return Err(error(
+                    "device_simulator.rtp.packet_too_large",
+                    "RTP packet is too large for RTSP interleaved framing",
+                ));
+            }
+            required = required
+                .checked_add(payload_bytes + packets * (RTP_HEADER_BYTES + 4))
+                .ok_or_else(|| {
+                    error(
+                        "device_simulator.rtp.packet_too_large",
+                        "RTP access unit is too large",
+                    )
+                })?;
+        }
+        batch.reserve(required);
+        let mut stats = InterleavedPacketStats {
+            packets: 0,
+            payload_octets: 0,
+        };
+        for (nal_index, nal) in nals.iter().enumerate() {
+            let nal = nal.as_ref();
+            let access_unit_end = nal_index + 1 == nals.len();
+            if nal.len() <= self.max_payload_bytes {
+                self.write_interleaved_packet(batch, channel, timestamp, access_unit_end, &[], nal);
+                stats.packets += 1;
+                stats.payload_octets = stats.payload_octets.wrapping_add(nal.len() as u32);
+                continue;
+            }
+            let mut fragments = nal[nal_header_bytes..].chunks(fragment_size).peekable();
+            let mut start = true;
+            while let Some(fragment) = fragments.next() {
+                let end = fragments.peek().is_none();
+                let flags = (u8::from(start) << 7) | (u8::from(end) << 6);
+                let header = match codec {
+                    Codec::H264 => [(nal[0] & 0xe0) | 28, flags | (nal[0] & 0x1f), 0],
+                    Codec::H265 => [
+                        (nal[0] & 0x81) | (49 << 1),
+                        nal[1],
+                        flags | ((nal[0] >> 1) & 0x3f),
+                    ],
+                };
+                self.write_interleaved_packet(
+                    batch,
+                    channel,
+                    timestamp,
+                    access_unit_end && end,
+                    &header[..fragment_header_bytes],
+                    fragment,
+                );
+                stats.packets += 1;
+                stats.payload_octets = stats
+                    .payload_octets
+                    .wrapping_add((fragment_header_bytes + fragment.len()) as u32);
+                start = false;
+            }
+        }
+        Ok(stats)
+    }
+
+    fn write_interleaved_packet(
+        &mut self,
+        batch: &mut Vec<u8>,
+        channel: u8,
+        timestamp: u32,
+        marker: bool,
+        prefix: &[u8],
+        payload: &[u8],
+    ) {
+        let packet_len = (RTP_HEADER_BYTES + prefix.len() + payload.len()) as u16;
+        batch.extend_from_slice(&[b'$', channel]);
+        batch.extend_from_slice(&packet_len.to_be_bytes());
+        batch.extend_from_slice(&[0x80, (u8::from(marker) << 7) | self.payload_type]);
+        batch.extend_from_slice(&self.next_sequence.to_be_bytes());
+        batch.extend_from_slice(&timestamp.to_be_bytes());
+        batch.extend_from_slice(&self.ssrc.to_be_bytes());
+        batch.extend_from_slice(prefix);
+        batch.extend_from_slice(payload);
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+    }
+
     pub fn packetize_access_unit(
         &mut self,
         codec: Codec,
@@ -327,6 +458,85 @@ fn error(code: &'static str, message: impl Into<String>) -> RtpPacketError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_interleaving_matches_original_packets_byte_for_byte() {
+        for codec in [Codec::H264, Codec::H265] {
+            for max_payload_bytes in [4, 7, 1_200] {
+                for length in [2, 4, 7, 8, 25, 1_200, 2_401] {
+                    let mut nal = vec![0x55; length];
+                    nal[0] = if codec == Codec::H264 { 0x65 } else { 0x26 };
+                    nal[1] = 1;
+                    let nals = [vec![0x67, 1], nal.clone(), nal];
+                    let slices = nals.iter().map(Vec::as_slice).collect::<Vec<_>>();
+                    let mut original = RtpPacketizer {
+                        payload_type: 105,
+                        ssrc: 0x0102_0304,
+                        next_sequence: u16::MAX - 1,
+                        max_payload_bytes,
+                    };
+                    let mut direct = original.clone();
+                    for timestamp in [u32::MAX, 3_599] {
+                        let packets = original
+                            .packetize_access_unit(codec, &slices, timestamp)
+                            .unwrap();
+                        let expected = packets
+                            .iter()
+                            .flat_map(|packet| tcp_interleaved_frame(2, &packet.bytes).unwrap())
+                            .collect::<Vec<_>>();
+                        let mut batch = vec![42];
+                        let stats = direct
+                            .write_interleaved_access_unit(codec, &nals, timestamp, 2, &mut batch)
+                            .unwrap();
+                        assert_eq!(batch[0], 42);
+                        assert_eq!(&batch[1..], expected.as_slice());
+                        assert_eq!(stats.packets, packets.len());
+                        assert_eq!(
+                            stats.payload_octets,
+                            packets
+                                .iter()
+                                .map(|packet| (packet.bytes.len() - RTP_HEADER_BYTES) as u32)
+                                .sum::<u32>()
+                        );
+                        assert_eq!(direct.next_sequence, original.next_sequence);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_interleaving_rejects_invalid_input_without_partial_output() {
+        let mut packetizer = RtpPacketizer {
+            payload_type: 105,
+            ssrc: 1,
+            next_sequence: 7,
+            max_payload_bytes: 1_200,
+        };
+        for codec in [Codec::H264, Codec::H265] {
+            let mut batch = vec![42];
+            let error = packetizer
+                .write_interleaved_access_unit(codec, &[vec![0x65, 1], vec![]], 0, 0, &mut batch)
+                .unwrap_err();
+            assert_eq!(error.code, "device_simulator.rtp.nal_invalid");
+            assert_eq!(batch, vec![42]);
+            assert_eq!(packetizer.next_sequence, 7);
+        }
+        packetizer.max_payload_bytes = 70_000;
+        assert_eq!(
+            packetizer
+                .write_interleaved_access_unit(
+                    Codec::H264,
+                    &[vec![0x65; 70_001]],
+                    0,
+                    0,
+                    &mut Vec::new()
+                )
+                .unwrap_err()
+                .code,
+            "device_simulator.rtp.packet_too_large"
+        );
+    }
 
     #[test]
     fn packetizes_single_and_fragmented_h264_with_continuous_sequence() {

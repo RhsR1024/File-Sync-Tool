@@ -4,17 +4,19 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct ProtocolDiagnosticSink {
-    sender: mpsc::UnboundedSender<WorkerEventPayload>,
+    sender: mpsc::Sender<WorkerEventPayload>,
 }
 
 impl ProtocolDiagnosticSink {
-    pub fn new(sender: mpsc::UnboundedSender<WorkerEventPayload>) -> Self {
+    pub fn new(sender: mpsc::Sender<WorkerEventPayload>) -> Self {
         Self { sender }
     }
 
     pub fn debug(&self, component: &str, message: String) {
         log::debug!("[{component}] {message}");
-        let _ = self.sender.send(WorkerEventPayload::Log {
+        // A stalled UI/pipe must not retain an unlimited diagnostic backlog
+        // or block the media producer. Drop debug entries when full.
+        let _ = self.sender.try_send(WorkerEventPayload::Log {
             level: WorkerLogLevel::Debug,
             component: component.to_string(),
             message,
@@ -81,6 +83,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn diagnostic_backlog_is_bounded_and_accepts_logs_after_draining() {
+        let (sender, mut receiver) = mpsc::channel(2);
+        let sink = ProtocolDiagnosticSink::new(sender);
+        for index in 0..10_000 {
+            sink.debug("test", index.to_string());
+        }
+        assert_eq!(receiver.len(), 2);
+        receiver.try_recv().unwrap();
+        receiver.try_recv().unwrap();
+        sink.debug("test", "resumed".into());
+        assert!(matches!(receiver.try_recv().unwrap(), WorkerEventPayload::Log { message, .. } if message == "resumed"));
+    }
+
+    #[test]
     fn counts_every_failure_but_rate_limits_log_admission() {
         let metrics = ProtocolFailureMetrics::default();
         assert!(metrics.record_parse_failure(1_000, 10_000));
@@ -98,7 +114,7 @@ mod tests {
 
     #[test]
     fn diagnostic_sink_forwards_copyable_debug_log_text() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(4);
         let sink = ProtocolDiagnosticSink::new(sender);
         sink.debug("watermark_timing", "WM_DIAG input_fps=25.00".into());
 

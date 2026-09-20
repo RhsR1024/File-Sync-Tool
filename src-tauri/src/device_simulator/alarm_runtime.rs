@@ -34,9 +34,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
-/// Alarm receiver endpoints advertised by every platform currently subscribed
-/// to this simulator session. The protocol runtime adds or refreshes entries;
-/// alarm jobs select one entry explicitly when more than one is active.
+/// Alarm receiver endpoints advertised for the virtual devices in this
+/// simulator session. The protocol runtime adds or refreshes device-scoped
+/// entries; alarm jobs select one or more entries for each device.
 pub type SharedLearnedAlarmSubscriptions = Arc<RwLock<LearnedAlarmSubscriptions>>;
 
 /// A subscription endpoint parsed out of a LAPI `Event/Subscription` body.
@@ -45,9 +45,13 @@ pub type SharedLearnedAlarmSubscriptions = Arc<RwLock<LearnedAlarmSubscriptions>
 /// no port range may be assumed — only a non-zero port is required.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearnedAlarmEndpoint {
-    /// Stable for repeated subscriptions from the same source and advertised
-    /// host. The dynamically allocated receiver port may change on renewal.
+    /// Stable for repeated subscriptions for the same virtual device and final
+    /// callback host. The receiver port may change on renewal.
     pub id: String,
+    /// Virtual device whose HTTP listener received the subscription.
+    pub device_id: String,
+    /// Virtual device IP whose HTTP listener received the subscription.
+    pub device_ip: Ipv4Addr,
     /// TCP peer that delivered the subscription request.
     pub source_ip: IpAddr,
     /// `IPAddress` from the subscription body; `None` falls back to the TCP peer
@@ -64,17 +68,22 @@ pub struct LearnedAlarmEndpoint {
 
 impl LearnedAlarmEndpoint {
     pub fn new(
+        device_id: impl Into<String>,
+        device_ip: Ipv4Addr,
         source_ip: IpAddr,
         host: Option<Ipv4Addr>,
         port: u16,
         duration_secs: Option<u32>,
         learned_at_ms: u64,
     ) -> Self {
-        let advertised_host = host
+        let callback_host = host
             .map(|address| address.to_string())
-            .unwrap_or_else(|| "configured-host".into());
+            .unwrap_or_else(|| source_ip.to_string());
+        let device_id = device_id.into();
         Self {
-            id: format!("{source_ip}|{advertised_host}"),
+            id: format!("{device_id}|{callback_host}"),
+            device_id,
+            device_ip,
             source_ip,
             host,
             port,
@@ -138,8 +147,45 @@ impl LearnedAlarmSubscriptions {
             .collect()
     }
 
+    pub fn active_entries_for_device(
+        &self,
+        device_id: &str,
+        timestamp_ms: u64,
+    ) -> Vec<LearnedAlarmEndpoint> {
+        self.active_entries(timestamp_ms)
+            .into_iter()
+            .filter(|endpoint| endpoint.device_id == device_id)
+            .collect()
+    }
+
     pub fn get(&self, id: &str) -> Option<&LearnedAlarmEndpoint> {
         self.entries.get(id)
+    }
+
+    /// Refresh every subscription learned for a virtual device from the
+    /// requesting platform.
+    ///
+    /// LAPI renewal requests only carry `Duration`; the receiver host and port
+    /// remain those advertised by the original POST. The legacy response uses a
+    /// profile-defined subscription ID, so the virtual device plus TCP peer are
+    /// the stable identity available on both the original request and renewal.
+    pub fn renew_for_device_source(
+        &mut self,
+        device_id: &str,
+        source_ip: IpAddr,
+        duration_secs: u32,
+        renewed_at_ms: u64,
+    ) -> Option<u16> {
+        let mut renewed_port = None;
+        for endpoint in self.entries.values_mut() {
+            if endpoint.device_id != device_id || endpoint.source_ip != source_ip {
+                continue;
+            }
+            endpoint.duration_secs = Some(duration_secs);
+            endpoint.learned_at_ms = renewed_at_ms;
+            renewed_port.get_or_insert(endpoint.port);
+        }
+        renewed_port
     }
 }
 
@@ -434,13 +480,21 @@ impl AlarmRuntime {
     /// having to trigger an alarm and read the failure back.
     pub fn effective_destinations(&self) -> Vec<String> {
         let active = self.active_learned_subscriptions();
-        let automatic = (active.len() == 1).then(|| &active[0]);
+        if self.allow_learned_endpoint && !active.is_empty() {
+            let Some(base) = self.destinations.values().next() else {
+                return Vec::new();
+            };
+            return active
+                .iter()
+                .map(|endpoint| apply_learned_endpoint(base, Some(endpoint), true).to_string())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+        }
         self.destination_ids
             .iter()
             .filter_map(|id| self.destinations.get(id))
-            .map(|base| {
-                apply_learned_endpoint(base, automatic, self.allow_learned_endpoint).to_string()
-            })
+            .map(reqwest::Url::to_string)
             .collect()
     }
 
@@ -460,7 +514,14 @@ impl AlarmRuntime {
     }
 
     pub fn subscription_selection_required(&self) -> bool {
-        self.allow_learned_endpoint && self.active_learned_subscriptions().len() > 1
+        if !self.allow_learned_endpoint {
+            return false;
+        }
+        let mut counts = BTreeMap::<String, usize>::new();
+        for endpoint in self.active_learned_subscriptions() {
+            *counts.entry(endpoint.device_id).or_default() += 1;
+        }
+        counts.values().any(|count| *count > 1)
     }
 
     /// `false` when an explicit receiver URL pins the destination, which
@@ -469,46 +530,68 @@ impl AlarmRuntime {
         self.allow_learned_endpoint
     }
 
-    fn resolve_subscription_destination_id(
+    fn resolve_subscription_destination_ids(
         &self,
-        requested_id: Option<&str>,
-    ) -> Result<Option<String>, AlarmRuntimeError> {
+        device_id: &str,
+        requested_ids: Option<&[String]>,
+        legacy_requested_id: Option<&str>,
+    ) -> Result<Vec<String>, AlarmRuntimeError> {
         if !self.allow_learned_endpoint {
-            if requested_id.is_some() {
+            if requested_ids.is_some_and(|ids| !ids.is_empty()) || legacy_requested_id.is_some() {
                 return Err(runtime_error(
                     "device_simulator.alarm.subscription_override_active",
                     "an explicit alarm receiver URL is configured; learned subscriptions cannot be selected",
                 ));
             }
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         let learned = self.learned_subscriptions.read();
-        if let Some(id) = requested_id {
-            learned.get(id).ok_or_else(|| {
+        let validate_requested = |id: &str| -> Result<String, AlarmRuntimeError> {
+            let endpoint = learned.get(id).ok_or_else(|| {
                 runtime_error(
                     "device_simulator.alarm.subscription_unknown",
                     format!("alarm subscription '{id}' is not available in this session"),
                 )
             })?;
+            if endpoint.device_id != device_id {
+                return Err(runtime_error(
+                    "device_simulator.alarm.subscription_device_mismatch",
+                    format!(
+                        "alarm subscription '{id}' belongs to device '{}', not '{device_id}'",
+                        endpoint.device_id
+                    ),
+                ));
+            }
             // Expiry is advisory for an explicitly selected target. UMS may
             // still accept alarms after its advertised lifetime has elapsed,
             // so let the real delivery attempt determine success or failure.
-            return Ok(Some(format!("{LEARNED_DESTINATION_PREFIX}{id}")));
+            Ok(format!("{LEARNED_DESTINATION_PREFIX}{id}"))
+        };
+        if let Some(ids) = requested_ids.filter(|ids| !ids.is_empty()) {
+            let mut unique = BTreeSet::new();
+            return ids
+                .iter()
+                .filter(|id| unique.insert(id.as_str()))
+                .map(|id| validate_requested(id))
+                .collect();
+        }
+        if let Some(id) = legacy_requested_id {
+            return validate_requested(id).map(|destination| vec![destination]);
         }
 
-        let active = learned.active_entries(now_ms());
+        let active = learned.active_entries_for_device(device_id, now_ms());
         match active.as_slice() {
-            [] => Ok(None),
-            [endpoint] => Ok(Some(format!(
+            [] => Ok(Vec::new()),
+            [endpoint] => Ok(vec![format!(
                 "{LEARNED_DESTINATION_PREFIX}{}",
                 endpoint.id
-            ))),
+            )]),
             _ => Err(runtime_error(
                 "device_simulator.alarm.destination_selection_required",
                 format!(
-                    "{} active platform subscriptions are available; select the intended alarm receiver",
-                    active.len()
+                    "{} active platform subscriptions are available for device '{device_id}'; select one or more alarm receivers",
+                    active.len(),
                 ),
             )),
         }
@@ -651,13 +734,27 @@ impl AlarmRuntime {
                 "configure an alarm receiver URL or at least one platform server",
             ));
         }
-        let selected_subscription_destination =
-            self.resolve_subscription_destination_id(request.target_subscription_id.as_deref())?;
         let selected_ids = if request.target_device_ids.is_empty() {
             self.devices.keys().cloned().collect::<Vec<_>>()
         } else {
             request.target_device_ids.clone()
         };
+        let selected_id_set = selected_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if let Some(unselected_device_id) = request
+            .target_subscription_ids_by_device
+            .keys()
+            .find(|device_id| !selected_id_set.contains(device_id.as_str()))
+        {
+            return Err(runtime_error(
+                "device_simulator.alarm.subscription_device_unselected",
+                format!(
+                    "alarm subscription targets were supplied for unselected device '{unselected_device_id}'"
+                ),
+            ));
+        }
         let requested_types = request
             .alarm_type_ids
             .iter()
@@ -713,21 +810,6 @@ impl AlarmRuntime {
                 ));
             }
             let subscription_id = stable_numeric_id(job_id, &device_id);
-            let destination_id = selected_subscription_destination
-                .clone()
-                .unwrap_or_else(|| {
-                    self.destination_ids[index % self.destination_ids.len()].clone()
-                });
-            // Fail here rather than at dispatch time if the job names a
-            // destination that was never configured.
-            if !destination_id.starts_with(LEARNED_DESTINATION_PREFIX)
-                && !self.destinations.contains_key(&destination_id)
-            {
-                return Err(runtime_error(
-                    "device_simulator.alarm.destination_missing",
-                    format!("alarm destination '{destination_id}' is not configured"),
-                ));
-            }
             let mut invocations = Vec::with_capacity(definitions.len());
             for mut definition in definitions {
                 if let Some(user_image) = &user_image {
@@ -744,12 +826,36 @@ impl AlarmRuntime {
                     image_cache: Arc::clone(&job_image_cache),
                 });
             }
-            targets.push(AlarmDeviceTarget {
-                device_id: device_id.clone(),
-                destination_id,
-                platform: self.platform,
-                invocations,
-            });
+            let mut destination_ids = self.resolve_subscription_destination_ids(
+                &device_id,
+                request
+                    .target_subscription_ids_by_device
+                    .get(&device_id)
+                    .map(Vec::as_slice),
+                request.target_subscription_id.as_deref(),
+            )?;
+            if destination_ids.is_empty() {
+                destination_ids
+                    .push(self.destination_ids[index % self.destination_ids.len()].clone());
+            }
+            for destination_id in destination_ids {
+                // Fail here rather than at dispatch time if the job names a
+                // destination that was never configured.
+                if !destination_id.starts_with(LEARNED_DESTINATION_PREFIX)
+                    && !self.destinations.contains_key(&destination_id)
+                {
+                    return Err(runtime_error(
+                        "device_simulator.alarm.destination_missing",
+                        format!("alarm destination '{destination_id}' is not configured"),
+                    ));
+                }
+                targets.push(AlarmDeviceTarget {
+                    device_id: device_id.clone(),
+                    destination_id,
+                    platform: self.platform,
+                    invocations: invocations.clone(),
+                });
+            }
         }
         if user_image.is_some() && !user_image_applied {
             return Err(runtime_error(
@@ -869,6 +975,16 @@ impl AlarmSender for HttpAlarmSender {
                             "alarm subscription '{subscription_id}' is no longer available"
                         ))
                 })?;
+                if endpoint.device_id != outbound.device_id {
+                    return Err(AlarmSendError::new(
+                        "device_simulator.alarm.subscription_device_mismatch",
+                        false,
+                    )
+                    .with_details(format!(
+                        "alarm subscription '{subscription_id}' belongs to device '{}', not '{}'",
+                        endpoint.device_id, outbound.device_id
+                    )));
+                }
                 let configured = self.destinations.values().next().ok_or_else(|| {
                     AlarmSendError::new("device_simulator.alarm.destination_unknown", false)
                         .with_details("no configured destination is available")
@@ -2420,6 +2536,8 @@ mod tests {
 
         // A port far outside the legacy 55000..55999 range must be honoured.
         let learned = LearnedAlarmEndpoint::new(
+            "device-1",
+            Ipv4Addr::new(192, 0, 2, 10),
             "198.51.100.9".parse().unwrap(),
             None,
             22_815,
@@ -2438,6 +2556,8 @@ mod tests {
         // If IPAddress is absent, the TCP peer identifies the correct UMS
         // instead of borrowing the first configured server's host.
         let peer_fallback = LearnedAlarmEndpoint::new(
+            "device-1",
+            Ipv4Addr::new(192, 0, 2, 10),
             "198.51.100.44".parse().unwrap(),
             None,
             22_816,
@@ -2459,6 +2579,8 @@ mod tests {
 
         // The advertised receiver host wins over the configured server host.
         let relocated = LearnedAlarmEndpoint::new(
+            "device-1",
+            Ipv4Addr::new(192, 0, 2, 10),
             "198.51.100.9".parse().unwrap(),
             Some(Ipv4Addr::new(192, 115, 1, 55)),
             22_815,
@@ -2492,6 +2614,8 @@ mod tests {
         let mut subscriptions = LearnedAlarmSubscriptions::default();
         for index in 1..=17_u8 {
             subscriptions.upsert(LearnedAlarmEndpoint::new(
+                "device-1",
+                Ipv4Addr::new(192, 0, 2, 10),
                 format!("198.51.100.{index}").parse().unwrap(),
                 None,
                 22_815,
@@ -2507,6 +2631,8 @@ mod tests {
             .all(|entry| entry.source_ip.to_string() != "198.51.100.1"));
 
         let replacement = LearnedAlarmEndpoint::new(
+            "device-1",
+            Ipv4Addr::new(192, 0, 2, 10),
             "198.51.100.17".parse().unwrap(),
             None,
             23_000,
@@ -2532,6 +2658,55 @@ mod tests {
             subscriptions.active_entries(2_000).len(),
             MAX_LEARNED_ALARM_SUBSCRIPTIONS - 1
         );
+    }
+
+    #[test]
+    fn learned_alarm_subscriptions_are_scoped_and_renewed_per_virtual_device() {
+        let mut subscriptions = LearnedAlarmSubscriptions::default();
+        let source_ip = "198.51.100.9".parse().unwrap();
+        let callback_ip = Some(Ipv4Addr::new(198, 51, 100, 20));
+        subscriptions.upsert(LearnedAlarmEndpoint::new(
+            "device-1",
+            Ipv4Addr::new(192, 0, 2, 10),
+            source_ip,
+            callback_ip,
+            22_815,
+            Some(600),
+            1_000,
+        ));
+        subscriptions.upsert(LearnedAlarmEndpoint::new(
+            "device-2",
+            Ipv4Addr::new(192, 0, 2, 11),
+            source_ip,
+            callback_ip,
+            22_815,
+            Some(600),
+            1_000,
+        ));
+
+        assert_eq!(subscriptions.entries().len(), 2);
+        assert_eq!(
+            subscriptions
+                .active_entries_for_device("device-1", 1_000)
+                .len(),
+            1
+        );
+        assert_eq!(
+            subscriptions.renew_for_device_source("device-1", source_ip, 1_200, 2_000),
+            Some(22_815)
+        );
+        let device_one = subscriptions
+            .active_entries_for_device("device-1", 2_000)
+            .pop()
+            .unwrap();
+        let device_two = subscriptions
+            .active_entries_for_device("device-2", 2_000)
+            .pop()
+            .unwrap();
+        assert_eq!(device_one.duration_secs, Some(1_200));
+        assert_eq!(device_one.learned_at_ms, 2_000);
+        assert_eq!(device_two.duration_secs, Some(600));
+        assert_eq!(device_two.learned_at_ms, 1_000);
     }
 
     #[test]

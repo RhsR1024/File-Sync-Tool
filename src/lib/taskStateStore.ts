@@ -48,6 +48,8 @@ const defaultApi: TaskStateStoreApi = {
 };
 
 const MAX_TASK_LOG_ENTRIES = 10_000;
+const MAX_GROUP_LOG_ENTRIES = 2_000;
+const MAX_CACHED_DETAILS = 32;
 
 export interface ManualDeploySession {
   task_group_id: string;
@@ -63,62 +65,125 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
     groups: [] as TaskGroupListItem[],
     selectedTaskGroupId: null as string | null,
     selectedGroupDetail: null as TaskGroup | null,
-    groupDetails: {} as Record<string, TaskGroup>,
+    groupDetails: shallowReactive({} as Record<string, TaskGroup>),
     isHydrated: false,
     isLoadingDetail: false,
-    taskLogs: [] as TaskLogEntry[],
-    taskLogsByGroup: {} as Record<string, TaskLogEntry[]>,
+    taskLogs: shallowReactive([] as TaskLogEntry[]),
+    taskLogsByGroup: shallowReactive({} as Record<string, TaskLogEntry[]>),
     latestManualDeploy: null as ManualDeploySession | null,
   });
 
-  async function hydrateTaskState() {
-    state.groups = await api.listTaskGroups();
+  let groupsVersion = 0;
+  let hydration: Promise<void> | null = null;
+  let selectionVersion = 0;
+
+  function replaceGroups(groups: TaskGroupListItem[]) {
+    ++groupsVersion;
+    state.groups = groups;
     state.isHydrated = true;
+    const ids = new Set(groups.map(group => group.task_group_id));
+    for (const id of Object.keys(state.groupDetails)) {
+      if (!ids.has(id)) delete state.groupDetails[id];
+    }
+    for (const id of Object.keys(state.taskLogsByGroup)) {
+      if (!ids.has(id)) delete state.taskLogsByGroup[id];
+    }
+    const retainedLogs = state.taskLogs.filter(entry => !entry.task_group_id || ids.has(entry.task_group_id));
+    if (retainedLogs.length !== state.taskLogs.length) {
+      state.taskLogs.splice(0, state.taskLogs.length, ...retainedLogs);
+    }
+    if (state.selectedTaskGroupId && !ids.has(state.selectedTaskGroupId)) {
+      ++selectionVersion;
+      state.selectedTaskGroupId = null;
+      state.selectedGroupDetail = null;
+      state.isLoadingDetail = false;
+    }
+  }
+
+  function hydrateTaskState(): Promise<void> {
+    if (hydration) return hydration;
+    const version = groupsVersion;
+    hydration = Promise.resolve().then(async () => {
+      const groups = await api.listTaskGroups();
+      // Live events received during the request are newer than its response.
+      if (version === groupsVersion) replaceGroups(groups);
+    }).finally(() => { hydration = null; });
+    return hydration;
+  }
+
+  function cacheDetail(taskGroupId: string, detail: TaskGroup) {
+    delete state.groupDetails[taskGroupId];
+    state.groupDetails[taskGroupId] = detail;
+    const ids = Object.keys(state.groupDetails);
+    for (const id of ids) {
+      if (Object.keys(state.groupDetails).length <= MAX_CACHED_DETAILS) break;
+      if (id !== state.selectedTaskGroupId && id !== state.latestManualDeploy?.task_group_id) {
+        delete state.groupDetails[id];
+      }
+    }
   }
 
   async function selectTaskGroup(taskGroupId: string) {
+    const version = ++selectionVersion;
     state.selectedTaskGroupId = taskGroupId;
+    state.selectedGroupDetail = state.groupDetails[taskGroupId] ?? null;
+    const previousDetail = state.groupDetails[taskGroupId];
     state.isLoadingDetail = true;
     try {
       const detail = await api.getTaskGroupDetail(taskGroupId);
-      state.selectedGroupDetail = detail;
-      state.groupDetails = { ...state.groupDetails, [taskGroupId]: detail };
+      if (version !== selectionVersion) return;
+      // A detail event may already have advanced this task while IPC was pending.
+      if (state.groupDetails[taskGroupId] === previousDetail) {
+        cacheDetail(taskGroupId, detail);
+        state.selectedGroupDetail = detail;
+      }
     } finally {
-      state.isLoadingDetail = false;
+      if (version === selectionVersion) state.isLoadingDetail = false;
     }
   }
 
   let latestRevision = 0;
 
   function applyGroupsSnapshot(payload: { revision?: number; groups: TaskGroupListItem[] }) {
-    if (payload.revision && payload.revision <= latestRevision) return;
-    latestRevision = payload.revision ?? latestRevision + 1;
-    state.groups = payload.groups;
-    if (
-      state.selectedTaskGroupId
-      && !payload.groups.some((group) => group.task_group_id === state.selectedTaskGroupId)
-    ) {
-      state.selectedTaskGroupId = null;
-      state.selectedGroupDetail = null;
-    }
+    if (payload.revision !== undefined && payload.revision <= latestRevision) return false;
+    if (payload.revision !== undefined) latestRevision = payload.revision;
+    replaceGroups(payload.groups);
+    return true;
   }
 
   function applyDetailSnapshot(payload: { task_group_id: string; group: TaskGroup }) {
-    state.groupDetails = { ...state.groupDetails, [payload.task_group_id]: payload.group };
+    cacheDetail(payload.task_group_id, payload.group);
     if (payload.task_group_id === state.selectedTaskGroupId) {
       state.selectedGroupDetail = payload.group;
     }
   }
 
   function appendTaskLog(entry: TaskLogEntry) {
-    state.taskLogs = [...state.taskLogs, entry].slice(-MAX_TASK_LOG_ENTRIES);
+    state.taskLogs.push(entry);
     if (entry.task_group_id) {
-      const groupLogs = state.taskLogsByGroup[entry.task_group_id] ?? [];
-      const nextGroupLogs = [...groupLogs, entry].slice(-2_000);
-      state.taskLogsByGroup = {
-        ...state.taskLogsByGroup,
-        [entry.task_group_id]: nextGroupLogs,
-      };
+      const groupLogs = state.taskLogsByGroup[entry.task_group_id]
+        ?? (state.taskLogsByGroup[entry.task_group_id] = shallowReactive([] as TaskLogEntry[]));
+      groupLogs.push(entry);
+      if (groupLogs.length > MAX_GROUP_LOG_ENTRIES) {
+        groupLogs.splice(0, MAX_GROUP_LOG_ENTRIES / 10);
+      }
+    }
+    // Per-group indexes must share the global retention budget. A per-group
+    // limit alone leaves one permanent array for every task ever observed.
+    if (state.taskLogs.length > MAX_TASK_LOG_ENTRIES) {
+      // Trim in batches: shifting a reactive 10,000-entry array on every log
+      // would perform thousands of proxy writes per incoming event.
+      const removed = new Set(state.taskLogs.splice(0, MAX_TASK_LOG_ENTRIES / 10));
+      const affectedGroups = new Set([...removed].map(log => log.task_group_id));
+      for (const id of affectedGroups) {
+        if (!id) continue;
+        const groupLogs = state.taskLogsByGroup[id];
+        if (!groupLogs) continue;
+        let count = 0;
+        while (count < groupLogs.length && removed.has(groupLogs[count])) count++;
+        if (count === groupLogs.length) delete state.taskLogsByGroup[id];
+        else if (count) groupLogs.splice(0, count);
+      }
     }
   }
 
@@ -139,10 +204,11 @@ export function createTaskStateStore(apiOverrides: Partial<TaskStateStoreApi> = 
     };
     await hydrateTaskState();
     try {
-      state.groupDetails = {
-        ...state.groupDetails,
-        [handle.task_group_id]: await api.getTaskGroupDetail(handle.task_group_id),
-      };
+      const previousDetail = state.groupDetails[handle.task_group_id];
+      const detail = await api.getTaskGroupDetail(handle.task_group_id);
+      if (state.groupDetails[handle.task_group_id] === previousDetail) {
+        cacheDetail(handle.task_group_id, detail);
+      }
     } catch {
       // The global detail-snapshot listener will populate this as the run advances.
     }

@@ -107,13 +107,67 @@ impl SharedMediaPack {
 
     pub fn read_nal(&self, nal: &SharedMediaNal) -> Result<Vec<u8>, MediaPackError> {
         let mut bytes = vec![0_u8; nal.length];
-        read_exact_at(&self.media_file, &mut bytes, nal.offset as u64).map_err(|error| {
+        self.read_nal_into(nal, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn read_nal_into(
+        &self,
+        nal: &SharedMediaNal,
+        bytes: &mut [u8],
+    ) -> Result<(), MediaPackError> {
+        if bytes.len() != nal.length {
+            return Err(MediaPackError::new(
+                "device_simulator.media.nal_buffer_invalid",
+                "NAL destination length must match the indexed length",
+            ));
+        }
+        read_exact_at(&self.media_file, bytes, nal.offset as u64).map_err(|error| {
             MediaPackError::new(
                 "device_simulator.media.media_read_failed",
                 format!("failed to read indexed media NAL: {error}"),
             )
+        })
+    }
+
+    /// Reuses one bounded frame buffer, reading NAL bytes directly after each
+    /// Annex-B delimiter rather than allocating and copying a temporary NAL.
+    pub fn read_annex_b_frame_into(
+        &self,
+        frame_index: usize,
+        bytes: &mut Vec<u8>,
+    ) -> Result<(), MediaPackError> {
+        let frame = self.frames.get(frame_index).ok_or_else(|| {
+            MediaPackError::new(
+                "device_simulator.media.frame_index_invalid",
+                "media frame index is out of bounds",
+            )
         })?;
-        Ok(bytes)
+        let capacity = frame
+            .nals
+            .iter()
+            .try_fold(0usize, |total, nal| {
+                total.checked_add(nal.length)?.checked_add(4)
+            })
+            .ok_or_else(|| {
+                MediaPackError::new(
+                    "device_simulator.media.frame_too_large",
+                    "Annex-B frame size overflow",
+                )
+            })?;
+        bytes.clear();
+        bytes.resize(capacity, 0);
+        let mut offset = 0;
+        for nal in frame.nals.iter() {
+            bytes[offset..offset + 4].copy_from_slice(&[0, 0, 0, 1]);
+            offset += 4;
+            if let Err(error) = self.read_nal_into(nal, &mut bytes[offset..offset + nal.length]) {
+                bytes.clear();
+                return Err(error);
+            }
+            offset += nal.length;
+        }
+        Ok(())
     }
 
     pub fn parameter_set(&self, kind: ParameterSetKind) -> Option<Vec<u8>> {
@@ -1063,6 +1117,33 @@ mod tests {
         assert_eq!(source.codec, Codec::H264);
         assert!(source.scheduler.owns_indexed_producer());
         assert_eq!(first.read_frame_nals(0).unwrap().1[0], &[0x67, 0x42]);
+    }
+
+    #[test]
+    fn annex_b_reads_match_nals_and_reuse_the_frame_allocation() {
+        for codec in [Codec::H264, Codec::H265] {
+            let fixture = Fixture::new(codec);
+            let media = fixture.load_synthetic().unwrap();
+            let mut buffer = Vec::new();
+            media.read_annex_b_frame_into(0, &mut buffer).unwrap();
+            let allocation = buffer.as_ptr();
+            for frame in [0, media.frames().len() - 1, 0] {
+                let (_, nals) = media.read_frame_nals(frame).unwrap();
+                let expected = nals
+                    .iter()
+                    .flat_map(|nal| [0, 0, 0, 1].into_iter().chain(nal.iter().copied()))
+                    .collect::<Vec<_>>();
+                media.read_annex_b_frame_into(frame, &mut buffer).unwrap();
+                assert_eq!(buffer, expected);
+                assert_eq!(buffer.as_ptr(), allocation);
+            }
+            assert!(media
+                .read_annex_b_frame_into(media.frames().len(), &mut buffer)
+                .is_err());
+            assert!(media
+                .read_nal_into(&media.frames()[0].nals[0], &mut [])
+                .is_err());
+        }
     }
 
     #[test]

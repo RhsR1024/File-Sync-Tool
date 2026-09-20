@@ -3727,9 +3727,9 @@ mod tests {
     use super::schedule_dialog_task;
     use super::{
         appliance_ssh_api_port, build_appliance_ssh_api_url, build_iptables_whitelist_rule,
-        resolve_appliance_ssh_creds, resolve_jump_host_ssh_port,
-        reverse_appliance_ssh_failover_target, ApplianceSshApiVersion, ApplianceSshTarget,
-        ApplianceSshWhitelistScope,
+        build_nested_iptables_whitelist_command, resolve_appliance_ssh_creds,
+        resolve_jump_host_ssh_port, reverse_appliance_ssh_failover_target, ApplianceSshApiVersion,
+        ApplianceSshTarget, ApplianceSshWhitelistScope,
     };
     #[cfg(target_os = "windows")]
     use std::cell::Cell;
@@ -4048,6 +4048,21 @@ mod tests {
     }
 
     #[test]
+    fn appliance_ssh_nested_hop_does_not_consume_outer_shell_input() {
+        let command = build_nested_iptables_whitelist_command(
+            "root",
+            "206.206.0.98",
+            23333,
+            "0.0.0.0/0",
+            23333,
+            ApplianceSshWhitelistScope::AllTcp,
+        );
+
+        assert!(command.contains("&& ssh -n -o BatchMode=yes"));
+        assert!(command.contains("-p 23333 root@206.206.0.98"));
+    }
+
+    #[test]
     fn resolve_jump_host_ssh_port_prefers_user_then_status_then_default() {
         assert_eq!(resolve_jump_host_ssh_port(Some(2222), Some(23333)), 2222);
         assert_eq!(resolve_jump_host_ssh_port(None, Some(2200)), 2200);
@@ -4348,6 +4363,8 @@ fn validate_cidr(value: &str) -> bool {
 
 const DEVICE_BATCH_CONCURRENCY_LIMIT: usize = 4;
 const DEVICE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const APPLIANCE_SSH_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+const APPLIANCE_SSH_SESSION_TIMEOUT_MS: u32 = 15_000;
 
 fn build_device_http_client_with_timeout(
     request_timeout: Duration,
@@ -4599,9 +4616,10 @@ fn resolve_appliance_ssh_creds(
 /// pass A's firewall, and (2) SSHes into the target B to apply the same rule.
 /// Appliance master/backup pairs come pre-provisioned with passwordless SSH
 /// (key-based or host-based auth) between each other, so no password is
-/// passed here; `BatchMode=yes` makes ssh fail fast if interactive auth would
-/// be required instead of hanging. `source` may be a single IPv4 address or
-/// a CIDR.
+/// passed here. `-n` prevents the nested client from consuming the outer
+/// interactive shell's exit marker, while `BatchMode=yes` makes ssh fail fast
+/// if interactive auth would be required. `source` may be a single IPv4
+/// address or a CIDR.
 fn build_nested_iptables_whitelist_command(
     target_user: &str,
     target_ip: &str,
@@ -4612,7 +4630,7 @@ fn build_nested_iptables_whitelist_command(
 ) -> String {
     let rule = build_iptables_whitelist_rule(iptables_source, iptables_port, scope);
     format!(
-        "({rule}) && ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+        "({rule}) && ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
 -p {target_port} {target_user}@{target_ip} '{rule}'"
     )
 }
@@ -4667,6 +4685,27 @@ struct RemoteCommandResult {
     mode: &'static str,
 }
 
+async fn run_remote_command_over_ssh_with_timeout(
+    ip: String,
+    port: u16,
+    username: String,
+    password: String,
+    command: String,
+) -> Result<RemoteCommandResult, String> {
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        run_remote_command_over_ssh(&ip, port, &username, &password, &command)
+    });
+
+    match tokio::time::timeout(APPLIANCE_SSH_OPERATION_TIMEOUT, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(format!("SSH worker task failed: {error}")),
+        Err(_) => Err(format!(
+            "SSH command timed out after {} seconds",
+            APPLIANCE_SSH_OPERATION_TIMEOUT.as_secs()
+        )),
+    }
+}
+
 fn exec_restriction_hint(error: &str) -> bool {
     let lower = error.to_lowercase();
     lower.contains("not allowed")
@@ -4690,6 +4729,7 @@ fn connect_ssh_session(
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(15)));
 
     let mut sess = Session::new().map_err(|e| format!("SSH session init failed: {}", e))?;
+    sess.set_timeout(APPLIANCE_SSH_SESSION_TIMEOUT_MS);
     sess.set_tcp_stream(tcp);
     sess.handshake()
         .map_err(|e| format!("SSH handshake failed: {}", e))?;
@@ -5114,24 +5154,14 @@ async fn enable_appliance_ssh_for_target(
         let user_owned = ssh_user.clone();
         let password_owned = ssh_pass.clone();
         let command_owned = command.clone();
-        let whitelist_result = match tauri::async_runtime::spawn_blocking(move || {
-            run_remote_command_over_ssh(
-                &host_owned,
-                api_ssh_port,
-                &user_owned,
-                &password_owned,
-                &command_owned,
-            )
-        })
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                result.whitelist_applied = Some(false);
-                result.message = format!("Failed to run the SSH whitelist task: {}", e);
-                return Some(result);
-            }
-        };
+        let whitelist_result = run_remote_command_over_ssh_with_timeout(
+            host_owned,
+            api_ssh_port,
+            user_owned,
+            password_owned,
+            command_owned,
+        )
+        .await;
 
         match whitelist_result {
             Ok(remote_result) => {
@@ -5207,18 +5237,16 @@ async fn enable_appliance_ssh_for_target(
         let host_owned = api_ip.clone();
         let user_owned = ssh_user.clone();
         let password_owned = ssh_pass.clone();
-        let probe = tauri::async_runtime::spawn_blocking(move || {
-            run_remote_command_over_ssh(
-                &host_owned,
-                api_ssh_port,
-                &user_owned,
-                &password_owned,
-                "true",
-            )
-        })
+        let probe = run_remote_command_over_ssh_with_timeout(
+            host_owned,
+            api_ssh_port,
+            user_owned,
+            password_owned,
+            "true".to_string(),
+        )
         .await;
         match probe {
-            Ok(Ok(_)) => {
+            Ok(_) => {
                 result.success = true;
                 result.message = format!(
                     "Management API unavailable ({}), but jump host {} is reachable over SSH (port {})",
@@ -5233,7 +5261,7 @@ async fn enable_appliance_ssh_for_target(
                     "success",
                 );
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 result.message = format!(
                     "Management API unavailable ({}); SSH channel to jump host {} is not usable: {}",
                     api_err, api_ip, e
@@ -5245,12 +5273,6 @@ async fn enable_appliance_ssh_for_target(
                         ip, e
                     ),
                     "error",
-                );
-            }
-            Err(join_err) => {
-                result.message = format!(
-                    "Management API unavailable ({}); SSH channel to jump host {} is not usable: {}",
-                    api_err, api_ip, join_err
                 );
             }
         }

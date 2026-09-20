@@ -29,6 +29,21 @@ function group(overrides = {}) {
   };
 }
 
+test('forgets removed groups instead of retaining their notification state forever', () => {
+  const tracker = createSyncTaskNotificationTracker([group()]);
+  tracker.collect([]);
+  assert.deepEqual(tracker.collect([group({ copy_status: 'running' })]), []);
+});
+
+test('bounds unmatched queue announcements while retaining recent runs', () => {
+  const tracker = createSyncTaskNotificationTracker();
+  for (let i = 0; i < 1_100; i++) tracker.markQueued(`pending-${i}`);
+  assert.deepEqual(tracker.collect([group({ latest_run_id: 'pending-0', copy_status: 'running' })]), []);
+  assert.deepEqual(tracker.collect([group({ latest_run_id: 'pending-1099', copy_status: 'running' })]), [
+    { kind: 'copy_started', taskName: 'build-1' },
+  ]);
+});
+
 test('reports copy, local execution, and deploy milestones once for the same scheduled run', () => {
   const tracker = createSyncTaskNotificationTracker([group()]);
 

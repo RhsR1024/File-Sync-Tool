@@ -49,6 +49,8 @@ let launcherStateVersion = 0;
 // would enqueue the same direction more than once under rapid input.
 let requestedExpanded = false;
 let draggingLauncher = false;
+let launcherPress: { pointerId: number; clientX: number; clientY: number } | null = null;
+const LAUNCHER_DRAG_THRESHOLD = 4;
 let paperDragFinished = false;
 // Last known pointer state, kept explicitly because the webview reports the
 // expand reposition as a leave/enter pair the user never performed.
@@ -218,25 +220,44 @@ async function syncCollapsedWidth(): Promise<void> {
   );
 }
 
-async function startLauncherDrag(event: MouseEvent): Promise<void> {
-  if (event.button !== 0 || draggedPaperId.value || draggingLauncher) return;
+function startLauncherPress(event: PointerEvent): void {
+  if (event.button !== 0 || draggedPaperId.value || draggingLauncher || transitioning.value) return;
   cancelCollapse();
   pointerInside = true;
+  launcherPress = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function moveLauncherPress(event: PointerEvent): void {
+  const press = launcherPress;
+  if (!press || press.pointerId !== event.pointerId) return;
+  if (Math.abs(event.clientX - press.clientX) < LAUNCHER_DRAG_THRESHOLD
+    && Math.abs(event.clientY - press.clientY) < LAUNCHER_DRAG_THRESHOLD) return;
+  launcherPress = null;
+  void startLauncherDrag(press);
+}
+
+function finishLauncherPress(event: PointerEvent): void {
+  // Include the release position when a fast gesture has no pointermove.
+  moveLauncherPress(event);
+  if (launcherPress?.pointerId !== event.pointerId) return;
+  launcherPress = null;
+  void setExpanded(!requestedExpanded).catch((reason) => { store.error.value = String(reason); });
+}
+
+function cancelLauncherPress(): void {
+  launcherPress = null;
+}
+
+async function startLauncherDrag(event: { clientX: number; clientY: number }): Promise<void> {
   draggingLauncher = true;
   try {
-    // The capsule is the whole drag handle now, so a press is ambiguous: the
-    // native loop moves it across the virtual desktop, snaps it near any
-    // display edge, and reports whether it ever travelled. A press that did not
-    // move is the expand/collapse click.
-    // Capture the press location before the IPC round-trip. The native loop
-    // starts asynchronously, so sampling the cursor there would lose any
-    // movement made during that gap and make the capsule trail the pointer.
+    // Only pointer movement starts native work. A delayed IPC response must
+    // never turn a completed drag into an expand/collapse click.
     const moved = await dragPaperLauncher(event.clientX, event.clientY);
     if (moved) {
       settleUntil = Date.now() + SETTLE_MS;
       await store.refreshFromDisk();
-    } else {
-      await setExpanded(!requestedExpanded);
     }
   } catch (reason) {
     store.error.value = String(reason);
@@ -246,12 +267,25 @@ async function startLauncherDrag(event: MouseEvent): Promise<void> {
 }
 
 /**
- * Pointer presses are resolved by the drag loop, so only keyboard activation —
+ * Pointer presses are resolved separately, so only keyboard activation —
  * which reports no click count — still has to toggle here.
  */
 function toggleFromKeyboard(event: MouseEvent): void {
   if (event.detail !== 0) return;
   void setExpanded(!requestedExpanded);
+}
+
+function collapseOnOutsideInteraction(): void {
+  cancelLauncherPress();
+  if (!requestedExpanded || !store.settings.value.autoCollapseLauncher
+    || draggingLauncher || draggedPaperId.value) return;
+  pointerInside = false;
+  void setExpanded(false).catch((reason) => { store.error.value = String(reason); });
+}
+
+function handleDocumentPointerDown(event: PointerEvent): void {
+  if (event.target instanceof Element && event.target.closest('button, [draggable="true"]')) return;
+  collapseOnOutsideInteraction();
 }
 
 function scheduleCollapse(): void {
@@ -265,10 +299,10 @@ function scheduleCollapse(): void {
   cancelCollapse();
   // Reordering papers and dragging the launcher both move things around under
   // the cursor; neither is the user pointing away from the launcher.
-  if (draggedPaperId.value || draggingLauncher) return;
+  if (draggedPaperId.value || draggingLauncher || launcherPress) return;
   collapseTimer = setTimeout(() => {
     collapseTimer = null;
-    if (pointerInside || draggedPaperId.value || draggingLauncher) return;
+    if (pointerInside || draggedPaperId.value || draggingLauncher || launcherPress) return;
     void setExpanded(false);
   }, COLLAPSE_DELAY_MS);
 }
@@ -403,6 +437,8 @@ watch(() => store.settings.value.autoCollapseLauncher, (enabled) => {
 });
 
 onMounted(async () => {
+  window.addEventListener('blur', collapseOnOutsideInteraction);
+  document.addEventListener('pointerdown', handleDocumentPointerDown);
   try {
     await store.initialize();
     // The backend creates and synchronizes the launcher in collapsed mode
@@ -417,6 +453,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   cancelCollapse();
+  cancelLauncherPress();
+  window.removeEventListener('blur', collapseOnOutsideInteraction);
+  document.removeEventListener('pointerdown', handleDocumentPointerDown);
 });
 </script>
 
@@ -441,7 +480,11 @@ onBeforeUnmount(() => {
       :aria-label="expanded ? t('paperTodo.launcher.collapse') : t('paperTodo.launcher.expand')"
       :aria-expanded="expanded"
       aria-controls="paper-todo-capsule-list"
-      @mousedown.stop.prevent="startLauncherDrag"
+      @pointerdown.stop.prevent="startLauncherPress"
+      @pointermove="moveLauncherPress"
+      @pointerup="finishLauncherPress"
+      @pointercancel="cancelLauncherPress"
+      @lostpointercapture="cancelLauncherPress"
       @click="toggleFromKeyboard"
     >
       <ChevronDown v-if="expanded" class="launcher-chevron" aria-hidden="true" />
@@ -589,6 +632,7 @@ onBeforeUnmount(() => {
   text-align: left;
 }
 .launcher-master-capsule:active { cursor: grabbing; }
+.launcher-drag-handle { touch-action: none; }
 .launcher-free .launcher-master-capsule {
   justify-content: center;
   padding-inline: 8px;

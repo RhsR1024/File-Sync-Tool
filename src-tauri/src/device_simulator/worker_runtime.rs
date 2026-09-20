@@ -3,8 +3,8 @@ use crate::device_simulator::alarm_runtime::{AlarmRuntime, AlarmRuntimeConfig, A
 use crate::device_simulator::api::{
     preview_devices, AlarmJobRequest, AlarmJobStatsSnapshot, AlarmSubscriptionRecordSnapshot,
     AlarmSubscriptionSnapshot, AlarmTriggerResult, DevicePreview, DeviceRuntimeStatusSnapshot,
-    PlatformAccessMode, RtspStatsSnapshot, RuntimeEventBatcher, RuntimeTelemetrySnapshot,
-    SimulatorMetricsSnapshot, SimulatorStatusSnapshot, TargetPlatformServer,
+    PlatformAccessMode, RtspStatsSnapshot, RuntimeEventBatcher, RuntimeTelemetryCache,
+    RuntimeTelemetrySnapshot, SimulatorMetricsSnapshot, SimulatorStatusSnapshot, TargetPlatformServer,
 };
 use crate::device_simulator::errors::SimulatorErrorBody;
 use crate::device_simulator::local_materials::LocalMaterialPaths;
@@ -313,6 +313,8 @@ impl WorkerServiceRuntime for SystemWorkerServices {
                 let expires_at_ms = endpoint.expires_at_ms();
                 AlarmSubscriptionRecordSnapshot {
                     id: endpoint.id,
+                    device_id: endpoint.device_id,
+                    device_ip: endpoint.device_ip.to_string(),
                     source_ip: endpoint.source_ip.to_string(),
                     host: endpoint.host.map(|host| host.to_string()),
                     port: endpoint.port,
@@ -362,6 +364,8 @@ pub struct WorkerRuntime {
     services: Box<dyn WorkerServiceRuntime>,
     worker_process: Option<WorkerProcessIdentity>,
     event_batcher: RuntimeEventBatcher,
+    telemetry_cache: RuntimeTelemetryCache,
+    last_device_telemetry: Option<(SessionState, ProtocolRuntimeStats)>,
 }
 
 impl WorkerRuntime {
@@ -413,6 +417,8 @@ impl WorkerRuntime {
             services,
             worker_process,
             event_batcher: RuntimeEventBatcher::default(),
+            telemetry_cache: RuntimeTelemetryCache::default(),
+            last_device_telemetry: None,
         }
     }
 
@@ -906,10 +912,32 @@ impl WorkerRuntime {
     }
 
     pub async fn telemetry_snapshot(&mut self) -> RuntimeTelemetrySnapshot {
+        self.collect_telemetry(false).await
+    }
+
+    pub async fn telemetry_changes(&mut self) -> RuntimeTelemetrySnapshot {
+        self.collect_telemetry(true).await
+    }
+
+    async fn collect_telemetry(&mut self, changes_only: bool) -> RuntimeTelemetrySnapshot {
         let protocol_stats = self.services.protocol_stats();
         let alarm_stats = self.services.alarm_stats().await;
         let status = self.build_status_snapshot(&protocol_stats, &alarm_stats);
-        if let Some(initialized) = self.initialized.as_ref() {
+        let devices_unchanged =
+            self.last_device_telemetry
+                .as_ref()
+                .is_some_and(|(state, previous)| {
+                    *state == self.state
+                        && previous.active_http_connections_by_device
+                            == protocol_stats.active_http_connections_by_device
+                        && previous.active_rtsp_clients_by_device
+                            == protocol_stats.active_rtsp_clients_by_device
+                });
+        if let Some(initialized) = self
+            .initialized
+            .as_ref()
+            .filter(|_| !changes_only || !devices_unchanged)
+        {
             for device in &initialized.payload.preview.devices {
                 self.event_batcher
                     .update_device(DeviceRuntimeStatusSnapshot {
@@ -942,10 +970,15 @@ impl WorkerRuntime {
         if let Some(subscription) = self.services.alarm_subscription() {
             self.event_batcher.update_alarm_subscription(subscription);
         }
-        RuntimeTelemetrySnapshot {
+        let mut snapshot = RuntimeTelemetrySnapshot {
             status,
             events: self.event_batcher.drain(&self.session_id, usize::MAX),
+        };
+        if changes_only {
+            self.telemetry_cache.retain_changed(&mut snapshot.events);
+            self.last_device_telemetry = Some((self.state, protocol_stats));
         }
+        snapshot
     }
 
     fn build_status_snapshot(
@@ -1770,6 +1803,41 @@ mod tests {
                 "198.51.100.20".parse::<Ipv4Addr>().unwrap(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn full_telemetry_does_not_consume_periodic_changes() {
+        let root = TempDir::new().unwrap();
+        let mut runtime = seed_runtime(
+            &root,
+            Arc::new(FakeIpBackend::default()),
+            Arc::new(FakeFirewallBackend::default()),
+        );
+        runtime.state = SessionState::Running;
+        let full = runtime.telemetry_snapshot().await;
+        let first = runtime.telemetry_changes().await;
+        assert_eq!(
+            full.events.device_status.as_ref().unwrap().devices,
+            first.events.device_status.as_ref().unwrap().devices
+        );
+        assert!(first.events.rtsp_stats.is_some());
+        let repeated = runtime.telemetry_changes().await;
+        assert!(repeated.events.device_status.is_none());
+        assert!(repeated.events.rtsp_stats.is_none());
+        let reopened = runtime.telemetry_snapshot().await;
+        assert!(reopened.events.device_status.is_some());
+        assert!(reopened.events.rtsp_stats.is_some());
+        runtime.state = SessionState::Stopped;
+        let _ = runtime.telemetry_snapshot().await;
+        let stopped = runtime.telemetry_changes().await;
+        assert!(stopped
+            .events
+            .device_status
+            .unwrap()
+            .devices
+            .iter()
+            .all(|device| !device.online));
+        assert_eq!(stopped.status.state, SessionState::Stopped);
     }
 
     #[tokio::test]

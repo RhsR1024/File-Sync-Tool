@@ -80,6 +80,78 @@ store.applyGroupsSnapshot({ groups: [] });
 assert.equal(store.groups.length, 0);
 assert.equal(store.selectedTaskGroupId, null);
 assert.equal(store.selectedGroupDetail, null);
+assert.equal(Object.keys(store.groupDetails).length, 0);
+assert.equal(Object.keys(store.taskLogsByGroup).length, 0);
+assert.equal(store.taskLogs.length, 0);
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+// An old query must not put deleted/completed tasks back after a live snapshot.
+const oldList = deferred();
+let listCalls = 0;
+const raceStore = createTaskStateStore({ listTaskGroups: () => { listCalls++; return oldList.promise; } });
+const firstHydrate = raceStore.hydrateTaskState();
+assert.equal(raceStore.hydrateTaskState(), firstHydrate);
+await Promise.resolve();
+raceStore.applyGroupsSnapshot({ revision: 10, groups: [{ ...sampleGroup, summary_status: 'completed' }] });
+oldList.resolve([sampleGroup]);
+await firstHydrate;
+assert.equal(listCalls, 1);
+assert.equal(raceStore.isHydrated, true);
+assert.equal(raceStore.groups[0].summary_status, 'completed');
+raceStore.applyGroupsSnapshot({ revision: 9, groups: [] });
+assert.equal(raceStore.groups.length, 1);
+
+// Switching selection and receiving detail events cannot be undone by slow IPC.
+const firstDetail = deferred();
+const secondDetail = deferred();
+const detailStore = createTaskStateStore({
+  getTaskGroupDetail: id => id === 'group-1' ? firstDetail.promise : secondDetail.promise,
+});
+const firstSelection = detailStore.selectTaskGroup('group-1');
+const secondSelection = detailStore.selectTaskGroup('group-2');
+firstDetail.resolve(sampleDetail);
+await firstSelection;
+assert.equal(detailStore.selectedTaskGroupId, 'group-2');
+assert.equal(detailStore.isLoadingDetail, true);
+detailStore.applyDetailSnapshot({ task_group_id: 'group-2', group: { ...sampleDetail, task_group_id: 'group-2', summary_status: 'completed' } });
+secondDetail.resolve({ ...sampleDetail, task_group_id: 'group-2' });
+await secondSelection;
+assert.equal(detailStore.selectedGroupDetail.summary_status, 'completed');
+assert.equal(detailStore.isLoadingDetail, false);
+
+// Even without list snapshots, long-running task churn has a fixed cache budget.
+const churnStore = createTaskStateStore();
+for (let i = 0; i < 10_100; i++) {
+  const id = `churn-${i}`;
+  churnStore.appendTaskLog({ task_group_id: id, run_id: `run-${i}`, level: 'info', message: 'log', timestamp: 'now', server_id: null, server_name: null });
+  if (i < 100) churnStore.applyDetailSnapshot({ task_group_id: id, group: { ...sampleDetail, task_group_id: id } });
+}
+assert.ok(churnStore.taskLogs.length <= 10_000 && churnStore.taskLogs.length >= 9_000);
+assert.equal(Object.keys(churnStore.taskLogsByGroup).length, churnStore.taskLogs.length);
+assert.equal(Object.values(churnStore.taskLogsByGroup).reduce((sum, logs) => sum + logs.length, 0), churnStore.taskLogs.length);
+assert.ok(Object.keys(churnStore.groupDetails).length <= 32);
+assert.equal(churnStore.taskLogsByGroup['churn-0'], undefined);
+churnStore.applyGroupsSnapshot({ groups: [] });
+assert.equal(Object.keys(churnStore.taskLogsByGroup).length, 0);
+assert.equal(Object.keys(churnStore.groupDetails).length, 0);
+
+// Mutating bounded arrays still invalidates Vue consumers of shallow store state.
+const { computed } = await import('vue');
+const logCount = computed(() => churnStore.taskLogs.length);
+const groupLogCount = computed(() => churnStore.taskLogsByGroup['same-group']?.length ?? 0);
+assert.equal(logCount.value, 0);
+assert.equal(groupLogCount.value, 0);
+for (let i = 0; i < 2_100; i++) {
+  churnStore.appendTaskLog({ task_group_id: 'same-group', run_id: 'same-run', level: 'info', message: `${i}`, timestamp: 'now', server_id: null, server_name: null });
+}
+assert.equal(logCount.value, 2_100);
+assert.ok(groupLogCount.value <= 2_000 && groupLogCount.value >= 1_800);
+assert.equal(churnStore.taskLogsByGroup['same-group'].at(-1).message, '2099');
 
 // ── Manual task action tests ─────────────────────────────────────────────────
 const actionCalls = [];

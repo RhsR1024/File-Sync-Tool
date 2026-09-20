@@ -608,7 +608,7 @@ async fn serve_http_connection(
     // Learn the platform's alarm receiver endpoint from subscription requests so
     // alarm dispatch and the rendered subscription Reference follow it, exactly
     // as the legacy tool wrote picconfig/sendport from the subscription Port.
-    learn_subscription_endpoint(&request, peer, &learned_subscriptions);
+    learn_subscription_endpoint(&request, peer, &device, &learned_subscriptions);
     let response = if let Some(response) = live_stream_url_response(&request, &device)? {
         response
     } else if request.method == HttpMethod::Get && request.path == "/LAPI/V1.0/System/Picture" {
@@ -802,8 +802,8 @@ struct HttpTemplateSelection {
 }
 
 /// Extract the alarm receiver endpoint the platform advertised in a subscription
-/// request body and publish it to the shared learned-endpoint handle. Returns
-/// the port for immediate response rewriting.
+/// request body, or refresh an existing endpoint when a renewal PUT only carries
+/// `Duration`. Returns the learned receiver port.
 ///
 /// The request path and method are the only gate: a body carrying `Port` on
 /// `POST`/`PUT .../Event/Subscription` is unambiguously a subscription, so no
@@ -814,6 +814,7 @@ struct HttpTemplateSelection {
 fn learn_subscription_endpoint(
     request: &HttpRequest,
     peer: SocketAddr,
+    device: &DeviceIdentityPreviewDto,
     learned_subscriptions: &SharedLearnedAlarmSubscriptions,
 ) -> Option<u16> {
     if !request.path.contains("Event/Subscription")
@@ -821,14 +822,30 @@ fn learn_subscription_endpoint(
     {
         return None;
     }
-    let port = extract_subscription_u16(&request.body, "Port").filter(|port| *port != 0)?;
+
+    let duration_secs =
+        extract_subscription_u32(&request.body, "Duration").filter(|duration| *duration != 0);
+    let port = extract_subscription_u16(&request.body, "Port").filter(|port| *port != 0);
+    if request.method == HttpMethod::Put && port.is_none() {
+        let duration_secs = duration_secs?;
+        return learned_subscriptions.write().renew_for_device_source(
+            &device.device_id,
+            peer.ip(),
+            duration_secs,
+            now_ms(),
+        );
+    }
+
+    let port = port?;
     learned_subscriptions
         .write()
         .upsert(LearnedAlarmEndpoint::new(
+            device.device_id.clone(),
+            device.ip,
             peer.ip(),
             extract_subscription_host(&request.body),
             port,
-            extract_subscription_u32(&request.body, "Duration").filter(|duration| *duration != 0),
+            duration_secs,
             now_ms(),
         ));
     Some(port)
@@ -1665,6 +1682,16 @@ mod tests {
             resolve_http_template(&keep_alive).unwrap().path,
             "xml/Common/1-KeepAlive.xml"
         );
+        let renewal = request(
+            HttpMethod::Put,
+            "/LAPI/V1.0/System/Event/Subscription/1000",
+            None,
+            br#"{"Duration":600}"#,
+        );
+        assert_eq!(
+            resolve_http_template(&renewal).unwrap().path,
+            "xml/Common/PUT.xml"
+        );
     }
 
     #[test]
@@ -1794,6 +1821,7 @@ mod tests {
         let learned: SharedLearnedAlarmSubscriptions =
             std::sync::Arc::new(parking_lot::RwLock::new(Default::default()));
         let peer: SocketAddr = "192.115.1.10:40000".parse().unwrap();
+        let subscribed_device = device("ipc-structured");
         // Captured from a real UMS deployment: the receiver port sits far
         // outside the legacy 55000..55999 range, and the platform names the
         // receiver host explicitly.
@@ -1804,11 +1832,13 @@ mod tests {
             b"{\"AddressType\":0,\"IPAddress\":\"192.115.1.55\",\"Port\":22815,\"Duration\":600}",
         );
         assert_eq!(
-            learn_subscription_endpoint(&post, peer, &learned),
+            learn_subscription_endpoint(&post, peer, &subscribed_device, &learned),
             Some(22815)
         );
         let endpoint = learned.read().entries()[0].clone();
         assert_eq!(endpoint.port, 22815);
+        assert_eq!(endpoint.device_id, subscribed_device.device_id);
+        assert_eq!(endpoint.device_ip, subscribed_device.ip);
         assert_eq!(endpoint.source_ip, peer.ip());
         assert_eq!(endpoint.host, Some(Ipv4Addr::new(192, 115, 1, 55)));
         assert_eq!(endpoint.duration_secs, Some(600));
@@ -1824,8 +1854,43 @@ mod tests {
             None,
             b"{\"Port\":0,\"Duration\":600}",
         );
-        assert_eq!(learn_subscription_endpoint(&zero, peer, &learned), None);
+        assert_eq!(
+            learn_subscription_endpoint(&zero, peer, &subscribed_device, &learned),
+            None
+        );
         assert_eq!(learned.read().entries()[0].port, 22815);
+
+        // UMS renews the server-issued subscription ID with only a Duration.
+        // Preserve the endpoint learned by POST and restart its expiry window.
+        let original = learned.read().entries()[0].clone();
+        let renewal = request(
+            HttpMethod::Put,
+            "/LAPI/V1.0/System/Event/Subscription/1000",
+            None,
+            br#"{"Duration":1200}"#,
+        );
+        assert_eq!(
+            learn_subscription_endpoint(&renewal, peer, &subscribed_device, &learned),
+            Some(22815)
+        );
+        let renewed = learned.read().entries()[0].clone();
+        assert_eq!(renewed.id, original.id);
+        assert_eq!(renewed.host, original.host);
+        assert_eq!(renewed.port, original.port);
+        assert_eq!(renewed.duration_secs, Some(1200));
+        assert!(renewed.learned_at_ms >= original.learned_at_ms);
+        assert_eq!(
+            renewed.expires_at_ms(),
+            Some(renewed.learned_at_ms + 1_200_000)
+        );
+
+        // A renewal from another platform must not extend this subscription.
+        let unrelated_peer: SocketAddr = "192.115.1.11:40000".parse().unwrap();
+        assert_eq!(
+            learn_subscription_endpoint(&renewal, unrelated_peer, &subscribed_device, &learned),
+            None
+        );
+        assert_eq!(learned.read().entries()[0], renewed);
 
         // Non-subscription traffic never touches the learned endpoint.
         let unrelated = request(
@@ -1835,7 +1900,7 @@ mod tests {
             b"{\"Port\":9000}",
         );
         assert_eq!(
-            learn_subscription_endpoint(&unrelated, peer, &learned),
+            learn_subscription_endpoint(&unrelated, peer, &subscribed_device, &learned),
             None
         );
         assert_eq!(learned.read().entries()[0].port, 22815);
@@ -1848,7 +1913,7 @@ mod tests {
             b"{\"IPAddress\":\"0.0.0.0\",\"Port\":30000}",
         );
         assert_eq!(
-            learn_subscription_endpoint(&unspecified, peer, &learned),
+            learn_subscription_endpoint(&unspecified, peer, &subscribed_device, &learned),
             Some(30000)
         );
         let endpoint = learned
@@ -1860,6 +1925,19 @@ mod tests {
         assert_eq!(endpoint.host, None);
         assert_eq!(endpoint.duration_secs, None);
         assert_eq!(learned.read().entries().len(), 2);
+
+        // The same callback subscribing to another virtual device is a distinct
+        // association and must not overwrite this device's subscriptions.
+        let second_device = device_at("ipc-structured", "group", "group-0002", "192.0.2.11");
+        assert_eq!(
+            learn_subscription_endpoint(&post, peer, &second_device, &learned),
+            Some(22815)
+        );
+        let entries = learned.read().entries();
+        assert_eq!(entries.len(), 3);
+        assert!(entries
+            .iter()
+            .any(|entry| entry.device_id == second_device.device_id));
     }
 
     #[tokio::test]

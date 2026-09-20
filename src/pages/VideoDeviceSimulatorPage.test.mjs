@@ -240,7 +240,7 @@ assert.match(page, /subscription\.destinations\.join/, 'the effective alarm dest
 assert.match(messages, /waitingDescription: '平台通常在添加设备时、或设备离线再上线后才下发订阅。/, 'the waiting copy must explain when a platform normally subscribes');
 assert.match(messages, /count: '已收到 \{count\} 个订阅'/, 'the Chinese subscription count must describe received subscriptions');
 assert.doesNotMatch(page, /:disabled="subscriptionRecordExpired\(record\)/, 'expired subscriptions must remain selectable');
-assert.match(page, /target_subscription_id: selectedAlarmSubscriptionAvailable\.value/, 'an explicitly selected expired subscription must be sent to the backend');
+assert.match(page, /target_subscription_ids_by_device: Object\.fromEntries\([\s\S]*?selectedSubscriptionIds\(deviceId\)/, 'explicit subscriptions must be sent in the device-scoped selection map');
 assert.doesNotMatch(alarmRuntime, /if endpoint\.is_expired_at\(/, 'the backend must attempt delivery to an explicitly selected expired subscription');
 
 // The real failure code was previously dropped, leaving only one generic

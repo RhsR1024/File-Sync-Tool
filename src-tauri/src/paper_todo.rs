@@ -988,9 +988,6 @@ fn run_launcher_drag(app: &AppHandle, client_x: f64, client_y: f64) -> Result<bo
     let mut cursor = POINT::default();
     while Instant::now() < deadline {
         let pressed = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000;
-        if pressed == 0 {
-            break;
-        }
         if unsafe { GetCursorPos(&mut cursor) }.is_err() {
             break;
         }
@@ -1029,6 +1026,11 @@ fn run_launcher_drag(app: &AppHandle, client_x: f64, client_y: f64) -> Result<bo
                 last_position = target;
                 let _ = window.set_position(target);
             }
+        }
+        // Include the final cursor position if a quick drag released before
+        // the IPC request reached this worker.
+        if pressed == 0 {
+            break;
         }
         std::thread::sleep(Duration::from_millis(LAUNCHER_DRAG_TICK_MS));
     }

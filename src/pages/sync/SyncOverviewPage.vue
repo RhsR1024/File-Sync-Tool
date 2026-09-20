@@ -122,6 +122,28 @@ const currentSpeed = computed(() => {
   return `${(bytesPerSecond / (1024 * 1024 * 1024)).toFixed(2)} GB/s`;
 });
 
+const scanActive = computed(() => appStore.isRunning || appStore.scanInProgress);
+const scanStatus = computed(() => {
+  if (appStore.scanInProgress) return t('console.scanning');
+  if (appStore.lastScanError) return t('console.scanHasErrors');
+  if (!appStore.isRunning) return t('console.stopped');
+  return t(appStore.scanWaitingForQueue ? 'console.scanWaitingForQueue' : 'console.scanWaiting');
+});
+const scanTiming = computed(() => {
+  if (appStore.scanStartedAt !== null) {
+    const seconds = Math.max(0, Math.floor((appStore.nowTick - appStore.scanStartedAt) / 1000));
+    return t('console.scanElapsed', { seconds });
+  }
+  if (appStore.nextRunAt !== null) {
+    const seconds = Math.max(0, Math.ceil((appStore.nextRunAt - appStore.nowTick) / 1000));
+    return t('console.scanCountdown', { seconds });
+  }
+  return '—';
+});
+const nextScanTime = computed(() => appStore.nextRunAt === null
+  ? (appStore.scanInProgress && appStore.isRunning ? t('console.afterCurrentScan') : '—')
+  : new Date(appStore.nextRunAt).toLocaleTimeString());
+
 const terminalTaskCount = computed(() => allRows.value.filter(r => {
   const s = r.summary_status;
   return s === 'completed' || s === 'failed' || s === 'cancelled'
@@ -355,7 +377,6 @@ async function handleManualCopyQueued() {
 }
 
 async function handleScanClick() {
-  if (appStore.isRunning) return;
   await executeScan();
 }
 
@@ -409,20 +430,20 @@ function handleManualCopyClose() {
     <section class="sync-overview-summary grid shrink-0 grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <!-- Status -->
       <div class="relative overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div class="absolute inset-y-0 left-0 w-1" :class="appStore.isRunning ? 'bg-emerald-500' : 'bg-slate-300'"></div>
+        <div class="absolute inset-y-0 left-0 w-1" :class="scanActive ? 'bg-emerald-500' : 'bg-slate-300'"></div>
         <div class="flex items-center gap-4 px-5 py-4">
           <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset"
-               :class="appStore.isRunning ? 'bg-emerald-50 text-emerald-600 ring-emerald-100' : 'bg-slate-50 text-slate-400 ring-slate-100'">
+               :class="scanActive ? 'bg-emerald-50 text-emerald-600 ring-emerald-100' : 'bg-slate-50 text-slate-400 ring-slate-100'">
             <Activity class="h-5 w-5" aria-hidden="true" />
           </div>
           <div class="min-w-0">
             <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{{ t('console.status') }}</div>
-            <div class="mt-1 flex items-center gap-2 text-lg font-bold" :class="appStore.isRunning ? 'text-emerald-600' : 'text-slate-700'">
+            <div class="mt-1 flex items-center gap-2 text-lg font-bold" :class="appStore.lastScanError ? 'text-amber-600' : scanActive ? 'text-emerald-600' : 'text-slate-700'" :title="appStore.lastScanError">
               <span class="relative flex h-2.5 w-2.5">
-                <span v-if="appStore.isRunning" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75 motion-reduce:animate-none"></span>
-                <span class="relative inline-flex h-2.5 w-2.5 rounded-full" :class="appStore.isRunning ? 'bg-emerald-500' : 'bg-slate-400'"></span>
+                <span v-if="appStore.scanInProgress" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75 motion-reduce:animate-none"></span>
+                <span class="relative inline-flex h-2.5 w-2.5 rounded-full" :class="scanActive ? 'bg-emerald-500' : 'bg-slate-400'"></span>
               </span>
-              <span class="truncate">{{ appStore.isRunning ? t('console.running') : t('console.stopped') }}</span>
+              <span class="truncate">{{ scanStatus }}</span>
             </div>
           </div>
         </div>
@@ -437,8 +458,9 @@ function handleManualCopyClose() {
           <div class="min-w-0">
             <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{{ t('console.nextRun') }}</div>
             <div class="mt-1 truncate font-mono text-lg font-bold tabular-nums text-slate-900">
-              {{ appStore.nextRunTime }}
+              {{ nextScanTime }}
             </div>
+            <div class="mt-1 text-xs tabular-nums text-slate-500">{{ scanTiming }}</div>
           </div>
         </div>
       </div>
@@ -501,12 +523,13 @@ function handleManualCopyClose() {
               type="button"
               @click="handleScanClick"
               class="flex min-h-11 items-center gap-2 rounded-lg border border-blue-200 bg-white px-3.5 py-2 text-sm font-semibold text-blue-700 shadow-sm transition-colors hover:border-blue-300 hover:bg-blue-50 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 disabled:hover:border-blue-200 disabled:hover:bg-white"
-              :disabled="appStore.isRunning"
-              :class="{ 'cursor-not-allowed opacity-50': appStore.isRunning }"
+              :disabled="appStore.scanInProgress"
+              :class="{ 'cursor-not-allowed opacity-50': appStore.scanInProgress }"
+              :aria-busy="appStore.scanInProgress"
               :aria-label="t('console.scanNow')"
               :title="t('console.scanNow')"
             >
-              <RefreshCw class="h-4 w-4 motion-reduce:animate-none" :class="{ 'animate-spin': appStore.isRunning }" aria-hidden="true" />
+              <RefreshCw class="h-4 w-4 motion-reduce:animate-none" :class="{ 'animate-spin': appStore.scanInProgress }" aria-hidden="true" />
               {{ t('console.scanNow') }}
             </button>
           </div>

@@ -118,6 +118,7 @@ pub enum WorkerCommandName {
     TriggerAlarmOnce,
     GetStatus,
     GetRuntimeTelemetry,
+    GetRuntimeTelemetryChanges,
     Shutdown,
     RecoverSession,
 }

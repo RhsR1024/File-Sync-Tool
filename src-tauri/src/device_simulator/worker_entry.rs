@@ -151,7 +151,7 @@ async fn run_windows_worker(launch: WorkerLaunchArgs) -> Result<(), String> {
     let worker_process = tokio::task::spawn_blocking(current_worker_identity)
         .await
         .map_err(|error| format!("worker identity task failed: {error}"))??;
-    let (diagnostic_tx, mut diagnostic_rx) = mpsc::unbounded_channel();
+    let (diagnostic_tx, mut diagnostic_rx) = mpsc::channel(256);
     let mut runtime = WorkerRuntime::system_with_diagnostics(
         launch.session_id.clone(),
         Some(worker_process),
@@ -334,6 +334,9 @@ async fn handle_worker_request(
         WorkerCommandName::GetStatus => Ok(to_value(runtime.status_snapshot().await).ok()),
         WorkerCommandName::GetRuntimeTelemetry => {
             Ok(to_value(runtime.telemetry_snapshot().await).ok())
+        }
+        WorkerCommandName::GetRuntimeTelemetryChanges => {
+            Ok(to_value(runtime.telemetry_changes().await).ok())
         }
         WorkerCommandName::Shutdown
             if matches!(

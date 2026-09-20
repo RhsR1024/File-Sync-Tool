@@ -310,6 +310,9 @@ export interface AlarmJobRequest {
   recovery_delay_secs: number | null;
   image_variant: string | null;
   user_image_id: string | null;
+  /** Device-scoped learned subscription targets. Multiple IDs broadcast the alarm. */
+  target_subscription_ids_by_device: Record<string, string[]>;
+  /** Legacy global target retained for compatibility with older request producers. */
   target_subscription_id: string | null;
 }
 
@@ -354,6 +357,8 @@ export interface AlarmSubscription {
 
 export interface AlarmSubscriptionRecord {
   id: string;
+  device_id: string;
+  device_ip: string;
   source_ip: string;
   host: string | null;
   port: number;
@@ -685,6 +690,8 @@ const ALARM_ERROR_MESSAGE_KEYS: Record<string, string> = {
   'device_simulator.alarm.destination_missing': 'destinationUnknown',
   'device_simulator.alarm.destination_selection_required': 'destinationSelectionRequired',
   'device_simulator.alarm.subscription_unknown': 'subscriptionUnknown',
+  'device_simulator.alarm.subscription_device_mismatch': 'subscriptionDeviceMismatch',
+  'device_simulator.alarm.subscription_device_unselected': 'subscriptionDeviceMismatch',
   'device_simulator.alarm.subscription_expired': 'subscriptionExpired',
   'device_simulator.alarm.subscription_override_active': 'subscriptionOverrideActive',
   'device_simulator.alarm.header_invalid': 'headerInvalid',

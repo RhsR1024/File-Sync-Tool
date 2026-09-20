@@ -89,7 +89,12 @@ function shows(section: 'tasks' | 'strategy' | 'delivery') {
 }
 
 function serverDisplayName(server: DeployServer) {
-    return server.name || server.host;
+    return server.name.trim() || server.host;
+}
+
+function serverBindingDisplayName(serverId: string) {
+    const server = config.value.servers.find(item => item.id === serverId);
+    return server ? serverDisplayName(server) : serverId.substring(0, 8);
 }
 
 function rememberOpener() {
@@ -1408,7 +1413,7 @@ onMounted(load);
                     <span v-for="binding in task.server_bindings" :key="binding.server_id"
                       class="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100 flex items-center gap-1">
                       <Server class="w-2.5 h-2.5" />
-                      {{ config.servers.find(s => s.id === binding.server_id)?.name || binding.server_id.substring(0, 8) }}
+                      {{ serverBindingDisplayName(binding.server_id) }}
                       <template v-if="binding.command_group_ids.length > 0">
                         <span class="text-blue-400">·</span>
                         {{ binding.command_group_ids.map(id => commandGroupName(id)).join('+') }}

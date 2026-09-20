@@ -1,5 +1,5 @@
 use super::rtp::{
-    rtcp_compound_sender_report, tcp_interleaved_frame, RtpPacketizer, RTP_HEADER_BYTES,
+    rtcp_compound_sender_report, tcp_interleaved_frame, RtpPacketizer,
 };
 use super::scheduler::{ScheduledAccessUnit, SharedFrameScheduler};
 use super::state::{
@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -22,6 +22,7 @@ static NEXT_RTP_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
 const LEGACY_RTP_SSRC: u32 = 0x0c8c_750a;
 const RTCP_CNAME: &[u8] = b"file-sync-tool@virtual-device";
 const DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5);
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RtspServerStats {
@@ -651,12 +652,17 @@ async fn serve_client(
     config: Arc<RtspEndpointConfig>,
     metrics: Arc<RtspServerMetrics>,
 ) -> Result<(), RtspServiceError> {
-    let (mut reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
     let (outgoing, mut outbound) = mpsc::channel::<Vec<u8>>(config.client_write_queue);
     let writer_metrics = Arc::clone(&metrics);
     let mut writer_task = AbortTaskOnDrop::new(tokio::spawn(async move {
         while let Some(bytes) = outbound.recv().await {
-            writer.write_all(&bytes).await?;
+            tokio::time::timeout(CLIENT_WRITE_TIMEOUT, writer.write_all(&bytes))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "RTSP client write timed out")
+                })??;
             writer_metrics
                 .bytes_sent
                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -671,7 +677,27 @@ async fn serve_client(
     let mut stream_task: Option<AbortTaskOnDrop<()>> = None;
 
     loop {
-        let bytes = match read_request(&mut reader).await? {
+        // A failed/full media queue or writer must close the entire session.
+        // Waiting only for another RTSP request leaves half-open clients and
+        // their queued frames alive indefinitely after the stream has stopped.
+        let request = tokio::select! {
+            request = read_request(&mut reader) => request?,
+            result = writer_task.join() => {
+                return result.map_err(|error| service_error(
+                    "device_simulator.rtsp.writer_panicked", error.to_string(),
+                ))?.map_err(|error| service_error(
+                    "device_simulator.rtsp.write_failed", error.to_string(),
+                ));
+            }
+            _ = async {
+                if let Some(task) = stream_task.as_mut() {
+                    let _ = task.join().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => return Ok(()),
+        };
+        let bytes = match request {
             Some(bytes) => bytes,
             None => break,
         };
@@ -922,31 +948,22 @@ async fn stream_frames(
                         continue;
                     }
                     waiting_for_keyframe = false;
-                    let nals = access_unit
-                        .nals
-                        .iter()
-                        .map(AsRef::as_ref)
-                        .collect::<Vec<_>>();
-                    let Ok(packets) = packetizer.packetize_access_unit(
+                    let mut batch = Vec::new();
+                    let last_rtp_timestamp = timestamp.wrapping_add(client_state.timestamp_offset);
+                    let Ok(packet_stats) = packetizer.write_interleaved_access_unit(
                         source.codec,
-                        &nals,
-                        timestamp.wrapping_add(client_state.timestamp_offset),
+                        &access_unit.nals,
+                        last_rtp_timestamp,
+                        rtp_channel,
+                        &mut batch,
                     ) else {
                         break 'stream "packetize_error";
                     };
-                    let mut batch = Vec::new();
-                    for packet in &packets {
-                        sender_packet_count = sender_packet_count.wrapping_add(1);
-                        sender_octet_count = sender_octet_count
-                            .wrapping_add(packet.bytes.len().saturating_sub(RTP_HEADER_BYTES) as u32);
-                        let Ok(frame) = tcp_interleaved_frame(rtp_channel, &packet.bytes) else {
-                            break 'stream "rtp_interleaved_frame_error";
-                        };
-                        batch.extend_from_slice(&frame);
-                    }
-                    let Some(last_rtp_timestamp) = packets.last().map(|packet| packet.timestamp) else {
+                    if packet_stats.packets == 0 {
                         continue;
-                    };
+                    }
+                    sender_packet_count = sender_packet_count.wrapping_add(packet_stats.packets as u32);
+                    sender_octet_count = sender_octet_count.wrapping_add(packet_stats.payload_octets);
                     let send_sender_report = last_sender_report_at
                         .map(|sent| sent.elapsed() >= Duration::from_secs(5))
                         .unwrap_or(true);
@@ -975,7 +992,7 @@ async fn stream_frames(
                             }
                             diagnostics.record_sent(
                                 timestamp,
-                                packets.len(),
+                                packet_stats.packets,
                                 batch_bytes,
                                 access_unit.keyframe,
                                 send_sender_report,
@@ -1015,7 +1032,15 @@ async fn send_response(
     outgoing: &mpsc::Sender<Vec<u8>>,
     response: Vec<u8>,
 ) -> Result<(), RtspServiceError> {
-    outgoing.send(response).await.map_err(|_| disconnected())
+    tokio::time::timeout(CLIENT_WRITE_TIMEOUT, outgoing.send(response))
+        .await
+        .map_err(|_| {
+            service_error(
+                "device_simulator.rtsp.write_timeout",
+                "RTSP response queue timed out",
+            )
+        })?
+        .map_err(|_| disconnected())
 }
 
 fn disconnected() -> RtspServiceError {
@@ -1150,6 +1175,62 @@ mod tests {
             diagnostics: None,
             diagnostic_mode: "test",
         }
+    }
+
+    #[tokio::test]
+    async fn failed_stream_releases_client_without_waiting_for_another_request() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let (scheduler, publisher) = SharedFrameScheduler::external(90_000, 3_600, 8).unwrap();
+        let mut source = source();
+        source.scheduler = scheduler;
+        let server = start_rtsp_server(RtspEndpointConfig {
+            bind_addr: address,
+            routes: BTreeMap::from([("/media/video1".into(), source)]),
+            client_write_queue: 8,
+        })
+        .await
+        .unwrap();
+        // Repeated reconnects must not accumulate abandoned sessions.
+        for _ in 0..20 {
+            let mut client = TcpStream::connect(server.local_addr()).await.unwrap();
+            client
+                .write_all(b"PLAY rtsp://127.0.0.1/media/video1 RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&read_response(&mut client).await).contains("200 OK"));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while publisher.receiver_count() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            publisher.publish(ScheduledAccessUnit {
+                frame_index: 0,
+                timestamp: 0,
+                access_unit: Arc::new(SharedAccessUnit {
+                    nals: vec![SharedNal::from_bytes(Vec::new())].into(),
+                    keyframe: true,
+                }),
+            });
+            let mut remaining = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut remaining))
+                .await
+                .expect("failed stream must close its TCP session")
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while server.stats().active_clients != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(publisher.receiver_count(), 0);
+        }
+        assert_eq!(server.stats().disconnected_clients, 20);
+        server.stop(Duration::from_secs(2)).await.unwrap();
     }
 
     #[test]

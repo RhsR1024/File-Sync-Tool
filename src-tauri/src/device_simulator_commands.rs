@@ -6,7 +6,8 @@ use app_lib::device_simulator::api::{
     AlarmTypeSummary, AssetPackStatus, AssetProgressSnapshot, AssetStatus, DevicePreview,
     DeviceProfileAvailability, DeviceProfileSummary, ImportedAlarmImage, MediaThemeSummary,
     PreflightReport, ProfileAlarmTypes, RecoveryResult, RemoteMaterialSyncResult,
-    RuntimeTelemetrySnapshot, SimulatorStartRequest, SimulatorStatusSnapshot, TargetPlatformServer,
+    RuntimeEventBatch, RuntimeTelemetrySnapshot, SimulatorStartRequest, SimulatorStatusSnapshot,
+    TargetPlatformServer,
     DEVICE_SIMULATOR_EVENT_ALARM_STATS, DEVICE_SIMULATOR_EVENT_ALARM_SUBSCRIPTION,
     DEVICE_SIMULATOR_EVENT_ASSET_PROGRESS, DEVICE_SIMULATOR_EVENT_CLEANUP_PROGRESS,
     DEVICE_SIMULATOR_EVENT_DEVICE_STATUS, DEVICE_SIMULATOR_EVENT_LOG,
@@ -848,14 +849,17 @@ pub async fn device_simulator_get_status(
     simulator_state: State<'_, DeviceSimulatorCommandState>,
 ) -> Result<SimulatorStatusSnapshot, SimulatorErrorBody> {
     if simulator_state.manager.has_worker().await {
-        if let Ok(status) = worker_request::<SimulatorStatusSnapshot, ()>(
+        if let Ok(snapshot) = worker_request::<RuntimeTelemetrySnapshot, ()>(
             &simulator_state.manager,
-            WorkerCommandName::GetStatus,
+            WorkerCommandName::GetRuntimeTelemetry,
             None,
         )
         .await
         {
-            return Ok(status);
+            // A newly opened page needs a full snapshot even when the periodic
+            // forwarder has suppressed unchanged idle state.
+            emit_runtime_telemetry(&app_handle, &snapshot);
+            return Ok(snapshot.status);
         }
     }
     status_with_recovery(&app_handle, simulator_state.inner()).await
@@ -1416,6 +1420,26 @@ fn spawn_manager_notification_forwarder(
     });
 }
 
+fn emit_runtime_telemetry(app_handle: &AppHandle, snapshot: &RuntimeTelemetrySnapshot) {
+    let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_STATUS, &snapshot.status);
+    emit_runtime_events(app_handle, &snapshot.events);
+}
+
+fn emit_runtime_events(app_handle: &AppHandle, events: &RuntimeEventBatch) {
+    if let Some(device_status) = &events.device_status {
+        let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_DEVICE_STATUS, device_status);
+    }
+    if let Some(rtsp_stats) = &events.rtsp_stats {
+        let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_RTSP_STATS, rtsp_stats);
+    }
+    for alarm_stats in &events.alarm_stats {
+        let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_ALARM_STATS, alarm_stats);
+    }
+    if let Some(subscription) = &events.alarm_subscription {
+        let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_ALARM_SUBSCRIPTION, subscription);
+    }
+}
+
 fn spawn_runtime_telemetry_forwarder(
     app_handle: AppHandle,
     manager: Arc<SimulatorManager>,
@@ -1425,6 +1449,7 @@ fn spawn_runtime_telemetry_forwarder(
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
+        let mut previous_status: Option<SimulatorStatusSnapshot> = None;
         loop {
             interval.tick().await;
             let manager_status = manager.status();
@@ -1435,7 +1460,7 @@ fn spawn_runtime_telemetry_forwarder(
             }
             let snapshot = match worker_request::<RuntimeTelemetrySnapshot, ()>(
                 &manager,
-                WorkerCommandName::GetRuntimeTelemetry,
+                WorkerCommandName::GetRuntimeTelemetryChanges,
                 None,
             )
             .await
@@ -1443,20 +1468,11 @@ fn spawn_runtime_telemetry_forwarder(
                 Ok(snapshot) => snapshot,
                 Err(_) => break,
             };
-            let RuntimeTelemetrySnapshot { status, events } = snapshot;
-            let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_STATUS, status);
-            if let Some(device_status) = events.device_status {
-                let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_DEVICE_STATUS, device_status);
+            if previous_status.as_ref() != Some(&snapshot.status) {
+                let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_STATUS, &snapshot.status);
+                previous_status = Some(snapshot.status);
             }
-            if let Some(rtsp_stats) = events.rtsp_stats {
-                let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_RTSP_STATS, rtsp_stats);
-            }
-            for alarm_stats in events.alarm_stats {
-                let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_ALARM_STATS, alarm_stats);
-            }
-            if let Some(subscription) = events.alarm_subscription {
-                let _ = app_handle.emit(DEVICE_SIMULATOR_EVENT_ALARM_SUBSCRIPTION, subscription);
-            }
+            emit_runtime_events(&app_handle, &snapshot.events);
         }
     });
 }

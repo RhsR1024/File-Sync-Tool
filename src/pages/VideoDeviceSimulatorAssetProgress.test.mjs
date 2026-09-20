@@ -1,20 +1,15 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const page = readFileSync(new URL('./VideoDeviceSimulatorPage.vue', import.meta.url), 'utf8');
 const composable = readFileSync(new URL('../composables/useDeviceSimulator.ts', import.meta.url), 'utf8');
-
-const activeProgress = page.match(
-  /const assetDownloadActive = computed\(\(\) => \{[\s\S]*?\n\}\);/,
-)?.[0] ?? '';
 const prepareAssets = composable.match(
   /async function prepareAssets\(\)[\s\S]*?(?=\r?\n\s*async function refreshAlarmTypes)/,
 )?.[0] ?? '';
 
 assert.match(
-  activeProgress,
-  /simulator\.assets\.value\?\.state === 'ready'[\s\S]*return false/,
-  'authoritative asset readiness must suppress stale active progress',
+  composable,
+  /payload\.state === 'ready' \|\| payload\.state === 'failed'[\s\S]*?getAssetStatus\(selectedProfileIds\.value\)[\s\S]*?assets\.value = status/,
+  'terminal progress must refresh the authoritative asset status',
 );
 assert.match(
   prepareAssets,

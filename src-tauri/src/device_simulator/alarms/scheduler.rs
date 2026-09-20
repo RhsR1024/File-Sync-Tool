@@ -1259,7 +1259,7 @@ fn validate_job(
             "alarm recovery delay exceeds 24 hours",
         ));
     }
-    let mut device_ids = BTreeSet::new();
+    let mut target_ids = BTreeSet::new();
     for target in targets {
         if target.device_id.is_empty()
             || target.device_id.len() > 256
@@ -1269,12 +1269,12 @@ fn validate_job(
                 .destination_id
                 .bytes()
                 .any(|byte| byte.is_ascii_control())
-            || !device_ids.insert(target.device_id.as_str())
+            || !target_ids.insert((target.device_id.as_str(), target.destination_id.as_str()))
             || target.invocations.is_empty()
         {
             return Err(AlarmError::new(
                 "device_simulator.alarm.target_invalid",
-                "alarm targets must have unique IDs, destinations, and invocations",
+                "alarm targets must have unique device/destination pairs and invocations",
             ));
         }
         if mode == AlarmDispatchMode::Specified && target.invocations.len() != 1 {
@@ -1619,6 +1619,51 @@ mod tests {
         let requests = sender.requests.lock().await;
         assert_eq!(requests[0].request.path, "/fixture/alarm");
         assert_eq!(requests[1].request.path, "/fixture/second");
+    }
+
+    #[tokio::test]
+    async fn one_device_can_broadcast_to_multiple_unique_destinations() {
+        let clock: Arc<dyn AlarmClock> = Arc::new(TestClock::default());
+        let sender = Arc::new(ScriptedSender::successful(clock.clone()));
+        let scheduler = AlarmScheduler::new(sender.clone(), clock, limits()).unwrap();
+        let handler = definition(
+            AlarmHandlerId::StructuredV1,
+            ResponseSuccessRule::StatusRange {
+                minimum: 200,
+                maximum: 299,
+            },
+            true,
+            false,
+        );
+        let first = target("one", vec![handler.clone()]);
+        let mut second = target("one", vec![handler]);
+        second.destination_id = "ums-b".into();
+
+        let snapshot = scheduler
+            .trigger_once(OneShotAlarmJob {
+                job_id: "once-broadcast".into(),
+                targets: vec![first, second],
+                mode: AlarmDispatchMode::Specified,
+                recovery_delay_ms: None,
+                random_seed: 1,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.attempted, 2);
+        assert_eq!(snapshot.succeeded, 2);
+        assert_eq!(snapshot.devices["one"].attempted, 2);
+        let destinations = sender
+            .requests
+            .lock()
+            .await
+            .iter()
+            .map(|request| request.destination_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            destinations,
+            BTreeSet::from(["ums-a".to_owned(), "ums-b".to_owned()])
+        );
     }
 
     #[tokio::test]
